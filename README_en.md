@@ -161,6 +161,26 @@ python3 -m vllm.entrypoints.openai.api_server \
 
 - After successful startup, the model service will be accessible at `http://localhost:8000/v1`. If you deploy the model on a remote server, access it using that server's IP address.
 
+### 4. Check Model Deployment
+
+After starting the model service, you can use the following command to verify the deployment:
+
+```bash
+python scripts/check_deployment_en.py --base-url http://localhost:8000/v1 --model autoglm-phone-9b-multilingual
+```
+
+If using a third-party model service:
+
+```bash
+# Novita AI
+python scripts/check_deployment_en.py --base-url https://api.novita.ai/openai --model zai-org/autoglm-phone-9b-multilingual --apikey your-novita-api-key
+
+# Parasail
+python scripts/check_deployment_en.py --base-url https://api.parasail.io/v1 --model parasail-auto-glm-9b-multilingual --apikey your-parasail-api-key
+```
+
+Upon successful execution, the script will display the model's inference result and token statistics, helping you confirm whether the model deployment is working correctly.
+
 ## Using AutoGLM
 
 ### Command Line
