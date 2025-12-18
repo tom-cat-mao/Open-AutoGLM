@@ -14,11 +14,11 @@ interface IAutoGLMService {
     String executeShellCommand(String command);
 
     /**
-     * 获取屏幕截图
-     * 直接返回图片字节数据，避免文件IO，提高速度
-     * @return PNG 格式的字节数组
+     * 获取屏幕截图（通过文件系统）
+     * 避免 Binder 传输大数据导致 DeadObjectException
+     * @return 截图文件的绝对路径，失败时返回 "ERROR: 错误信息"
      */
-    byte[] takeScreenshot();
+    String takeScreenshotToFile();
     
     /**
      * 注入 Base64 文本 (通过 ADB Keyboard 广播)

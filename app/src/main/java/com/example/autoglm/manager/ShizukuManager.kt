@@ -42,21 +42,37 @@ object ShizukuManager {
     }
 
     /**
-     * 绑定 UserService
+     * 绑定 UserService (带服务存活检测和自动重连)
      */
     suspend fun bindService(context: Context): IAutoGLMService = suspendCancellableCoroutine { cont ->
-        if (service != null && service!!.asBinder().isBinderAlive) {
-            cont.resume(service!!)
-            return@suspendCancellableCoroutine
+        // 检查现有服务是否存活
+        if (service != null) {
+            try {
+                // 测试调用一个轻量级命令来检查Binder是否存活
+                if (service!!.asBinder().isBinderAlive) {
+                    service!!.executeShellCommand("echo alive")
+                    Log.d(TAG, "Existing service is alive, reusing")
+                    cont.resume(service!!)
+                    return@suspendCancellableCoroutine
+                }
+            } catch (e: android.os.DeadObjectException) {
+                Log.w(TAG, "Service died (DeadObjectException), rebinding...")
+                service = null
+            } catch (e: Exception) {
+                Log.w(TAG, "Service test failed, rebinding: ${e.message}")
+                service = null
+            }
         }
 
+        // 需要重新绑定服务
+        Log.d(TAG, "Binding new UserService...")
         val args = Shizuku.UserServiceArgs(
             ComponentName(context.packageName, AutoGLMUserService::class.java.name)
         )
             .daemon(false) // 不需要守护进程模式
             .processNameSuffix("service") // 进程名后缀
             .debuggable(BuildConfig.DEBUG)
-            .version(1)
+            .version(BuildConfig.VERSION_CODE) // 使用版本号，升级时自动重新绑定
 
         Shizuku.bindUserService(args, object : ServiceConnection {
             override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
@@ -71,7 +87,7 @@ object ShizukuManager {
             }
 
             override fun onServiceDisconnected(name: ComponentName?) {
-                Log.w(TAG, "UserService disconnected")
+                Log.w(TAG, "UserService disconnected unexpectedly")
                 service = null
             }
         })
@@ -82,11 +98,15 @@ object ShizukuManager {
         try {
             service?.destroy()
         } catch (e: Exception) {
-            // ignore
+            Log.e(TAG, "Failed to destroy service", e)
         }
         service = null
-        Shizuku.unbindUserService(Shizuku.UserServiceArgs(
-            ComponentName("com.example.autoglm", AutoGLMUserService::class.java.name)
-        ), null, true)
+        try {
+            Shizuku.unbindUserService(Shizuku.UserServiceArgs(
+                ComponentName("com.example.autoglm", AutoGLMUserService::class.java.name)
+            ), null, true)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to unbind service", e)
+        }
     }
 }

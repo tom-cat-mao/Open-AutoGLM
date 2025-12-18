@@ -25,6 +25,10 @@ class AgentCore {
     fun stop() {
         isRunning = false
     }
+    
+    fun isSessionRunning(): Boolean {
+        return isRunning
+    }
 
     suspend fun step(screenshotBytes: ByteArray): Action? {
         if (!isRunning) return null
@@ -39,10 +43,14 @@ class AgentCore {
             ContentPart(type = "image_url", image_url = ImageUrl(imageUrl))
         )
         
-        // Optimization: Only keep the LAST image in history
+        // Optimization: Only keep the LAST image in history to save tokens
+        // We remove previous user messages that contained images (lists)
         history.removeAll { it.role == "user" && it.content is List<*> }
         
         val currentMessage = Message("user", contentParts)
+        // Note: We don't add currentMessage to history YET, we send it in request
+        // But for history consistency in multi-turn, we usually store a summary.
+        // Let's follow the Python logic: send full history.
         val requestMessages = history + currentMessage
 
         // 3. Call API
@@ -53,7 +61,7 @@ class AgentCore {
                     messages = requestMessages,
                     max_tokens = 1024,
                     temperature = 0.5,
-                    top_p = 0.9 // Parameters from Open-AutoGLM config
+                    top_p = 0.9 
                 )
             )
 
@@ -62,8 +70,7 @@ class AgentCore {
                 val content = responseMsg.content
                 
                 // Add assistant response to history
-                // Note: We reconstruct a text-only user message for history to save tokens/memory
-                // instead of saving the full Base64 image
+                // To save memory/tokens, we record that we processed an image
                 history.add(Message("user", "Screenshot processed.")) 
                 history.add(Message("assistant", content))
 
