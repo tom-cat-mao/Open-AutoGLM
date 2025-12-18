@@ -265,6 +265,35 @@ class MainActivity : AppCompatActivity(), Shizuku.OnRequestPermissionResultListe
         Log.d("MainActivity", "Note recorded: $note")
     }
     
+    // ==================== Phase 4: Safety & Timing ====================
+    
+    /**
+     * Phase 4: 敏感操作确认回调
+     * 严格对齐原版 handler.py 的 confirmation_callback
+     * 
+     * @param message 敏感操作描述信息
+     * @return Boolean - true 表示用户确认，false 表示用户取消
+     */
+    private suspend fun handleConfirmation(message: String): Boolean = suspendCancellableCoroutine { continuation ->
+        runOnUiThread {
+            AlertDialog.Builder(this)
+                .setTitle("⚠️ 敏感操作确认")
+                .setMessage("检测到敏感操作：\n\n$message\n\n是否继续执行？")
+                .setCancelable(false)
+                .setPositiveButton("确认执行") { dialog, _ ->
+                    Log.i("MainActivity", "User confirmed sensitive operation: $message")
+                    dialog.dismiss()
+                    continuation.resume(true)
+                }
+                .setNegativeButton("取消") { dialog, _ ->
+                    Log.i("MainActivity", "User cancelled sensitive operation: $message")
+                    dialog.dismiss()
+                    continuation.resume(false)
+                }
+                .show()
+        }
+    }
+    
     private fun toggleAutoLoop() {
         if (isLooping.get()) {
             stopLoop()
@@ -305,6 +334,7 @@ class MainActivity : AppCompatActivity(), Shizuku.OnRequestPermissionResultListe
                 val service = ShizukuManager.bindService(this@MainActivity)
                 
                 // Phase 2: 创建 ActionExecutor 并传入回调
+                // Phase 4: 添加 onConfirmation 回调
                 if (actionExecutor == null) {
                     val metrics = resources.displayMetrics
                     actionExecutor = ActionExecutor(
@@ -324,6 +354,10 @@ class MainActivity : AppCompatActivity(), Shizuku.OnRequestPermissionResultListe
                         },
                         onNote = { note ->
                             handleNote(note)
+                        },
+                        onConfirmation = { message ->
+                            // Phase 4: 敏感操作确认回调
+                            handleConfirmation(message)
                         }
                     )
                 }
@@ -433,7 +467,18 @@ class MainActivity : AppCompatActivity(), Shizuku.OnRequestPermissionResultListe
                          }
                          
                          // E. Execute
-                         actionExecutor?.execute(action)
+                         // Phase 4: 检查 execute 返回值，如果用户取消敏感操作则停止任务
+                         val shouldContinue = actionExecutor?.execute(action) ?: true
+                         
+                         if (!shouldContinue) {
+                             // 用户取消了敏感操作，停止任务
+                             withContext(Dispatchers.Main) {
+                                 statusText.text = "Task Cancelled: User declined sensitive operation"
+                                 Toast.makeText(this@MainActivity, "Task Cancelled by User", Toast.LENGTH_LONG).show()
+                                 stopLoop()
+                             }
+                             break
+                         }
                          
                          // F. Wait
                          delay(2000)
@@ -478,6 +523,7 @@ class MainActivity : AppCompatActivity(), Shizuku.OnRequestPermissionResultListe
             try {
                 val service = ShizukuManager.bindService(this@MainActivity)
                 // Phase 2: 创建 ActionExecutor 并传入回调
+                // Phase 4: 添加 onConfirmation 回调
                 if (actionExecutor == null) {
                     val metrics = resources.displayMetrics
                     actionExecutor = ActionExecutor(
@@ -495,6 +541,10 @@ class MainActivity : AppCompatActivity(), Shizuku.OnRequestPermissionResultListe
                         },
                         onNote = { note ->
                             handleNote(note)
+                        },
+                        onConfirmation = { message ->
+                            // Phase 4: 敏感操作确认回调
+                            handleConfirmation(message)
                         }
                     )
                 }

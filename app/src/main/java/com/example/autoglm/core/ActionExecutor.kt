@@ -5,22 +5,27 @@ import android.util.Log
 import com.example.autoglm.IAutoGLMService
 import com.example.autoglm.data.Action
 import com.example.autoglm.config.AppMap
+import com.example.autoglm.config.TimingConfig
+import kotlinx.coroutines.delay
 
 /**
  * ActionExecutor - 执行 Agent 的各种操作
  * Phase 2: 完整支持所有动作类型
  * Phase 3: IME 自动化管理
+ * Phase 4: Safety & Timing - 敏感操作确认和执行时序
  * 
  * 坐标转换修复：使用截图实际尺寸而非物理屏幕尺寸
+ * 严格对齐 Open-AutoGLM 原版 phone_agent/actions/handler.py
  */
 class ActionExecutor(
     private val context: Context,
     private val service: IAutoGLMService,
     private var screenWidth: Int,   // 改为 var，支持动态更新
     private var screenHeight: Int,  // 改为 var，支持动态更新
-    private val onTakeOver: ((String) -> Unit)? = null,      // Take_over 回调
-    private val onInteract: ((String) -> String?)? = null,   // Interact 回调
-    private val onNote: ((String) -> Unit)? = null           // Note 回调
+    private val onTakeOver: ((String) -> Unit)? = null,           // Take_over 回调
+    private val onInteract: ((String) -> String?)? = null,        // Interact 回调
+    private val onNote: ((String) -> Unit)? = null,               // Note 回调
+    private val onConfirmation: (suspend (String) -> Boolean)? = null  // Phase 4: 敏感操作确认回调
 ) {
     
     companion object {
@@ -39,86 +44,115 @@ class ActionExecutor(
     fun updateScreenSize(width: Int, height: Int) {
         screenWidth = width
         screenHeight = height
-        Log.d("ActionExecutor", "Screen size updated: ${width}x${height}")
+        Log.d(TAG, "Screen size updated: ${width}x${height}")
     }
 
-    fun execute(action: Action) {
-        val type = action.action ?: return
+    /**
+     * Phase 4: 改为 suspend 函数以支持敏感操作确认
+     * 严格对齐原版 handler.py 的 execute 方法
+     * 
+     * @return Boolean - true 表示继续执行，false 表示用户取消（应停止任务）
+     */
+    suspend fun execute(action: Action): Boolean {
+        val type = action.action ?: return true
         
-        Log.d("ActionExecutor", "Executing: $type with params: ${action.location} / ${action.content}")
-        Log.d("ActionExecutor", "Current screen size: ${screenWidth}x${screenHeight}")
+        Log.d(TAG, "Executing: $type with params: ${action.location} / ${action.content}")
+        Log.d(TAG, "Current screen size: ${screenWidth}x${screenHeight}")
 
         // Normalize action type (case insensitive)
         when (type.lowercase()) {
             "launch" -> {
-                val appName = action.content ?: return
+                val appName = action.content ?: return true
                 val packageName = findPackageName(appName)
                 
                 if (packageName != null) {
-                    Log.d("ActionExecutor", "Resolved app '$appName' to package '$packageName'")
+                    Log.d(TAG, "Resolved app '$appName' to package '$packageName'")
                     runShell("monkey -p $packageName -c android.intent.category.LAUNCHER 1")
+                    
+                    // Phase 4: 添加延迟（对齐原版 timing.py）
+                    delay(TimingConfig.device.defaultLaunchDelay)
                 } else {
-                    Log.w("ActionExecutor", "Could not find package for app: $appName")
+                    Log.w(TAG, "Could not find package for app: $appName")
                 }
             }
             
             "tap" -> {
-                val coords = action.location ?: return
+                val coords = action.location ?: return true
                 if (coords.size >= 2) {
                     val x = (coords[0] / 1000.0 * screenWidth).toInt()
                     val y = (coords[1] / 1000.0 * screenHeight).toInt()
                     
-                    Log.d("ActionExecutor", "Tap: model coords=[${coords[0]}, ${coords[1]}] -> screen coords=($x, $y)")
+                    Log.d(TAG, "Tap: model coords=[${coords[0]}, ${coords[1]}] -> screen coords=($x, $y)")
                     
-                    // 检查是否有敏感操作消息
+                    // Phase 4: 敏感操作确认（严格对齐原版 handler.py）
                     if (action.message != null) {
-                        Log.w("ActionExecutor", "Sensitive tap: ${action.message}")
-                        // TODO: Phase 4 - 添加确认对话框
+                        Log.w(TAG, "Sensitive operation detected: ${action.message}")
+                        
+                        val confirmed = onConfirmation?.invoke(action.message) ?: true
+                        
+                        if (!confirmed) {
+                            Log.i(TAG, "User cancelled sensitive operation")
+                            return false  // 返回 false 表示用户取消，应停止任务
+                        }
+                        
+                        Log.i(TAG, "User confirmed sensitive operation")
                     }
                     
                     runShell("input tap $x $y")
+                    
+                    // Phase 4: 添加延迟（对齐原版 timing.py）
+                    delay(TimingConfig.device.defaultTapDelay)
                 }
             }
             
             // Phase 2: Double Tap 实现
             "double tap" -> {
-                val coords = action.location ?: return
+                val coords = action.location ?: return true
                 if (coords.size >= 2) {
                     val x = (coords[0] / 1000.0 * screenWidth).toInt()
                     val y = (coords[1] / 1000.0 * screenHeight).toInt()
                     
-                    Log.d("ActionExecutor", "Double Tap: model coords=[${coords[0]}, ${coords[1]}] -> screen coords=($x, $y)")
+                    Log.d(TAG, "Double Tap: model coords=[${coords[0]}, ${coords[1]}] -> screen coords=($x, $y)")
                     
                     // 第一次点击
                     runShell("input tap $x $y")
-                    // 短暂延迟（150ms）
-                    try { Thread.sleep(150) } catch (e: Exception) {}
+                    
+                    // Phase 4: 使用 TimingConfig 的 doubleTapInterval（对齐原版）
+                    delay(TimingConfig.device.doubleTapInterval)
+                    
                     // 第二次点击
                     runShell("input tap $x $y")
                     
-                    Log.d("ActionExecutor", "Double tap executed at ($x, $y)")
+                    // Phase 4: 添加延迟
+                    delay(TimingConfig.device.defaultDoubleTapDelay)
+                    
+                    Log.d(TAG, "Double tap executed at ($x, $y)")
                 }
             }
             
             // Phase 2: Long Press 支持动态 duration
             "long press" -> {
-                val coords = action.location ?: return
+                val coords = action.location ?: return true
                 if (coords.size >= 2) {
                     val x = (coords[0] / 1000.0 * screenWidth).toInt()
                     val y = (coords[1] / 1000.0 * screenHeight).toInt()
                     
-                    Log.d("ActionExecutor", "Long Press: model coords=[${coords[0]}, ${coords[1]}] -> screen coords=($x, $y)")
+                    Log.d(TAG, "Long Press: model coords=[${coords[0]}, ${coords[1]}] -> screen coords=($x, $y)")
                     
                     // 使用 action.duration 或默认 1000ms
                     val duration = action.duration ?: 1000
                     
                     runShell("input swipe $x $y $x $y $duration")
-                    Log.d("ActionExecutor", "Long press executed at ($x, $y) for ${duration}ms")
+                    
+                    // Phase 4: 添加延迟
+                    delay(TimingConfig.device.defaultLongPressDelay)
+                    
+                    Log.d(TAG, "Long press executed at ($x, $y) for ${duration}ms")
                 }
             }
             
             "type", "type_name" -> {
-                val text = action.content ?: return
+                val text = action.content ?: return true
                 
                 // Phase 3: 自动切换到 ADB Keyboard
                 if (!imeHasBeenSwitched) {
@@ -133,6 +167,9 @@ class ActionExecutor(
                             if (success) {
                                 imeHasBeenSwitched = true
                                 Log.i(TAG, "Successfully switched to ADB Keyboard")
+                                
+                                // Phase 4: 添加 IME 切换延迟（对齐原版 timing.py）
+                                delay(TimingConfig.action.keyboardSwitchDelay)
                             } else {
                                 Log.w(TAG, "Failed to switch to ADB Keyboard, will try to input anyway")
                             }
@@ -150,74 +187,94 @@ class ActionExecutor(
                 try {
                     service.injectInputBase64(base64)
                     Log.d(TAG, "Text input executed: ${text.take(20)}...")
+                    
+                    // Phase 4: 添加文本输入延迟（对齐原版 timing.py）
+                    delay(TimingConfig.action.textInputDelay)
                 } catch (e: Exception) {
                     Log.e(TAG, "Input failed", e)
                 }
             }
             
             "swipe" -> {
-                 val coords = action.location ?: return
+                 val coords = action.location ?: return true
                  if (coords.size >= 4) {
                      val x1 = (coords[0] / 1000.0 * screenWidth).toInt()
                      val y1 = (coords[1] / 1000.0 * screenHeight).toInt()
                      val x2 = (coords[2] / 1000.0 * screenWidth).toInt()
                      val y2 = (coords[3] / 1000.0 * screenHeight).toInt()
                      
-                     Log.d("ActionExecutor", "Swipe: model coords=[${coords[0]}, ${coords[1]}] -> [${coords[2]}, ${coords[3]}]")
-                     Log.d("ActionExecutor", "Swipe: screen coords=($x1, $y1) -> ($x2, $y2)")
+                     Log.d(TAG, "Swipe: model coords=[${coords[0]}, ${coords[1]}] -> [${coords[2]}, ${coords[3]}]")
+                     Log.d(TAG, "Swipe: screen coords=($x1, $y1) -> ($x2, $y2)")
                      
                      runShell("input swipe $x1 $y1 $x2 $y2 300")
+                     
+                     // Phase 4: 添加延迟
+                     delay(TimingConfig.device.defaultSwipeDelay)
                  }
             }
             
-            "home" -> runShell("input keyevent KEYCODE_HOME")
-            "back" -> runShell("input keyevent KEYCODE_BACK")
-            "enter" -> runShell("input keyevent KEYCODE_ENTER")
+            "home" -> {
+                runShell("input keyevent KEYCODE_HOME")
+                // Phase 4: 添加延迟
+                delay(TimingConfig.device.defaultHomeDelay)
+            }
+            
+            "back" -> {
+                runShell("input keyevent KEYCODE_BACK")
+                // Phase 4: 添加延迟
+                delay(TimingConfig.device.defaultBackDelay)
+            }
+            
+            "enter" -> {
+                runShell("input keyevent KEYCODE_ENTER")
+            }
             
             // Phase 2: Take_over 实现
             "take_over" -> {
                 val message = action.message ?: action.content ?: "需要人工介入"
-                Log.i("ActionExecutor", "Take_over requested: $message")
+                Log.i(TAG, "Take_over requested: $message")
                 onTakeOver?.invoke(message)
             }
             
             // Phase 2: Interact 实现
             "interact" -> {
                 val message = action.message ?: action.content ?: "请选择"
-                Log.i("ActionExecutor", "Interact requested: $message")
+                Log.i(TAG, "Interact requested: $message")
                 val result = onInteract?.invoke(message)
-                Log.d("ActionExecutor", "User selected: $result")
+                Log.d(TAG, "User selected: $result")
                 // TODO: 将用户选择结果传回 Agent
             }
             
             // Phase 2: Note 实现
             "note" -> {
                 val message = action.message ?: action.content ?: "True"
-                Log.i("ActionExecutor", "Note: $message")
+                Log.i(TAG, "Note: $message")
                 onNote?.invoke(message)
             }
             
             // Call_API 在 AgentCore 中处理，这里只记录
             "call_api" -> {
                 val instruction = action.instruction ?: action.content ?: ""
-                Log.i("ActionExecutor", "Call_API: $instruction")
+                Log.i(TAG, "Call_API: $instruction")
                 // 实际处理在 AgentCore.kt 中
             }
             
             "wait" -> { 
                 val duration = action.duration ?: 2000
-                try { Thread.sleep(duration.toLong()) } catch (e: Exception) {}
+                delay(duration.toLong())
             }
             
             "finish" -> { 
                 val message = action.message ?: action.content ?: "任务完成"
-                Log.i("ActionExecutor", "Task Finished: $message")
+                Log.i(TAG, "Task Finished: $message")
             }
             
             else -> {
-                Log.w("ActionExecutor", "Unknown action: $type")
+                Log.w(TAG, "Unknown action: $type")
             }
         }
+        
+        return true  // 默认返回 true 表示继续执行
     }
 
     private fun findPackageName(appName: String): String? {
@@ -227,16 +284,16 @@ class ActionExecutor(
         // Case-insensitive match
         AppMap.PACKAGES.entries.find { it.key.equals(appName, ignoreCase = true) }?.let { return it.value }
 
-        Log.w("ActionExecutor", "App not found in static map: $appName")
+        Log.w(TAG, "App not found in static map: $appName")
         return null
     }
 
     private fun runShell(cmd: String) {
         try {
-            Log.d("Executor", "Running: $cmd")
+            Log.d(TAG, "Running: $cmd")
             service.executeShellCommand(cmd)
         } catch (e: Exception) {
-            Log.e("Executor", "Shell failed", e)
+            Log.e(TAG, "Shell failed", e)
         }
     }
     

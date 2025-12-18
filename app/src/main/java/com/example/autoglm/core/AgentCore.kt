@@ -93,6 +93,28 @@ class AgentCore(private val context: Context) {
     }
     
     /**
+     * Phase 5: 从消息中移除图片内容以节省上下文空间
+     * 严格对齐原版 Python client.py 的 MessageBuilder.remove_images_from_message()
+     * 
+     * @param message 原始消息
+     * @return 移除图片后的消息（只保留文本内容）
+     */
+    private fun removeImagesFromMessage(message: Message): Message {
+        // 如果 content 是 List<ContentPart>，过滤掉 image_url 类型
+        if (message.content is List<*>) {
+            val contentParts = message.content as List<ContentPart>
+            val textOnlyParts = contentParts.filter { it.type == "text" }
+            
+            Log.d("AgentCore", "Removed images from message: ${contentParts.size} parts -> ${textOnlyParts.size} text parts")
+            
+            return Message(message.role, textOnlyParts)
+        }
+        
+        // 如果 content 是 String，直接返回
+        return message
+    }
+    
+    /**
      * Phase 2: Call_API - 基于 Notes 请求摘要
      */
     suspend fun callAPI(instruction: String): String? {
@@ -196,9 +218,16 @@ class AgentCore(private val context: Context) {
                 val responseMsg = response.body()!!.choices.first().message
                 val content = responseMsg.content
                 
-                // Add assistant response to history
-                // To save memory/tokens, we record that we processed an image
-                history.add(Message("user", "Screenshot processed.")) 
+                // Phase 5: 严格对齐原版 Python 的上下文管理
+                // 1. 先添加当前的 user message（带图片）到历史
+                history.add(currentMessage)
+                
+                // 2. 立即剥离图片，只保留文本（对齐原版 agent.py line 155）
+                // self._context[-1] = MessageBuilder.remove_images_from_message(self._context[-1])
+                val lastIndex = history.size - 1
+                history[lastIndex] = removeImagesFromMessage(history[lastIndex])
+                
+                // 3. 添加 assistant 响应
                 history.add(Message("assistant", content))
 
                 Log.d("AgentCore", "AI Response: $content")
