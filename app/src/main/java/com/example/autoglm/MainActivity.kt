@@ -34,7 +34,7 @@ class MainActivity : AppCompatActivity(), Shizuku.OnRequestPermissionResultListe
     private lateinit var etBaseUrl: EditText
     private lateinit var etModel: EditText
     private lateinit var etTask: EditText
-    private lateinit var btnStep: Button
+    // private lateinit var btnStep: Button  // REMOVED
     private lateinit var btnAutoLoop: Button
 
     // ==================== Core Components ====================
@@ -95,7 +95,7 @@ class MainActivity : AppCompatActivity(), Shizuku.OnRequestPermissionResultListe
         etBaseUrl = findViewById(R.id.et_base_url)
         etModel = findViewById(R.id.et_model)
         etTask = findViewById(R.id.et_task)
-        btnStep = findViewById(R.id.btn_step)
+        // btnStep = findViewById(R.id.btn_step) // REMOVED
         btnAutoLoop = findViewById(R.id.btn_auto_loop)
     }
 
@@ -117,10 +117,7 @@ class MainActivity : AppCompatActivity(), Shizuku.OnRequestPermissionResultListe
             saveSettings()
         }
 
-        // Step button
-        btnStep.setOnClickListener {
-            runOneStep()
-        }
+        // Step button listener REMOVED
 
         // Auto loop button
         btnAutoLoop.isEnabled = true
@@ -327,7 +324,7 @@ class MainActivity : AppCompatActivity(), Shizuku.OnRequestPermissionResultListe
         agentCore.stop()
         btnAutoLoop.text = "Auto Loop"
         statusText.text = "Status: Stopped by User"
-        btnStep.isEnabled = true
+        // btnStep.isEnabled = true // REMOVED
 
         // 异步还原输入法，避免阻塞主线程
         lifecycleScope.launch(Dispatchers.IO) {
@@ -348,7 +345,7 @@ class MainActivity : AppCompatActivity(), Shizuku.OnRequestPermissionResultListe
 
         isLooping.set(true)
         btnAutoLoop.text = "STOP Loop"
-        btnStep.isEnabled = false // Disable single step while looping
+        // btnStep.isEnabled = false // REMOVED
         
         lifecycleScope.launch {
             try {
@@ -530,99 +527,5 @@ class MainActivity : AppCompatActivity(), Shizuku.OnRequestPermissionResultListe
         }
     }
 
-    private fun runOneStep() {
-        val task = etTask.text.toString().trim()
-        if (task.isEmpty()) {
-            Toast.makeText(this, "Please enter a task", Toast.LENGTH_SHORT).show()
-            return
-        }
-        
-        statusText.text = "Status: Capturing Screenshot..."
-        
-        lifecycleScope.launch {
-            try {
-                val service = ShizukuManager.bindService(this@MainActivity)
-                // Phase 2: 创建 ActionExecutor 并传入回调
-                // Phase 4: 添加 onConfirmation 回调
-                if (actionExecutor == null) {
-                    val metrics = resources.displayMetrics
-                    actionExecutor = ActionExecutor(
-                        context = this@MainActivity,
-                        service = service,
-                        screenWidth = metrics.widthPixels,
-                        screenHeight = metrics.heightPixels,
-                        onTakeOver = { message ->
-                            // Take_over 会暂停并等待用户操作完成（suspend 函数）
-                            handleTakeOver(message)
-                        },
-                        onInteract = { message ->
-                            null // 单步模式暂不支持 Interact
-                        },
-                        onNote = { note ->
-                            handleNote(note)
-                        },
-                        onConfirmation = { message ->
-                            // Phase 4: 敏感操作确认回调
-                            handleConfirmation(message)
-                        }
-                    )
-                }
-
-                // 使用新的文件系统方案
-                val screenshotPath = service.takeScreenshotToFile()
-                
-                if (screenshotPath.startsWith("ERROR")) {
-                    statusText.text = "Error: $screenshotPath"
-                    return@launch
-                }
-                
-                val bytes = withContext(Dispatchers.IO) {
-                    try {
-                        java.io.File(screenshotPath).readBytes().also {
-                            java.io.File(screenshotPath).delete()
-                            Log.d("MainActivity", "Screenshot loaded for one step: $screenshotPath")
-                        }
-                    } catch (e: Exception) {
-                        Log.e("MainActivity", "Failed to read screenshot in runOneStep", e)
-                        ByteArray(0)
-                    }
-                }
-                
-                if (bytes.isEmpty()) {
-                    statusText.text = "Error: Failed to read screenshot"
-                    return@launch
-                }
-                
-                val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
-                imageView.setImageBitmap(bitmap)
-                
-                // 🔧 坐标修复：从截图获取实际尺寸并更新 ActionExecutor
-                val actualWidth = bitmap.width
-                val actualHeight = bitmap.height
-                actionExecutor?.updateScreenSize(actualWidth, actualHeight)
-                Log.d("MainActivity", "Screenshot size: ${actualWidth}x${actualHeight}")
-                
-                statusText.text = "Status: Thinking (API Call)..."
-
-                withContext(Dispatchers.IO) {
-                    // One Step mode always starts a fresh session for debugging
-                    agentCore.startSession(task) 
-                    val action = agentCore.step(bytes)
-                    
-                    withContext(Dispatchers.Main) {
-                        if (action != null) {
-                            val think = agentCore.lastThink ?: "No thought"
-                            statusText.text = "Think: $think\nAction: ${action.action} ${action.location ?: ""}"
-                            actionExecutor?.execute(action)
-                        } else {
-                            statusText.text = "Status: No Action or Error"
-                        }
-                    }
-                }
-            } catch (e: Exception) {
-                Log.e("MainActivity", "Step Failed", e)
-                statusText.text = "Error: ${e.message}"
-            }
-        }
-    }
+    // runOneStep REMOVED
 }

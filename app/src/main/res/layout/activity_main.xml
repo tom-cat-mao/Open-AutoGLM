@@ -75,7 +75,7 @@
                 android:layout_width="0dp"
                 android:layout_height="wrap_content"
                 android:layout_weight="1"
-                android:hint="Model Name (e.g. glm-4v)"
+                android:hint="Model Name (e.g. autoglm-phone)"
                 android:inputType="text" />
             <Button
                 android:id="@+id/btn_clear_model"
@@ -148,17 +148,9 @@
             android:orientation="horizontal">
 
             <Button
-                android:id="@+id/btn_step"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:text="Run ONE Step" />
-
-            <Button
                 android:id="@+id/btn_auto_loop"
-                android:layout_width="0dp"
+                android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_weight="1"
                 android:enabled="false"
                 android:text="Auto Loop" />
         </LinearLayout>

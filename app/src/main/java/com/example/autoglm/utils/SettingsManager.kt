@@ -24,6 +24,6 @@ object SettingsManager {
         set(value) = prefs.edit().putString(KEY_API_KEY, value).apply()
 
     var model: String
-        get() = prefs.getString(KEY_MODEL, "glm-4v") ?: "glm-4v"
+        get() = prefs.getString(KEY_MODEL, "autoglm-phone") ?: "autoglm-phone"
         set(value) = prefs.edit().putString(KEY_MODEL, value).apply()
 }
