@@ -10,9 +10,13 @@ import com.example.autoglm.api.ApiClient
 import com.example.autoglm.core.ActionExecutor
 import com.example.autoglm.core.AgentCore
 import com.example.autoglm.data.*
+import com.example.autoglm.manager.OverlayPermissionManager
 import com.example.autoglm.manager.ShizukuManager
+import com.example.autoglm.service.OverlayService
 import com.example.autoglm.ui.theme.ThemeMode
 import com.example.autoglm.utils.SettingsManager
+import android.content.Intent
+import android.os.Build
 import kotlinx.collections.immutable.persistentListOf
 import kotlinx.collections.immutable.toPersistentList
 import kotlinx.coroutines.Dispatchers
@@ -71,6 +75,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     // 对话框响应的CompletableDeferred
     private var confirmationDeferred: CompletableDeferred<Boolean>? = null
     private var takeOverDeferred: CompletableDeferred<Unit>? = null
+
+    // 悬浮窗控制
+    private val _overlayEnabled = MutableStateFlow(false)
+    val overlayEnabled: StateFlow<Boolean> = _overlayEnabled.asStateFlow()
 
     init {
         // 初始化SettingsManager
@@ -451,6 +459,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             return
         }
 
+        // 新增：检查悬浮窗权限
+        if (!OverlayPermissionManager.checkPermission(getApplication())) {
+            addSystemMessage("需要悬浮窗权限才能执行任务，请在设置中授予权限", SystemMessageType.ERROR)
+            return
+        }
+
         // 启动任务
         _state.update { it.copy(isRunning = true) }
         addSystemMessage("任务启动: $task", SystemMessageType.INFO)
@@ -488,6 +502,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
         // 还原IME
         actionExecutor?.restoreIME()
+
+        // 停止悬浮窗服务
+        stopOverlayService()
     }
 
     /**
@@ -499,10 +516,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         ApiClient.init(currentState.baseUrl, currentState.apiKey)
         Log.d(TAG, "ApiClient initialized with baseUrl=${currentState.baseUrl}, apiKey=${currentState.apiKey.take(10)}...")
 
-        // 2. 初始化AgentCore
+        // 2. 启动悬浮窗服务
+        withContext(Dispatchers.Main) {
+            startOverlayService()
+        }
+        // 标记任务开始
+        OverlayService.instance?.markTaskStarted()
+
+        // 3. 初始化AgentCore
         agentCore?.startSession(task)
 
-        // 2. 绑定Shizuku服务
+        // 4. 绑定Shizuku服务
         service = try {
             ShizukuManager.bindService(getApplication())
         } catch (e: Exception) {
@@ -511,7 +535,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             return
         }
 
-        // 3. 初始化ActionExecutor
+        // 5. 初始化ActionExecutor
         val screenSize = getScreenSize()
         actionExecutor = ActionExecutor(
             context = getApplication(),
@@ -530,7 +554,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
         )
 
-        // 4. 执行步骤循环
+        // 6. 执行步骤循环
         var stepCount = 0
         var consecutiveFailures = 0  // 连续失败计数
         val MAX_CONSECUTIVE_FAILURES = 3  // 最大连续失败次数
@@ -539,17 +563,23 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             stepCount++
             Log.d(TAG, "Step $stepCount")
 
-            // 4.1 截图
+            // 6.1 截图
             val screenshot = captureScreenshot()
             if (screenshot == null) {
                 addSystemMessage("截图失败", SystemMessageType.ERROR)
                 break
             }
 
-            // 4.2 调用AgentCore获取下一步动作
+            // 6.2 更新悬浮窗：开始思考
+            OverlayService.instance?.updateThinking(true)
+
+            // 6.3 调用AgentCore获取下一步动作
             val action = agentCore?.step(screenshot)
 
-            // 4.3 显示AI思考内容
+            // 6.4 更新悬浮窗：结束思考
+            OverlayService.instance?.updateThinking(false)
+
+            // 6.5 显示AI思考内容
             agentCore?.lastThink?.let { think ->
                 if (think.isNotBlank()) {
                     addThinkMessage(think)
@@ -557,15 +587,21 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 }
             }
 
-            // 4.4 执行动作
+            // 6.6 执行动作
             if (action != null) {
                 addActionMessage(action)
                 consecutiveFailures = 0  // 有动作说明成功，重置计数
+
+                // 更新悬浮窗：显示动作
+                val actionText = formatActionForOverlay(action)
+                OverlayService.instance?.updateAction(actionText)
 
                 // 检查是否是finish动作
                 if (action.action?.lowercase() == "finish") {
                     val message = action.message ?: action.content ?: "任务完成"
                     addSystemMessage(message, SystemMessageType.SUCCESS)
+                    // 标记任务完成
+                    OverlayService.instance?.markCompleted()
                     break
                 }
 
@@ -606,6 +642,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private fun cleanupTask() {
         actionExecutor?.restoreIME()
         _state.update { it.copy(isRunning = false) }
+        // 注意：不在这里停止悬浮窗，让用户点击"已完成"后返回应用
     }
 
     /**
@@ -739,5 +776,56 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         Log.d(TAG, "cancelTakeOver called")
         takeOverDeferred?.cancel()
         stopTask()
+    }
+
+    // ==================== 悬浮窗控制 ====================
+
+    /**
+     * 启动悬浮窗服务
+     */
+    fun startOverlayService() {
+        if (!OverlayPermissionManager.checkPermission(getApplication())) {
+            addSystemMessage("需要悬浮窗权限", SystemMessageType.ERROR)
+            return
+        }
+
+        val intent = Intent(getApplication(), OverlayService::class.java)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            getApplication<Application>().startForegroundService(intent)
+        } else {
+            getApplication<Application>().startService(intent)
+        }
+        _overlayEnabled.value = true
+        Log.d(TAG, "Overlay service started")
+    }
+
+    /**
+     * 停止悬浮窗服务
+     */
+    fun stopOverlayService() {
+        val intent = Intent(getApplication(), OverlayService::class.java)
+        getApplication<Application>().stopService(intent)
+        _overlayEnabled.value = false
+        Log.d(TAG, "Overlay service stopped")
+    }
+
+    /**
+     * 格式化Action为悬浮窗显示文本
+     */
+    private fun formatActionForOverlay(action: Action): String {
+        return when (action.action?.lowercase()) {
+            "tap" -> "点击 ${action.location}"
+            "double tap" -> "双击 ${action.location}"
+            "long press" -> "长按 ${action.location}"
+            "type", "type_name" -> "输入文本"
+            "swipe" -> "滑动"
+            "launch" -> "启动应用"
+            "back" -> "返回"
+            "home" -> "主屏幕"
+            "enter" -> "确认"
+            "wait" -> "等待"
+            "note" -> "记录"
+            else -> action.action ?: "执行操作"
+        }
     }
 }

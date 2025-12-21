@@ -81,12 +81,12 @@ android {
     }
 
     compileOptions {
-        sourceCompatibility = JavaVersion.VERSION_1_8
-        targetCompatibility = JavaVersion.VERSION_1_8
+        sourceCompatibility = JavaVersion.VERSION_11
+        targetCompatibility = JavaVersion.VERSION_11
     }
 
     kotlinOptions {
-        jvmTarget = "1.8"
+        jvmTarget = "11"
         freeCompilerArgs += listOf(
             "-opt-in=androidx.compose.material3.ExperimentalMaterial3Api",
             "-opt-in=androidx.compose.foundation.ExperimentalFoundationApi"
@@ -120,6 +120,7 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.7.0")
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.7.0")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.7.0")
+    implementation("androidx.lifecycle:lifecycle-service:2.7.0")  // 悬浮窗服务需要
 
     // Navigation Compose
     implementation("androidx.navigation:navigation-compose:2.7.6")
@@ -165,6 +166,10 @@ dependencies {
     // Mockito
     testImplementation("org.mockito:mockito-core:5.8.0")
     testImplementation("org.mockito:mockito-inline:5.2.0")
+
+    // MockK (Kotlin mocking library)
+    testImplementation("io.mockk:mockk:1.13.8")
+    testImplementation("io.mockk:mockk-android:1.13.8")
 
     // AndroidX Test
     testImplementation("androidx.test:core:1.5.0")

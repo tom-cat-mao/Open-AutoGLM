@@ -255,21 +255,26 @@ fun AutoGLMTheme(
     val view = LocalView.current
     if (!view.isInEditMode) {
         SideEffect {
-            val window = (view.context as Activity).window
+            // 安全检查：只在 Activity Context 中设置系统栏
+            val context = view.context
+            if (context is Activity) {
+                val window = context.window
 
-            // 设置状态栏颜色（使用主题的surface颜色）
-            window.statusBarColor = colorScheme.surface.toArgb()
+                // 设置状态栏颜色（使用主题的surface颜色）
+                window.statusBarColor = colorScheme.surface.toArgb()
 
-            // 设置导航栏颜色（使用主题的surface颜色）
-            window.navigationBarColor = colorScheme.surface.toArgb()
+                // 设置导航栏颜色（使用主题的surface颜色）
+                window.navigationBarColor = colorScheme.surface.toArgb()
 
-            // 禁用边到边显示，避免内容被系统栏遮挡
-            WindowCompat.setDecorFitsSystemWindows(window, true)
+                // 禁用边到边显示，避免内容被系统栏遮挡
+                WindowCompat.setDecorFitsSystemWindows(window, true)
 
-            // 设置状态栏和导航栏图标颜色
-            val insetsController = WindowCompat.getInsetsController(window, view)
-            insetsController.isAppearanceLightStatusBars = !isDark
-            insetsController.isAppearanceLightNavigationBars = !isDark
+                // 设置状态栏和导航栏图标颜色
+                val insetsController = WindowCompat.getInsetsController(window, view)
+                insetsController.isAppearanceLightStatusBars = !isDark
+                insetsController.isAppearanceLightNavigationBars = !isDark
+            }
+            // WindowContext 或其他 Context 类型：跳过系统栏设置
         }
     }
 
