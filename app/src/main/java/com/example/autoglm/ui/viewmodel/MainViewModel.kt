@@ -13,6 +13,8 @@ import com.example.autoglm.data.*
 import com.example.autoglm.manager.ShizukuManager
 import com.example.autoglm.ui.theme.ThemeMode
 import com.example.autoglm.utils.SettingsManager
+import kotlinx.collections.immutable.persistentListOf
+import kotlinx.collections.immutable.toPersistentList
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.CompletableDeferred
@@ -44,6 +46,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private val _state = MutableStateFlow(AppState())
     val state: StateFlow<AppState> = _state.asStateFlow()
+
+    // 性能优化：专用于设置页面的状态，避免过度订阅
+    private val _settingsState = MutableStateFlow(SettingsState())
+    val settingsState: StateFlow<SettingsState> = _settingsState.asStateFlow()
 
     // SharedPreferences用于主题持久化
     private val prefs = application.getSharedPreferences("app_prefs", 0)
@@ -83,7 +89,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 withContext(Dispatchers.Main) {
                     Log.d(TAG, "Error callback invoked: $errorMsg")
                     _state.update {
-                        it.copy(messages = it.messages + MessageItem.SystemMessage(errorMsg, SystemMessageType.ERROR))
+                        it.copy(messages = (it.messages + MessageItem.SystemMessage(content = errorMsg, type = SystemMessageType.ERROR)).toPersistentList())
                     }
                 }
             }
@@ -94,36 +100,118 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     /**
      * 从SettingsManager加载配置
+     * 性能优化：同时加载到 AppState 和 SettingsState
      */
     private fun loadSettings() {
+        val apiKey = SettingsManager.apiKey
+        val baseUrl = SettingsManager.baseUrl
+        val model = SettingsManager.model
+        val themeMode = loadThemeMode()
+        val pureBlackEnabled = loadPureBlackEnabled()
+        val timeoutSeconds = SettingsManager.timeoutSeconds
+        val retryCount = SettingsManager.retryCount
+        val debugMode = SettingsManager.debugMode
+
+        // 更新 AppState
         _state.update { it.copy(
-            apiKey = SettingsManager.apiKey,
-            baseUrl = SettingsManager.baseUrl,
-            model = SettingsManager.model,
-            themeMode = loadThemeMode(),
-            pureBlackEnabled = loadPureBlackEnabled()
+            apiKey = apiKey,
+            baseUrl = baseUrl,
+            model = model,
+            themeMode = themeMode,
+            pureBlackEnabled = pureBlackEnabled
         )}
+
+        // 更新 SettingsState（包含验证状态）
+        _settingsState.update {
+            val isApiKeyValid = apiKey.isEmpty() || apiKey.length >= 10
+            val isBaseUrlValid = baseUrl.isEmpty() || baseUrl.startsWith("http")
+            it.copy(
+                apiKey = apiKey,
+                baseUrl = baseUrl,
+                model = model,
+                themeMode = themeMode,
+                pureBlackEnabled = pureBlackEnabled,
+                timeoutSeconds = timeoutSeconds,
+                retryCount = retryCount,
+                debugMode = debugMode,
+                isApiKeyValid = isApiKeyValid,
+                isBaseUrlValid = isBaseUrlValid,
+                isSaveEnabled = calculateSaveEnabled(apiKey, baseUrl, model, isApiKeyValid, isBaseUrlValid)
+            )
+        }
+    }
+
+    /**
+     * 计算保存按钮是否可用
+     */
+    private fun calculateSaveEnabled(
+        apiKey: String,
+        baseUrl: String,
+        model: String,
+        isApiKeyValid: Boolean,
+        isBaseUrlValid: Boolean
+    ): Boolean {
+        return apiKey.isNotEmpty() &&
+               baseUrl.isNotEmpty() &&
+               model.isNotEmpty() &&
+               isApiKeyValid &&
+               isBaseUrlValid
     }
 
     /**
      * 更新API Key
+     * 性能优化：同时更新 AppState 和 SettingsState，并计算验证状态
      */
     fun updateApiKey(value: String) {
         _state.update { it.copy(apiKey = value) }
+
+        _settingsState.update { current ->
+            val isValid = value.isEmpty() || value.length >= 10
+            current.copy(
+                apiKey = value,
+                isApiKeyValid = isValid,
+                isSaveEnabled = calculateSaveEnabled(
+                    value, current.baseUrl, current.model, isValid, current.isBaseUrlValid
+                )
+            )
+        }
     }
 
     /**
      * 更新Base URL
+     * 性能优化：同时更新 AppState 和 SettingsState，并计算验证状态
      */
     fun updateBaseUrl(value: String) {
         _state.update { it.copy(baseUrl = value) }
+
+        _settingsState.update { current ->
+            val isValid = value.isEmpty() || value.startsWith("http")
+            current.copy(
+                baseUrl = value,
+                isBaseUrlValid = isValid,
+                isSaveEnabled = calculateSaveEnabled(
+                    current.apiKey, value, current.model, current.isApiKeyValid, isValid
+                )
+            )
+        }
     }
 
     /**
      * 更新Model名称
+     * 性能优化：同时更新 AppState 和 SettingsState，并计算验证状态
      */
     fun updateModel(value: String) {
         _state.update { it.copy(model = value) }
+
+        _settingsState.update { current ->
+            current.copy(
+                model = value,
+                isSaveEnabled = calculateSaveEnabled(
+                    current.apiKey, current.baseUrl, value,
+                    current.isApiKeyValid, current.isBaseUrlValid
+                )
+            )
+        }
     }
 
     /**
@@ -146,17 +234,21 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     /**
      * 更新主题模式
+     * 性能优化：同时更新 AppState 和 SettingsState
      */
     fun updateThemeMode(mode: ThemeMode) {
         _state.update { it.copy(themeMode = mode) }
+        _settingsState.update { it.copy(themeMode = mode) }
         saveThemeMode(mode)
     }
 
     /**
      * 切换Pure Black模式
+     * 性能优化：同时更新 AppState 和 SettingsState
      */
     fun togglePureBlack(enabled: Boolean) {
         _state.update { it.copy(pureBlackEnabled = enabled) }
+        _settingsState.update { it.copy(pureBlackEnabled = enabled) }
         savePureBlackEnabled(enabled)
     }
 
@@ -193,6 +285,35 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         prefs.edit().putBoolean("pure_black_enabled", enabled).apply()
     }
 
+    // ==================== 高级设置管理（性能优化新增）====================
+
+    /**
+     * 更新超时时间
+     * 性能优化：更新 SettingsState 并持久化
+     */
+    fun updateTimeout(seconds: Int) {
+        _settingsState.update { it.copy(timeoutSeconds = seconds) }
+        SettingsManager.timeoutSeconds = seconds
+    }
+
+    /**
+     * 更新重试次数
+     * 性能优化：更新 SettingsState 并持久化
+     */
+    fun updateRetryCount(count: Int) {
+        _settingsState.update { it.copy(retryCount = count) }
+        SettingsManager.retryCount = count
+    }
+
+    /**
+     * 更新调试模式
+     * 性能优化：更新 SettingsState 并持久化
+     */
+    fun updateDebugMode(enabled: Boolean) {
+        _settingsState.update { it.copy(debugMode = enabled) }
+        SettingsManager.debugMode = enabled
+    }
+
     // ==================== UI状态管理 ====================
 
     /**
@@ -220,36 +341,40 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     /**
      * 添加AI思考消息
+     * 性能优化：使用 ImmutableList plus 运算符，高效添加元素
      */
     fun addThinkMessage(content: String) {
         _state.update {
-            it.copy(messages = it.messages + MessageItem.ThinkMessage(content))
+            it.copy(messages = (it.messages + MessageItem.ThinkMessage(content = content)).toPersistentList())
         }
     }
 
     /**
      * 添加操作消息
+     * 性能优化：使用 ImmutableList plus 运算符，高效添加元素
      */
     fun addActionMessage(action: Action) {
         _state.update {
-            it.copy(messages = it.messages + MessageItem.ActionMessage(action))
+            it.copy(messages = (it.messages + MessageItem.ActionMessage(action = action)).toPersistentList())
         }
     }
 
     /**
      * 添加系统消息
+     * 性能优化：使用 ImmutableList plus 运算符，高效添加元素
      */
     fun addSystemMessage(content: String, type: SystemMessageType) {
         _state.update {
-            it.copy(messages = it.messages + MessageItem.SystemMessage(content, type))
+            it.copy(messages = (it.messages + MessageItem.SystemMessage(content = content, type = type)).toPersistentList())
         }
     }
 
     /**
      * 清空所有消息
+     * 性能优化：使用 persistentListOf() 创建空的 ImmutableList
      */
     fun clearMessages() {
-        _state.update { it.copy(messages = emptyList()) }
+        _state.update { it.copy(messages = kotlinx.collections.immutable.persistentListOf()) }
     }
 
     // ==================== 系统状态检查 ====================

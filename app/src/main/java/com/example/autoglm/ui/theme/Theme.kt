@@ -6,6 +6,7 @@ import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.SideEffect
+import androidx.compose.runtime.remember
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalContext
@@ -227,26 +228,28 @@ fun AutoGLMTheme(
     val context = LocalContext.current
     val isDark = themeMode == ThemeMode.DARK
 
-    // 选择配色方案
-    val colorScheme = when {
-        // Pure Black模式优先（仅暗色主题）
-        // Pure Black模式下不使用动态颜色，以确保纯黑背景
-        isDark && pureBlackEnabled -> PureBlackColorScheme
+    // ✅ 性能优化：缓存 colorScheme 计算结果，避免每次重组时重新计算
+    val colorScheme = remember(themeMode, pureBlackEnabled, dynamicColor) {
+        when {
+            // Pure Black模式优先（仅暗色主题）
+            // Pure Black模式下不使用动态颜色，以确保纯黑背景
+            isDark && pureBlackEnabled -> PureBlackColorScheme
 
-        // Android 12+ 支持动态颜色
-        dynamicColor && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S -> {
-            if (isDark) {
-                dynamicDarkColorScheme(context)
-            } else {
-                dynamicLightColorScheme(context)
+            // Android 12+ 支持动态颜色
+            dynamicColor && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S -> {
+                if (isDark) {
+                    dynamicDarkColorScheme(context)
+                } else {
+                    dynamicLightColorScheme(context)
+                }
             }
+
+            // 标准暗色主题
+            isDark -> DarkColorScheme
+
+            // 标准亮色主题
+            else -> LightColorScheme
         }
-
-        // 标准暗色主题
-        isDark -> DarkColorScheme
-
-        // 标准亮色主题
-        else -> LightColorScheme
     }
 
     val view = LocalView.current

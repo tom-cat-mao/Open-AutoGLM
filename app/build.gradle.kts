@@ -92,6 +92,15 @@ android {
             "-opt-in=androidx.compose.foundation.ExperimentalFoundationApi"
         )
     }
+
+    // ==================== Compose Compiler Metrics（性能优化）====================
+    // 启用 Compose 编译器报告，用于分析重组性能和稳定性
+    // 报告将生成在 app/build/compose-metrics 和 app/build/compose-reports 目录
+    composeCompiler {
+        metricsDestination.set(layout.buildDirectory.dir("compose-metrics"))
+        reportsDestination.set(layout.buildDirectory.dir("compose-reports"))
+    }
+    // ==================== Compose Compiler Metrics 结束 ====================
 }
 
 dependencies {
@@ -122,6 +131,9 @@ dependencies {
 
     // Kotlin Coroutines
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")
+
+    // Kotlinx Immutable Collections (性能优化：稳定化 Compose State)
+    implementation("org.jetbrains.kotlinx:kotlinx-collections-immutable:0.3.7")
 
     // Core
     implementation("androidx.core:core-ktx:1.12.0")

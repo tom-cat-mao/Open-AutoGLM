@@ -25,6 +25,8 @@ import kotlinx.coroutines.launch
  * - 列表项位置变化的平滑动画
  * - 自动滚动到最新消息
  *
+ * 性能优化：使用唯一 ID 作为 key，确保列表项正确追踪
+ *
  * @param messages 消息列表
  * @param modifier 修饰符
  */
@@ -60,7 +62,7 @@ fun MessageList(
         ) {
             items(
                 items = messages,
-                key = { it.hashCode() } // 性能优化：使用key避免重组
+                key = { it.id }  // ✅ 性能优化：使用唯一 ID 避免重组
             ) { message ->
                 // Material3动画：消息出现时的淡入+滑入动画
                 AnimatedVisibility(

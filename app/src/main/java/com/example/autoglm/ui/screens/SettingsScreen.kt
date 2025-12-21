@@ -32,6 +32,9 @@ import kotlinx.coroutines.launch
  * - API配置（API Key、Base URL、Model）
  * - 高级设置（可选）
  *
+ * 性能优化：使用专用的 settingsState 而不是完整的 AppState
+ * 这样可以避免主页面消息更新时触发设置页面的重组
+ *
  * @param onNavigateBack 返回主页面的回调
  * @param viewModel 共享的ViewModel实例
  */
@@ -44,32 +47,13 @@ fun SettingsScreen(
     // 性能监控：追踪重组次数
     RecompositionCounter("SettingsScreen")
 
-    val state by viewModel.state.collectAsState()
+    // ✅ 性能优化：只订阅设置相关的状态，避免过度订阅
+    val state by viewModel.settingsState.collectAsState()
     val snackbarHostState = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
 
     // 高级设置展开状态
     var advancedSettingsExpanded by remember { mutableStateOf(false) }
-
-    // 高级设置的状态（移到外层避免在AnimatedVisibility内重建）
-    var timeoutValue by remember { mutableFloatStateOf(30f) }
-    var retryCount by remember { mutableIntStateOf(3) }
-    var debugMode by remember { mutableStateOf(false) }
-
-    // 预计算验证结果，避免在每次recomposition时重复计算
-    val isApiKeyValid = remember(state.apiKey) {
-        state.apiKey.isEmpty() || state.apiKey.length >= 10
-    }
-    val isBaseUrlValid = remember(state.baseUrl) {
-        state.baseUrl.isEmpty() || state.baseUrl.startsWith("http")
-    }
-    val isSaveEnabled = remember(state.apiKey, state.baseUrl, state.model, isApiKeyValid, isBaseUrlValid) {
-        state.apiKey.isNotEmpty() &&
-        state.baseUrl.isNotEmpty() &&
-        state.model.isNotEmpty() &&
-        isApiKeyValid &&
-        isBaseUrlValid
-    }
 
     Scaffold(
         topBar = {
@@ -207,9 +191,9 @@ fun SettingsScreen(
                                 }
                             }
                         },
-                        isError = !isApiKeyValid,
+                        isError = !state.isApiKeyValid,
                         supportingText = {
-                            if (!isApiKeyValid) {
+                            if (!state.isApiKeyValid) {
                                 Text("API Key长度至少10个字符")
                             }
                         }
@@ -232,9 +216,9 @@ fun SettingsScreen(
                                 }
                             }
                         },
-                        isError = !isBaseUrlValid,
+                        isError = !state.isBaseUrlValid,
                         supportingText = {
-                            if (!isBaseUrlValid) {
+                            if (!state.isBaseUrlValid) {
                                 Text("Base URL必须以http://或https://开头")
                             }
                         }
@@ -260,6 +244,7 @@ fun SettingsScreen(
                     )
 
                     // 保存按钮
+                    // ✅ 性能优化：使用 state.isSaveEnabled，验证逻辑已在 ViewModel 中计算
                     Button(
                         onClick = {
                             viewModel.saveSettings()
@@ -272,7 +257,7 @@ fun SettingsScreen(
                             }
                         },
                         modifier = Modifier.fillMaxWidth(),
-                        enabled = isSaveEnabled
+                        enabled = state.isSaveEnabled
                     ) {
                         Text("保存配置")
                     }
@@ -318,6 +303,7 @@ fun SettingsScreen(
                             HorizontalDivider()
 
                             // 超时设置（滑块）
+                            // ✅ 性能优化：使用 state.timeoutSeconds，直接调用 ViewModel 更新
                             Column(
                                 verticalArrangement = Arrangement.spacedBy(8.dp)
                             ) {
@@ -331,15 +317,15 @@ fun SettingsScreen(
                                     verticalAlignment = Alignment.CenterVertically
                                 ) {
                                     Slider(
-                                        value = timeoutValue,
-                                        onValueChange = { timeoutValue = it },
+                                        value = state.timeoutSeconds.toFloat(),
+                                        onValueChange = { viewModel.updateTimeout(it.toInt()) },
                                         valueRange = 10f..120f,
                                         steps = 10,
                                         modifier = Modifier.weight(1f)
                                     )
                                     Spacer(modifier = Modifier.width(12.dp))
                                     Text(
-                                        text = "${timeoutValue.toInt()}秒",
+                                        text = "${state.timeoutSeconds}秒",
                                         style = MaterialTheme.typography.bodyMedium,
                                         modifier = Modifier.width(50.dp)
                                     )
@@ -347,6 +333,7 @@ fun SettingsScreen(
                             }
 
                             // 重试次数设置
+                            // ✅ 性能优化：使用 state.retryCount，直接调用 ViewModel 更新
                             Column(
                                 verticalArrangement = Arrangement.spacedBy(8.dp)
                             ) {
@@ -360,15 +347,15 @@ fun SettingsScreen(
                                     verticalAlignment = Alignment.CenterVertically
                                 ) {
                                     Slider(
-                                        value = retryCount.toFloat(),
-                                        onValueChange = { retryCount = it.toInt() },
+                                        value = state.retryCount.toFloat(),
+                                        onValueChange = { viewModel.updateRetryCount(it.toInt()) },
                                         valueRange = 0f..10f,
                                         steps = 9,
                                         modifier = Modifier.weight(1f)
                                     )
                                     Spacer(modifier = Modifier.width(12.dp))
                                     Text(
-                                        text = "${retryCount}次",
+                                        text = "${state.retryCount}次",
                                         style = MaterialTheme.typography.bodyMedium,
                                         modifier = Modifier.width(50.dp)
                                     )
@@ -376,6 +363,7 @@ fun SettingsScreen(
                             }
 
                             // 调试模式开关
+                            // ✅ 性能优化：使用 state.debugMode，直接调用 ViewModel 更新
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
                                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -386,8 +374,8 @@ fun SettingsScreen(
                                     style = MaterialTheme.typography.bodyMedium
                                 )
                                 Switch(
-                                    checked = debugMode,
-                                    onCheckedChange = { debugMode = it }
+                                    checked = state.debugMode,
+                                    onCheckedChange = { viewModel.updateDebugMode(it) }
                                 )
                             }
                         }

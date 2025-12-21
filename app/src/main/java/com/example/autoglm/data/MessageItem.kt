@@ -1,18 +1,24 @@
 package com.example.autoglm.data
 
 import com.example.autoglm.data.Action
+import java.util.UUID
 
 /**
  * 消息项基类
  * 用于在UI中展示不同类型的消息
+ *
+ * 性能优化：添加唯一 ID，确保 LazyColumn 可以正确追踪列表项
+ * 避免使用 hashCode() 作为 key，因为 hashCode 可能重复
  */
 sealed class MessageItem {
+    abstract val id: String  // ✅ 唯一标识符
 
     /**
      * AI思考消息
- * 显示AI的推理过程（来自<think>标签）
+     * 显示AI的推理过程（来自<think>标签）
      */
     data class ThinkMessage(
+        override val id: String = UUID.randomUUID().toString(),
         val content: String,
         val timestamp: Long = System.currentTimeMillis()
     ) : MessageItem()
@@ -22,6 +28,7 @@ sealed class MessageItem {
      * 显示AI执行的具体操作
      */
     data class ActionMessage(
+        override val id: String = UUID.randomUUID().toString(),
         val action: Action,
         val timestamp: Long = System.currentTimeMillis()
     ) : MessageItem()
@@ -31,6 +38,7 @@ sealed class MessageItem {
      * 显示系统状态、错误、成功等信息
      */
     data class SystemMessage(
+        override val id: String = UUID.randomUUID().toString(),
         val content: String,
         val type: SystemMessageType,
         val timestamp: Long = System.currentTimeMillis()
