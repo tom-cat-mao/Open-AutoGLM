@@ -791,9 +791,50 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         break
                     }
 
-                    // 执行动作，如果返回false表示用户取消
-                    val shouldContinue = actionExecutor?.execute(action) ?: true
-                    if (!shouldContinue) {
+                    // 执行动作，获取执行结果
+                    val result = actionExecutor?.execute(action) ?: ActionExecutor.ExecuteResult(success = true)
+
+                    // 检查是否有错误
+                    if (!result.success && result.errorMessage != null) {
+                        // 显示错误信息
+                        withContext(Dispatchers.Main) {
+                            addSystemMessage(
+                                "执行失败: ${result.errorMessage}",
+                                SystemMessageType.ERROR
+                            )
+                        }
+                        Log.e(TAG, "Action execution failed: ${result.errorMessage}")
+
+                        // 更新悬浮窗错误状态
+                        OverlayService.instance?.updateError(
+                            "执行失败",
+                            consecutiveFailures + 1
+                        )
+
+                        consecutiveFailures++
+
+                        if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+                            withContext(Dispatchers.Main) {
+                                addSystemMessage(
+                                    "连续失败${MAX_CONSECUTIVE_FAILURES}次，任务已停止",
+                                    SystemMessageType.ERROR
+                                )
+                            }
+                            Log.e(TAG, "Max consecutive failures reached, stopping task")
+                            delay(3000)
+                            // 停止悬浮窗服务
+                            val intent = Intent(getApplication(), OverlayService::class.java)
+                            getApplication<Application>().stopService(intent)
+                            break
+                        }
+
+                        // 继续下一次循环，让 AI 重新尝试
+                        delay(500)
+                        continue
+                    }
+
+                    // 检查用户是否取消
+                    if (!result.shouldContinue) {
                         // ✅ 恢复：添加到主界面消息列表
                         withContext(Dispatchers.Main) {
                             addSystemMessage("用户取消操作", SystemMessageType.WARNING)
@@ -801,6 +842,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         Log.d(TAG, "User cancelled operation")
                         break
                     }
+
+                    // 执行成功，重置失败计数
+                    consecutiveFailures = 0
 
                     // 等待一小段时间让UI更新
                     delay(500)

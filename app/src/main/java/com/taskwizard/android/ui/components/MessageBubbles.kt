@@ -60,9 +60,15 @@ fun ThinkMessageBubble(
                     )
                 }
 
-                // 内容
+                // 内容 - 添加额外的安全检查
+                val displayText = when {
+                    message.content.isBlank() -> "正在思考中..."
+                    message.content.length < 3 -> "正在分析..."
+                    else -> message.content
+                }
+
                 Text(
-                    text = message.content,
+                    text = displayText,
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSecondaryContainer
                 )

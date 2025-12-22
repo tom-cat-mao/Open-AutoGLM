@@ -48,58 +48,75 @@ class ActionExecutor(
     }
 
     /**
+     * 执行结果
+     */
+    data class ExecuteResult(
+        val success: Boolean,
+        val shouldContinue: Boolean = true,  // false 表示用户取消，应停止任务
+        val errorMessage: String? = null
+    )
+
+    /**
      * Phase 4: 改为 suspend 函数以支持敏感操作确认
      * 严格对齐原版 handler.py 的 execute 方法
-     * 
-     * @return Boolean - true 表示继续执行，false 表示用户取消（应停止任务）
+     *
+     * @return ExecuteResult - 包含执行状态和错误信息
      */
-    suspend fun execute(action: Action): Boolean {
-        val type = action.action ?: return true
-        
+    suspend fun execute(action: Action): ExecuteResult {
+        val type = action.action ?: return ExecuteResult(success = true)
+
         Log.d(TAG, "Executing: $type with params: ${action.location} / ${action.content}")
         Log.d(TAG, "Current screen size: ${screenWidth}x${screenHeight}")
 
         // Normalize action type (case insensitive)
         when (type.lowercase()) {
             "launch" -> {
-                val appName = action.content ?: return true
+                val appName = action.content ?: return ExecuteResult(success = true)
                 val packageName = findPackageName(appName)
-                
+
                 if (packageName != null) {
                     Log.d(TAG, "Resolved app '$appName' to package '$packageName'")
                     runShell("monkey -p $packageName -c android.intent.category.LAUNCHER 1")
-                    
+
                     // Phase 4: 添加延迟（对齐原版 timing.py）
                     delay(TimingConfig.device.defaultLaunchDelay)
+
+                    return ExecuteResult(success = true)
                 } else {
-                    Log.w(TAG, "Could not find package for app: $appName")
+                    val errorMsg = "应用 '$appName' 未在系统中找到。请检查应用名称是否正确，或确认应用已安装。"
+                    Log.e(TAG, "Launch failed: $errorMsg")
+                    Log.e(TAG, "Available apps in AppMap: bilibili, 微信, QQ, 淘宝, 京东, 抖音, 快手...")
+                    return ExecuteResult(
+                        success = false,
+                        errorMessage = errorMsg
+                    )
                 }
             }
             
             "tap" -> {
-                val coords = action.location ?: return true
+                val coords = action.location ?: return ExecuteResult(success = true)
                 if (coords.size >= 2) {
                     val x = (coords[0] / 1000.0 * screenWidth).toInt()
                     val y = (coords[1] / 1000.0 * screenHeight).toInt()
-                    
+
                     Log.d(TAG, "Tap: model coords=[${coords[0]}, ${coords[1]}] -> screen coords=($x, $y)")
-                    
+
                     // Phase 4: 敏感操作确认（严格对齐原版 handler.py）
                     if (action.message != null) {
                         Log.w(TAG, "Sensitive operation detected: ${action.message}")
-                        
+
                         val confirmed = onConfirmation?.invoke(action.message) ?: true
-                        
+
                         if (!confirmed) {
                             Log.i(TAG, "User cancelled sensitive operation")
-                            return false  // 返回 false 表示用户取消，应停止任务
+                            return ExecuteResult(success = true, shouldContinue = false)
                         }
-                        
+
                         Log.i(TAG, "User confirmed sensitive operation")
                     }
-                    
+
                     runShell("input tap $x $y")
-                    
+
                     // Phase 4: 添加延迟（对齐原版 timing.py）
                     delay(TimingConfig.device.defaultTapDelay)
                 }
@@ -107,7 +124,7 @@ class ActionExecutor(
             
             // Phase 2: Double Tap 实现
             "double tap" -> {
-                val coords = action.location ?: return true
+                val coords = action.location ?: return ExecuteResult(success = true)
                 if (coords.size >= 2) {
                     val x = (coords[0] / 1000.0 * screenWidth).toInt()
                     val y = (coords[1] / 1000.0 * screenHeight).toInt()
@@ -132,7 +149,7 @@ class ActionExecutor(
             
             // Phase 2: Long Press 支持动态 duration
             "long press" -> {
-                val coords = action.location ?: return true
+                val coords = action.location ?: return ExecuteResult(success = true)
                 if (coords.size >= 2) {
                     val x = (coords[0] / 1000.0 * screenWidth).toInt()
                     val y = (coords[1] / 1000.0 * screenHeight).toInt()
@@ -152,7 +169,7 @@ class ActionExecutor(
             }
             
             "type", "type_name" -> {
-                val text = action.content ?: return true
+                val text = action.content ?: return ExecuteResult(success = true)
                 
                 // Phase 3: 自动切换到 ADB Keyboard
                 if (!imeHasBeenSwitched) {
@@ -196,7 +213,7 @@ class ActionExecutor(
             }
             
             "swipe" -> {
-                 val coords = action.location ?: return true
+                 val coords = action.location ?: return ExecuteResult(success = true)
                  if (coords.size >= 4) {
                      val x1 = (coords[0] / 1000.0 * screenWidth).toInt()
                      val y1 = (coords[1] / 1000.0 * screenHeight).toInt()
@@ -273,8 +290,8 @@ class ActionExecutor(
                 Log.w(TAG, "Unknown action: $type")
             }
         }
-        
-        return true  // 默认返回 true 表示继续执行
+
+        return ExecuteResult(success = true)  // 默认返回成功
     }
 
     private fun findPackageName(appName: String): String? {

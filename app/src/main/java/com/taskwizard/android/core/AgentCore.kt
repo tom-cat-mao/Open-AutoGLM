@@ -28,10 +28,14 @@ class AgentCore(
     // We only expose the last thought for UI
     var lastThink: String? = null
 
+    // 保存上一次的 thinking，用于模型省略 thinking 时的 fallback
+    private var previousThink: String? = null
+
     fun startSession(task: String) {
         history.clear()
         notes.clear()  // 清空 notes
         isFirstStep = true
+        previousThink = null  // 重置 previousThink
         // Use the new dynamic System Prompt
         history.add(Message("system", SystemPrompt.get()))
         // Store the task, we'll add Screen Info in the first step
@@ -273,9 +277,28 @@ class AgentCore(
 
                 // 6. Parse using the new Regex Parser
                 val result = ResponseParser.parse(content)
-                lastThink = result.think
 
-                Log.d("AgentCore", "Parsed result - think: ${result.think?.take(50)}, action: ${result.action?.action}")
+                // 7. 智能选择 thinking 内容
+                lastThink = when {
+                    // 情况 1: 模型输出了 thinking
+                    result.think != null -> {
+                        Log.d("AgentCore", "Using current thinking from model")
+                        previousThink = result.think  // 保存为 previousThink
+                        result.think
+                    }
+                    // 情况 2: 模型没有输出 thinking，但有上一次的 thinking
+                    previousThink != null -> {
+                        Log.d("AgentCore", "Model omitted thinking, using previous thinking")
+                        previousThink
+                    }
+                    // 情况 3: 两者都没有，使用默认文本
+                    else -> {
+                        Log.d("AgentCore", "No thinking available, using default")
+                        "正在执行操作..."
+                    }
+                }
+
+                Log.d("AgentCore", "Parsed result - think: ${result.think?.take(50)}, action: ${result.action?.action}, lastThink: ${lastThink?.take(50)}")
 
                 if (result.action == null) {
                     Log.w("AgentCore", "Failed to parse action from: $content")
