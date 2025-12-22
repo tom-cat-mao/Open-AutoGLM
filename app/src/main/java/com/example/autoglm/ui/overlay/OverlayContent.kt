@@ -122,20 +122,29 @@ private fun OverlayContentLayout(state: OverlayState) {
         Text(
             text = state.getDisplayText(),
             style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurface,
-            maxLines = 2,
+            color = if (state.errorMessage != null) {
+                // 错误时使用红色
+                MaterialTheme.colorScheme.error
+            } else {
+                MaterialTheme.colorScheme.onSurface
+            },
+            maxLines = 3,  // 错误消息可能需要更多行
             overflow = TextOverflow.Ellipsis,
             textAlign = TextAlign.Center,
             modifier = Modifier.fillMaxWidth()
         )
 
-        // 进度指示（保留）
+        // 进度指示
         if (state.shouldShowThinkingIndicator() || state.shouldShowActionIndicator()) {
             LinearProgressIndicator(
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(2.dp),
-                color = MaterialTheme.colorScheme.primary
+                color = if (state.errorMessage != null) {
+                    MaterialTheme.colorScheme.error
+                } else {
+                    MaterialTheme.colorScheme.primary
+                }
             )
         }
     }

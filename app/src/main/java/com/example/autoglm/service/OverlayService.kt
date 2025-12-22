@@ -19,6 +19,7 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.setViewTreeLifecycleOwner
 import androidx.lifecycle.setViewTreeViewModelStoreOwner
 import androidx.savedstate.setViewTreeSavedStateRegistryOwner
+import com.example.autoglm.MainActivity
 import com.example.autoglm.R
 import com.example.autoglm.ui.overlay.OverlayContent
 import com.example.autoglm.ui.theme.AutoGLMTheme
@@ -314,14 +315,38 @@ class OverlayService : LifecycleService() {
         overlayViewModel.markTaskStarted()
     }
 
+    /**
+     * 更新错误状态
+     */
+    fun updateError(message: String, retryCount: Int = 0) {
+        Log.d(TAG, "updateError: $message, retryCount: $retryCount")
+        overlayViewModel.updateError(message, retryCount)
+    }
+
+    /**
+     * 清除错误状态
+     */
+    fun clearError() {
+        Log.d(TAG, "clearError")
+        overlayViewModel.clearError()
+    }
+
+    /**
+     * 更新步骤计数
+     */
+    fun updateStep(step: Int) {
+        Log.d(TAG, "updateStep: $step")
+        overlayViewModel.updateStep(step)
+    }
+
     // ==================== 动画方法（阶段3新增）====================
 
     /**
      * 执行放大到全屏的动画
      *
      * 流程：
-     * 1. 回调启动MainActivity
-     * 2. 延迟50ms确保Activity已启动
+     * 1. 先启动MainActivity（关键修复：在动画前启动）
+     * 2. 延迟300ms等待MainActivity启动
      * 3. 执行放大动画（缩放到10倍，淡出）
      * 4. 动画结束后关闭Service
      *
@@ -331,11 +356,11 @@ class OverlayService : LifecycleService() {
         Log.d(TAG, "animateToFullScreen: starting")
 
         overlayView?.let { view ->
-            // 1. 先回调启动MainActivity
+            // 关键修复1：先启动MainActivity
             onAnimationStart()
             Log.d(TAG, "animateToFullScreen: MainActivity launch callback invoked")
 
-            // 2. 延迟50ms确保Activity已启动
+            // 关键修复2：延迟300ms确保MainActivity完全启动并可见
             view.postDelayed({
                 Log.d(TAG, "animateToFullScreen: starting animation")
 
@@ -351,7 +376,7 @@ class OverlayService : LifecycleService() {
                         stopSelf()
                     }
                     .start()
-            }, 50)
+            }, 300)  // 增加延迟到300ms
         } ?: run {
             Log.e(TAG, "animateToFullScreen: overlayView is null")
             stopSelf()
@@ -375,15 +400,23 @@ class OverlayService : LifecycleService() {
     }
 
     /**
-     * 返回主Activity（阶段3修改）
-     * 添加FROM_OVERLAY标志，通知MainActivity显示放大动画
+     * 返回主Activity（关键修复）
+     * 使用正确的Intent标志位确保MainActivity被带到前台并触发onNewIntent
      */
     private fun returnToMainActivity() {
         try {
-            val launchIntent = packageManager.getLaunchIntentForPackage(packageName)
-            launchIntent?.apply {
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                // 阶段3新增：添加FROM_OVERLAY标志
+            Log.d(TAG, "returnToMainActivity: starting")
+
+            // 关键修复：使用正确的标志位组合
+            val launchIntent = Intent(this, MainActivity::class.java).apply {
+                // FLAG_ACTIVITY_NEW_TASK: 从Service启动Activity必需
+                // FLAG_ACTIVITY_SINGLE_TOP: 确保不创建新实例，触发onNewIntent
+                // FLAG_ACTIVITY_REORDER_TO_FRONT: 将已存在的Activity带到前台
+                addFlags(
+                    Intent.FLAG_ACTIVITY_NEW_TASK or
+                    Intent.FLAG_ACTIVITY_SINGLE_TOP or
+                    Intent.FLAG_ACTIVITY_REORDER_TO_FRONT
+                )
                 putExtra("FROM_OVERLAY", true)
             }
             startActivity(launchIntent)

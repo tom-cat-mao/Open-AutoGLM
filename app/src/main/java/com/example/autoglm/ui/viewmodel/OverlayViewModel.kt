@@ -147,6 +147,41 @@ class OverlayViewModel : ViewModel() {
     }
 
     /**
+     * 更新错误状态
+     */
+    fun updateError(message: String, retryCount: Int = 0) {
+        _state.update {
+            it.copy(
+                errorMessage = message,
+                retryCount = retryCount,
+                isThinking = false,
+                currentAction = null
+            )
+        }
+    }
+
+    /**
+     * 清除错误状态
+     */
+    fun clearError() {
+        _state.update { it.copy(errorMessage = null, retryCount = 0) }
+    }
+
+    /**
+     * 更新步骤计数
+     */
+    fun updateStep(step: Int) {
+        _state.update { it.copy(currentStep = step) }
+    }
+
+    /**
+     * 递增步骤计数
+     */
+    fun incrementStep() {
+        _state.update { it.copy(currentStep = it.currentStep + 1) }
+    }
+
+    /**
      * 标记任务完成
      */
     fun markTaskCompleted() {

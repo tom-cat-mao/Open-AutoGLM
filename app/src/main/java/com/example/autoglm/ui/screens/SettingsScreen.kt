@@ -18,7 +18,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
-import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.autoglm.ui.theme.ThemeMode
 import com.example.autoglm.ui.viewmodel.MainViewModel
 import com.example.autoglm.utils.RecompositionCounter
@@ -48,7 +48,7 @@ fun SettingsScreen(
     RecompositionCounter("SettingsScreen")
 
     // ✅ 性能优化：只订阅设置相关的状态，避免过度订阅
-    val state by viewModel.settingsState.collectAsState()
+    val state by viewModel.settingsState.collectAsStateWithLifecycle()
     val snackbarHostState = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
 

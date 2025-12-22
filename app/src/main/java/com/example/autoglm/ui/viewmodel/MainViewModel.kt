@@ -96,11 +96,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val isAnimatingFromOverlay: StateFlow<Boolean> = _isAnimatingFromOverlay.asStateFlow()
 
     /**
-     * 是否应该finish Activity
-     * 用于在动画完成后通知MainActivity执行finish
+     * 是否应该将Activity移到后台
+     * 用于在动画完成后通知MainActivity执行moveTaskToBack
      */
-    private val _shouldFinishActivity = MutableStateFlow(false)
-    val shouldFinishActivity: StateFlow<Boolean> = _shouldFinishActivity.asStateFlow()
+    private val _shouldMoveToBackground = MutableStateFlow(false)
+    val shouldMoveToBackground: StateFlow<Boolean> = _shouldMoveToBackground.asStateFlow()
 
     init {
         // 初始化SettingsManager
@@ -118,9 +118,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             viewModelScope.launch {
                 withContext(Dispatchers.Main) {
                     Log.d(TAG, "Error callback invoked: $errorMsg")
-                    _state.update {
-                        it.copy(messages = (it.messages + MessageItem.SystemMessage(content = errorMsg, type = SystemMessageType.ERROR)).toPersistentList())
-                    }
+                    // ✅ 修改：只更新悬浮窗，不再添加到主界面消息列表
+                    // 因为主界面在任务执行时已经关闭
+                    OverlayService.instance?.updateError(errorMsg)
                 }
             }
         }
@@ -424,7 +424,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         val service = ShizukuManager.bindService(getApplication())
                         val installed = service.isADBKeyboardInstalled()
                         val enabled = if (installed) {
-                            service.getCurrentIME() == "com.android.adbkeyboard/.AdbIME"
+                            service.isIMEEnabled("com.android.adbkeyboard/.AdbIME")
                         } else {
                             false
                         }
@@ -452,6 +452,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     /**
      * 启动任务
+     * 修改：添加网络预检查，在动画前验证网络连接和API配置
      */
     fun startTask() {
         val task = _state.value.currentTask
@@ -487,51 +488,42 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             return
         }
 
-        // 启动任务
-        _state.update { it.copy(isRunning = true) }
-        addSystemMessage("任务启动: $task", SystemMessageType.INFO)
+        // ✅ 新增：启动前网络预检查
+        addSystemMessage("正在检查网络连接...", SystemMessageType.INFO)
 
-        // 新增：显示使用的API配置（用于调试）
-        Log.d(TAG, "Starting task with API config:")
-        Log.d(TAG, "  Base URL: ${_state.value.baseUrl}")
-        Log.d(TAG, "  API Key: ${_state.value.apiKey.take(10)}...")
-        Log.d(TAG, "  Model: ${_state.value.model}")
-
-        // 阶段2新增：启动缩小动画流程
         viewModelScope.launch {
-            // 1. 触发缩小动画
-            _isAnimatingToOverlay.value = true
-            Log.d(TAG, "Animation to overlay started")
-
-            // 2. 等待动画完成（300ms动画 + 50ms缓冲）
-            delay(350)
-            Log.d(TAG, "Animation to overlay completed")
-
-            // 3. 通知MainActivity执行finish
-            withContext(Dispatchers.Main) {
-                _shouldFinishActivity.value = true
-            }
-            Log.d(TAG, "Finish activity signal sent")
-        }
-
-        // 4. 使用 TaskScope.launchTask 启动任务
-        taskJob = TaskScope.launchTask(agentCore!!) {
             try {
-                executeTask(task)
-            } catch (e: kotlinx.coroutines.CancellationException) {
-                Log.d(TAG, "Task cancelled: ${e.message}")
-                withContext(Dispatchers.Main) {
-                    addSystemMessage("任务已取消", SystemMessageType.INFO)
+                // 1. 初始化 ApiClient
+                val currentState = _state.value
+                ApiClient.init(currentState.baseUrl, currentState.apiKey)
+
+                // 2. 执行预检查请求（简单的健康检查）
+                val testResult = withContext(Dispatchers.IO) {
+                    performNetworkPreCheck()
                 }
+
+                if (!testResult.success) {
+                    // 预检查失败，显示错误并停止
+                    addSystemMessage(
+                        "网络预检查失败: ${testResult.errorMessage}\n请检查：\n1. 网络连接是否正常\n2. Base URL 是否正确\n3. API Key 是否有效",
+                        SystemMessageType.ERROR
+                    )
+                    return@launch
+                }
+
+                // 3. 预检查成功，显示成功消息
+                addSystemMessage("网络连接正常，准备启动任务", SystemMessageType.SUCCESS)
+                delay(500) // 让用户看到成功消息
+
+                // 4. 启动任务（原有逻辑）
+                startTaskAfterPreCheck(task)
+
             } catch (e: Exception) {
-                Log.e(TAG, "Task execution failed", e)
-                withContext(Dispatchers.Main) {
-                    addSystemMessage("任务执行失败: ${e.message}", SystemMessageType.ERROR)
-                }
-            } finally {
-                withContext(Dispatchers.Main) {
-                    cleanupTask()
-                }
+                Log.e(TAG, "Pre-check failed", e)
+                addSystemMessage(
+                    "启动前检查失败: ${e.message}",
+                    SystemMessageType.ERROR
+                )
             }
         }
     }
@@ -555,6 +547,121 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
         // 停止悬浮窗服务
         stopOverlayService()
+    }
+
+    /**
+     * 执行网络预检查
+     * 发送一个简单的测试请求来验证网络连接和API配置
+     * @return 预检查结果
+     */
+    private suspend fun performNetworkPreCheck(): PreCheckResult {
+        return try {
+            // 发送一个简单的测试请求
+            val testMessages = listOf(
+                Message("system", "You are a helpful assistant."),
+                Message("user", "Hello")
+            )
+
+            val response = ApiClient.getService().chatCompletion(
+                OpenAIRequest(
+                    model = _state.value.model,
+                    messages = testMessages,
+                    max_tokens = 5,
+                    temperature = 0.0
+                )
+            )
+
+            if (response.isSuccessful) {
+                Log.d(TAG, "Network pre-check successful")
+                PreCheckResult(success = true)
+            } else {
+                val errorMsg = when (response.code()) {
+                    401 -> "API Key 无效或已过期"
+                    403 -> "API 访问被拒绝，请检查权限"
+                    404 -> "API 地址不存在，请检查 Base URL"
+                    429 -> "API 请求频率超限，请稍后再试"
+                    500, 502, 503 -> "API 服务器错误，请稍后再试"
+                    else -> "API 错误 (${response.code()})"
+                }
+                Log.e(TAG, "Network pre-check failed: $errorMsg (code=${response.code()})")
+                PreCheckResult(success = false, errorMessage = errorMsg)
+            }
+        } catch (e: Exception) {
+            val errorMsg = when (e) {
+                is java.net.SocketTimeoutException -> "网络连接超时"
+                is java.net.UnknownHostException -> "无法连接到服务器，请检查网络"
+                is javax.net.ssl.SSLException -> "SSL 证书错误"
+                else -> "网络错误: ${e.message}"
+            }
+            Log.e(TAG, "Network pre-check exception: $errorMsg", e)
+            PreCheckResult(success = false, errorMessage = errorMsg)
+        }
+    }
+
+    /**
+     * 预检查通过后启动任务
+     * 这是原有的启动逻辑，从 startTask() 中提取出来
+     */
+    private fun startTaskAfterPreCheck(task: String) {
+        // 启动任务
+        _state.update { it.copy(isRunning = true) }
+
+        addSystemMessage("任务启动: $task", SystemMessageType.INFO)
+
+        Log.d(TAG, "Starting task with API config:")
+        Log.d(TAG, "  Base URL: ${_state.value.baseUrl}")
+        Log.d(TAG, "  API Key: ${_state.value.apiKey.take(10)}...")
+        Log.d(TAG, "  Model: ${_state.value.model}")
+
+        // 关键修复：注册任务停止回调，用于状态同步
+        TaskScope.setOnTaskStoppedCallback {
+            // 在主线程更新状态
+            viewModelScope.launch(Dispatchers.Main) {
+                Log.d(TAG, "Task stopped callback invoked from TaskScope")
+                updateTaskStoppedState()
+            }
+        }
+
+        // 启动缩小动画流程
+        viewModelScope.launch {
+            // 1. 触发缩小动画
+            _isAnimatingToOverlay.value = true
+            Log.d(TAG, "Animation to overlay started")
+
+            // 2. 等待动画完成（300ms动画 + 50ms缓冲）
+            delay(350)
+            Log.d(TAG, "Animation to overlay completed")
+
+            // 3. 通知MainActivity移到后台（不finish，保留ViewModel）
+            withContext(Dispatchers.Main) {
+                _shouldMoveToBackground.value = true
+            }
+            Log.d(TAG, "Move to background signal sent")
+        }
+
+        // 4. 使用 TaskScope.launchTask 启动任务
+        taskJob = TaskScope.launchTask(agentCore!!) {
+            try {
+                executeTask(task)
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                Log.d(TAG, "Task cancelled: ${e.message}")
+                withContext(Dispatchers.Main) {
+                    addSystemMessage("任务已取消", SystemMessageType.INFO)
+                    // 关键修复：在取消时也要调用 cleanupTask()
+                    cleanupTask()
+                }
+                // 不重新抛出异常，让 finally 块正常执行
+            } catch (e: Exception) {
+                Log.e(TAG, "Task execution failed", e)
+                withContext(Dispatchers.Main) {
+                    addSystemMessage("任务执行失败: ${e.message}", SystemMessageType.ERROR)
+                }
+            } finally {
+                withContext(Dispatchers.Main) {
+                    cleanupTask()
+                }
+            }
+        }
     }
 
     /**
@@ -620,14 +727,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
             while (agentCore?.isSessionRunning() == true && stepCount < MAX_STEPS) {
                 stepCount++
+
+                // 更新悬浮窗步骤数
+                OverlayService.instance?.updateStep(stepCount)
+
                 Log.d(TAG, "Step $stepCount")
 
                 // 6.1 截图
                 val screenshot = captureScreenshot()
                 if (screenshot == null) {
-                    withContext(Dispatchers.Main) {
-                        addSystemMessage("截图失败", SystemMessageType.ERROR)
-                    }
+                    // ✅ 修改：不再添加到主界面消息列表，因为主界面已经关闭
+                    Log.e(TAG, "Screenshot failed at step $stepCount")
                     break
                 }
 
@@ -643,19 +753,26 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 // 6.5 显示AI思考内容
                 agentCore?.lastThink?.let { think ->
                     if (think.isNotBlank()) {
+                        // ✅ 恢复：添加到主界面消息列表，因为Activity不再finish，ViewModel保留
                         withContext(Dispatchers.Main) {
-                            addThinkMessage(think)
+                            addThinkMessage("[$stepCount] $think")
                         }
+                        Log.d(TAG, "[$stepCount] Think: $think")
                         consecutiveFailures = 0  // 有思考内容说明成功，重置计数
                     }
                 }
 
                 // 6.6 执行动作
                 if (action != null) {
+                    // ✅ 恢复：添加到主界面消息列表
                     withContext(Dispatchers.Main) {
                         addActionMessage(action)
                     }
+                    Log.d(TAG, "[$stepCount] Action: ${action.action}")
                     consecutiveFailures = 0  // 有动作说明成功，重置计数
+
+                    // 清除错误状态
+                    OverlayService.instance?.clearError()
 
                     // 更新悬浮窗：显示动作
                     val actionText = formatActionForOverlay(action)
@@ -664,9 +781,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     // 检查是否是finish动作
                     if (action.action?.lowercase() == "finish") {
                         val message = action.message ?: action.content ?: "任务完成"
+                        // ✅ 恢复：添加到主界面消息列表
                         withContext(Dispatchers.Main) {
                             addSystemMessage(message, SystemMessageType.SUCCESS)
                         }
+                        Log.d(TAG, "Task finished: $message")
                         // 标记任务完成
                         OverlayService.instance?.markCompleted()
                         break
@@ -675,9 +794,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     // 执行动作，如果返回false表示用户取消
                     val shouldContinue = actionExecutor?.execute(action) ?: true
                     if (!shouldContinue) {
+                        // ✅ 恢复：添加到主界面消息列表
                         withContext(Dispatchers.Main) {
-                            addSystemMessage("用户取消操作，任务已停止", SystemMessageType.WARNING)
+                            addSystemMessage("用户取消操作", SystemMessageType.WARNING)
                         }
+                        Log.d(TAG, "User cancelled operation")
                         break
                     }
 
@@ -688,13 +809,28 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     consecutiveFailures++
                     Log.w(TAG, "No action returned from AgentCore (failure $consecutiveFailures/$MAX_CONSECUTIVE_FAILURES)")
 
+                    // 更新悬浮窗错误状态
+                    OverlayService.instance?.updateError(
+                        "获取动作失败",
+                        consecutiveFailures
+                    )
+
                     if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+                        // ✅ 恢复：添加到主界面消息列表
                         withContext(Dispatchers.Main) {
                             addSystemMessage(
-                                "连续${MAX_CONSECUTIVE_FAILURES}次获取动作失败，任务已停止。\n请检查：\n1. API配置是否正确\n2. 网络连接是否正常\n3. API服务是否可用",
+                                "连续失败${MAX_CONSECUTIVE_FAILURES}次，任务已停止",
                                 SystemMessageType.ERROR
                             )
                         }
+                        Log.e(TAG, "Max consecutive failures reached, stopping task")
+
+                        // 停止悬浮窗服务
+                        delay(3000)  // 显示错误 3 秒
+                        withContext(Dispatchers.Main) {
+                            stopOverlayService()
+                        }
+
                         break  // 停止循环
                     }
 
@@ -703,9 +839,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
 
             if (stepCount >= MAX_STEPS) {
+                // ✅ 恢复：添加到主界面消息列表
                 withContext(Dispatchers.Main) {
-                    addSystemMessage("达到最大步骤数限制", SystemMessageType.WARNING)
+                    addSystemMessage("已达到最大步骤数($MAX_STEPS)，任务停止", SystemMessageType.WARNING)
                 }
+                Log.w(TAG, "Max steps reached")
             }
         } finally {
             // 关键：finally 块保证清理代码执行
@@ -906,12 +1044,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
-     * 重置finish Activity标志
-     * 在Activity finish后调用，避免重复finish
+     * 重置moveToBackground标志
+     * 在Activity移到后台后调用，避免重复操作
      */
-    fun resetFinishActivityFlag() {
-        _shouldFinishActivity.value = false
-        Log.d(TAG, "resetFinishActivityFlag")
+    fun resetMoveToBackgroundFlag() {
+        _shouldMoveToBackground.value = false
+        Log.d(TAG, "resetMoveToBackgroundFlag")
     }
 
     /**
@@ -933,4 +1071,47 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             else -> action.action ?: "执行操作"
         }
     }
+
+    // ==================== 状态同步方法（修复后台状态更新问题）====================
+
+    /**
+     * 强制刷新状态
+     *
+     * 用于解决 Activity 从后台恢复时状态不同步的问题。
+     *
+     * 问题场景：
+     * 1. 任务在悬浮窗中停止，MainActivity 在后台
+     * 2. collectAsStateWithLifecycle() 在 STOPPED 状态暂停收集
+     * 3. MainActivity 恢复时，虽然重新开始收集，但不会触发重组
+     *
+     * 解决方案：
+     * 通过创建新的状态副本，强制触发 StateFlow 更新，从而触发 Compose 重组
+     */
+    fun refreshState() {
+        Log.d(TAG, "refreshState() called - forcing state update")
+        _state.update { it.copy() }
+        _settingsState.update { it.copy() }
+    }
+
+    /**
+     * 更新任务停止状态
+     *
+     * 由 TaskScope 的回调调用，用于在任务停止时更新 ViewModel 状态
+     * 这确保了无论从哪里停止任务（主 app 或悬浮窗），状态都会正确更新
+     */
+    fun updateTaskStoppedState() {
+        Log.d(TAG, "updateTaskStoppedState() called")
+        _state.update { it.copy(isRunning = false) }
+        taskJob = null
+        addSystemMessage("任务已停止", SystemMessageType.INFO)
+    }
 }
+
+/**
+ * 预检查结果数据类
+ * 用于表示网络预检查的结果
+ */
+data class PreCheckResult(
+    val success: Boolean,
+    val errorMessage: String? = null
+)

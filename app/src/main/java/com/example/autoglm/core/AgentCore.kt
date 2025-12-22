@@ -297,12 +297,12 @@ class AgentCore(
                 // API调用失败，提供详细的错误信息
                 val errorBody = response.errorBody()?.string() ?: "无错误详情"
                 val errorMsg = when (response.code()) {
-                    401 -> "API认证失败，请检查API Key是否正确"
-                    403 -> "API访问被拒绝，请检查权限设置"
-                    404 -> "API地址不存在，请检查Base URL配置"
-                    429 -> "API调用频率超限，请稍后重试"
-                    500, 502, 503 -> "API服务器错误，请稍后重试"
-                    else -> "API调用失败 (HTTP ${response.code()}): ${errorBody.take(100)}"
+                    401 -> "API认证失败"
+                    403 -> "API访问被拒绝"
+                    404 -> "API地址不存在"
+                    429 -> "API限流"
+                    500, 502, 503 -> "服务器错误"
+                    else -> "API错误 (${response.code()})"
                 }
                 Log.e("AgentCore", "API Error: $errorMsg")
                 Log.e("AgentCore", "Full error body: $errorBody")
@@ -310,7 +310,12 @@ class AgentCore(
                 Log.d("AgentCore", "onError callback invoked with: $errorMsg")
             }
         } catch (e: Exception) {
-            val errorMsg = "网络错误: ${e.message ?: "未知错误"}"
+            val errorMsg = when (e) {
+                is java.net.SocketTimeoutException -> "网络超时"
+                is java.net.UnknownHostException -> "网络连接失败"
+                is javax.net.ssl.SSLException -> "SSL证书错误"
+                else -> "网络错误: ${e.message}"
+            }
             Log.e("AgentCore", "Network exception", e)
             Log.e("AgentCore", "Exception type: ${e.javaClass.simpleName}")
             Log.e("AgentCore", "Exception message: ${e.message}")

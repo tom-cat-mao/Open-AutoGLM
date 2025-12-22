@@ -430,4 +430,263 @@ class OverlayViewModelTest {
             viewModel.getCurrentDisplayState()
         )
     }
+
+    // ==================== 错误处理测试 ====================
+
+    /**
+     * 测试：updateError设置错误消息
+     */
+    @Test
+    fun `updateError sets error message`() {
+        val errorMsg = "网络连接失败"
+
+        viewModel.updateError(errorMsg)
+
+        assertEquals(
+            "errorMessage应该被设置",
+            errorMsg,
+            viewModel.state.value.errorMessage
+        )
+        assertEquals(
+            "retryCount应该为0",
+            0,
+            viewModel.state.value.retryCount
+        )
+    }
+
+    /**
+     * 测试：updateError设置错误消息和重试次数
+     */
+    @Test
+    fun `updateError sets error message with retry count`() {
+        val errorMsg = "API调用失败"
+        val retryCount = 2
+
+        viewModel.updateError(errorMsg, retryCount)
+
+        assertEquals(
+            "errorMessage应该被设置",
+            errorMsg,
+            viewModel.state.value.errorMessage
+        )
+        assertEquals(
+            "retryCount应该被设置",
+            retryCount,
+            viewModel.state.value.retryCount
+        )
+    }
+
+    /**
+     * 测试：clearError清除错误状态
+     */
+    @Test
+    fun `clearError clears error state`() {
+        // 先设置错误
+        viewModel.updateError("测试错误", 1)
+        assertEquals("测试错误", viewModel.state.value.errorMessage)
+
+        // 清除错误
+        viewModel.clearError()
+
+        assertNull(
+            "errorMessage应该为null",
+            viewModel.state.value.errorMessage
+        )
+        assertEquals(
+            "retryCount应该被重置为0",
+            0,
+            viewModel.state.value.retryCount
+        )
+    }
+
+    /**
+     * 测试：getDisplayText在有错误时优先显示错误
+     */
+    @Test
+    fun `getDisplayText prioritizes error message`() {
+        // 设置多个状态
+        viewModel.updateThinkingState(true)
+        viewModel.updateAction("点击按钮")
+        viewModel.updateError("网络错误")
+
+        val displayText = viewModel.state.value.getDisplayText()
+
+        assertTrue(
+            "显示文本应该包含错误信息",
+            displayText.contains("错误: 网络错误")
+        )
+    }
+
+    /**
+     * 测试：getDisplayText显示错误和重试次数
+     */
+    @Test
+    fun `getDisplayText shows error with retry count`() {
+        viewModel.updateError("API超时", 2)
+
+        val displayText = viewModel.state.value.getDisplayText()
+
+        assertTrue(
+            "显示文本应该包含错误信息",
+            displayText.contains("错误: API超时")
+        )
+        assertTrue(
+            "显示文本应该包含重试次数",
+            displayText.contains("重试: 2/3")
+        )
+    }
+
+    /**
+     * 测试：getDisplayText在重试次数为0时不显示重试信息
+     */
+    @Test
+    fun `getDisplayText shows error without retry count when retry is zero`() {
+        viewModel.updateError("连接失败", 0)
+
+        val displayText = viewModel.state.value.getDisplayText()
+
+        assertTrue(
+            "显示文本应该包含错误信息",
+            displayText.contains("错误: 连接失败")
+        )
+        assertFalse(
+            "显示文本不应该包含重试信息",
+            displayText.contains("重试:")
+        )
+    }
+
+    // ==================== 步骤管理测试 ====================
+
+    /**
+     * 测试：updateStep设置步骤数
+     */
+    @Test
+    fun `updateStep sets step count`() {
+        viewModel.updateStep(5)
+
+        assertEquals(
+            "currentStep应该被设置为5",
+            5,
+            viewModel.state.value.currentStep
+        )
+    }
+
+    /**
+     * 测试：incrementStep增加步骤数
+     */
+    @Test
+    fun `incrementStep increments step count`() {
+        assertEquals(0, viewModel.state.value.currentStep)
+
+        viewModel.incrementStep()
+        assertEquals(1, viewModel.state.value.currentStep)
+
+        viewModel.incrementStep()
+        assertEquals(2, viewModel.state.value.currentStep)
+
+        viewModel.incrementStep()
+        assertEquals(3, viewModel.state.value.currentStep)
+    }
+
+    /**
+     * 测试：getDisplayText显示步骤数
+     */
+    @Test
+    fun `getDisplayText shows step count`() {
+        viewModel.updateStep(10)
+
+        val displayText = viewModel.state.value.getDisplayText()
+
+        assertEquals(
+            "显示文本应该显示步骤数",
+            "Step 10",
+            displayText
+        )
+    }
+
+    /**
+     * 测试：getDisplayText步骤数优先级低于thinking和action
+     */
+    @Test
+    fun `getDisplayText step count has lower priority than thinking and action`() {
+        viewModel.updateStep(5)
+
+        // 步骤数应该显示
+        assertEquals("Step 5", viewModel.state.value.getDisplayText())
+
+        // thinking优先级更高
+        viewModel.updateThinkingState(true)
+        assertEquals("Thinking...", viewModel.state.value.getDisplayText())
+
+        // action优先级更高
+        viewModel.updateThinkingState(false)
+        viewModel.updateAction("点击按钮")
+        assertEquals("点击按钮", viewModel.state.value.getDisplayText())
+    }
+
+    /**
+     * 测试：reset重置步骤数和错误状态
+     */
+    @Test
+    fun `reset clears step count and error state`() {
+        // 设置步骤和错误
+        viewModel.updateStep(10)
+        viewModel.updateError("测试错误", 2)
+
+        assertEquals(10, viewModel.state.value.currentStep)
+        assertEquals("测试错误", viewModel.state.value.errorMessage)
+        assertEquals(2, viewModel.state.value.retryCount)
+
+        // 重置
+        viewModel.reset()
+
+        assertEquals(
+            "currentStep应该被重置为0",
+            0,
+            viewModel.state.value.currentStep
+        )
+        assertNull(
+            "errorMessage应该为null",
+            viewModel.state.value.errorMessage
+        )
+        assertEquals(
+            "retryCount应该被重置为0",
+            0,
+            viewModel.state.value.retryCount
+        )
+    }
+
+    /**
+     * 测试：错误状态不影响其他状态
+     */
+    @Test
+    fun `error state does not affect other states`() {
+        viewModel.markTaskStarted()
+        viewModel.updateStep(3)
+        viewModel.updateError("测试错误")
+
+        assertTrue("isTaskRunning应该保持true", viewModel.isRunning())
+        assertEquals("currentStep应该保持为3", 3, viewModel.state.value.currentStep)
+        assertEquals("错误应该被设置", "测试错误", viewModel.state.value.errorMessage)
+    }
+
+    /**
+     * 测试：步骤数在任务完成后保持
+     */
+    @Test
+    fun `step count persists after task completion`() {
+        viewModel.updateStep(15)
+        viewModel.markTaskCompleted()
+
+        assertEquals(
+            "步骤数应该保持",
+            15,
+            viewModel.state.value.currentStep
+        )
+        assertEquals(
+            "显示文本应该显示已完成",
+            "已完成",
+            viewModel.state.value.getDisplayText()
+        )
+    }
 }

@@ -5,7 +5,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalDensity
-import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.autoglm.ui.components.*
 import com.example.autoglm.ui.viewmodel.MainViewModel
 
@@ -27,12 +27,12 @@ fun MainScreen(
     viewModel: MainViewModel
 ) {
     // 收集状态
-    val state by viewModel.state.collectAsState()
-    val confirmationRequest by viewModel.confirmationRequest.collectAsState()
-    val takeOverRequest by viewModel.takeOverRequest.collectAsState()
+    val state by viewModel.state.collectAsStateWithLifecycle()
+    val confirmationRequest by viewModel.confirmationRequest.collectAsStateWithLifecycle()
+    val takeOverRequest by viewModel.takeOverRequest.collectAsStateWithLifecycle()
 
     // 阶段2新增：收集动画状态
-    val isAnimatingToOverlay by viewModel.isAnimatingToOverlay.collectAsState()
+    val isAnimatingToOverlay by viewModel.isAnimatingToOverlay.collectAsStateWithLifecycle()
 
     // 检测IME（键盘）是否可见
     val density = LocalDensity.current

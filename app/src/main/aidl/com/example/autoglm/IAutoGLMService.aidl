@@ -50,4 +50,11 @@ interface IAutoGLMService {
      * @return 是否已安装
      */
     boolean isADBKeyboardInstalled();
+
+    /**
+     * 检查指定 IME 是否已启用（在启用列表中）
+     * @param imeId 输入法 ID
+     * @return 是否已启用
+     */
+    boolean isIMEEnabled(String imeId);
 }

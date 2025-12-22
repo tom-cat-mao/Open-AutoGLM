@@ -21,6 +21,7 @@ import kotlinx.coroutines.launch
  * - 支持全局取消（应用退出时）
  * - 提供任务管理方法（启动、停止）
  * - 使用 invokeOnCompletion 保证清理代码执行
+ * - 支持任务停止回调，用于状态同步
  */
 object TaskScope {
     private const val TAG = "TaskScope"
@@ -36,6 +37,9 @@ object TaskScope {
     // 清理回调列表
     private val cleanupCallbacks = mutableListOf<() -> Unit>()
 
+    // 任务停止回调（用于通知 ViewModel 更新状态）
+    private var onTaskStoppedCallback: (() -> Unit)? = null
+
     /**
      * 注册清理回调
      * 这些回调会在任务取消或完成时执行
@@ -43,6 +47,25 @@ object TaskScope {
     fun registerCleanupCallback(callback: () -> Unit) {
         cleanupCallbacks.add(callback)
         Log.d(TAG, "Cleanup callback registered (total: ${cleanupCallbacks.size})")
+    }
+
+    /**
+     * 设置任务停止回调
+     * 用于通知 ViewModel 更新状态
+     *
+     * @param callback 任务停止时的回调函数
+     */
+    fun setOnTaskStoppedCallback(callback: () -> Unit) {
+        onTaskStoppedCallback = callback
+        Log.d(TAG, "Task stopped callback registered")
+    }
+
+    /**
+     * 清除任务停止回调
+     */
+    fun clearOnTaskStoppedCallback() {
+        onTaskStoppedCallback = null
+        Log.d(TAG, "Task stopped callback cleared")
     }
 
     /**
@@ -97,6 +120,14 @@ object TaskScope {
             // 2. 取消协程（非阻塞）
             currentTaskJob?.cancel()
             Log.d(TAG, "Task cancellation requested")
+
+            // 3. 通知任务停止回调（关键修复：通知 ViewModel 更新状态）
+            try {
+                onTaskStoppedCallback?.invoke()
+                Log.d(TAG, "Task stopped callback invoked")
+            } catch (e: Exception) {
+                Log.e(TAG, "Error invoking task stopped callback", e)
+            }
 
             currentTaskJob = null
             currentAgentCore = null

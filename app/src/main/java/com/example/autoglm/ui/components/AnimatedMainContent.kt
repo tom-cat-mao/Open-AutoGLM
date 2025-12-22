@@ -67,6 +67,10 @@ fun AnimatedMainContent(
                 // 关键：设置缩放中心为右上角
                 // (1f, 0f) = (右边, 顶部)
                 transformOrigin = TransformOrigin(1f, 0f)
+
+                // 关键修复：保持 alpha 为 1.0，防止 Activity 被标记为透明
+                // 即使在动画过程中也不改变透明度，避免系统杀死 Activity
+                alpha = 1.0f
             }
     ) {
         content()

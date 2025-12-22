@@ -88,7 +88,27 @@ data class OverlayState(
      * 上次点击时间戳
      * 用于实现自动恢复逻辑
      */
-    val lastClickTimestamp: Long = 0L
+    val lastClickTimestamp: Long = 0L,
+
+    /**
+     * 当前错误消息
+     */
+    val errorMessage: String? = null,
+
+    /**
+     * 当前步骤数
+     */
+    val currentStep: Int = 0,
+
+    /**
+     * 重试次数
+     */
+    val retryCount: Int = 0,
+
+    /**
+     * 最大重试次数
+     */
+    val maxRetries: Int = 3
 ) {
     /**
      * 获取显示文本
@@ -96,10 +116,19 @@ data class OverlayState(
      */
     fun getDisplayText(): String {
         return when {
+            // 错误优先级最高
+            errorMessage != null -> {
+                if (retryCount > 0) {
+                    "错误: $errorMessage\n重试: $retryCount/$maxRetries"
+                } else {
+                    "错误: $errorMessage"
+                }
+            }
             isTaskCompleted -> "已完成"
             displayState == OverlayDisplayState.CONFIRM_EXIT -> "确认退出?"
             isThinking -> "Thinking..."
             currentAction != null -> currentAction
+            currentStep > 0 -> "Step $currentStep"
             else -> statusText.ifEmpty { "就绪" }
         }
     }

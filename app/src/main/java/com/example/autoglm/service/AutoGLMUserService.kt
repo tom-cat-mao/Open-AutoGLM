@@ -169,11 +169,30 @@ class AutoGLMUserService(context: Context) : IAutoGLMService.Stub() {
             // 检查 ADB Keyboard 包是否已安装
             val output = executeShellCommand("pm list packages com.android.adbkeyboard")
             val installed = output.contains("com.android.adbkeyboard")
-            
+
             Log.d(TAG, "isADBKeyboardInstalled: $installed")
             installed
         } catch (e: Exception) {
             Log.e(TAG, "Failed to check ADB Keyboard installation", e)
+            false
+        }
+    }
+
+    override fun isIMEEnabled(imeId: String): Boolean {
+        return try {
+            // 获取已启用的输入法列表
+            val output = executeShellCommand("settings get secure enabled_input_methods")
+            val enabledIMEs = output.trim()
+
+            Log.d(TAG, "Enabled IMEs: $enabledIMEs")
+
+            // 检查是否包含指定的 IME
+            val isEnabled = enabledIMEs.contains(imeId)
+
+            Log.d(TAG, "isIMEEnabled($imeId): $isEnabled")
+            isEnabled
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to check if IME is enabled", e)
             false
         }
     }
