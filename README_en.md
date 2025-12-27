@@ -10,6 +10,8 @@
 [![Kotlin](https://img.shields.io/badge/Kotlin-2.0.0-blue)](https://kotlinlang.org/)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 
+[English Documentation] | [中文文档](README.md)
+
 ## Overview
 
 **TaskWizard** is a native Android application that brings the power of [Open-AutoGLM](https://github.com/zai-org/Open-AutoGLM) to your device. It uses AI vision models to understand screen content and automatically perform tasks on your phone through natural language commands.
@@ -19,9 +21,17 @@
 - **AI-Powered Automation**: Use natural language to control your phone
 - **Visual Understanding**: AI analyzes screenshots to understand context
 - **Floating Overlay**: Real-time task status with a beautiful overlay interface
+- **History Management**: View and continue historical tasks
+- **New Conversation**: Quick-start a fresh conversation with one tap
 - **Shizuku Integration**: System-level privileges for advanced automation
 - **100+ App Support**: Works with WeChat, Taobao, Meituan, and more
 - **Privacy-First**: All processing happens locally or with your own API
+
+### Latest Features ✨
+
+- ✅ **Complete History Display**: View all message types (think, action, system messages) when clicking history records
+- ✅ **New Conversation Button**: Quick-start a new conversation with one tap
+- ✅ **Performance Optimizations**: Improved history loading and message rendering
 
 ## Project Origin
 
@@ -112,6 +122,29 @@ Open TaskWizard and navigate to Settings:
 - **Shizuku Permission**: Required for system operations
 - **Notification Permission**: Required for foreground service
 
+## Feature Usage
+
+### History Management
+
+1. Tap the "History" button in the top status bar
+2. View all historical task records
+3. Click any history record to view complete conversation content
+4. View task status, steps, model info, etc.
+5. Support for search and filtering
+
+### Continue Historical Conversation
+
+1. On the history screen, tap the task you want to continue
+2. System automatically loads historical messages to chat interface
+3. Continue chatting with AI to execute tasks
+4. All message types (think, action, system messages) are displayed
+
+### New Conversation
+
+1. Tap the "➕" button in the top status bar
+2. Immediately clear current conversation and start a new task
+3. No need to manually clear input field
+
 ## Model Options
 
 ### Option 1: Zhipu BigModel (Recommended)
@@ -199,7 +232,7 @@ During task execution, the overlay shows:
 ```
 TaskWizard/
 ├── ui/                     # Jetpack Compose UI
-│   ├── screens/           # Main, Settings screens
+│   ├── screens/           # Main, Settings, History screens
 │   ├── components/        # Reusable UI components
 │   ├── overlay/           # Floating overlay UI
 │   └── viewmodel/         # State management
@@ -211,6 +244,9 @@ TaskWizard/
 │   └── AutoGLMService.kt  # Retrofit API client
 ├── manager/                # System integration
 │   └── ShizukuManager.kt  # Shizuku connection & IPC
+├── data/                   # Data layer
+│   ├── history/           # History database
+│   └── AppState.kt        # Application state management
 ├── config/                 # Configuration
 │   ├── AppMap.kt          # App package mappings
 │   ├── SystemPrompt.kt    # AI system prompt
@@ -251,6 +287,18 @@ TaskWizard/
 
 Release builds require keystore configuration. See [RELEASE_SETUP.md](RELEASE_SETUP.md) for details.
 
+### Performance Testing
+
+The project includes a comprehensive performance test suite:
+
+```bash
+# Run unit performance tests
+./gradlew testDebugUnitTest --tests "com.taskwizard.android.PerformanceTest"
+
+# Run UI performance benchmark tests
+./gradlew connectedAndroidTest
+```
+
 ## Troubleshooting
 
 ### Shizuku Not Connected
@@ -277,6 +325,12 @@ Release builds require keystore configuration. See [RELEASE_SETUP.md](RELEASE_SE
 1. Grant overlay permission in Settings → Apps → TaskWizard
 2. Check if Battery Optimization is disabled for TaskWizard
 3. Ensure Notification permission is granted
+
+### History Not Showing Complete
+
+1. Ensure you're using the latest version
+2. History records save all message types (think, action, system messages)
+3. If action messages don't appear, you may need to re-execute the task to save them properly
 
 ## Contributing
 

@@ -10,7 +10,7 @@
 [![Kotlin](https://img.shields.io/badge/Kotlin-2.0.0-blue)](https://kotlinlang.org/)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 
-[English Documentation](README_en.md) | 中文文档
+[English Documentation](README_EN.md) | 中文文档
 
 ## 项目简介
 
@@ -21,9 +21,17 @@
 - **AI 智能自动化**：使用自然语言控制手机
 - **视觉理解**：AI 分析截图以理解上下文
 - **悬浮窗实时显示**：精美的悬浮窗界面显示任务进度
+- **历史记录管理**：查看和继续历史任务
+- **新建对话**：一键清空开始新对话
 - **Shizuku 系统集成**：获得系统级权限实现高级自动化
 - **100+ 应用支持**：支持微信、淘宝、美团等主流应用
 - **隐私优先**：所有处理均在本地或使用您自己的 API
+
+### 最新功能 ✨
+
+- ✅ **历史记录完整显示**：点击历史记录可查看所有消息（思考、操作、系统消息）
+- ✅ **新建对话按钮**：快速开始新对话，无需手动清空
+- ✅ **性能优化**：优化历史记录加载和消息渲染性能
 
 ## 项目起源
 
@@ -114,6 +122,29 @@ adb install app/build/outputs/apk/debug/app-debug.apk
 - **Shizuku 权限**：执行系统操作需要
 - **通知权限**：前台服务需要
 
+## 功能使用
+
+### 历史记录管理
+
+1. 点击顶部状态栏的「历史」按钮
+2. 查看所有历史任务记录
+3. 点击任意历史记录可查看完整对话内容
+4. 查看任务状态、步数、模型等信息
+5. 支持搜索和筛选功能
+
+### 继续历史对话
+
+1. 在历史记录页面，点击想要继续的任务
+2. 系统自动加载历史消息到聊天界面
+3. 可以继续与 AI 对话执行任务
+4. 所有消息类型（思考、操作、系统消息）都会显示
+
+### 新建对话
+
+1. 点击顶部状态栏的「➕」按钮
+2. 立即清空当前对话，开始新任务
+3. 无需手动清除输入框
+
 ## 模型选项
 
 ### 选项 1：智谱 BigModel（推荐）
@@ -201,7 +232,7 @@ TaskWizard 支持 100+ Android 应用，涵盖多个分类：
 ```
 TaskWizard/
 ├── ui/                     # Jetpack Compose UI
-│   ├── screens/           # 主界面、设置界面
+│   ├── screens/           # 主界面、设置界面、历史界面
 │   ├── components/        # 可复用 UI 组件
 │   ├── overlay/           # 悬浮窗 UI
 │   └── viewmodel/         # 状态管理
@@ -213,6 +244,9 @@ TaskWizard/
 │   └── AutoGLMService.kt  # Retrofit API 客户端
 ├── manager/                # 系统集成
 │   └── ShizukuManager.kt  # Shizuku 连接与 IPC
+├── data/                   # 数据层
+│   ├── history/           # 历史记录数据库
+│   └── AppState.kt        # 应用状态管理
 ├── config/                 # 配置
 │   ├── AppMap.kt          # 应用包名映射
 │   ├── SystemPrompt.kt    # AI 系统提示词
@@ -253,6 +287,18 @@ TaskWizard/
 
 Release 构建需要配置密钥库。详细说明请查看 [RELEASE_SETUP.md](RELEASE_SETUP.md)。
 
+### 性能测试
+
+项目包含完整的性能测试套件：
+
+```bash
+# 运行单元性能测试
+./gradlew testDebugUnitTest --tests "com.taskwizard.android.PerformanceTest"
+
+# 运行 UI 性能基准测试
+./gradlew connectedAndroidTest
+```
+
 ## 常见问题
 
 ### Shizuku 未连接
@@ -279,6 +325,12 @@ Release 构建需要配置密钥库。详细说明请查看 [RELEASE_SETUP.md](R
 1. 在 设置 → 应用 → TaskWizard 中授予悬浮窗权限
 2. 检查是否已为 TaskWizard 关闭电池优化
 3. 确保已授予通知权限
+
+### 历史记录不显示完整
+
+1. 确保使用最新版本
+2. 历史记录会保存所有消息类型（思考、操作、系统消息）
+3. 如果看不到操作消息，可能需要重新执行任务以保存
 
 ## 贡献
 
