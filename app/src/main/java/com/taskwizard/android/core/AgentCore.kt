@@ -67,6 +67,40 @@ class AgentCore(
     }
 
     /**
+     * Get API message history for context restoration
+     * Returns a copy of the current history list
+     */
+    fun getApiHistory(): List<Message> {
+        return history.toList()
+    }
+
+    /**
+     * Restore a session from history with partial API context
+     * @param task Original task description
+     * @param apiHistory Partial API message history (last ~20 messages)
+     */
+    fun restoreSession(task: String, apiHistory: List<Message>) {
+        history.clear()
+        notes.clear()
+        isFirstStep = true
+        previousThink = null
+
+        // Add system prompt
+        history.add(Message("system", SystemPrompt.get()))
+
+        // Add partial API history for context (exclude system prompt if present)
+        apiHistory.filter { it.role != "system" }.forEach { history.add(it) }
+
+        // Add task message
+        history.add(Message("user", "Task: $task (continuing from history)"))
+
+        // Don't auto-start, let user click start button
+        isRunning = false
+
+        Log.d("AgentCore", "Session restored with ${apiHistory.size} context messages, task: $task")
+    }
+
+    /**
      * 构建 Screen Info JSON 字符串
      * 对齐 Python 版本的 MessageBuilder.build_screen_info()
      */

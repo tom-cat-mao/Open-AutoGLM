@@ -3,6 +3,7 @@ package com.taskwizard.android.data.history
 import android.content.Context
 import com.google.gson.Gson
 import com.taskwizard.android.data.Action
+import com.taskwizard.android.data.Message
 import com.taskwizard.android.data.MessageItem
 import kotlinx.coroutines.flow.Flow
 
@@ -120,6 +121,7 @@ class HistoryRepository(context: Context) {
             statusMessage = null,
             stepCount = 0,
             messagesJson = gson.toJson(emptyList<MessageItem>()),
+            apiContextMessagesJson = gson.toJson(emptyList<Message>()),
             actionsJson = gson.toJson(emptyList<Action>()),
             errorMessagesJson = gson.toJson(emptyList<String>()),
             screenshotCount = 0
@@ -195,6 +197,18 @@ class HistoryRepository(context: Context) {
     suspend fun updateTaskMessages(taskId: Long, messages: List<MessageItem>) {
         val task = dao.getTaskById(taskId) ?: return
         dao.updateTask(task.copy(messagesJson = gson.toJson(messages)))
+    }
+
+    /**
+     * Update API context messages for conversation continuation
+     * Stores the last ~20 API messages to enable AI context restoration
+     * @param taskId Task ID
+     * @param apiMessages List of API messages (will be truncated to last 20)
+     */
+    suspend fun updateApiContextMessages(taskId: Long, apiMessages: List<Message>) {
+        // Keep only last 20 messages to save space and context window
+        val recentMessages = apiMessages.takeLast(20)
+        dao.updateApiContextMessages(taskId, gson.toJson(recentMessages))
     }
 
     /**

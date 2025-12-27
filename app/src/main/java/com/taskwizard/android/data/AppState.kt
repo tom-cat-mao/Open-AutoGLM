@@ -26,6 +26,10 @@ data class AppState(
     val currentTask: String = "",
     val messages: ImmutableList<MessageItem> = persistentListOf(),  // ✅ 使用 ImmutableList
 
+    // ==================== 继续对话相关 ====================
+    val isContinuedConversation: Boolean = false,
+    val originalTaskId: Long? = null,
+
     // ==================== 系统状态 ====================
     val hasShizukuPermission: Boolean = false,
     val isADBKeyboardInstalled: Boolean = false,

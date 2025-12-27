@@ -6,6 +6,7 @@ import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.google.gson.Gson
 import com.taskwizard.android.data.Action
+import com.taskwizard.android.data.Message
 import com.taskwizard.android.data.MessageItem
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.test.runTest
@@ -406,6 +407,80 @@ class HistoryRepositoryTest {
         assertEquals(1, remaining.size)
         assertEquals(TaskStatus.FAILED.name, remaining[0].status)
     }
+
+    // ==================== API Context Messages Tests ====================
+
+    @Test
+    fun updateApiContextMessages_shouldStoreMessagesAsJson() = runTest {
+        // Given
+        val id = repository.createTask("Test task", "model")
+        val apiMessages = listOf(
+            Message("system", "System prompt"),
+            Message("user", "Task: test task"),
+            Message("assistant", "I'll help you with that")
+        )
+
+        // When
+        repository.updateApiContextMessages(id, apiMessages)
+
+        // Then
+        val task = repository.getTaskById(id)
+        assertNotNull(task)
+        // Verify JSON contains our messages
+        assertTrue(task.apiContextMessagesJson.contains("System prompt"))
+        assertTrue(task.apiContextMessagesJson.contains("test task"))
+        assertTrue(task.apiContextMessagesJson.contains("I'll help you"))
+    }
+
+    @Test
+    fun updateApiContextMessages_shouldLimitToLast20Messages() = runTest {
+        // Given
+        val id = repository.createTask("Test task", "model")
+        val apiMessages = (1..30).map { i ->
+            Message("user", "Message $i")
+        }
+
+        // When
+        repository.updateApiContextMessages(id, apiMessages)
+
+        // Then
+        val task = repository.getTaskById(id)
+        assertNotNull(task)
+        // Verify only last 20 messages are stored (messages 11-30)
+        assertTrue(!task.apiContextMessagesJson.contains("Message 1"))
+        assertTrue(!task.apiContextMessagesJson.contains("Message 10"))
+        assertTrue(task.apiContextMessagesJson.contains("Message 11"))
+        assertTrue(task.apiContextMessagesJson.contains("Message 30"))
+    }
+
+    @Test
+    fun getTaskById_shouldReturnTaskWithApiContextMessages() = runTest {
+        // Given
+        val id = repository.createTask("Test task", "model")
+        val apiMessages = listOf(
+            Message("system", "System prompt"),
+            Message("user", "Task: test task")
+        )
+        repository.updateApiContextMessages(id, apiMessages)
+
+        // When
+        val task = repository.getTaskById(id)
+
+        // Then
+        assertNotNull(task)
+        assertEquals("Test task", task.taskDescription)
+        assertTrue(task.apiContextMessagesJson.contains("System prompt"))
+        assertTrue(task.apiContextMessagesJson.contains("test task"))
+    }
+
+    @Test
+    fun getTaskById_withNonExistentId_shouldReturnNull() = runTest {
+        // When
+        val task = repository.getTaskById(99999L)
+
+        // Then
+        assertEquals(null, task)
+    }
 }
 
 /**
@@ -426,6 +501,7 @@ class TestHistoryRepository(private val database: TaskHistoryDatabase) {
             statusMessage = null,
             stepCount = 0,
             messagesJson = gson.toJson(emptyList<MessageItem>()),
+            apiContextMessagesJson = gson.toJson(emptyList<Message>()),
             actionsJson = gson.toJson(emptyList<Action>()),
             errorMessagesJson = gson.toJson(emptyList<String>()),
             screenshotCount = 0
@@ -530,5 +606,12 @@ class TestHistoryRepository(private val database: TaskHistoryDatabase) {
 
     suspend fun deleteTasksByStatus(status: String): Int {
         return dao.deleteTasksByStatus(status)
+    }
+
+    suspend fun updateApiContextMessages(taskId: Long, apiMessages: List<Message>) {
+        // Keep only last 20 messages to save space and context window
+        val gson = Gson()
+        val recentMessages = apiMessages.takeLast(20)
+        dao.updateApiContextMessages(taskId, gson.toJson(recentMessages))
     }
 }

@@ -42,6 +42,7 @@ import java.util.*
 @Composable
 fun HistoryScreen(
     onNavigateBack: () -> Unit,
+    onContinueConversation: (Long) -> Unit,  // Callback to continue from history
     viewModel: HistoryViewModel
 ) {
     val state by viewModel.historyState.collectAsStateWithLifecycle()
@@ -197,7 +198,8 @@ fun HistoryScreen(
                         TaskHistoryItem(
                             task = task,
                             onClick = {
-                                // TODO: 显示任务详情
+                                // Navigate to main screen with history ID to continue conversation
+                                onContinueConversation(task.id)
                             },
                             onDelete = {
                                 viewModel.deleteTask(task)

@@ -70,6 +70,12 @@ data class TaskHistoryEntity(
     val messagesJson: String = "[]",
 
     /**
+     * Partial API message history for context restoration (last ~20 messages)
+     * Stored as JSON to enable AI to continue from historical conversations
+     */
+    val apiContextMessagesJson: String = "[]",
+
+    /**
      * All actions executed during task (stored as JSON)
      */
     val actionsJson: String = "[]",

@@ -154,6 +154,17 @@ interface TaskHistoryDao {
         stepCount: Int
     )
 
+    /**
+     * Update API context messages for conversation continuation
+     * @param taskId Task ID to update
+     * @param apiContextMessagesJson JSON string of API messages (last ~20 messages)
+     */
+    @Query("UPDATE task_history SET apiContextMessagesJson = :apiContextMessagesJson WHERE id = :taskId")
+    suspend fun updateApiContextMessages(
+        taskId: Long,
+        apiContextMessagesJson: String
+    )
+
     // ==================== Delete Operations ====================
 
     /**

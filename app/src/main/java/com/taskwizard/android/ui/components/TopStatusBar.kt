@@ -2,6 +2,7 @@ package com.taskwizard.android.ui.components
 
 import androidx.compose.foundation.layout.*
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.AddCircle
 import androidx.compose.material.icons.rounded.History
 import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material3.*
@@ -19,6 +20,7 @@ import androidx.compose.ui.unit.dp
  * @param hasADBKeyboard ADB Keyboard是否可用
  * @param onSettingsClick 设置按钮点击回调
  * @param onHistoryClick 历史按钮点击回调
+ * @param onNewConversationClick 新建对话按钮点击回调
  * @param modifier 修饰符
  */
 @Composable
@@ -28,6 +30,7 @@ fun TopStatusBar(
     hasADBKeyboard: Boolean,
     onSettingsClick: () -> Unit,
     onHistoryClick: () -> Unit,
+    onNewConversationClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     Surface(
@@ -60,7 +63,7 @@ fun TopStatusBar(
                 }
             }
 
-            // 右侧：历史和设置按钮
+            // 右侧：历史、新建对话和设置按钮
             Row(
                 horizontalArrangement = Arrangement.spacedBy(4.dp)
             ) {
@@ -68,6 +71,13 @@ fun TopStatusBar(
                     Icon(
                         imageVector = Icons.Rounded.History,
                         contentDescription = "历史",
+                        tint = MaterialTheme.colorScheme.onSurface
+                    )
+                }
+                IconButton(onClick = onNewConversationClick) {
+                    Icon(
+                        imageVector = Icons.Rounded.AddCircle,
+                        contentDescription = "新建对话",
                         tint = MaterialTheme.colorScheme.onSurface
                     )
                 }

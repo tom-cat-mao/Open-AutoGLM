@@ -3,8 +3,10 @@ package com.taskwizard.android.ui.screens
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.taskwizard.android.ui.components.*
 import com.taskwizard.android.ui.viewmodel.MainViewModel
@@ -21,17 +23,26 @@ import com.taskwizard.android.ui.viewmodel.MainViewModel
  * @param onNavigateToSettings 导航到设置页面的回调
  * @param onNavigateToHistory 导航到历史页面的回调
  * @param viewModel 共享的ViewModel实例
+ * @param historyIdToLoad 要加载的历史记录ID（用于继续对话）
  */
 @Composable
 fun MainScreen(
     onNavigateToSettings: () -> Unit,
     onNavigateToHistory: () -> Unit,
-    viewModel: MainViewModel
+    viewModel: MainViewModel,
+    historyIdToLoad: Long? = null
 ) {
     // 收集状态
     val state by viewModel.state.collectAsStateWithLifecycle()
     val confirmationRequest by viewModel.confirmationRequest.collectAsStateWithLifecycle()
     val takeOverRequest by viewModel.takeOverRequest.collectAsStateWithLifecycle()
+
+    // Load historical conversation if historyId is provided
+    LaunchedEffect(historyIdToLoad) {
+        historyIdToLoad?.let { historyId ->
+            viewModel.loadHistoricalConversation(historyId)
+        }
+    }
 
     // 阶段2新增：收集动画状态
     val isAnimatingToOverlay by viewModel.isAnimatingToOverlay.collectAsStateWithLifecycle()
@@ -49,13 +60,16 @@ fun MainScreen(
     AnimatedMainContent(isAnimating = isAnimatingToOverlay) {
         Scaffold(
         topBar = {
-            TopStatusBar(
-                modelName = state.model,
-                hasShizuku = state.hasShizukuPermission,
-                hasADBKeyboard = state.isADBKeyboardInstalled && state.isADBKeyboardEnabled,
-                onSettingsClick = onNavigateToSettings,
-                onHistoryClick = onNavigateToHistory
-            )
+            Column {
+                TopStatusBar(
+                    modelName = state.model,
+                    hasShizuku = state.hasShizukuPermission,
+                    hasADBKeyboard = state.isADBKeyboardInstalled && state.isADBKeyboardEnabled,
+                    onSettingsClick = onNavigateToSettings,
+                    onHistoryClick = onNavigateToHistory,
+                    onNewConversationClick = { viewModel.newConversation() }
+                )
+            }
         },
         bottomBar = {
             TaskInputBar(

@@ -10,14 +10,14 @@ import androidx.sqlite.db.SupportSQLiteDatabase
  * Room database for task history
  *
  * Configuration:
- * - Version 1
+ * - Version 2 (added apiContextMessagesJson for conversation continuation)
  * - Single table: task_history
  * - Destructive migration for development
  * - Callback for data seeding in future
  */
 @Database(
     entities = [TaskHistoryEntity::class],
-    version = 1,
+    version = 2,
     exportSchema = false
 )
 abstract class TaskHistoryDatabase : RoomDatabase() {

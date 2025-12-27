@@ -5,6 +5,8 @@ import android.graphics.Bitmap
 import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.google.gson.Gson
+import com.google.gson.reflect.TypeToken
 import com.taskwizard.android.IAutoGLMService
 import com.taskwizard.android.TaskScope
 import com.taskwizard.android.api.ApiClient
@@ -71,11 +73,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     // ==================== 历史记录追踪 ====================
 
     private val historyRepository = HistoryRepository(application)
+    private val gson = Gson()
     private var currentTaskHistoryId: Long? = null
     private var taskStartTime: Long = 0
     private val taskMessages = mutableListOf<MessageItem>()
     private val taskActions = mutableListOf<Action>()
     private val taskErrors = mutableListOf<String>()
+    private val apiContextMessages = mutableListOf<Message>()  // For AI context restoration
 
     // 对话框状态
     private val _confirmationRequest = MutableStateFlow<String?>(null)
@@ -410,9 +414,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
      * 性能优化：使用 ImmutableList plus 运算符，高效添加元素
      */
     fun addSystemMessage(content: String, type: SystemMessageType) {
+        val message = MessageItem.SystemMessage(content = content, type = type)
         _state.update {
-            it.copy(messages = (it.messages + MessageItem.SystemMessage(content = content, type = type)).toPersistentList())
+            it.copy(messages = (it.messages + message).toPersistentList())
         }
+        // Save system messages to database for history
+        recordTaskMessage(message)
     }
 
     /**
@@ -626,8 +633,25 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
      * 这是原有的启动逻辑，从 startTask() 中提取出来
      */
     private fun startTaskAfterPreCheck(task: String) {
-        // 创建任务历史记录
-        createTaskHistory(task, _state.value.model)
+        // Check if continuing from history
+        val isContinuation = currentTaskHistoryId != null && _state.value.isContinuedConversation
+
+        if (!isContinuation) {
+            // New task - create new history record
+            createTaskHistory(task, _state.value.model)
+        } else {
+            // Continuing from history - update existing record to RUNNING
+            viewModelScope.launch {
+                try {
+                    currentTaskHistoryId?.let { id ->
+                        historyRepository.updateTaskStatus(id, TaskStatus.RUNNING.name, "继续任务")
+                    }
+                    addSystemMessage("继续执行任务", SystemMessageType.INFO)
+                } catch (e: Exception) {
+                    Log.e(TAG, "Failed to update task status", e)
+                }
+            }
+        }
 
         // 启动任务
         _state.update { it.copy(isRunning = true) }
@@ -637,8 +661,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
         addSystemMessage("任务启动: $task", SystemMessageType.INFO)
 
-        // 更新任务状态为运行中
-        updateTaskStatusRunning()
+        // 更新任务状态为运行中 (only for new tasks)
+        if (!isContinuation) {
+            updateTaskStatusRunning()
+        }
 
         Log.d(TAG, "Starting task with API config:")
         Log.d(TAG, "  Base URL: ${_state.value.baseUrl}")
@@ -885,6 +911,22 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
                     // 执行成功，重置失败计数
                     consecutiveFailures = 0
+
+                    // Save API context messages periodically for conversation continuation
+                    agentCore?.getApiHistory()?.let { apiHistory ->
+                        apiContextMessages.clear()
+                        apiContextMessages.addAll(apiHistory)
+                        // Save to database periodically
+                        currentTaskHistoryId?.let { id ->
+                            viewModelScope.launch(Dispatchers.IO) {
+                                try {
+                                    historyRepository.updateApiContextMessages(id, apiContextMessages.toList())
+                                } catch (e: Exception) {
+                                    Log.e(TAG, "Failed to save API context messages", e)
+                                }
+                            }
+                        }
+                    }
 
                     // 等待一小段时间让UI更新
                     delay(500)
@@ -1385,6 +1427,128 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 currentTaskHistoryId = null
             }
         }
+    }
+
+    // ==================== 历史对话继续功能 ====================
+
+    /**
+     * Load historical conversation for continuation
+     * @param historyId ID of the historical task to load
+     */
+    fun loadHistoricalConversation(historyId: Long) {
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val task = historyRepository.getTaskById(historyId)
+                if (task == null) {
+                    withContext(Dispatchers.Main) {
+                        addSystemMessage("无法找到历史记录", SystemMessageType.ERROR)
+                    }
+                    return@launch
+                }
+
+                // 1. Deserialize Think messages from messagesJson
+                val thinkMessages = try {
+                    gson.fromJson(task.messagesJson, Array<MessageItem>::class.java).toList()
+                } catch (e: Exception) {
+                    Log.e(TAG, "Failed to deserialize messages", e)
+                    emptyList()
+                }
+
+                // 2. Deserialize Action messages from actionsJson
+                val actions = try {
+                    gson.fromJson(task.actionsJson, Array<Action>::class.java).toList()
+                } catch (e: Exception) {
+                    Log.e(TAG, "Failed to deserialize actions", e)
+                    emptyList()
+                }
+
+                // 3. Convert actions to ActionMessage items
+                val actionMessages = actions.map { MessageItem.ActionMessage(action = it) }
+
+                // 4. Merge all messages - combine think and action messages
+                val allMessages = thinkMessages + actionMessages
+
+                // 5. Restore UI messages to AppState
+                withContext(Dispatchers.Main) {
+                    _state.update {
+                        it.copy(
+                            messages = allMessages.toPersistentList(),
+                            currentTask = task.taskDescription,
+                            model = task.model,
+                            isContinuedConversation = true,
+                            originalTaskId = historyId
+                        )
+                    }
+                }
+
+                // 6. Set current task history ID to update existing record
+                currentTaskHistoryId = task.id
+                taskStartTime = System.currentTimeMillis()
+
+                // 7. Restore tracking lists
+                taskMessages.clear()
+                taskMessages.addAll(allMessages)
+                taskActions.clear()
+                taskErrors.clear()
+
+                // 8. Restore partial API context
+                val apiMessages = try {
+                    val type = object : TypeToken<List<Message>>() {}.type
+                    gson.fromJson<List<Message>>(task.apiContextMessagesJson, type) ?: emptyList()
+                } catch (e: Exception) {
+                    Log.e(TAG, "Failed to deserialize API context messages", e)
+                    emptyList<Message>()
+                }
+                apiContextMessages.clear()
+                apiContextMessages.addAll(apiMessages)
+
+                // 9. Restore AgentCore context with partial history
+                agentCore?.restoreSession(task.taskDescription, apiMessages)
+
+                // 10. Show continuation message
+                withContext(Dispatchers.Main) {
+                    addSystemMessage(
+                        "继续历史任务: ${task.taskDescription}",
+                        SystemMessageType.INFO
+                    )
+                }
+
+                Log.d(TAG, "Loaded historical conversation: ${task.id}, ${allMessages.size} messages (${thinkMessages.size} think + ${actionMessages.size} action)")
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to load historical conversation", e)
+                withContext(Dispatchers.Main) {
+                    addSystemMessage("加载历史对话失败: ${e.message}", SystemMessageType.ERROR)
+                }
+            }
+        }
+    }
+
+    /**
+     * Start a new conversation - clears all state
+     */
+    fun newConversation() {
+        // Clear all messages and state
+        _state.update {
+            it.copy(
+                messages = persistentListOf(),
+                currentTask = "",
+                isContinuedConversation = false,
+                originalTaskId = null,
+                isRunning = false
+            )
+        }
+
+        // Clear tracking variables
+        taskMessages.clear()
+        taskActions.clear()
+        taskErrors.clear()
+        apiContextMessages.clear()
+        currentTaskHistoryId = null
+
+        // Clear AgentCore session
+        agentCore?.stop()
+
+        Log.d(TAG, "New conversation started")
     }
 }
 

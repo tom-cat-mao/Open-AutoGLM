@@ -6,6 +6,7 @@ import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.google.gson.Gson
 import com.taskwizard.android.data.Action
+import com.taskwizard.android.data.Message
 import com.taskwizard.android.data.MessageItem
 import com.taskwizard.android.data.history.HistoryRepository
 import com.taskwizard.android.data.history.HistoryStatistics
@@ -392,6 +393,7 @@ class HistoryViewModelTest {
             startTime = System.currentTimeMillis(),
             status = status,
             messagesJson = gson.toJson(emptyList<MessageItem>()),
+            apiContextMessagesJson = gson.toJson(emptyList<com.taskwizard.android.data.Message>()),
             actionsJson = gson.toJson(emptyList<Action>()),
             errorMessagesJson = gson.toJson(emptyList<String>())
         )

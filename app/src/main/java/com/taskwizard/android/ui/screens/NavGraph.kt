@@ -5,8 +5,10 @@ import androidx.compose.animation.core.tween
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.navigation.NavHostController
+import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
+import androidx.navigation.navArgument
 import com.taskwizard.android.ui.viewmodel.HistoryViewModel
 import com.taskwizard.android.ui.viewmodel.HistoryViewModelFactory
 import com.taskwizard.android.ui.viewmodel.MainViewModel
@@ -16,6 +18,7 @@ import com.taskwizard.android.ui.viewmodel.MainViewModel
  */
 object NavRoutes {
     const val MAIN = "main"
+    const val MAIN_WITH_HISTORY = "main?historyId={historyId}"
     const val SETTINGS = "settings"
     const val HISTORY = "history"
 }
@@ -67,8 +70,20 @@ fun AppNavGraph(
             ) + fadeOut(animationSpec = tween(300))
         }
     ) {
-        // 主页面
-        composable(NavRoutes.MAIN) {
+        // Main screen with optional history ID parameter
+        composable(
+            route = NavRoutes.MAIN_WITH_HISTORY,
+            arguments = listOf(
+                navArgument("historyId") {
+                    type = NavType.LongType
+                    defaultValue = -1L
+                    nullable = false
+                }
+            )
+        ) { backStackEntry ->
+            val historyId = backStackEntry?.arguments?.getLong("historyId") ?: -1L
+            val effectiveHistoryId = if (historyId > 0) historyId else null
+
             MainScreen(
                 onNavigateToSettings = {
                     navController.navigate(NavRoutes.SETTINGS)
@@ -76,11 +91,12 @@ fun AppNavGraph(
                 onNavigateToHistory = {
                     navController.navigate(NavRoutes.HISTORY)
                 },
-                viewModel = viewModel
+                viewModel = viewModel,
+                historyIdToLoad = effectiveHistoryId
             )
         }
 
-        // 设置页面
+        // Settings screen
         composable(NavRoutes.SETTINGS) {
             SettingsScreen(
                 onNavigateBack = {
@@ -90,7 +106,7 @@ fun AppNavGraph(
             )
         }
 
-        // 历史记录页面
+        // History screen
         composable(NavRoutes.HISTORY) {
             val historyViewModel = androidx.lifecycle.viewmodel.compose.viewModel<HistoryViewModel>(
                 factory = HistoryViewModelFactory(
@@ -101,6 +117,12 @@ fun AppNavGraph(
             HistoryScreen(
                 onNavigateBack = {
                     navController.popBackStack()
+                },
+                onContinueConversation = { historyId ->
+                    navController.navigate("main?historyId=$historyId") {
+                        // Clear back stack to prevent going back to history while running
+                        popUpTo(NavRoutes.HISTORY) { inclusive = false }
+                    }
                 },
                 viewModel = historyViewModel
             )
