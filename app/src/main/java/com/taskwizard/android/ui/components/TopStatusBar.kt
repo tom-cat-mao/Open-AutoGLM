@@ -1,5 +1,6 @@
 package com.taskwizard.android.ui.components
 
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.AddCircle
@@ -21,6 +22,8 @@ import androidx.compose.ui.unit.dp
  * @param onSettingsClick 设置按钮点击回调
  * @param onHistoryClick 历史按钮点击回调
  * @param onNewConversationClick 新建对话按钮点击回调
+ * @param onShizukuClick Shizuku状态芯片点击回调
+ * @param onADBKeyboardClick ADB Keyboard状态芯片点击回调
  * @param modifier 修饰符
  */
 @Composable
@@ -31,6 +34,8 @@ fun TopStatusBar(
     onSettingsClick: () -> Unit,
     onHistoryClick: () -> Unit,
     onNewConversationClick: () -> Unit,
+    onShizukuClick: () -> Unit = {},
+    onADBKeyboardClick: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     Surface(
@@ -58,8 +63,16 @@ fun TopStatusBar(
                 Row(
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    StatusChip(label = "Shizuku", isActive = hasShizuku)
-                    StatusChip(label = "ADB Keyboard", isActive = hasADBKeyboard)
+                    StatusChip(
+                        label = "Shizuku",
+                        isActive = hasShizuku,
+                        onClick = onShizukuClick
+                    )
+                    StatusChip(
+                        label = "ADB Keyboard",
+                        isActive = hasADBKeyboard,
+                        onClick = onADBKeyboardClick
+                    )
                 }
             }
 
@@ -96,11 +109,17 @@ fun TopStatusBar(
 /**
  * 状态指示器芯片
  * 显示系统状态（Shizuku、ADB Keyboard等）
+ *
+ * @param label 状态标签
+ * @param isActive 是否激活
+ * @param onClick 点击回调
+ * @param modifier 修饰符
  */
 @Composable
-private fun StatusChip(
+fun StatusChip(
     label: String,
     isActive: Boolean,
+    onClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     Surface(
@@ -109,7 +128,7 @@ private fun StatusChip(
         else
             MaterialTheme.colorScheme.errorContainer,
         shape = MaterialTheme.shapes.small,
-        modifier = modifier
+        modifier = modifier.clickable(onClick = onClick)
     ) {
         Row(
             modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),

@@ -97,6 +97,70 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _overlayEnabled = MutableStateFlow(false)
     val overlayEnabled: StateFlow<Boolean> = _overlayEnabled.asStateFlow()
 
+    // ==================== 引导对话框状态 ====================
+
+    /**
+     * 是否显示Shizuku引导对话框
+     */
+    private val _showShizukuGuide = MutableStateFlow(false)
+    val showShizukuGuide: StateFlow<Boolean> = _showShizukuGuide.asStateFlow()
+
+    /**
+     * 是否显示ADB Keyboard引导对话框
+     */
+    private val _showADBKeyboardGuide = MutableStateFlow(false)
+    val showADBKeyboardGuide: StateFlow<Boolean> = _showADBKeyboardGuide.asStateFlow()
+
+    /**
+     * 显示Shizuku引导对话框
+     */
+    fun showShizukuGuide() {
+        _showShizukuGuide.value = true
+    }
+
+    /**
+     * 显示ADB Keyboard引导对话框
+     */
+    fun showADBKeyboardGuide() {
+        _showADBKeyboardGuide.value = true
+    }
+
+    /**
+     * 关闭Shizuku引导对话框
+     */
+    fun dismissShizukuGuide() {
+        _showShizukuGuide.value = false
+    }
+
+    /**
+     * 关闭ADB Keyboard引导对话框
+     */
+    fun dismissADBKeyboardGuide() {
+        _showADBKeyboardGuide.value = false
+    }
+
+    // ==================== 悬浮窗权限引导对话框状态 ====================
+
+    /**
+     * 是否显示悬浮窗权限引导对话框
+     */
+    private val _showOverlayPermissionGuide = MutableStateFlow(false)
+    val showOverlayPermissionGuide: StateFlow<Boolean> = _showOverlayPermissionGuide.asStateFlow()
+
+    /**
+     * 显示悬浮窗权限引导对话框
+     */
+    fun showOverlayPermissionGuide() {
+        _showOverlayPermissionGuide.value = true
+    }
+
+    /**
+     * 关闭悬浮窗权限引导对话框
+     */
+    fun dismissOverlayPermissionGuide() {
+        _showOverlayPermissionGuide.value = false
+    }
+
     // ==================== 动画状态管理（阶段1新增）====================
 
     /**
@@ -569,7 +633,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
         // 新增：检查悬浮窗权限
         if (!OverlayPermissionManager.checkPermission(getApplication())) {
-            addSystemMessage("需要悬浮窗权限才能执行任务，请在设置中授予权限", SystemMessageType.ERROR)
+            addSystemMessage("需要悬浮窗权限才能执行任务", SystemMessageType.ERROR)
+            showOverlayPermissionGuide()
             return
         }
 
