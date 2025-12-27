@@ -1,7 +1,10 @@
 package com.taskwizard.android.ui.components
 
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.AddCircle
+import androidx.compose.material.icons.rounded.History
 import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
@@ -17,6 +20,10 @@ import androidx.compose.ui.unit.dp
  * @param hasShizuku Shizuku是否可用
  * @param hasADBKeyboard ADB Keyboard是否可用
  * @param onSettingsClick 设置按钮点击回调
+ * @param onHistoryClick 历史按钮点击回调
+ * @param onNewConversationClick 新建对话按钮点击回调
+ * @param onShizukuClick Shizuku状态芯片点击回调
+ * @param onADBKeyboardClick ADB Keyboard状态芯片点击回调
  * @param modifier 修饰符
  */
 @Composable
@@ -25,6 +32,10 @@ fun TopStatusBar(
     hasShizuku: Boolean,
     hasADBKeyboard: Boolean,
     onSettingsClick: () -> Unit,
+    onHistoryClick: () -> Unit,
+    onNewConversationClick: () -> Unit,
+    onShizukuClick: () -> Unit = {},
+    onADBKeyboardClick: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     Surface(
@@ -52,18 +63,44 @@ fun TopStatusBar(
                 Row(
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    StatusChip(label = "Shizuku", isActive = hasShizuku)
-                    StatusChip(label = "ADB Keyboard", isActive = hasADBKeyboard)
+                    StatusChip(
+                        label = "Shizuku",
+                        isActive = hasShizuku,
+                        onClick = onShizukuClick
+                    )
+                    StatusChip(
+                        label = "ADB Keyboard",
+                        isActive = hasADBKeyboard,
+                        onClick = onADBKeyboardClick
+                    )
                 }
             }
 
-            // 右侧：设置按钮
-            IconButton(onClick = onSettingsClick) {
-                Icon(
-                    imageVector = Icons.Rounded.Settings,
-                    contentDescription = "设置",
-                    tint = MaterialTheme.colorScheme.onSurface
-                )
+            // 右侧：历史、新建对话和设置按钮
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                IconButton(onClick = onHistoryClick) {
+                    Icon(
+                        imageVector = Icons.Rounded.History,
+                        contentDescription = "历史",
+                        tint = MaterialTheme.colorScheme.onSurface
+                    )
+                }
+                IconButton(onClick = onNewConversationClick) {
+                    Icon(
+                        imageVector = Icons.Rounded.AddCircle,
+                        contentDescription = "新建对话",
+                        tint = MaterialTheme.colorScheme.onSurface
+                    )
+                }
+                IconButton(onClick = onSettingsClick) {
+                    Icon(
+                        imageVector = Icons.Rounded.Settings,
+                        contentDescription = "设置",
+                        tint = MaterialTheme.colorScheme.onSurface
+                    )
+                }
             }
         }
     }
@@ -72,11 +109,17 @@ fun TopStatusBar(
 /**
  * 状态指示器芯片
  * 显示系统状态（Shizuku、ADB Keyboard等）
+ *
+ * @param label 状态标签
+ * @param isActive 是否激活
+ * @param onClick 点击回调
+ * @param modifier 修饰符
  */
 @Composable
-private fun StatusChip(
+fun StatusChip(
     label: String,
     isActive: Boolean,
+    onClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     Surface(
@@ -85,7 +128,7 @@ private fun StatusChip(
         else
             MaterialTheme.colorScheme.errorContainer,
         shape = MaterialTheme.shapes.small,
-        modifier = modifier
+        modifier = modifier.clickable(onClick = onClick)
     ) {
         Row(
             modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),

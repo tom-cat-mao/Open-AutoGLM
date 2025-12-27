@@ -1,6 +1,7 @@
 package com.taskwizard.android.ui.screens
 
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.tween
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -131,10 +132,11 @@ fun SettingsScreen(
                     }
 
                     // Pure Black开关（仅在暗色模式下显示）
+                    // 性能优化：使用简单淡入淡出替代复杂的expand动画
                     AnimatedVisibility(
                         visible = state.themeMode == ThemeMode.DARK,
-                        enter = expandVertically() + fadeIn(),
-                        exit = shrinkVertically() + fadeOut()
+                        enter = fadeIn(animationSpec = tween(200)),
+                        exit = fadeOut(animationSpec = tween(150))
                     ) {
                         Column {
                             HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
@@ -291,10 +293,11 @@ fun SettingsScreen(
                     }
 
                     // 可折叠内容
+                    // 性能优化：使用简单淡入淡出替代复杂的expand动画
                     AnimatedVisibility(
                         visible = advancedSettingsExpanded,
-                        enter = expandVertically() + fadeIn(),
-                        exit = shrinkVertically() + fadeOut()
+                        enter = fadeIn(animationSpec = tween(200)),
+                        exit = fadeOut(animationSpec = tween(150))
                     ) {
                         Column(
                             modifier = Modifier.padding(top = 12.dp),

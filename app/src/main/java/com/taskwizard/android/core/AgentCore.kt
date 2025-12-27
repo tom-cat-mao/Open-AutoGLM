@@ -28,10 +28,14 @@ class AgentCore(
     // We only expose the last thought for UI
     var lastThink: String? = null
 
+    // 保存上一次的 thinking，用于模型省略 thinking 时的 fallback
+    private var previousThink: String? = null
+
     fun startSession(task: String) {
         history.clear()
         notes.clear()  // 清空 notes
         isFirstStep = true
+        previousThink = null  // 重置 previousThink
         // Use the new dynamic System Prompt
         history.add(Message("system", SystemPrompt.get()))
         // Store the task, we'll add Screen Info in the first step
@@ -60,6 +64,40 @@ class AgentCore(
      */
     fun getNotes(): List<String> {
         return notes.toList()
+    }
+
+    /**
+     * Get API message history for context restoration
+     * Returns a copy of the current history list
+     */
+    fun getApiHistory(): List<Message> {
+        return history.toList()
+    }
+
+    /**
+     * Restore a session from history with partial API context
+     * @param task Original task description
+     * @param apiHistory Partial API message history (last ~20 messages)
+     */
+    fun restoreSession(task: String, apiHistory: List<Message>) {
+        history.clear()
+        notes.clear()
+        isFirstStep = true
+        previousThink = null
+
+        // Add system prompt
+        history.add(Message("system", SystemPrompt.get()))
+
+        // Add partial API history for context (exclude system prompt if present)
+        apiHistory.filter { it.role != "system" }.forEach { history.add(it) }
+
+        // Add task message
+        history.add(Message("user", "Task: $task (continuing from history)"))
+
+        // Don't auto-start, let user click start button
+        isRunning = false
+
+        Log.d("AgentCore", "Session restored with ${apiHistory.size} context messages, task: $task")
     }
 
     /**
@@ -155,7 +193,8 @@ class AgentCore(
             )
             
             if (response.isSuccessful && response.body() != null) {
-                val summary = response.body()!!.choices.first().message.content
+                val body = response.body() ?: return null
+                val summary = body.choices.first().message.content
                 Log.d("AgentCore", "API summary: $summary")
                 return summary
             } else {
@@ -252,7 +291,8 @@ class AgentCore(
             }
 
             if (response.isSuccessful && response.body() != null) {
-                val responseMsg = response.body()!!.choices.first().message
+                val body = response.body() ?: return null
+                val responseMsg = body.choices.first().message
                 val content = responseMsg.content
 
                 Log.d("AgentCore", "AI Response received, length=${content.length}")
@@ -273,9 +313,28 @@ class AgentCore(
 
                 // 6. Parse using the new Regex Parser
                 val result = ResponseParser.parse(content)
-                lastThink = result.think
 
-                Log.d("AgentCore", "Parsed result - think: ${result.think?.take(50)}, action: ${result.action?.action}")
+                // 7. 智能选择 thinking 内容
+                lastThink = when {
+                    // 情况 1: 模型输出了 thinking
+                    result.think != null -> {
+                        Log.d("AgentCore", "Using current thinking from model")
+                        previousThink = result.think  // 保存为 previousThink
+                        result.think
+                    }
+                    // 情况 2: 模型没有输出 thinking，但有上一次的 thinking
+                    previousThink != null -> {
+                        Log.d("AgentCore", "Model omitted thinking, using previous thinking")
+                        previousThink
+                    }
+                    // 情况 3: 两者都没有，使用默认文本
+                    else -> {
+                        Log.d("AgentCore", "No thinking available, using default")
+                        "正在执行操作..."
+                    }
+                }
+
+                Log.d("AgentCore", "Parsed result - think: ${result.think?.take(50)}, action: ${result.action?.action}, lastThink: ${lastThink?.take(50)}")
 
                 if (result.action == null) {
                     Log.w("AgentCore", "Failed to parse action from: $content")

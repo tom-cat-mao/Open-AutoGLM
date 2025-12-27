@@ -5,16 +5,21 @@ import android.graphics.Bitmap
 import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.google.gson.Gson
+import com.google.gson.reflect.TypeToken
 import com.taskwizard.android.IAutoGLMService
 import com.taskwizard.android.TaskScope
 import com.taskwizard.android.api.ApiClient
 import com.taskwizard.android.core.ActionExecutor
 import com.taskwizard.android.core.AgentCore
 import com.taskwizard.android.data.*
+import com.taskwizard.android.data.history.HistoryRepository
+import com.taskwizard.android.data.history.TaskStatus
 import com.taskwizard.android.manager.OverlayPermissionManager
 import com.taskwizard.android.manager.ShizukuManager
 import com.taskwizard.android.service.OverlayService
 import com.taskwizard.android.ui.theme.ThemeMode
+import com.taskwizard.android.utils.SecureSettingsManager
 import com.taskwizard.android.utils.SettingsManager
 import android.content.Intent
 import android.os.Build
@@ -56,6 +61,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _settingsState = MutableStateFlow(SettingsState())
     val settingsState: StateFlow<SettingsState> = _settingsState.asStateFlow()
 
+    // ==================== 消息数据库批量写入优化 ====================
+
+    // 性能优化：批量写入数据库，避免频繁的IO操作
+    private val pendingMessagesToSave = mutableListOf<MessageItem>()
+    private val pendingActionsToSave = mutableListOf<Action>()
+    private var isBatching = false
+
     // SharedPreferences用于主题持久化
     private val prefs = application.getSharedPreferences("app_prefs", 0)
 
@@ -65,6 +77,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var actionExecutor: ActionExecutor? = null
     private var taskJob: Job? = null
     private var service: IAutoGLMService? = null
+
+    // ==================== 历史记录追踪 ====================
+
+    private val historyRepository = HistoryRepository(application)
+    private val gson = Gson()
+    private var currentTaskHistoryId: Long? = null
+    private var taskStartTime: Long = 0
+    private val taskMessages = mutableListOf<MessageItem>()
+    private val taskActions = mutableListOf<Action>()
+    private val taskErrors = mutableListOf<String>()
+    private val apiContextMessages = mutableListOf<Message>()  // For AI context restoration
 
     // 对话框状态
     private val _confirmationRequest = MutableStateFlow<String?>(null)
@@ -80,6 +103,70 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     // 悬浮窗控制
     private val _overlayEnabled = MutableStateFlow(false)
     val overlayEnabled: StateFlow<Boolean> = _overlayEnabled.asStateFlow()
+
+    // ==================== 引导对话框状态 ====================
+
+    /**
+     * 是否显示Shizuku引导对话框
+     */
+    private val _showShizukuGuide = MutableStateFlow(false)
+    val showShizukuGuide: StateFlow<Boolean> = _showShizukuGuide.asStateFlow()
+
+    /**
+     * 是否显示ADB Keyboard引导对话框
+     */
+    private val _showADBKeyboardGuide = MutableStateFlow(false)
+    val showADBKeyboardGuide: StateFlow<Boolean> = _showADBKeyboardGuide.asStateFlow()
+
+    /**
+     * 显示Shizuku引导对话框
+     */
+    fun showShizukuGuide() {
+        _showShizukuGuide.value = true
+    }
+
+    /**
+     * 显示ADB Keyboard引导对话框
+     */
+    fun showADBKeyboardGuide() {
+        _showADBKeyboardGuide.value = true
+    }
+
+    /**
+     * 关闭Shizuku引导对话框
+     */
+    fun dismissShizukuGuide() {
+        _showShizukuGuide.value = false
+    }
+
+    /**
+     * 关闭ADB Keyboard引导对话框
+     */
+    fun dismissADBKeyboardGuide() {
+        _showADBKeyboardGuide.value = false
+    }
+
+    // ==================== 悬浮窗权限引导对话框状态 ====================
+
+    /**
+     * 是否显示悬浮窗权限引导对话框
+     */
+    private val _showOverlayPermissionGuide = MutableStateFlow(false)
+    val showOverlayPermissionGuide: StateFlow<Boolean> = _showOverlayPermissionGuide.asStateFlow()
+
+    /**
+     * 显示悬浮窗权限引导对话框
+     */
+    fun showOverlayPermissionGuide() {
+        _showOverlayPermissionGuide.value = true
+    }
+
+    /**
+     * 关闭悬浮窗权限引导对话框
+     */
+    fun dismissOverlayPermissionGuide() {
+        _showOverlayPermissionGuide.value = false
+    }
 
     // ==================== 动画状态管理（阶段1新增）====================
 
@@ -106,6 +193,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         // 初始化SettingsManager
         SettingsManager.init(application)
 
+        // 初始化SecureSettingsManager (用于加密存储API Key)
+        try {
+            SecureSettingsManager.init(application)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to initialize SecureSettingsManager", e)
+        }
+
+        // 迁移现有的API Key到加密存储（一次性迁移）
+        migrateApiKeyToSecureStorage()
+
         // 加载配置
         loadSettings()
 
@@ -126,14 +223,54 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    /**
+     * 迁移现有的API Key从普通SharedPreferences到加密存储
+     * 这是一次性操作，迁移后会清除普通SharedPreferences中的API Key
+     */
+    private fun migrateApiKeyToSecureStorage() {
+        try {
+            // 从普通存储读取API Key
+            val plainApiKey = SettingsManager.apiKey
+
+            // 如果普通存储中有API Key
+            if (plainApiKey.isNotEmpty()) {
+                // 检查加密存储中是否已有API Key
+                if (!SecureSettingsManager.hasApiKey()) {
+                    // 迁移到加密存储
+                    SecureSettingsManager.apiKey = plainApiKey
+                    Log.d(TAG, "API Key migrated to encrypted storage")
+
+                    // 清除普通存储中的API Key
+                    SettingsManager.apiKey = ""
+                    Log.d(TAG, "API Key cleared from plaintext storage")
+                } else {
+                    // 加密存储中已有API Key，保留加密存储的版本
+                    // 清除普通存储中的版本（如果存在）
+                    SettingsManager.apiKey = ""
+                    Log.d(TAG, "API Key already in encrypted storage, cleared plaintext")
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to migrate API Key to secure storage", e)
+        }
+    }
+
     // ==================== 配置管理 ====================
 
     /**
      * 从SettingsManager加载配置
      * 性能优化：同时加载到 AppState 和 SettingsState
+     * 安全改进：API Key从加密存储读取
      */
     private fun loadSettings() {
-        val apiKey = SettingsManager.apiKey
+        // 从加密存储读取API Key
+        val apiKey = try {
+            SecureSettingsManager.apiKey
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to read API key from secure storage", e)
+            // Fallback to regular storage if secure storage fails
+            SettingsManager.apiKey
+        }
         val baseUrl = SettingsManager.baseUrl
         val model = SettingsManager.model
         val themeMode = loadThemeMode()
@@ -246,10 +383,21 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     /**
      * 保存配置到SettingsManager
+     * 安全改进：API Key保存到加密存储
      */
     fun saveSettings() {
         val current = _state.value
-        SettingsManager.apiKey = current.apiKey
+
+        // 保存API Key到加密存储
+        try {
+            SecureSettingsManager.apiKey = current.apiKey
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to save API key to secure storage", e)
+            // Fallback to regular storage if secure storage fails
+            SettingsManager.apiKey = current.apiKey
+        }
+
+        // 其他配置保存到普通存储
         SettingsManager.baseUrl = current.baseUrl
         SettingsManager.model = current.model
 
@@ -371,31 +519,78 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     /**
      * 添加AI思考消息
-     * 性能优化：使用 ImmutableList plus 运算符，高效添加元素
+     * 性能优化：立即更新UI，批量写入数据库
      */
     fun addThinkMessage(content: String) {
+        val message = MessageItem.ThinkMessage(content = content)
         _state.update {
-            it.copy(messages = (it.messages + MessageItem.ThinkMessage(content = content)).toPersistentList())
+            it.copy(messages = (it.messages + message).toPersistentList())
         }
+        // 批量写入数据库
+        batchRecordTaskMessage(message)
     }
 
     /**
      * 添加操作消息
-     * 性能优化：使用 ImmutableList plus 运算符，高效添加元素
+     * 性能优化：立即更新UI，批量写入数据库
      */
     fun addActionMessage(action: Action) {
         _state.update {
             it.copy(messages = (it.messages + MessageItem.ActionMessage(action = action)).toPersistentList())
         }
+        // 批量写入数据库
+        batchRecordTaskAction(action)
     }
 
     /**
      * 添加系统消息
-     * 性能优化：使用 ImmutableList plus 运算符，高效添加元素
+     * 性能优化：立即更新UI，批量写入数据库
      */
     fun addSystemMessage(content: String, type: SystemMessageType) {
+        val message = MessageItem.SystemMessage(content = content, type = type)
         _state.update {
-            it.copy(messages = (it.messages + MessageItem.SystemMessage(content = content, type = type)).toPersistentList())
+            it.copy(messages = (it.messages + message).toPersistentList())
+        }
+        // 系统消息不需要保存到历史记录
+    }
+
+    /**
+     * 批量写入消息到数据库
+     * 性能优化：100ms内的消息会被批量写入，减少IO操作
+     */
+    private fun batchRecordTaskMessage(message: MessageItem) {
+        pendingMessagesToSave.add(message)
+
+        if (!isBatching) {
+            isBatching = true
+            viewModelScope.launch(Dispatchers.IO) {
+                delay(100) // 批量100ms内的消息
+                val messagesToSave = pendingMessagesToSave.toList()
+                pendingMessagesToSave.clear()
+                isBatching = false
+
+                messagesToSave.forEach { recordTaskMessage(it) }
+            }
+        }
+    }
+
+    /**
+     * 批量写入操作到数据库
+     * 性能优化：100ms内的操作会被批量写入，减少IO操作
+     */
+    private fun batchRecordTaskAction(action: Action) {
+        pendingActionsToSave.add(action)
+
+        if (!isBatching) {
+            isBatching = true
+            viewModelScope.launch(Dispatchers.IO) {
+                delay(100) // 批量100ms内的操作
+                val actionsToSave = pendingActionsToSave.toList()
+                pendingActionsToSave.clear()
+                isBatching = false
+
+                actionsToSave.forEach { recordTaskAction(it) }
+            }
         }
     }
 
@@ -484,7 +679,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
         // 新增：检查悬浮窗权限
         if (!OverlayPermissionManager.checkPermission(getApplication())) {
-            addSystemMessage("需要悬浮窗权限才能执行任务，请在设置中授予权限", SystemMessageType.ERROR)
+            addSystemMessage("需要悬浮窗权限才能执行任务", SystemMessageType.ERROR)
+            showOverlayPermissionGuide()
             return
         }
 
@@ -543,7 +739,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
         taskJob = null
         _state.update { it.copy(isRunning = false) }
+
+        // ✅ 修复：用户手动停止后清空输入框
+        clearTask()
+
         addSystemMessage("任务已停止", SystemMessageType.INFO)
+
+        // 取消历史记录
+        cancelTaskHistory()
 
         // 停止悬浮窗服务
         stopOverlayService()
@@ -603,10 +806,38 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
      * 这是原有的启动逻辑，从 startTask() 中提取出来
      */
     private fun startTaskAfterPreCheck(task: String) {
+        // Check if continuing from history
+        val isContinuation = currentTaskHistoryId != null && _state.value.isContinuedConversation
+
+        if (!isContinuation) {
+            // New task - create new history record
+            createTaskHistory(task, _state.value.model)
+        } else {
+            // Continuing from history - update existing record to RUNNING
+            viewModelScope.launch {
+                try {
+                    currentTaskHistoryId?.let { id ->
+                        historyRepository.updateTaskStatus(id, TaskStatus.RUNNING.name, "继续任务")
+                    }
+                    addSystemMessage("继续执行任务", SystemMessageType.INFO)
+                } catch (e: Exception) {
+                    Log.e(TAG, "Failed to update task status", e)
+                }
+            }
+        }
+
         // 启动任务
         _state.update { it.copy(isRunning = true) }
 
+        // ✅ 修复：任务启动后立即清空输入框
+        clearTask()
+
         addSystemMessage("任务启动: $task", SystemMessageType.INFO)
+
+        // 更新任务状态为运行中 (only for new tasks)
+        if (!isContinuation) {
+            updateTaskStatusRunning()
+        }
 
         Log.d(TAG, "Starting task with API config:")
         Log.d(TAG, "  Base URL: ${_state.value.baseUrl}")
@@ -640,7 +871,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
 
         // 4. 使用 TaskScope.launchTask 启动任务
-        taskJob = TaskScope.launchTask(agentCore!!) {
+        val core = agentCore ?: run {
+            Log.e(TAG, "AgentCore not initialized")
+            return
+        }
+        taskJob = TaskScope.launchTask(core) {
             try {
                 executeTask(task)
             } catch (e: kotlinx.coroutines.CancellationException) {
@@ -685,7 +920,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             agentCore?.startSession(task)
 
             // 4. 绑定Shizuku服务
-            service = try {
+            val shizukuService = try {
                 ShizukuManager.bindService(getApplication())
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to bind Shizuku service", e)
@@ -694,12 +929,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 }
                 return
             }
+            service = shizukuService
 
             // 5. 初始化ActionExecutor
             val screenSize = getScreenSize()
             actionExecutor = ActionExecutor(
                 context = getApplication(),
-                service = service!!,
+                service = shizukuService,
                 screenWidth = screenSize.first,
                 screenHeight = screenSize.second,
                 onTakeOver = { message ->
@@ -784,22 +1020,90 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         // ✅ 恢复：添加到主界面消息列表
                         withContext(Dispatchers.Main) {
                             addSystemMessage(message, SystemMessageType.SUCCESS)
+                            // ✅ 修复：任务完成后清空输入框
+                            clearTask()
                         }
                         Log.d(TAG, "Task finished: $message")
                         // 标记任务完成
                         OverlayService.instance?.markCompleted()
+                        // 完成历史记录
+                        completeTaskHistory(message)
                         break
                     }
 
-                    // 执行动作，如果返回false表示用户取消
-                    val shouldContinue = actionExecutor?.execute(action) ?: true
-                    if (!shouldContinue) {
+                    // 执行动作，获取执行结果
+                    val result = actionExecutor?.execute(action) ?: ActionExecutor.ExecuteResult(success = true)
+
+                    // 检查是否有错误
+                    if (!result.success && result.errorMessage != null) {
+                        // 显示错误信息
+                        withContext(Dispatchers.Main) {
+                            addSystemMessage(
+                                "执行失败: ${result.errorMessage}",
+                                SystemMessageType.ERROR
+                            )
+                        }
+                        Log.e(TAG, "Action execution failed: ${result.errorMessage}")
+
+                        // 更新悬浮窗错误状态
+                        OverlayService.instance?.updateError(
+                            "执行失败",
+                            consecutiveFailures + 1
+                        )
+
+                        consecutiveFailures++
+
+                        if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+                            withContext(Dispatchers.Main) {
+                                addSystemMessage(
+                                    "连续失败${MAX_CONSECUTIVE_FAILURES}次，任务已停止",
+                                    SystemMessageType.ERROR
+                                )
+                                // ✅ 修复：任务失败停止后清空输入框
+                                clearTask()
+                            }
+                            Log.e(TAG, "Max consecutive failures reached, stopping task")
+                            // 停止悬浮窗服务
+                            delay(3000)
+                            val intent = Intent(getApplication(), OverlayService::class.java)
+                            getApplication<Application>().stopService(intent)
+                            // 标记历史为失败
+                            failTaskHistory("连续失败${MAX_CONSECUTIVE_FAILURES}次")
+                            break
+                        }
+
+                        // 继续下一次循环，让 AI 重新尝试
+                        delay(500)
+                        continue
+                    }
+
+                    // 检查用户是否取消
+                    if (!result.shouldContinue) {
                         // ✅ 恢复：添加到主界面消息列表
                         withContext(Dispatchers.Main) {
                             addSystemMessage("用户取消操作", SystemMessageType.WARNING)
                         }
                         Log.d(TAG, "User cancelled operation")
                         break
+                    }
+
+                    // 执行成功，重置失败计数
+                    consecutiveFailures = 0
+
+                    // Save API context messages periodically for conversation continuation
+                    agentCore?.getApiHistory()?.let { apiHistory ->
+                        apiContextMessages.clear()
+                        apiContextMessages.addAll(apiHistory)
+                        // Save to database periodically
+                        currentTaskHistoryId?.let { id ->
+                            viewModelScope.launch(Dispatchers.IO) {
+                                try {
+                                    historyRepository.updateApiContextMessages(id, apiContextMessages.toList())
+                                } catch (e: Exception) {
+                                    Log.e(TAG, "Failed to save API context messages", e)
+                                }
+                            }
+                        }
                     }
 
                     // 等待一小段时间让UI更新
@@ -844,6 +1148,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     addSystemMessage("已达到最大步骤数($MAX_STEPS)，任务停止", SystemMessageType.WARNING)
                 }
                 Log.w(TAG, "Max steps reached")
+                // 标记历史为失败
+                failTaskHistory("达到最大步骤数")
             }
         } finally {
             // 关键：finally 块保证清理代码执行
@@ -1104,6 +1410,323 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _state.update { it.copy(isRunning = false) }
         taskJob = null
         addSystemMessage("任务已停止", SystemMessageType.INFO)
+    }
+
+    // ==================== 历史记录追踪方法 ====================
+
+    /**
+     * 创建任务历史记录
+     */
+    private fun createTaskHistory(task: String, model: String) {
+        viewModelScope.launch {
+            try {
+                currentTaskHistoryId = historyRepository.createTask(task, model)
+                taskStartTime = System.currentTimeMillis()
+                // 清空之前的追踪数据
+                taskMessages.clear()
+                taskActions.clear()
+                taskErrors.clear()
+                Log.d(TAG, "Created task history with ID: $currentTaskHistoryId")
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to create task history", e)
+            }
+        }
+    }
+
+    /**
+     * 更新任务状态为运行中
+     */
+    private fun updateTaskStatusRunning() {
+        viewModelScope.launch {
+            try {
+                currentTaskHistoryId?.let { id ->
+                    historyRepository.updateTaskStatus(id, TaskStatus.RUNNING.name)
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to update task status to running", e)
+            }
+        }
+    }
+
+    /**
+     * 记录任务消息
+     */
+    fun recordTaskMessage(message: MessageItem) {
+        taskMessages.add(message)
+        viewModelScope.launch {
+            try {
+                currentTaskHistoryId?.let { id ->
+                    historyRepository.updateTaskMessages(id, taskMessages.toList())
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to record task message", e)
+            }
+        }
+    }
+
+    /**
+     * 记录任务动作
+     */
+    fun recordTaskAction(action: Action) {
+        taskActions.add(action)
+        viewModelScope.launch {
+            try {
+                currentTaskHistoryId?.let { id ->
+                    historyRepository.updateTaskActions(id, taskActions.toList())
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to record task action", e)
+            }
+        }
+    }
+
+    /**
+     * 记录任务错误
+     */
+    fun recordTaskError(error: String) {
+        taskErrors.add(error)
+        viewModelScope.launch {
+            try {
+                currentTaskHistoryId?.let { id ->
+                    historyRepository.addErrorMessage(id, error)
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to record task error", e)
+            }
+        }
+    }
+
+    /**
+     * 更新任务步骤数
+     */
+    fun updateTaskStepCount(stepCount: Int) {
+        viewModelScope.launch {
+            try {
+                currentTaskHistoryId?.let { id ->
+                    historyRepository.updateTaskStepCount(id, stepCount)
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to update task step count", e)
+            }
+        }
+    }
+
+    /**
+     * 完成任务历史记录（成功）
+     */
+    private fun completeTaskHistory(message: String?) {
+        viewModelScope.launch {
+            try {
+                currentTaskHistoryId?.let { id ->
+                    val endTime = System.currentTimeMillis()
+                    val duration = endTime - taskStartTime
+                    val stepCount = taskMessages.count { it is MessageItem.ThinkMessage }
+
+                    historyRepository.updateTaskCompletion(
+                        taskId = id,
+                        endTime = endTime,
+                        durationMs = duration,
+                        stepCount = stepCount
+                    )
+                    historyRepository.updateTaskStatus(
+                        taskId = id,
+                        status = TaskStatus.COMPLETED.name,
+                        statusMessage = message
+                    )
+                    Log.d(TAG, "Completed task history: $id")
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to complete task history", e)
+            } finally {
+                currentTaskHistoryId = null
+            }
+        }
+    }
+
+    /**
+     * 标记任务历史记录为失败
+     */
+    private fun failTaskHistory(error: String?) {
+        viewModelScope.launch {
+            try {
+                currentTaskHistoryId?.let { id ->
+                    val endTime = System.currentTimeMillis()
+                    val duration = endTime - taskStartTime
+                    val stepCount = taskMessages.count { it is MessageItem.ThinkMessage }
+
+                    historyRepository.updateTaskCompletion(
+                        taskId = id,
+                        endTime = endTime,
+                        durationMs = duration,
+                        stepCount = stepCount
+                    )
+                    historyRepository.updateTaskStatus(
+                        taskId = id,
+                        status = TaskStatus.FAILED.name,
+                        statusMessage = error
+                    )
+                    Log.d(TAG, "Failed task history: $id")
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to mark task history as failed", e)
+            } finally {
+                currentTaskHistoryId = null
+            }
+        }
+    }
+
+    /**
+     * 取消任务历史记录
+     */
+    private fun cancelTaskHistory() {
+        viewModelScope.launch {
+            try {
+                currentTaskHistoryId?.let { id ->
+                    val endTime = System.currentTimeMillis()
+                    val duration = endTime - taskStartTime
+                    val stepCount = taskMessages.count { it is MessageItem.ThinkMessage }
+
+                    historyRepository.updateTaskCompletion(
+                        taskId = id,
+                        endTime = endTime,
+                        durationMs = duration,
+                        stepCount = stepCount
+                    )
+                    historyRepository.updateTaskStatus(
+                        taskId = id,
+                        status = TaskStatus.CANCELLED.name,
+                        statusMessage = "用户取消"
+                    )
+                    Log.d(TAG, "Cancelled task history: $id")
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to cancel task history", e)
+            } finally {
+                currentTaskHistoryId = null
+            }
+        }
+    }
+
+    // ==================== 历史对话继续功能 ====================
+
+    /**
+     * Load historical conversation for continuation
+     * @param historyId ID of the historical task to load
+     */
+    fun loadHistoricalConversation(historyId: Long) {
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val task = historyRepository.getTaskById(historyId)
+                if (task == null) {
+                    withContext(Dispatchers.Main) {
+                        addSystemMessage("无法找到历史记录", SystemMessageType.ERROR)
+                    }
+                    return@launch
+                }
+
+                // 1. Deserialize Think messages from messagesJson
+                val thinkMessages = try {
+                    gson.fromJson(task.messagesJson, Array<MessageItem>::class.java).toList()
+                } catch (e: Exception) {
+                    Log.e(TAG, "Failed to deserialize messages", e)
+                    emptyList()
+                }
+
+                // 2. Deserialize Action messages from actionsJson
+                val actions = try {
+                    gson.fromJson(task.actionsJson, Array<Action>::class.java).toList()
+                } catch (e: Exception) {
+                    Log.e(TAG, "Failed to deserialize actions", e)
+                    emptyList()
+                }
+
+                // 3. Convert actions to ActionMessage items
+                val actionMessages = actions.map { MessageItem.ActionMessage(action = it) }
+
+                // 4. Merge all messages - combine think and action messages
+                val allMessages = thinkMessages + actionMessages
+
+                // 5. Restore UI messages to AppState
+                withContext(Dispatchers.Main) {
+                    _state.update {
+                        it.copy(
+                            messages = allMessages.toPersistentList(),
+                            currentTask = task.taskDescription,
+                            model = task.model,
+                            isContinuedConversation = true,
+                            originalTaskId = historyId
+                        )
+                    }
+                }
+
+                // 6. Set current task history ID to update existing record
+                currentTaskHistoryId = task.id
+                taskStartTime = System.currentTimeMillis()
+
+                // 7. Restore tracking lists
+                taskMessages.clear()
+                taskMessages.addAll(allMessages)
+                taskActions.clear()
+                taskErrors.clear()
+
+                // 8. Restore partial API context
+                val apiMessages = try {
+                    val type = object : TypeToken<List<Message>>() {}.type
+                    gson.fromJson<List<Message>>(task.apiContextMessagesJson, type) ?: emptyList()
+                } catch (e: Exception) {
+                    Log.e(TAG, "Failed to deserialize API context messages", e)
+                    emptyList<Message>()
+                }
+                apiContextMessages.clear()
+                apiContextMessages.addAll(apiMessages)
+
+                // 9. Restore AgentCore context with partial history
+                agentCore?.restoreSession(task.taskDescription, apiMessages)
+
+                // 10. Show continuation message
+                withContext(Dispatchers.Main) {
+                    addSystemMessage(
+                        "继续历史任务: ${task.taskDescription}",
+                        SystemMessageType.INFO
+                    )
+                }
+
+                Log.d(TAG, "Loaded historical conversation: ${task.id}, ${allMessages.size} messages (${thinkMessages.size} think + ${actionMessages.size} action)")
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to load historical conversation", e)
+                withContext(Dispatchers.Main) {
+                    addSystemMessage("加载历史对话失败: ${e.message}", SystemMessageType.ERROR)
+                }
+            }
+        }
+    }
+
+    /**
+     * Start a new conversation - clears all state
+     */
+    fun newConversation() {
+        // Clear all messages and state
+        _state.update {
+            it.copy(
+                messages = persistentListOf(),
+                currentTask = "",
+                isContinuedConversation = false,
+                originalTaskId = null,
+                isRunning = false
+            )
+        }
+
+        // Clear tracking variables
+        taskMessages.clear()
+        taskActions.clear()
+        taskErrors.clear()
+        apiContextMessages.clear()
+        currentTaskHistoryId = null
+
+        // Clear AgentCore session
+        agentCore?.stop()
+
+        Log.d(TAG, "New conversation started")
     }
 }
 

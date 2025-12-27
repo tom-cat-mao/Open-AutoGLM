@@ -1,5 +1,6 @@
 package com.taskwizard.android.data
 
+import androidx.compose.runtime.Stable
 import com.taskwizard.android.data.Action
 import java.util.UUID
 
@@ -7,9 +8,12 @@ import java.util.UUID
  * 消息项基类
  * 用于在UI中展示不同类型的消息
  *
- * 性能优化：添加唯一 ID，确保 LazyColumn 可以正确追踪列表项
- * 避免使用 hashCode() 作为 key，因为 hashCode 可能重复
+ * 性能优化：
+ * - 添加 @Stable 注解，确保 Compose 编译器将此类视为稳定类型
+ * - 添加唯一 ID，确保 LazyColumn 可以正确追踪列表项
+ * - 避免使用 hashCode() 作为 key，因为 hashCode 可能重复
  */
+@Stable
 sealed class MessageItem {
     abstract val id: String  // ✅ 唯一标识符
 

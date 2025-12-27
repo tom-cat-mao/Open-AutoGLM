@@ -10,6 +10,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.ChatBubbleOutline
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.snapshots.SnapshotStateList
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
@@ -20,12 +21,11 @@ import kotlinx.coroutines.launch
  * 消息列表组件
  * 使用LazyColumn实现虚拟化列表，性能优化
  *
- * Material3动画特性：
- * - 消息出现时的淡入+滑入动画
- * - 列表项位置变化的平滑动画
- * - 自动滚动到最新消息
- *
- * 性能优化：使用唯一 ID 作为 key，确保列表项正确追踪
+ * 性能优化：
+ * - 使用唯一 ID 作为 key，确保列表项正确追踪
+ * - 使用 contentType 优化重组
+ * - 智能自动滚动（仅在用户位于底部时）
+ * - 移除复杂动画以提升滚动性能
  *
  * @param messages 消息列表
  * @param modifier 修饰符
@@ -38,9 +38,18 @@ fun MessageList(
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
 
-    // 自动滚动到最新消息（带动画）
-    LaunchedEffect(messages.size) {
-        if (messages.isNotEmpty()) {
+    // 性能优化：检查用户是否位于底部，仅在此情况下自动滚动
+    val isAtBottom by remember {
+        derivedStateOf {
+            val layoutInfo = listState.layoutInfo
+            val lastVisibleItem = layoutInfo.visibleItemsInfo.lastOrNull()
+            lastVisibleItem != null && lastVisibleItem.index >= messages.size - 2
+        }
+    }
+
+    // 智能自动滚动：仅在用户位于底部时滚动
+    LaunchedEffect(messages.size, isAtBottom) {
+        if (messages.isNotEmpty() && isAtBottom) {
             scope.launch {
                 listState.animateScrollToItem(
                     index = messages.size - 1,
@@ -62,30 +71,15 @@ fun MessageList(
         ) {
             items(
                 items = messages,
-                key = { it.id }  // ✅ 性能优化：使用唯一 ID 避免重组
+                key = { it.id },  // ✅ 性能优化：使用唯一 ID 避免重组
+                contentType = { it::class }  // ✅ 性能优化：按类型分组优化重组
             ) { message ->
-                // Material3动画：消息出现时的淡入+滑入动画
-                AnimatedVisibility(
-                    visible = true,
-                    enter = fadeIn(
-                        animationSpec = tween(
-                            durationMillis = 250,
-                            easing = FastOutSlowInEasing
-                        ),
-                        initialAlpha = 0f
-                    ) + slideInVertically(
-                        animationSpec = tween(
-                            durationMillis = 250,
-                            easing = FastOutSlowInEasing
-                        ),
-                        initialOffsetY = { it / 4 } // 从下方1/4处滑入
-                    )
-                ) {
-                    when (message) {
-                        is MessageItem.ThinkMessage -> ThinkMessageBubble(message)
-                        is MessageItem.ActionMessage -> ActionMessageBubble(message)
-                        is MessageItem.SystemMessage -> SystemMessageBubble(message)
-                    }
+                // 移除复杂的 AnimatedVisibility 以提升滚动性能
+                // LazyColumn 的 animateItemPlacement 会在需要时提供平滑的动画
+                when (message) {
+                    is MessageItem.ThinkMessage -> ThinkMessageBubble(message)
+                    is MessageItem.ActionMessage -> ActionMessageBubble(message)
+                    is MessageItem.SystemMessage -> SystemMessageBubble(message)
                 }
             }
         }

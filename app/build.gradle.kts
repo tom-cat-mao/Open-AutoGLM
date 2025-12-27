@@ -2,6 +2,7 @@ plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose") version "2.0.0"
+    id("com.google.devtools.ksp") version "2.0.0-1.0.24"
 }
 
 android {
@@ -13,8 +14,11 @@ android {
         applicationId = "com.taskwizard.android"
         minSdk = 26 // Android 8.0+
         targetSdk = 34
-        versionCode = 1
-        versionName = "1.0.0"
+
+        // Read version from env var (GitHub Actions), fallback to hardcoded default
+        val versionFromEnv = System.getenv("VERSION_NAME")
+        versionCode = (System.getenv("VERSION_CODE") ?: "1").toInt()
+        versionName = versionFromEnv ?: "1.0.0"
     }
 
     // ==================== 签名配置 ====================
@@ -105,7 +109,7 @@ android {
 
 dependencies {
     // Jetpack Compose BOM (统一版本管理)
-    implementation(platform("androidx.compose:compose-bom:2024.02.00"))
+    implementation(platform("androidx.compose:compose-bom:2024.06.00"))
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.ui:ui-tooling-preview")
     implementation("androidx.compose.material3:material3")
@@ -141,13 +145,22 @@ dependencies {
     implementation("androidx.appcompat:appcompat:1.6.1")
     implementation("com.google.android.material:material:1.11.0")
 
-    // Networking
+    // Networking (updated OkHttp to 4.12.0)
     implementation("com.squareup.retrofit2:retrofit:2.9.0")
     implementation("com.squareup.retrofit2:converter-gson:2.9.0")
-    implementation("com.squareup.okhttp3:logging-interceptor:4.11.0")
+    implementation("com.squareup.okhttp3:logging-interceptor:4.12.0")
 
     // JSON
     implementation("com.google.code.gson:gson:2.10.1")
+
+    // ==================== Room Database (History Feature) ====================
+    val roomVersion = "2.6.1"
+    implementation("androidx.room:room-runtime:$roomVersion")
+    implementation("androidx.room:room-ktx:$roomVersion")
+    ksp("androidx.room:room-compiler:$roomVersion")
+
+    // ==================== Security (Encrypted Storage) ====================
+    implementation("androidx.security:security-crypto:1.1.0-alpha06")
 
     // ==================== 测试依赖 ====================
 
@@ -183,4 +196,7 @@ dependencies {
 
     // Navigation Test
     androidTestImplementation("androidx.navigation:navigation-testing:2.7.6")
+
+    // Room Testing (for history feature tests)
+    testImplementation("androidx.room:room-testing:2.6.1")
 }

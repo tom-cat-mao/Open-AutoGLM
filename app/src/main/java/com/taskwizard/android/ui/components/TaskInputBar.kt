@@ -57,32 +57,12 @@ fun TaskInputBar(
             )
 
             // 启动/停止按钮（带动画过渡）
+            // 性能优化：简化为纯淡入淡出，移除scale动画减少GPU负载
             AnimatedContent(
                 targetState = isRunning,
                 transitionSpec = {
-                    fadeIn(
-                        animationSpec = tween(
-                            durationMillis = 200,
-                            easing = FastOutSlowInEasing
-                        )
-                    ) + scaleIn(
-                        initialScale = 0.8f,
-                        animationSpec = tween(
-                            durationMillis = 200,
-                            easing = FastOutSlowInEasing
-                        )
-                    ) togetherWith fadeOut(
-                        animationSpec = tween(
-                            durationMillis = 200,
-                            easing = FastOutSlowInEasing
-                        )
-                    ) + scaleOut(
-                        targetScale = 0.8f,
-                        animationSpec = tween(
-                            durationMillis = 200,
-                            easing = FastOutSlowInEasing
-                        )
-                    )
+                    fadeIn(animationSpec = tween(150)) togetherWith
+                    fadeOut(animationSpec = tween(150))
                 },
                 label = "button_animation"
             ) { running ->
@@ -94,10 +74,11 @@ fun TaskInputBar(
                             containerColor = MaterialTheme.colorScheme.errorContainer,
                             contentColor = MaterialTheme.colorScheme.onErrorContainer
                         ),
+                        // 性能优化：使用no-bouncy弹簧减少额外帧渲染
                         modifier = Modifier.animateContentSize(
                             animationSpec = spring(
-                                dampingRatio = Spring.DampingRatioMediumBouncy,
-                                stiffness = Spring.StiffnessLow
+                                dampingRatio = Spring.DampingRatioNoBouncy,
+                                stiffness = Spring.StiffnessMedium
                             )
                         )
                     ) {
@@ -114,10 +95,11 @@ fun TaskInputBar(
                     Button(
                         onClick = onStart,
                         enabled = task.isNotBlank(),
+                        // 性能优化：使用no-bouncy弹簧减少额外帧渲染
                         modifier = Modifier.animateContentSize(
                             animationSpec = spring(
-                                dampingRatio = Spring.DampingRatioMediumBouncy,
-                                stiffness = Spring.StiffnessLow
+                                dampingRatio = Spring.DampingRatioNoBouncy,
+                                stiffness = Spring.StiffnessMedium
                             )
                         )
                     ) {

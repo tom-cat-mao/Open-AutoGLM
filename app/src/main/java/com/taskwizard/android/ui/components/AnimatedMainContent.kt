@@ -1,7 +1,9 @@
 package com.taskwizard.android.ui.components
 
+import androidx.compose.animation.core.AnimationVector
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.core.VectorConverter
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
@@ -9,11 +11,14 @@ import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.util.lerp
 
 /**
  * AnimatedMainContent - 可缩放的主界面容器
  *
  * 用于实现App缩小到悬浮窗的动画效果
+ *
+ * 性能优化：使用单一动画变量计算所有变换，减少GPU负载
  *
  * 关键特性：
  * - 缩放动画：从1.0缩小到0.1（10%大小）
@@ -29,33 +34,23 @@ fun AnimatedMainContent(
     isAnimating: Boolean,
     content: @Composable () -> Unit
 ) {
-    // 缩放动画：1.0 -> 0.1
-    val scale by animateFloatAsState(
-        targetValue = if (isAnimating) 0.1f else 1f,
-        animationSpec = tween(durationMillis = 300),
-        label = "scale"
-    )
-
-    // X轴偏移动画：移动到右侧
-    // 0.45 表示向右移动屏幕宽度的45%
-    val offsetX by animateFloatAsState(
-        targetValue = if (isAnimating) 0.45f else 0f,
-        animationSpec = tween(durationMillis = 300),
-        label = "offsetX"
-    )
-
-    // Y轴偏移动画：移动到顶部
-    // -0.45 表示向上移动屏幕高度的45%
-    val offsetY by animateFloatAsState(
-        targetValue = if (isAnimating) -0.45f else 0f,
-        animationSpec = tween(durationMillis = 300),
-        label = "offsetY"
+    // 性能优化：使用单一动画进度变量，一次性计算所有变换值
+    // 将三个独立的 animateFloatAsState 合并为一个，减少动画开销
+    val animationProgress by animateFloatAsState(
+        targetValue = if (isAnimating) 1f else 0f,
+        animationSpec = tween(durationMillis = 250),
+        label = "overlay_animation"
     )
 
     Box(
         modifier = Modifier
             .fillMaxSize()
             .graphicsLayer {
+                // 性能优化：使用lerp一次性计算所有变换值，避免每帧多次计算
+                val scale = lerp(1f, 0.15f, animationProgress)
+                val offsetX = lerp(0f, 0.45f, animationProgress)
+                val offsetY = lerp(0f, -0.45f, animationProgress)
+
                 // 应用缩放
                 scaleX = scale
                 scaleY = scale

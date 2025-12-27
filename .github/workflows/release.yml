@@ -39,22 +39,41 @@ jobs:
           echo "KEY_ALIAS=${{ secrets.KEY_ALIAS }}" >> $GITHUB_ENV
           echo "KEY_PASSWORD=${{ secrets.KEY_PASSWORD }}" >> $GITHUB_ENV
 
-      # 5. 赋予 gradlew 执行权限
+      # 5. 设置版本号环境变量
+      - name: Set version environment variables
+        run: |
+          # Extract version from tag (remove 'v' prefix)
+          VERSION_NAME=${{ github.ref_name }}
+          VERSION_NAME=${VERSION_NAME#v}
+          echo "VERSION_NAME=$VERSION_NAME" >> $GITHUB_ENV
+
+          # Generate versionCode from tag (major*10000 + minor*100 + patch)
+          # e.g., v1.3.3 -> 10303
+          VERSION=$VERSION_NAME
+          IFS='.' read -ra VERSION_PARTS <<< "$VERSION"
+          MAJOR=${VERSION_PARTS[0]:-0}
+          MINOR=${VERSION_PARTS[1]:-0}
+          PATCH=${VERSION_PARTS[2]:-0}
+          VERSION_CODE=$((MAJOR * 10000 + MINOR * 100 + PATCH))
+          echo "VERSION_CODE=$VERSION_CODE" >> $GITHUB_ENV
+          echo "Version: $VERSION_NAME, Code: $VERSION_CODE"
+
+      # 6. 赋予 gradlew 执行权限
       - name: Grant execute permission for gradlew
         run: chmod +x gradlew
 
-      # 6. 编译 Release APK（已签名）
+      # 7. 编译 Release APK（已签名）
       - name: Build Release APK
         run: ./gradlew assembleRelease --stacktrace --no-daemon --parallel
 
-      # 7. 重命名 APK
+      # 8. 重命名 APK
       - name: Rename APK
         run: |
           VERSION_NAME=${{ github.ref_name }}
           mv app/build/outputs/apk/release/app-release.apk \
              TaskWizard-${VERSION_NAME}.apk
 
-      # 8. 计算 SHA256 校验和
+      # 9. 计算 SHA256 校验和
       - name: Calculate SHA256
         id: sha256
         run: |
@@ -62,7 +81,7 @@ jobs:
           echo "sha256=$SHA256" >> $GITHUB_OUTPUT
           echo "SHA256: $SHA256"
 
-      # 9. 生成分类 Changelog
+      # 10. 生成分类 Changelog
       - name: Generate Changelog
         id: changelog
         run: |
@@ -144,7 +163,7 @@ jobs:
           echo -e "$CHANGELOG" >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
 
-      # 10. 创建 GitHub Release
+      # 11. 创建 GitHub Release
       - name: Create Release
         uses: softprops/action-gh-release@v1
         with:
@@ -183,7 +202,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      # 11. 清理签名密钥
+      # 12. 清理签名密钥
       - name: Cleanup
         if: always()
         run: |

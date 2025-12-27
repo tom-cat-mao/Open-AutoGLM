@@ -46,13 +46,14 @@ object ShizukuManager {
      */
     suspend fun bindService(context: Context): IAutoGLMService = suspendCancellableCoroutine { cont ->
         // 检查现有服务是否存活
-        if (service != null) {
+        val existingService = service
+        if (existingService != null) {
             try {
                 // 测试调用一个轻量级命令来检查Binder是否存活
-                if (service!!.asBinder().isBinderAlive) {
-                    service!!.executeShellCommand("echo alive")
+                if (existingService.asBinder().isBinderAlive) {
+                    existingService.executeShellCommand("echo alive")
                     Log.d(TAG, "Existing service is alive, reusing")
-                    cont.resume(service!!)
+                    cont.resume(existingService)
                     return@suspendCancellableCoroutine
                 }
             } catch (e: android.os.DeadObjectException) {

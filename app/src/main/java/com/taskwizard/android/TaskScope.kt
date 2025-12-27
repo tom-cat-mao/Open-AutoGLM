@@ -103,7 +103,7 @@ object TaskScope {
         }
 
         Log.d(TAG, "New task launched: ${currentTaskJob?.hashCode()}")
-        return currentTaskJob!!
+        return currentTaskJob ?: throw IllegalStateException("Task job was not created")
     }
 
     /**

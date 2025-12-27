@@ -60,9 +60,15 @@ fun ThinkMessageBubble(
                     )
                 }
 
-                // 内容
+                // 内容 - 添加额外的安全检查
+                val displayText = when {
+                    message.content.isBlank() -> "正在思考中..."
+                    message.content.length < 3 -> "正在分析..."
+                    else -> message.content
+                }
+
                 Text(
-                    text = message.content,
+                    text = displayText,
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSecondaryContainer
                 )
@@ -267,8 +273,20 @@ private fun formatAction(action: Action): String {
 
 /**
  * 格式化时间戳
+ * 性能优化：使用缓存对象避免每次创建 SimpleDateFormat 实例
  */
 private fun formatTimestamp(timestamp: Long): String {
-    val sdf = SimpleDateFormat("HH:mm:ss", Locale.getDefault())
-    return sdf.format(Date(timestamp))
+    return TimestampCache.format(timestamp)
+}
+
+/**
+ * 时间戳缓存对象
+ * 使用单例模式缓存 SimpleDateFormat 实例以提升性能
+ */
+private object TimestampCache {
+    private val dateFormat = SimpleDateFormat("HH:mm:ss", Locale.getDefault())
+
+    fun format(timestamp: Long): String {
+        return dateFormat.format(Date(timestamp))
+    }
 }

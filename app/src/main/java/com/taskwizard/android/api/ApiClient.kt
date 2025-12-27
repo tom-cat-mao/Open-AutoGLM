@@ -1,5 +1,6 @@
 package com.taskwizard.android.api
 
+import com.taskwizard.android.BuildConfig
 import okhttp3.Interceptor
 import okhttp3.OkHttpClient
 import okhttp3.logging.HttpLoggingInterceptor
@@ -20,8 +21,14 @@ object ApiClient {
 
     fun getService(): LLMService {
         if (retrofit == null) {
+            // Security: Only log headers in debug mode, not full body (which contains API keys)
+            // In production, use BASIC level to minimize sensitive data exposure
             val logging = HttpLoggingInterceptor().apply {
-                level = HttpLoggingInterceptor.Level.BODY
+                level = if (BuildConfig.DEBUG) {
+                    HttpLoggingInterceptor.Level.HEADERS  // Only headers in debug
+                } else {
+                    HttpLoggingInterceptor.Level.BASIC    // Minimal in production
+                }
             }
 
             val authInterceptor = Interceptor { chain ->
@@ -46,6 +53,7 @@ object ApiClient {
                 .addConverterFactory(GsonConverterFactory.create())
                 .build()
         }
-        return retrofit!!.create(LLMService::class.java)
+        return retrofit?.create(LLMService::class.java)
+            ?: throw IllegalStateException("ApiClient not initialized")
     }
 }

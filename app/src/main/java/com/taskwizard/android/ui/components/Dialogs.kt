@@ -202,6 +202,9 @@ fun TakeOverDialog(
  * @param permissionType 权限类型（用于显示不同的引导步骤）
  * @param onGrant 用户同意授权回调
  * @param onDismiss 用户取消回调
+ * @param onOpenShizukuApp 打开Shizuku应用的回调（可选）
+ * @param onOpenIMESettings 打开输入法设置的回调（可选）
+ * @param onOpenDownloadPage 打开ADB Keyboard下载页面的回调（可选）
  */
 @Composable
 fun PermissionDialog(
@@ -209,7 +212,10 @@ fun PermissionDialog(
     message: String,
     permissionType: PermissionType,
     onGrant: () -> Unit,
-    onDismiss: () -> Unit
+    onDismiss: () -> Unit,
+    onOpenShizukuApp: (() -> Unit)? = null,
+    onOpenIMESettings: (() -> Unit)? = null,
+    onOpenDownloadPage: (() -> Unit)? = null
 ) {
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -283,13 +289,41 @@ fun PermissionDialog(
             }
         },
         confirmButton = {
-            Button(onClick = onGrant) {
-                Text(
-                    when (permissionType) {
-                        PermissionType.SHIZUKU -> "去授权"
-                        PermissionType.ADB_KEYBOARD -> "去安装"
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                // Quick action buttons (if provided)
+                when (permissionType) {
+                    PermissionType.SHIZUKU -> {
+                        onOpenShizukuApp?.let {
+                            TextButton(onClick = it) {
+                                Text("打开Shizuku")
+                            }
+                        }
                     }
-                )
+                    PermissionType.ADB_KEYBOARD -> {
+                        onOpenIMESettings?.let {
+                            TextButton(onClick = it) {
+                                Text("输入法设置")
+                            }
+                        }
+                        onOpenDownloadPage?.let {
+                            TextButton(onClick = it) {
+                                Text("下载")
+                            }
+                        }
+                    }
+                }
+
+                // Primary action button
+                Button(onClick = onGrant) {
+                    Text(
+                        when (permissionType) {
+                            PermissionType.SHIZUKU -> "去授权"
+                            PermissionType.ADB_KEYBOARD -> "去设置"
+                        }
+                    )
+                }
             }
         },
         dismissButton = {

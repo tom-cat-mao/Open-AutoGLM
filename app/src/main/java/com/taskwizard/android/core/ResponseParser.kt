@@ -15,26 +15,58 @@ object ResponseParser {
 
     fun parse(content: String): ParseResult {
         // 1. Extract Think
-        val think = extractTag(content, "think")
-        
-        // 2. Extract Answer
+        var think = extractTag(content, "think")
+
+        // 2. If no <think> tag, try to extract implicit thinking
+        if (think == null) {
+            think = extractImplicitThinking(content)
+            if (think != null) {
+                Log.d(TAG, "Extracted implicit thinking: ${think.take(50)}...")
+            }
+        }
+
+        // 3. Extract Answer
         var answer = extractTag(content, "answer")
-        
-        // 3. If no <answer> tag, try to find do(...) or finish(...) in the raw content
+
+        // 4. If no <answer> tag, try to find do(...) or finish(...) in the raw content
         if (answer == null) {
             Log.d(TAG, "No <answer> tag found, searching for action in raw content")
             answer = extractActionFromRawContent(content)
         }
-        
-        // 4. Parse Action String (e.g., do(action="Tap", element=[123,456]))
+
+        // 5. Parse Action String (e.g., do(action="Tap", element=[123,456]))
         val action = if (answer != null) {
             parseActionString(answer)
         } else {
             Log.w(TAG, "No action found in content")
             null
         }
-        
+
         return ParseResult(think, action)
+    }
+
+    /**
+     * 提取隐式 thinking 内容
+     * 当模型没有使用 <think> 标签，但在 <answer> 之前有文本时，提取该文本作为 thinking
+     */
+    private fun extractImplicitThinking(content: String): String? {
+        // 查找第一个 <answer> 标签的位置
+        val answerIndex = content.indexOf("<answer>")
+        if (answerIndex <= 0) {
+            // 没有 <answer> 标签，或者 <answer> 在开头
+            return null
+        }
+
+        // 提取 <answer> 之前的所有文本
+        val beforeAnswer = content.substring(0, answerIndex).trim()
+
+        // 如果文本有意义（长度 > 5 且不全是空白），返回它
+        if (beforeAnswer.length > 5 && beforeAnswer.isNotBlank()) {
+            Log.d(TAG, "Found implicit thinking before <answer> tag")
+            return beforeAnswer
+        }
+
+        return null
     }
 
     /**
