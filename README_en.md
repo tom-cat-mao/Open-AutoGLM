@@ -29,6 +29,8 @@
 
 ### Latest Features ✨
 
+- ✅ **Manual Takeover**: AI can request manual intervention when needed, overlay shows countdown, tap to continue when done
+- ✅ **Built-in Input Method**: Integrated TaskWizard keyboard, no need to install ADB Keyboard separately
 - ✅ **Complete History Display**: View all message types (think, action, system messages) when clicking history records
 - ✅ **New Conversation Button**: Quick-start a new conversation with one tap
 - ✅ **Performance Optimizations**: Improved history loading and message rendering
@@ -286,10 +288,10 @@ TaskWizard/
 
 ### Build Requirements
 
-- JDK 11 or higher
+- JDK 17 or higher (Kotlin 2.0.0 requires JDK 17+)
 - Android SDK 34
 - Kotlin 2.0.0
-- Gradle 8.1.0
+- Gradle 8.0+
 
 ### Building
 
