@@ -229,20 +229,26 @@ fun SystemMessageBubble(
 }
 
 /**
+ * 操作类型到图标的映射表（性能优化：避免每次调用时创建新字符串）
+ */
+private val ACTION_ICON_MAP = mapOf(
+    "tap" to Icons.Rounded.TouchApp,
+    "double tap" to Icons.Rounded.TouchApp,
+    "swipe" to Icons.Rounded.SwipeRight,
+    "type" to Icons.Rounded.Keyboard,
+    "type_name" to Icons.Rounded.Keyboard,
+    "launch" to Icons.Rounded.RocketLaunch,
+    "back" to Icons.Rounded.ArrowBack,
+    "home" to Icons.Rounded.Home,
+    "long press" to Icons.Rounded.TouchApp,
+    "finish" to Icons.Rounded.CheckCircle
+)
+
+/**
  * 根据操作类型获取对应的图标
  */
 private fun getActionIcon(action: Action): ImageVector {
-    return when (action.action?.lowercase()) {
-        "tap", "double tap" -> Icons.Rounded.TouchApp
-        "swipe" -> Icons.Rounded.SwipeRight
-        "type", "type_name" -> Icons.Rounded.Keyboard
-        "launch" -> Icons.Rounded.RocketLaunch
-        "back" -> Icons.Rounded.ArrowBack
-        "home" -> Icons.Rounded.Home
-        "long press" -> Icons.Rounded.TouchApp
-        "finish" -> Icons.Rounded.CheckCircle
-        else -> Icons.Rounded.PlayArrow
-    }
+    return ACTION_ICON_MAP[action.action?.lowercase()] ?: Icons.Rounded.PlayArrow
 }
 
 /**

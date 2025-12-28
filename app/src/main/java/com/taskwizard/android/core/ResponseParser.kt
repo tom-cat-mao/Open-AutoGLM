@@ -3,6 +3,8 @@ package com.taskwizard.android.core
 import android.util.Log
 import java.util.regex.Pattern
 import com.taskwizard.android.data.Action
+import kotlinx.collections.immutable.ImmutableList
+import kotlinx.collections.immutable.toImmutableList
 
 object ResponseParser {
 
@@ -146,9 +148,9 @@ object ResponseParser {
             // Combine for Action object
             // If it's swipe, location needs 4 coords
             val location = if (start != null && end != null) {
-                start + end
+                (start + end).toImmutableList()
             } else {
-                element
+                element?.toImmutableList()
             }
 
             Log.d(TAG, "Parsed action: type=$actionType, location=$location, text=$text, duration=$duration")

@@ -1,5 +1,7 @@
 package com.taskwizard.android.data
 
+import androidx.compose.runtime.Stable
+
 /**
  * OverlayDisplayState - 悬浮窗显示状态
  *
@@ -47,6 +49,7 @@ enum class OverlayDisplayState {
  * 包含悬浮窗的所有状态信息
  * 使用data class确保Compose可以正确追踪状态变化
  */
+@Stable
 data class OverlayState(
     /**
      * 显示状态

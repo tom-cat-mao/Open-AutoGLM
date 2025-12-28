@@ -77,6 +77,17 @@ fun MainScreen(
         }
     }
 
+    // 性能优化：稳定的lambda引用，避免每次重组创建新的lambda实例
+    val onNewConversationClickStable = remember(viewModel) {
+        { viewModel.newConversation() }
+    }
+    val onShizukuClickStable = remember(state.hasShizukuPermission, viewModel) {
+        { if (!state.hasShizukuPermission) viewModel.showShizukuGuide() }
+    }
+    val onKeyboardClickStable = remember(viewModel) {
+        { viewModel.showTaskWizardIMEGuide() }
+    }
+
     // 阶段2新增：使用AnimatedMainContent包裹整个界面
     AnimatedMainContent(isAnimating = isAnimatingToOverlay) {
         Scaffold(
@@ -89,16 +100,9 @@ fun MainScreen(
                     hasADBKeyboard = state.isADBKeyboardEnabled,
                     onSettingsClick = onNavigateToSettings,
                     onHistoryClick = onNavigateToHistory,
-                    onNewConversationClick = { viewModel.newConversation() },
-                    onShizukuClick = {
-                        if (!state.hasShizukuPermission) {
-                            viewModel.showShizukuGuide()
-                        }
-                    },
-                    onKeyboardClick = {
-                        // 点击键盘状态时显示选择对话框
-                        viewModel.showTaskWizardIMEGuide()
-                    }
+                    onNewConversationClick = onNewConversationClickStable,
+                    onShizukuClick = onShizukuClickStable,
+                    onKeyboardClick = onKeyboardClickStable
                 )
             }
         },

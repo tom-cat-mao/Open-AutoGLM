@@ -22,6 +22,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.taskwizard.android.data.history.TaskStatus
 import com.taskwizard.android.data.history.TaskHistoryEntity
 import com.taskwizard.android.ui.viewmodel.HistoryViewModel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
 import java.util.*
@@ -52,6 +53,14 @@ fun HistoryScreen(
 
     // 搜索框状态
     var searchQuery by remember { mutableStateOf(TextFieldValue()) }
+
+    // 性能优化：搜索防抖，避免每次按键都触发搜索
+    LaunchedEffect(searchQuery.text) {
+        if (searchQuery.text.isNotBlank()) {
+            delay(300) // 300ms 防抖延迟
+        }
+        viewModel.searchTasks(searchQuery.text)
+    }
 
     // 筛选菜单展开状态
     var filterMenuExpanded by remember { mutableStateOf(false) }
@@ -146,10 +155,7 @@ fun HistoryScreen(
             // 搜索框
             SearchBar(
                 query = searchQuery,
-                onQueryChange = {
-                    searchQuery = it
-                    viewModel.searchTasks(it.text)
-                },
+                onQueryChange = { searchQuery = it },  // 只更新本地状态，搜索由 LaunchedEffect 防抖处理
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(horizontal = 16.dp, vertical = 8.dp)

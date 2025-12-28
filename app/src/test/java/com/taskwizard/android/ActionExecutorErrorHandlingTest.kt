@@ -6,6 +6,7 @@ import com.taskwizard.android.IAutoGLMService
 import com.taskwizard.android.core.ActionExecutor
 import com.taskwizard.android.data.Action
 import io.mockk.*
+import kotlinx.collections.immutable.toImmutableList
 import kotlinx.coroutines.runBlocking
 import org.junit.Before
 import org.junit.Test
@@ -211,7 +212,7 @@ class ActionExecutorErrorHandlingTest {
         // 测试 Tap action
         val tapAction = Action(
             action = "Tap",
-            location = listOf(500, 500)
+            location = listOf(500, 500).toImmutableList()
         )
 
         val tapResult = executor.execute(tapAction)

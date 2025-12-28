@@ -1,6 +1,7 @@
 package com.taskwizard.android.ui.viewmodel
 
 import android.app.Application
+import androidx.compose.runtime.Stable
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
@@ -8,6 +9,9 @@ import com.taskwizard.android.data.history.HistoryRepository
 import com.taskwizard.android.data.history.HistoryStatistics
 import com.taskwizard.android.data.history.TaskHistoryEntity
 import com.taskwizard.android.data.history.TaskStatus
+import kotlinx.collections.immutable.ImmutableList
+import kotlinx.collections.immutable.persistentListOf
+import kotlinx.collections.immutable.toImmutableList
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -60,7 +64,7 @@ class HistoryViewModel(application: Application) : AndroidViewModel(application)
             try {
                 repository.getRecentTasks(100).collect { tasks ->
                     _historyState.value = _historyState.value.copy(
-                        tasks = tasks,
+                        tasks = tasks.toImmutableList(),
                         isLoading = false,
                         error = null
                     )
@@ -96,7 +100,7 @@ class HistoryViewModel(application: Application) : AndroidViewModel(application)
             try {
                 repository.getTasksByStatus(status.name).collect { tasks ->
                     _historyState.value = _historyState.value.copy(
-                        tasks = tasks,
+                        tasks = tasks.toImmutableList(),
                         currentFilter = status.name
                     )
                 }
@@ -129,7 +133,7 @@ class HistoryViewModel(application: Application) : AndroidViewModel(application)
             try {
                 repository.searchTasks(query).collect { tasks ->
                     _historyState.value = _historyState.value.copy(
-                        tasks = tasks,
+                        tasks = tasks.toImmutableList(),
                         searchQuery = query
                     )
                 }
@@ -262,8 +266,9 @@ class HistoryViewModel(application: Application) : AndroidViewModel(application)
  * @param currentFilter 当前筛选状态
  * @param searchQuery 当前搜索查询
  */
+@Stable
 data class HistoryState(
-    val tasks: List<TaskHistoryEntity> = emptyList(),
+    val tasks: ImmutableList<TaskHistoryEntity> = persistentListOf(),
     val isLoading: Boolean = true,
     val error: String? = null,
     val message: String? = null,

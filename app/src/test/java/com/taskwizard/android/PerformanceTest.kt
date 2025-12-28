@@ -12,6 +12,7 @@ import com.taskwizard.android.data.SystemMessageType
 import com.taskwizard.android.data.history.HistoryRepository
 import com.taskwizard.android.data.history.TaskHistoryDatabase
 import com.taskwizard.android.data.history.TaskStatus
+import kotlinx.collections.immutable.toImmutableList
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.test.runTest
 import org.junit.After
@@ -97,7 +98,7 @@ class PerformanceTest {
             MessageItem.ThinkMessage(content = "Thinking" + "x".repeat(1000)),
             MessageItem.ActionMessage(action = Action(
                 action = "complex_action",
-                location = listOf(1, 2, 3, 4, 5),
+                location = listOf(1, 2, 3, 4, 5).toImmutableList(),
                 content = "content" + "y".repeat(500)
             )),
             MessageItem.SystemMessage(
@@ -257,7 +258,7 @@ class PerformanceTest {
                 0 -> MessageItem.ThinkMessage(content = "Thinking $i " + "x".repeat(100))
                 1 -> MessageItem.ActionMessage(action = Action(
                     action = "action_$i",
-                    location = listOf(i % 500, (i * 2) % 500),
+                    location = listOf(i % 500, (i * 2) % 500).toImmutableList(),
                     content = "action content"
                 ))
                 2 -> MessageItem.SystemMessage(
@@ -266,7 +267,7 @@ class PerformanceTest {
                 )
                 else -> MessageItem.ActionMessage(action = Action(
                     action = "tap",
-                    location = listOf(100, 200),
+                    location = listOf(100, 200).toImmutableList(),
                     content = null
                 ))
             }

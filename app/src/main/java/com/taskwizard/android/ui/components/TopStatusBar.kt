@@ -8,6 +8,7 @@ import androidx.compose.material.icons.rounded.History
 import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
@@ -70,11 +71,13 @@ fun TopStatusBar(
                         isActive = hasShizuku,
                         onClick = onShizukuClick
                     )
-                    // 动态显示键盘状态
-                    val keyboardLabel = when {
-                        hasTaskWizardIME -> "内置键盘"
-                        hasADBKeyboard -> "ADB Keyboard"
-                        else -> "键盘未启用"
+                    // 性能优化：缓存键盘标签计算
+                    val keyboardLabel = remember(hasTaskWizardIME, hasADBKeyboard) {
+                        when {
+                            hasTaskWizardIME -> "内置键盘"
+                            hasADBKeyboard -> "ADB Keyboard"
+                            else -> "键盘未启用"
+                        }
                     }
                     val keyboardActive = hasTaskWizardIME || hasADBKeyboard
                     StatusChip(

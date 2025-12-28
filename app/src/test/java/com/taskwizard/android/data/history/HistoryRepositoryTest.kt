@@ -8,6 +8,7 @@ import com.google.gson.Gson
 import com.taskwizard.android.data.Action
 import com.taskwizard.android.data.Message
 import com.taskwizard.android.data.MessageItem
+import kotlinx.collections.immutable.toImmutableList
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.test.runTest
 import org.junit.After
@@ -266,8 +267,8 @@ class HistoryRepositoryTest {
         // Given
         val id = repository.createTask("Test task", "model")
         val actions = listOf(
-            Action(action = "tap", location = listOf(100, 200)),
-            Action(action = "swipe", location = listOf(300, 400))
+            Action(action = "tap", location = listOf(100, 200).toImmutableList()),
+            Action(action = "swipe", location = listOf(300, 400).toImmutableList())
         )
 
         // When
