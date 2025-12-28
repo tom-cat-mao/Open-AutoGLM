@@ -44,6 +44,7 @@ fun MainScreen(
     val showShizukuGuide by viewModel.showShizukuGuide.collectAsStateWithLifecycle()
     val showADBKeyboardGuide by viewModel.showADBKeyboardGuide.collectAsStateWithLifecycle()
     val showOverlayPermissionGuide by viewModel.showOverlayPermissionGuide.collectAsStateWithLifecycle()
+    val showTaskWizardIMEGuide by viewModel.showTaskWizardIMEGuide.collectAsStateWithLifecycle()
 
     // Load historical conversation if historyId is provided
     LaunchedEffect(historyIdToLoad) {
@@ -57,8 +58,9 @@ fun MainScreen(
         delay(1000)  // Wait 1 second before showing
         if (!state.hasShizukuPermission) {
             viewModel.showShizukuGuide()
-        } else if (!(state.isADBKeyboardInstalled && state.isADBKeyboardEnabled)) {
-            viewModel.showADBKeyboardGuide()
+        } else if (!state.isTaskWizardIMEEnabled && !state.isADBKeyboardEnabled) {
+            // 如果 TaskWizard IME 和 ADB Keyboard 都未启用，显示 TaskWizard IME 引导
+            viewModel.showTaskWizardIMEGuide()
         }
     }
 
@@ -83,7 +85,8 @@ fun MainScreen(
                 TopStatusBar(
                     modelName = state.model,
                     hasShizuku = state.hasShizukuPermission,
-                    hasADBKeyboard = state.isADBKeyboardInstalled && state.isADBKeyboardEnabled,
+                    hasTaskWizardIME = state.isTaskWizardIMEEnabled,
+                    hasADBKeyboard = state.isADBKeyboardEnabled,
                     onSettingsClick = onNavigateToSettings,
                     onHistoryClick = onNavigateToHistory,
                     onNewConversationClick = { viewModel.newConversation() },
@@ -92,10 +95,9 @@ fun MainScreen(
                             viewModel.showShizukuGuide()
                         }
                     },
-                    onADBKeyboardClick = {
-                        if (!(state.isADBKeyboardInstalled && state.isADBKeyboardEnabled)) {
-                            viewModel.showADBKeyboardGuide()
-                        }
+                    onKeyboardClick = {
+                        // 点击键盘状态时显示选择对话框
+                        viewModel.showTaskWizardIMEGuide()
                     }
                 )
             }
@@ -192,6 +194,26 @@ fun MainScreen(
                     AppLauncher.openIMESettings(context)
                 },
                 onOpenDownloadPage = {
+                    AppLauncher.openADBKeyboardDownload(context)
+                }
+            )
+        }
+
+        // TaskWizard IME 引导对话框
+        if (showTaskWizardIMEGuide) {
+            TaskWizardIMEGuideDialog(
+                onDismiss = {
+                    viewModel.dismissTaskWizardIMEGuide()
+                },
+                onUseBuiltIn = {
+                    AppLauncher.openIMESettings(context)
+                    viewModel.dismissTaskWizardIMEGuide()
+                },
+                onUseADBKeyboard = {
+                    AppLauncher.openIMESettings(context)
+                    viewModel.dismissTaskWizardIMEGuide()
+                },
+                onDownloadADBKeyboard = {
                     AppLauncher.openADBKeyboardDownload(context)
                 }
             )

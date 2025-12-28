@@ -18,24 +18,26 @@ import androidx.compose.ui.unit.dp
  *
  * @param modelName 模型名称
  * @param hasShizuku Shizuku是否可用
- * @param hasADBKeyboard ADB Keyboard是否可用
+ * @param hasTaskWizardIME TaskWizard 内置键盘是否已启用
+ * @param hasADBKeyboard ADB Keyboard是否已启用
  * @param onSettingsClick 设置按钮点击回调
  * @param onHistoryClick 历史按钮点击回调
  * @param onNewConversationClick 新建对话按钮点击回调
  * @param onShizukuClick Shizuku状态芯片点击回调
- * @param onADBKeyboardClick ADB Keyboard状态芯片点击回调
+ * @param onKeyboardClick 键盘状态芯片点击回调
  * @param modifier 修饰符
  */
 @Composable
 fun TopStatusBar(
     modelName: String,
     hasShizuku: Boolean,
+    hasTaskWizardIME: Boolean,
     hasADBKeyboard: Boolean,
     onSettingsClick: () -> Unit,
     onHistoryClick: () -> Unit,
     onNewConversationClick: () -> Unit,
     onShizukuClick: () -> Unit = {},
-    onADBKeyboardClick: () -> Unit = {},
+    onKeyboardClick: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     Surface(
@@ -68,10 +70,17 @@ fun TopStatusBar(
                         isActive = hasShizuku,
                         onClick = onShizukuClick
                     )
+                    // 动态显示键盘状态
+                    val keyboardLabel = when {
+                        hasTaskWizardIME -> "内置键盘"
+                        hasADBKeyboard -> "ADB Keyboard"
+                        else -> "键盘未启用"
+                    }
+                    val keyboardActive = hasTaskWizardIME || hasADBKeyboard
                     StatusChip(
-                        label = "ADB Keyboard",
-                        isActive = hasADBKeyboard,
-                        onClick = onADBKeyboardClick
+                        label = keyboardLabel,
+                        isActive = keyboardActive,
+                        onClick = onKeyboardClick
                     )
                 }
             }

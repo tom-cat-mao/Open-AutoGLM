@@ -37,6 +37,7 @@ data class AppState(
     val hasShizukuPermission: Boolean = false,
     val isADBKeyboardInstalled: Boolean = false,
     val isADBKeyboardEnabled: Boolean = false,
+    val isTaskWizardIMEEnabled: Boolean = false,
 
     // ==================== UI状态 ====================
     val isSettingsOpen: Boolean = false

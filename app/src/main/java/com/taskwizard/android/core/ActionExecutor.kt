@@ -31,6 +31,9 @@ class ActionExecutor(
     
     companion object {
         private const val TAG = "ActionExecutor"
+        // 内置 TaskWizard IME（优先使用）
+        private const val TASKWIZARD_IME = "com.taskwizard.android/.ime.TaskWizardIME"
+        // 外部 ADB Keyboard（向后兼容）
         private const val ADB_KEYBOARD_IME = "com.android.adbkeyboard/.AdbIME"
     }
     
@@ -178,41 +181,63 @@ class ActionExecutor(
             
             "type", "type_name" -> {
                 val text = action.content ?: return ExecuteResult(success = true)
-                
-                // Phase 3: 自动切换到 ADB Keyboard
+
+                // Phase 3: 自动切换到兼容的输入法（优先 TaskWizard IME，降级到 ADB Keyboard）
                 if (!imeHasBeenSwitched) {
                     try {
                         // 记录当前输入法
                         originalIME = service.getCurrentIME()
                         Log.i(TAG, "Original IME: $originalIME")
-                        
-                        // 切换到 ADB Keyboard
-                        if (originalIME != ADB_KEYBOARD_IME) {
-                            val success = service.setIME(ADB_KEYBOARD_IME)
+
+                        // 确定目标输入法：优先 TaskWizard IME，降级到 ADB Keyboard
+                        val targetIME = when {
+                            // 已经在使用兼容的输入法
+                            originalIME == TASKWIZARD_IME || originalIME == ADB_KEYBOARD_IME -> {
+                                Log.d(TAG, "Already using compatible IME: $originalIME")
+                                imeHasBeenSwitched = true
+                                null // 不需要切换
+                            }
+                            // 优先使用内置 TaskWizard IME
+                            service.isIMEEnabled(TASKWIZARD_IME) -> {
+                                Log.d(TAG, "TaskWizard IME is enabled, will use it")
+                                TASKWIZARD_IME
+                            }
+                            // 降级到外部 ADB Keyboard
+                            service.isIMEEnabled(ADB_KEYBOARD_IME) -> {
+                                Log.w(TAG, "TaskWizard IME not enabled, falling back to ADB Keyboard")
+                                ADB_KEYBOARD_IME
+                            }
+                            // 都未启用
+                            else -> {
+                                Log.e(TAG, "No compatible IME enabled (TaskWizard IME or ADB Keyboard)")
+                                null
+                            }
+                        }
+
+                        // 执行切换
+                        if (targetIME != null) {
+                            val success = service.setIME(targetIME)
                             if (success) {
                                 imeHasBeenSwitched = true
-                                Log.i(TAG, "Successfully switched to ADB Keyboard")
-                                
+                                Log.i(TAG, "Successfully switched to $targetIME")
+
                                 // Phase 4: 添加 IME 切换延迟（对齐原版 timing.py）
                                 delay(TimingConfig.action.keyboardSwitchDelay)
                             } else {
-                                Log.w(TAG, "Failed to switch to ADB Keyboard, will try to input anyway")
+                                Log.w(TAG, "Failed to switch to $targetIME, will try to input anyway")
                             }
-                        } else {
-                            Log.d(TAG, "Already using ADB Keyboard")
-                            imeHasBeenSwitched = true
                         }
                     } catch (e: Exception) {
                         Log.e(TAG, "Failed to switch IME", e)
                     }
                 }
-                
+
                 // 执行输入
                 val base64 = android.util.Base64.encodeToString(text.toByteArray(), android.util.Base64.NO_WRAP)
                 try {
                     service.injectInputBase64(base64)
                     Log.d(TAG, "Text input executed: ${text.take(20)}...")
-                    
+
                     // Phase 4: 添加文本输入延迟（对齐原版 timing.py）
                     delay(TimingConfig.action.textInputDelay)
                 } catch (e: Exception) {

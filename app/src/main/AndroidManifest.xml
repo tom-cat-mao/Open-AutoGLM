@@ -52,6 +52,20 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!-- TaskWizard 内置输入法 -->
+        <service
+            android:name=".ime.TaskWizardIME"
+            android:label="@string/taskwizard_keyboard_name"
+            android:permission="android.permission.BIND_INPUT_METHOD"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.view.InputMethod" />
+            </intent-filter>
+            <meta-data
+                android:name="android.view.im"
+                android:resource="@xml/method" />
+        </service>
     </application>
 
 </manifest>

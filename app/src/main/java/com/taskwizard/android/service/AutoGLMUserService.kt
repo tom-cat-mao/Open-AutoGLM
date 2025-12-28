@@ -180,14 +180,20 @@ class AutoGLMUserService(context: Context) : IAutoGLMService.Stub() {
 
     override fun isIMEEnabled(imeId: String): Boolean {
         return try {
-            // 获取已启用的输入法列表
-            val output = executeShellCommand("settings get secure enabled_input_methods")
-            val enabledIMEs = output.trim()
+            // 使用 ime list -s 获取已启用的输入法列表（更可靠）
+            val output = executeShellCommand("ime list -s")
+            Log.d(TAG, "Enabled IMEs list:\n$output")
 
-            Log.d(TAG, "Enabled IMEs: $enabledIMEs")
-
-            // 检查是否包含指定的 IME
-            val isEnabled = enabledIMEs.contains(imeId)
+            // 检查是否包含指定的 IME（支持多种格式匹配）
+            val lines = output.trim().split("\n")
+            val isEnabled = lines.any { line ->
+                val trimmedLine = line.trim()
+                // 精确匹配或包含匹配
+                trimmedLine == imeId ||
+                trimmedLine.contains(imeId) ||
+                // 支持简写格式匹配（如 .ime.TaskWizardIME）
+                (imeId.contains("/") && trimmedLine.endsWith(imeId.substringAfter("/")))
+            }
 
             Log.d(TAG, "isIMEEnabled($imeId): $isEnabled")
             isEnabled

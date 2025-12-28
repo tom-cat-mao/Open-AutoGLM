@@ -146,6 +146,26 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _showADBKeyboardGuide.value = false
     }
 
+    /**
+     * 是否显示 TaskWizard IME 引导对话框
+     */
+    private val _showTaskWizardIMEGuide = MutableStateFlow(false)
+    val showTaskWizardIMEGuide: StateFlow<Boolean> = _showTaskWizardIMEGuide.asStateFlow()
+
+    /**
+     * 显示 TaskWizard IME 引导对话框
+     */
+    fun showTaskWizardIMEGuide() {
+        _showTaskWizardIMEGuide.value = true
+    }
+
+    /**
+     * 关闭 TaskWizard IME 引导对话框
+     */
+    fun dismissTaskWizardIMEGuide() {
+        _showTaskWizardIMEGuide.value = false
+    }
+
     // ==================== 悬浮窗权限引导对话框状态 ====================
 
     /**
@@ -613,8 +633,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 // 检查Shizuku权限
                 val hasShizuku = ShizukuManager.checkPermission()
 
-                // 如果有Shizuku权限，检查ADB Keyboard
-                val (isInstalled, isEnabled) = if (hasShizuku) {
+                // 如果有Shizuku权限，检查输入法状态
+                val (isInstalled, isEnabled, isTaskWizardIMEEnabled) = if (hasShizuku) {
                     try {
                         val service = ShizukuManager.bindService(getApplication())
                         val installed = service.isADBKeyboardInstalled()
@@ -623,19 +643,22 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         } else {
                             false
                         }
-                        Pair(installed, enabled)
+                        // 检查 TaskWizard IME 是否已启用
+                        val taskWizardEnabled = service.isIMEEnabled("com.taskwizard.android/.ime.TaskWizardIME")
+                        Triple(installed, enabled, taskWizardEnabled)
                     } catch (e: Exception) {
-                        Pair(false, false)
+                        Triple(false, false, false)
                     }
                 } else {
-                    Pair(false, false)
+                    Triple(false, false, false)
                 }
 
                 // 更新状态
                 _state.update { it.copy(
                     hasShizukuPermission = hasShizuku,
                     isADBKeyboardInstalled = isInstalled,
-                    isADBKeyboardEnabled = isEnabled
+                    isADBKeyboardEnabled = isEnabled,
+                    isTaskWizardIMEEnabled = isTaskWizardIMEEnabled
                 )}
             } catch (e: Exception) {
                 _state.update { it.copy(hasShizukuPermission = false) }
