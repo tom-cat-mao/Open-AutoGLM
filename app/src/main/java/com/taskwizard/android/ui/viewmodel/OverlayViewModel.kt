@@ -1,5 +1,6 @@
 package com.taskwizard.android.ui.viewmodel
 
+import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.taskwizard.android.data.OverlayDisplayState
@@ -28,6 +29,7 @@ import kotlinx.coroutines.launch
 class OverlayViewModel : ViewModel() {
 
     companion object {
+        private const val TAG = "OverlayViewModel"
         private const val AUTO_RESTORE_DELAY = 3000L // 3秒自动恢复
     }
 
@@ -38,6 +40,9 @@ class OverlayViewModel : ViewModel() {
 
     // 自动恢复Job
     private var autoRestoreJob: Job? = null
+
+    // 人工接管倒计时Job
+    private var takeoverCountdownJob: Job? = null
 
     // ==================== 点击处理 ====================
 
@@ -69,6 +74,11 @@ class OverlayViewModel : ViewModel() {
             OverlayDisplayState.COMPLETED -> {
                 // 完成状态 -> 触发返回应用回调
                 // 实际返回由Service处理
+            }
+
+            OverlayDisplayState.TAKEOVER -> {
+                // 人工接管状态 -> 点击由OverlayContent处理
+                // 不在这里处理，由onTakeoverComplete回调处理
             }
         }
 
@@ -210,11 +220,60 @@ class OverlayViewModel : ViewModel() {
         }
     }
 
+    // ==================== 人工接管管理 ====================
+
+    /**
+     * 开始人工接管
+     * @param message 接管消息
+     * @param timeoutSeconds 超时秒数
+     */
+    fun startTakeover(message: String, timeoutSeconds: Int = 180) {
+        Log.d(TAG, "startTakeover called: message=$message, timeout=$timeoutSeconds")
+        takeoverCountdownJob?.cancel()
+        _state.update {
+            it.copy(
+                isTakeover = true,
+                takeoverMessage = message,
+                takeoverRemainingSeconds = timeoutSeconds,
+                takeoverTotalSeconds = timeoutSeconds,
+                displayState = OverlayDisplayState.TAKEOVER,
+                isThinking = false,
+                currentAction = null
+            )
+        }
+        Log.d(TAG, "startTakeover: state updated, displayState=${_state.value.displayState}")
+        // 启动倒计时
+        takeoverCountdownJob = viewModelScope.launch {
+            while (_state.value.takeoverRemainingSeconds > 0) {
+                delay(1000)
+                _state.update {
+                    it.copy(takeoverRemainingSeconds = it.takeoverRemainingSeconds - 1)
+                }
+            }
+        }
+    }
+
+    /**
+     * 完成人工接管
+     */
+    fun completeTakeover() {
+        takeoverCountdownJob?.cancel()
+        _state.update {
+            it.copy(
+                isTakeover = false,
+                takeoverMessage = null,
+                takeoverRemainingSeconds = 0,
+                displayState = OverlayDisplayState.TRANSPARENT
+            )
+        }
+    }
+
     /**
      * 重置状态
      */
     fun reset() {
         cancelAutoRestore()
+        takeoverCountdownJob?.cancel()
         _state.value = OverlayState()
     }
 
@@ -223,6 +282,7 @@ class OverlayViewModel : ViewModel() {
     override fun onCleared() {
         super.onCleared()
         cancelAutoRestore()
+        takeoverCountdownJob?.cancel()
     }
 
     // ==================== 状态查询 ====================

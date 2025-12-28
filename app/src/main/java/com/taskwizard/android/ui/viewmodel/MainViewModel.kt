@@ -29,6 +29,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -298,6 +299,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val timeoutSeconds = SettingsManager.timeoutSeconds
         val retryCount = SettingsManager.retryCount
         val debugMode = SettingsManager.debugMode
+        val takeoverTimeoutSeconds = SettingsManager.takeoverTimeoutSeconds
 
         // 更新 AppState
         _state.update { it.copy(
@@ -321,6 +323,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 timeoutSeconds = timeoutSeconds,
                 retryCount = retryCount,
                 debugMode = debugMode,
+                takeoverTimeoutSeconds = takeoverTimeoutSeconds,
                 isApiKeyValid = isApiKeyValid,
                 isBaseUrlValid = isBaseUrlValid,
                 isSaveEnabled = calculateSaveEnabled(apiKey, baseUrl, model, isApiKeyValid, isBaseUrlValid)
@@ -492,6 +495,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun updateTimeout(seconds: Int) {
         _settingsState.update { it.copy(timeoutSeconds = seconds) }
         SettingsManager.timeoutSeconds = seconds
+    }
+
+    /**
+     * 更新人工接管超时时间
+     */
+    fun updateTakeoverTimeout(seconds: Int) {
+        _settingsState.update { it.copy(takeoverTimeoutSeconds = seconds) }
+        SettingsManager.takeoverTimeoutSeconds = seconds
     }
 
     /**
@@ -1033,9 +1044,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     // 清除错误状态
                     OverlayService.instance?.clearError()
 
-                    // 更新悬浮窗：显示动作
-                    val actionText = formatActionForOverlay(action)
-                    OverlayService.instance?.updateAction(actionText)
+                    // 更新悬浮窗：显示动作（跳过 take_over，因为它有专门的 UI）
+                    if (action.action?.lowercase() != "take_over") {
+                        val actionText = formatActionForOverlay(action)
+                        OverlayService.instance?.updateAction(actionText)
+                    }
 
                     // 检查是否是finish动作
                     if (action.action?.lowercase() == "finish") {
@@ -1247,26 +1260,52 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     /**
      * 处理Take Over请求
+     * 在悬浮窗显示人工接管状态，等待用户点击完成或超时
      */
     private suspend fun handleTakeOver(message: String) {
         Log.d(TAG, "Take over requested: $message")
 
-        // 创建CompletableDeferred用于等待用户操作
+        val timeoutSeconds = SettingsManager.takeoverTimeoutSeconds
         takeOverDeferred = CompletableDeferred()
 
-        // 更新UI状态，显示对话框
-        _takeOverRequest.value = message
+        // 设置回调：用户点击悬浮窗时完成接管
+        OverlayService.onTakeoverCompleteCallback = {
+            takeOverDeferred?.complete(Unit)
+        }
+
+        // 检查 OverlayService 是否可用
+        if (OverlayService.instance == null) {
+            Log.e(TAG, "handleTakeOver: OverlayService.instance is null!")
+            addSystemMessage("悬浮窗服务不可用，无法进行人工接管", SystemMessageType.ERROR)
+            return
+        }
+
+        // 在悬浮窗显示 takeover 状态
+        OverlayService.instance?.startTakeover(message, timeoutSeconds)
+        Log.d(TAG, "handleTakeOver: startTakeover called with timeout=$timeoutSeconds")
         addSystemMessage("需要人工介入: $message", SystemMessageType.WARNING)
 
-        // 等待用户完成操作
+        // 启动超时计时器
+        val timeoutJob = viewModelScope.launch {
+            delay(timeoutSeconds * 1000L)
+            takeOverDeferred?.cancel()
+        }
+
         try {
             takeOverDeferred?.await()
             Log.d(TAG, "User completed take over")
             addSystemMessage("继续执行任务", SystemMessageType.INFO)
+        } catch (e: CancellationException) {
+            Log.e(TAG, "Take over timeout or cancelled")
+            addSystemMessage("人工接管超时，任务已取消", SystemMessageType.WARNING)
+            stopTask()
         } catch (e: Exception) {
-            Log.e(TAG, "Take over cancelled", e)
+            Log.e(TAG, "Take over error", e)
             addSystemMessage("任务已取消", SystemMessageType.WARNING)
         } finally {
+            timeoutJob.cancel()
+            OverlayService.onTakeoverCompleteCallback = null
+            OverlayService.instance?.completeTakeover()
             _takeOverRequest.value = null
             takeOverDeferred = null
         }
@@ -1397,6 +1436,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             "enter" -> "确认"
             "wait" -> "等待"
             "note" -> "记录"
+            "take_over" -> "人工接管"
             else -> action.action ?: "执行操作"
         }
     }

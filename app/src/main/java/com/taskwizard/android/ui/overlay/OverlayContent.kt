@@ -32,7 +32,8 @@ import kotlinx.coroutines.delay
 fun OverlayContent(
     viewModel: OverlayViewModel,
     onExit: () -> Unit,
-    onReturnToApp: () -> Unit
+    onReturnToApp: () -> Unit,
+    onTakeoverComplete: (() -> Unit)? = null
 ) {
     val state by viewModel.state.collectAsState()
 
@@ -61,7 +62,8 @@ fun OverlayContent(
                     state = state,
                     viewModel = viewModel,
                     onExit = onExit,
-                    onReturnToApp = onReturnToApp
+                    onReturnToApp = onReturnToApp,
+                    onTakeoverComplete = onTakeoverComplete
                 )
             },
         shape = RoundedCornerShape(16.dp),
@@ -80,9 +82,14 @@ private fun handleClick(
     state: OverlayState,
     viewModel: OverlayViewModel,
     onExit: () -> Unit,
-    onReturnToApp: () -> Unit
+    onReturnToApp: () -> Unit,
+    onTakeoverComplete: (() -> Unit)? = null
 ) {
     when (state.displayState) {
+        OverlayDisplayState.TAKEOVER -> {
+            // 人工接管状态：点击完成接管
+            onTakeoverComplete?.invoke()
+        }
         OverlayDisplayState.CONFIRM_EXIT -> {
             // 第3次点击：确认退出
             onExit()

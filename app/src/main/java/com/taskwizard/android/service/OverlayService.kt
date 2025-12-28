@@ -47,6 +47,9 @@ class OverlayService : LifecycleService() {
 
         // 单例引用，用于外部更新状态
         var instance: OverlayService? = null
+
+        // 人工接管完成回调
+        var onTakeoverCompleteCallback: (() -> Unit)? = null
     }
 
     // ==================== 组件 ====================
@@ -162,6 +165,10 @@ class OverlayService : LifecycleService() {
                                 animateToFullScreen {
                                     returnToMainActivity()
                                 }
+                            },
+                            onTakeoverComplete = {
+                                // 人工接管完成回调
+                                notifyTakeoverComplete()
                             }
                         )
                     }
@@ -337,6 +344,32 @@ class OverlayService : LifecycleService() {
     fun updateStep(step: Int) {
         Log.d(TAG, "updateStep: $step")
         overlayViewModel.updateStep(step)
+    }
+
+    // ==================== 人工接管方法 ====================
+
+    /**
+     * 开始人工接管
+     */
+    fun startTakeover(message: String, timeoutSeconds: Int = 180) {
+        Log.d(TAG, "startTakeover: $message, timeout: ${timeoutSeconds}s")
+        overlayViewModel.startTakeover(message, timeoutSeconds)
+    }
+
+    /**
+     * 完成人工接管
+     */
+    fun completeTakeover() {
+        Log.d(TAG, "completeTakeover")
+        overlayViewModel.completeTakeover()
+    }
+
+    /**
+     * 通知人工接管完成（用户点击悬浮窗）
+     */
+    private fun notifyTakeoverComplete() {
+        Log.d(TAG, "notifyTakeoverComplete: User clicked to complete takeover")
+        onTakeoverCompleteCallback?.invoke()
     }
 
     // ==================== 动画方法（阶段3新增）====================

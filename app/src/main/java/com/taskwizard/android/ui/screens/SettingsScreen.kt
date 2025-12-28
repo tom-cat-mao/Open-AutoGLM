@@ -365,6 +365,35 @@ fun SettingsScreen(
                                 }
                             }
 
+                            // 人工接管超时设置
+                            Column(
+                                verticalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Text(
+                                    text = "人工接管超时时间",
+                                    style = MaterialTheme.typography.bodyMedium
+                                )
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Slider(
+                                        value = state.takeoverTimeoutSeconds.toFloat(),
+                                        onValueChange = { viewModel.updateTakeoverTimeout(it.toInt()) },
+                                        valueRange = 60f..600f,
+                                        steps = 8,
+                                        modifier = Modifier.weight(1f)
+                                    )
+                                    Spacer(modifier = Modifier.width(12.dp))
+                                    Text(
+                                        text = "${state.takeoverTimeoutSeconds / 60}分钟",
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        modifier = Modifier.width(60.dp)
+                                    )
+                                }
+                            }
+
                             // 调试模式开关
                             // ✅ 性能优化：使用 state.debugMode，直接调用 ViewModel 更新
                             Row(

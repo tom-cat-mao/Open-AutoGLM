@@ -21,6 +21,7 @@ object SettingsManager {
     private const val KEY_TIMEOUT_SECONDS = "timeout_seconds"
     private const val KEY_RETRY_COUNT = "retry_count"
     private const val KEY_DEBUG_MODE = "debug_mode"
+    private const val KEY_TAKEOVER_TIMEOUT = "takeover_timeout_seconds"
 
     private lateinit var prefs: SharedPreferences
 
@@ -67,4 +68,12 @@ object SettingsManager {
     var debugMode: Boolean
         get() = prefs.getBoolean(KEY_DEBUG_MODE, false)
         set(value) = prefs.edit().putBoolean(KEY_DEBUG_MODE, value).apply()
+
+    /**
+     * 人工接管超时时间（秒）
+     * 默认值：180秒（3分钟）
+     */
+    var takeoverTimeoutSeconds: Int
+        get() = prefs.getInt(KEY_TAKEOVER_TIMEOUT, 180)
+        set(value) = prefs.edit().putInt(KEY_TAKEOVER_TIMEOUT, value).apply()
 }

@@ -40,7 +40,16 @@ enum class OverlayDisplayState {
      * - 显示完成图标
      * - 点击可返回应用
      */
-    COMPLETED
+    COMPLETED,
+
+    /**
+     * 人工接管状态
+     * - 透明度：100%
+     * - 显示倒计时
+     * - 等待用户手动操作完成
+     * - 点击悬浮窗完成接管
+     */
+    TAKEOVER
 }
 
 /**
@@ -111,7 +120,27 @@ data class OverlayState(
     /**
      * 最大重试次数
      */
-    val maxRetries: Int = 3
+    val maxRetries: Int = 3,
+
+    /**
+     * 是否处于人工接管状态
+     */
+    val isTakeover: Boolean = false,
+
+    /**
+     * 人工接管消息
+     */
+    val takeoverMessage: String? = null,
+
+    /**
+     * 人工接管剩余秒数
+     */
+    val takeoverRemainingSeconds: Int = 0,
+
+    /**
+     * 人工接管总超时秒数
+     */
+    val takeoverTotalSeconds: Int = 180
 ) {
     /**
      * 获取显示文本
@@ -119,7 +148,13 @@ data class OverlayState(
      */
     fun getDisplayText(): String {
         return when {
-            // 错误优先级最高
+            // 人工接管优先级最高
+            isTakeover -> {
+                val minutes = takeoverRemainingSeconds / 60
+                val seconds = takeoverRemainingSeconds % 60
+                "人工接管\n时间：${minutes}:${String.format("%02d", seconds)}"
+            }
+            // 错误优先级次之
             errorMessage != null -> {
                 if (retryCount > 0) {
                     "错误: $errorMessage\n重试: $retryCount/$maxRetries"
@@ -172,6 +207,13 @@ data class OverlayState(
      * 是否应该显示动作指示器
      */
     fun shouldShowActionIndicator(): Boolean {
-        return !isThinking && !isTaskCompleted && currentAction != null
+        return !isThinking && !isTaskCompleted && !isTakeover && currentAction != null
+    }
+
+    /**
+     * 是否应该显示人工接管指示器
+     */
+    fun shouldShowTakeoverIndicator(): Boolean {
+        return isTakeover
     }
 }

@@ -32,6 +32,7 @@ data class SettingsState(
     val timeoutSeconds: Int = 30,
     val retryCount: Int = 3,
     val debugMode: Boolean = false,
+    val takeoverTimeoutSeconds: Int = 180,
 
     // ==================== 验证状态 ====================
     val isApiKeyValid: Boolean = true,
