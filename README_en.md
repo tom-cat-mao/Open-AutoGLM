@@ -68,7 +68,7 @@ Loop Until Task Complete
 
 - **Android**: 8.0 (API 26) or higher
 - **Shizuku**: Must be installed ([Download](https://github.com/RikkaApps/Shizuku/releases))
-- **ADB Keyboard**: Required for text input ([Download](https://github.com/senzhk/ADBKeyBoard/blob/master/ADBKeyboard.apk))
+- **Keyboard**: TaskWizard built-in keyboard (recommended), ADB Keyboard optional for backward compatibility
 - **API Access**: AutoGLM-compatible model API (see [Model Options](#model-options))
 
 ## Installation
@@ -100,7 +100,17 @@ Download the latest APK from the [Releases](https://github.com/yourusername/Open
 3. Start Shizuku service (follow in-app instructions)
 4. Grant TaskWizard Shizuku permission when prompted
 
-### 2. Install ADB Keyboard
+### 2. Configure Input Method
+
+TaskWizard provides two text input options:
+
+#### Option 1: Built-in Keyboard (Recommended)
+
+TaskWizard includes a built-in keyboard that requires no additional installation. The app will guide you through enabling it.
+
+#### Option 2: ADB Keyboard (Optional)
+
+If you prefer to use the external ADB Keyboard:
 
 1. Download [ADB Keyboard APK](https://github.com/senzhk/ADBKeyBoard/blob/master/ADBKeyboard.apk)
 2. Install on your device
@@ -121,6 +131,20 @@ Open TaskWizard and navigate to Settings:
 - **Overlay Permission**: Required for floating task status
 - **Shizuku Permission**: Required for system operations
 - **Notification Permission**: Required for foreground service
+
+## Keyboard Management
+
+TaskWizard supports two input methods and will automatically switch to a compatible one when needed:
+
+- **Built-in Keyboard**: TaskWizard's native input method (recommended)
+- **ADB Keyboard**: External input method (backward compatibility)
+
+The app status bar shows your current keyboard status:
+- Built-in: Shows "内置键盘" (green)
+- ADB Keyboard: Shows "ADB Keyboard" (green)
+- Not enabled: Shows "键盘未启用" (red)
+
+Tap the keyboard status icon in the status bar to view setup options and switching guides.
 
 ## Feature Usage
 
@@ -307,11 +331,25 @@ The project includes a comprehensive performance test suite:
 2. Open Shizuku app and check service status
 3. Restart Shizuku service if needed
 
-### ADB Keyboard Not Working
+### Input Method Issues
+
+**Q: Built-in keyboard not working?**
+
+1. Open Settings → Language & Input
+2. Find and enable "TaskWizard Keyboard"
+3. Tap "OK" in the warning dialog
+
+**Q: ADB Keyboard not working?**
 
 1. Verify ADB Keyboard is enabled in Settings
 2. Check if ADB Keyboard is set as current input method
 3. Re-enable ADB Keyboard if needed
+
+**Q: How to switch input methods?**
+
+1. Tap the keyboard status icon in the app status bar
+2. Choose your preferred input method
+3. Follow the setup instructions
 
 ### API Connection Failed
 

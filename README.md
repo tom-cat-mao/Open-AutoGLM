@@ -68,7 +68,7 @@ Shizuku 执行（系统级操作）
 
 - **Android**：8.0 (API 26) 或更高版本
 - **Shizuku**：必须安装 ([下载地址](https://github.com/RikkaApps/Shizuku/releases))
-- **ADB Keyboard**：文本输入需要 ([下载地址](https://github.com/senzhk/ADBKeyBoard/blob/master/ADBKeyboard.apk))
+- **输入法**：TaskWizard 内置键盘（推荐），ADB Keyboard 可选用于向后兼容
 - **API 访问**：AutoGLM 兼容的模型 API（见[模型选项](#模型选项)）
 
 ## 安装方法
@@ -100,7 +100,17 @@ adb install app/build/outputs/apk/debug/app-debug.apk
 3. 启动 Shizuku 服务（按照应用内说明操作）
 4. 在提示时授予 TaskWizard Shizuku 权限
 
-### 2. 安装 ADB Keyboard
+### 2. 配置输入法
+
+TaskWizard 提供两种文本输入方式：
+
+#### 选项 1：内置键盘（推荐）
+
+TaskWizard 内置了输入法功能，无需额外安装，应用会自动引导您启用。
+
+#### 选项 2：ADB Keyboard（可选）
+
+如果您更喜欢使用外部 ADB Keyboard：
 
 1. 下载 [ADB Keyboard APK](https://github.com/senzhk/ADBKeyBoard/blob/master/ADBKeyboard.apk)
 2. 安装到您的设备
@@ -121,6 +131,20 @@ adb install app/build/outputs/apk/debug/app-debug.apk
 - **悬浮窗权限**：显示任务状态悬浮窗需要
 - **Shizuku 权限**：执行系统操作需要
 - **通知权限**：前台服务需要
+
+## 键盘管理
+
+TaskWizard 支持两种输入法，并会在需要时自动切换到兼容的输入法：
+
+- **内置键盘**：TaskWizard 原生输入法（推荐）
+- **ADB Keyboard**：外部输入法（向后兼容）
+
+应用状态栏会显示当前键盘状态：
+- 内置键盘：显示"内置键盘"（绿色）
+- ADB Keyboard：显示"ADB Keyboard"（绿色）
+- 未启用：显示"键盘未启用"（红色）
+
+点击状态栏键盘图标可以查看设置选项和切换引导。
 
 ## 功能使用
 
@@ -307,11 +331,25 @@ Release 构建需要配置密钥库。详细说明请查看 [RELEASE_SETUP.md](R
 2. 打开 Shizuku 应用检查服务状态
 3. 如需要，重启 Shizuku 服务
 
-### ADB Keyboard 不工作
+### 输入法问题
+
+**Q: 内置键盘无法使用？**
+
+1. 打开设置 → 语言和输入法
+2. 找到并启用"TaskWizard Keyboard"
+3. 在弹出的警告对话框中点击"确定"
+
+**Q: ADB Keyboard 不工作？**
 
 1. 确认在设置中已启用 ADB Keyboard
 2. 检查 ADB Keyboard 是否设为当前输入法
 3. 如需要，重新启用 ADB Keyboard
+
+**Q: 如何切换输入法？**
+
+1. 点击应用状态栏的键盘状态图标
+2. 选择您偏好的输入法
+3. 按照引导完成设置
 
 ### API 连接失败
 
