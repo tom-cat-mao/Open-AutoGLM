@@ -40,5 +40,9 @@ data class AppState(
     val isTaskWizardIMEEnabled: Boolean = false,
 
     // ==================== UI状态 ====================
-    val isSettingsOpen: Boolean = false
+    val isSettingsOpen: Boolean = false,
+
+    // ==================== 模板保存相关 ====================
+    val showSaveTemplateDialog: Boolean = false,
+    val templateStepCount: Int = 0
 )

@@ -12,6 +12,8 @@ import androidx.navigation.navArgument
 import com.taskwizard.android.ui.viewmodel.HistoryViewModel
 import com.taskwizard.android.ui.viewmodel.HistoryViewModelFactory
 import com.taskwizard.android.ui.viewmodel.MainViewModel
+import com.taskwizard.android.ui.viewmodel.TasksViewModel
+import com.taskwizard.android.ui.viewmodel.TasksViewModelFactory
 
 /**
  * 导航路由定义
@@ -21,6 +23,7 @@ object NavRoutes {
     const val MAIN_WITH_HISTORY = "main?historyId={historyId}"
     const val SETTINGS = "settings"
     const val HISTORY = "history"
+    const val TASKS = "tasks"
 }
 
 /**
@@ -92,6 +95,9 @@ fun AppNavGraph(
                 onNavigateToHistory = {
                     navController.navigate(NavRoutes.HISTORY)
                 },
+                onNavigateToTasks = {
+                    navController.navigate(NavRoutes.TASKS)
+                },
                 viewModel = viewModel,
                 historyIdToLoad = effectiveHistoryId
             )
@@ -126,6 +132,21 @@ fun AppNavGraph(
                     }
                 },
                 viewModel = historyViewModel
+            )
+        }
+
+        // Tasks screen
+        composable(NavRoutes.TASKS) {
+            val tasksViewModel = androidx.lifecycle.viewmodel.compose.viewModel<TasksViewModel>(
+                factory = TasksViewModelFactory(
+                    androidx.compose.ui.platform.LocalContext.current.applicationContext as android.app.Application
+                )
+            )
+            TasksScreen(
+                onNavigateBack = {
+                    navController.popBackStack()
+                },
+                viewModel = tasksViewModel
             )
         }
     }

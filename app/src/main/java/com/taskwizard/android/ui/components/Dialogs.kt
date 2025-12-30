@@ -345,3 +345,144 @@ enum class PermissionType {
     SHIZUKU,        // Shizuku权限
     ADB_KEYBOARD    // ADB Keyboard
 }
+
+/**
+ * 保存模板对话框
+ *
+ * 任务完成后显示，允许用户将操作序列保存为可重复执行的模板
+ *
+ * @param defaultName 默认模板名称（基于任务描述）
+ * @param stepCount 操作步骤数量
+ * @param onSave 保存回调，参数为用户输入的名称
+ * @param onDismiss 取消回调
+ */
+@Composable
+fun SaveTemplateDialog(
+    defaultName: String,
+    stepCount: Int,
+    onSave: (String) -> Unit,
+    onDismiss: () -> Unit
+) {
+    var name by remember { mutableStateOf(defaultName) }
+    var isError by remember { mutableStateOf(false) }
+    var errorMessage by remember { mutableStateOf("") }
+
+    // 验证名称
+    fun validateName(): Boolean {
+        return when {
+            name.isBlank() -> {
+                isError = true
+                errorMessage = "名称不能为空"
+                false
+            }
+            name.length < 2 -> {
+                isError = true
+                errorMessage = "名称至少需要2个字符"
+                false
+            }
+            name.length > 50 -> {
+                isError = true
+                errorMessage = "名称不能超过50个字符"
+                false
+            }
+            else -> {
+                isError = false
+                errorMessage = ""
+                true
+            }
+        }
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        icon = {
+            Icon(
+                imageVector = Icons.Rounded.CheckCircle,
+                contentDescription = "保存",
+                tint = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.size(48.dp)
+            )
+        },
+        title = {
+            Text(
+                text = "保存为 Task",
+                style = MaterialTheme.typography.headlineSmall,
+                textAlign = TextAlign.Center
+            )
+        },
+        text = {
+            Column(
+                modifier = Modifier.fillMaxWidth(),
+                verticalArrangement = Arrangement.spacedBy(16.dp)
+            ) {
+                Text(
+                    text = "将此次操作保存为可重复执行的 Task",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+
+                OutlinedTextField(
+                    value = name,
+                    onValueChange = {
+                        name = it
+                        if (isError) validateName()
+                    },
+                    label = { Text("Task 名称") },
+                    placeholder = { Text("输入 Task 名称") },
+                    isError = isError,
+                    supportingText = if (isError) {
+                        { Text(errorMessage) }
+                    } else {
+                        { Text("${name.length}/50") }
+                    },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                Card(
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.secondaryContainer
+                    )
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(12.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text(
+                            text = "操作步骤",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSecondaryContainer
+                        )
+                        Text(
+                            text = "$stepCount 步",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSecondaryContainer
+                        )
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = {
+                    if (validateName()) {
+                        onSave(name.trim())
+                    }
+                }
+            ) {
+                Text("保存")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("取消")
+            }
+        },
+        properties = DialogProperties(
+            dismissOnBackPress = true,
+            dismissOnClickOutside = false
+        )
+    )
+}

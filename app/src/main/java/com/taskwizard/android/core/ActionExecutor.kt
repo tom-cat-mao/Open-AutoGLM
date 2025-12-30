@@ -1,5 +1,6 @@
 package com.taskwizard.android.core
 
+import android.accessibilityservice.AccessibilityService
 import android.content.Context
 import android.util.Log
 import com.taskwizard.android.IAutoGLMService
@@ -14,32 +15,45 @@ import kotlinx.coroutines.delay
  * Phase 2: 完整支持所有动作类型
  * Phase 3: IME 自动化管理
  * Phase 4: Safety & Timing - 敏感操作确认和执行时序
- * 
+ * Phase 5: UiAutomation 支持 - 优先使用 UiAutomation API
+ *
  * 坐标转换修复：使用截图实际尺寸而非物理屏幕尺寸
  * 严格对齐 Open-AutoGLM 原版 phone_agent/actions/handler.py
  */
 class ActionExecutor(
     private val context: Context,
     private val service: IAutoGLMService,
-    private var screenWidth: Int,   // 改为 var，支持动态更新
-    private var screenHeight: Int,  // 改为 var，支持动态更新
-    private val onTakeOver: (suspend (String) -> Unit)? = null,          // Take_over 回调（改为 suspend）
-    private val onInteract: ((String) -> String?)? = null,               // Interact 回调
-    private val onNote: ((String) -> Unit)? = null,                      // Note 回调
-    private val onConfirmation: (suspend (String) -> Boolean)? = null    // Phase 4: 敏感操作确认回调
+    private var screenWidth: Int,
+    private var screenHeight: Int,
+    private val onTakeOver: (suspend (String) -> Unit)? = null,
+    private val onInteract: ((String) -> String?)? = null,
+    private val onNote: ((String) -> Unit)? = null,
+    private val onConfirmation: (suspend (String) -> Boolean)? = null
 ) {
-    
+
     companion object {
         private const val TAG = "ActionExecutor"
-        // 内置 TaskWizard IME（优先使用）
         private const val TASKWIZARD_IME = "com.taskwizard.android/.ime.TaskWizardIME"
-        // 外部 ADB Keyboard（向后兼容）
         private const val ADB_KEYBOARD_IME = "com.android.adbkeyboard/.AdbIME"
     }
-    
-    // Phase 3: IME Management - 记录原始输入法
+
+    // IME Management
     private var originalIME: String? = null
     private var imeHasBeenSwitched = false
+
+    // UiAutomation 支持标志
+    private var useUiAutomation = false
+
+    init {
+        // 尝试初始化 UiAutomation
+        try {
+            useUiAutomation = service.initUiAutomation()
+            Log.i(TAG, "UiAutomation initialized: $useUiAutomation")
+        } catch (e: Exception) {
+            Log.w(TAG, "UiAutomation not available, using shell commands", e)
+            useUiAutomation = false
+        }
+    }
 
     /**
      * 更新屏幕尺寸（基于截图实际尺寸）
@@ -107,25 +121,25 @@ class ActionExecutor(
 
                     Log.d(TAG, "Tap: model coords=[${coords[0]}, ${coords[1]}] -> screen coords=($x, $y)")
 
-                    // Phase 4: 敏感操作确认（严格对齐原版 handler.py）
+                    // Phase 4: 敏感操作确认
                     if (action.message != null) {
                         Log.w(TAG, "Sensitive operation detected: ${action.message}")
-
                         val confirmed = onConfirmation?.invoke(action.message) ?: true
-
                         if (!confirmed) {
                             Log.i(TAG, "User cancelled sensitive operation")
                             return ExecuteResult(success = true, shouldContinue = false)
                         }
-
                         Log.i(TAG, "User confirmed sensitive operation")
                     }
 
-                    // Use ShellCommandBuilder for safe command construction
-                    val cmd = ShellCommandBuilder.buildTapCommand(x, y)
-                    runShell(cmd)
+                    // Phase 5: 优先使用 UiAutomation
+                    if (useUiAutomation) {
+                        service.injectTap(x, y)
+                    } else {
+                        val cmd = ShellCommandBuilder.buildTapCommand(x, y)
+                        runShell(cmd)
+                    }
 
-                    // Phase 4: 添加延迟（对齐原版 timing.py）
                     delay(TimingConfig.device.defaultTapDelay)
                 }
             }
@@ -253,31 +267,39 @@ class ActionExecutor(
                      val x2 = (coords[2] / 1000.0 * screenWidth).toInt()
                      val y2 = (coords[3] / 1000.0 * screenHeight).toInt()
 
-                     Log.d(TAG, "Swipe: model coords=[${coords[0]}, ${coords[1]}] -> [${coords[2]}, ${coords[3]}]")
-                     Log.d(TAG, "Swipe: screen coords=($x1, $y1) -> ($x2, $y2)")
+                     Log.d(TAG, "Swipe: ($x1, $y1) -> ($x2, $y2)")
 
-                     // Use ShellCommandBuilder for safe command construction
-                     val cmd = ShellCommandBuilder.buildSwipeCommand(x1, y1, x2, y2, 300)
-                     runShell(cmd)
-                     
-                     // Phase 4: 添加延迟
+                     // Phase 5: 优先使用 UiAutomation
+                     if (useUiAutomation) {
+                         service.injectSwipe(x1, y1, x2, y2, 300)
+                     } else {
+                         val cmd = ShellCommandBuilder.buildSwipeCommand(x1, y1, x2, y2, 300)
+                         runShell(cmd)
+                     }
+
                      delay(TimingConfig.device.defaultSwipeDelay)
                  }
             }
             
             "home" -> {
-                // Use ShellCommandBuilder for safe command construction
-                val cmd = ShellCommandBuilder.buildKeyEventCommand("KEYCODE_HOME")
-                runShell(cmd)
-                // Phase 4: 添加延迟
+                // Phase 5: 优先使用 UiAutomation
+                if (useUiAutomation) {
+                    service.performGlobalAction(AccessibilityService.GLOBAL_ACTION_HOME)
+                } else {
+                    val cmd = ShellCommandBuilder.buildKeyEventCommand("KEYCODE_HOME")
+                    runShell(cmd)
+                }
                 delay(TimingConfig.device.defaultHomeDelay)
             }
 
             "back" -> {
-                // Use ShellCommandBuilder for safe command construction
-                val cmd = ShellCommandBuilder.buildKeyEventCommand("KEYCODE_BACK")
-                runShell(cmd)
-                // Phase 4: 添加延迟
+                // Phase 5: 优先使用 UiAutomation
+                if (useUiAutomation) {
+                    service.performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK)
+                } else {
+                    val cmd = ShellCommandBuilder.buildKeyEventCommand("KEYCODE_BACK")
+                    runShell(cmd)
+                }
                 delay(TimingConfig.device.defaultBackDelay)
             }
 

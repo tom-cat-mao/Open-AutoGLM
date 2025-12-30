@@ -57,4 +57,44 @@ interface IAutoGLMService {
      * @return 是否已启用
      */
     boolean isIMEEnabled(String imeId);
+
+    // ==================== UiAutomation API ====================
+
+    /**
+     * 初始化 UiAutomation 连接
+     * @return 是否成功
+     */
+    boolean initUiAutomation();
+
+    /**
+     * 通过 UiAutomation 注入点击事件
+     * @param x X 坐标
+     * @param y Y 坐标
+     * @return 是否成功
+     */
+    boolean injectTap(int x, int y);
+
+    /**
+     * 通过 UiAutomation 注入滑动事件
+     * @param x1 起始 X
+     * @param y1 起始 Y
+     * @param x2 结束 X
+     * @param y2 结束 Y
+     * @param duration 持续时间（毫秒）
+     * @return 是否成功
+     */
+    boolean injectSwipe(int x1, int y1, int x2, int y2, long duration);
+
+    /**
+     * 执行全局操作（如返回、主页等）
+     * @param action 操作类型（参考 AccessibilityService.GLOBAL_ACTION_*）
+     * @return 是否成功
+     */
+    boolean performGlobalAction(int action);
+
+    /**
+     * 检查 UiAutomation 是否可用
+     * @return 是否可用
+     */
+    boolean isUiAutomationAvailable();
 }

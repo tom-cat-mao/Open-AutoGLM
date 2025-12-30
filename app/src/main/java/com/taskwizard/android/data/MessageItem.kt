@@ -45,7 +45,8 @@ sealed class MessageItem {
         override val id: String = UUID.randomUUID().toString(),
         val content: String,
         val type: SystemMessageType,
-        val timestamp: Long = System.currentTimeMillis()
+        val timestamp: Long = System.currentTimeMillis(),
+        val stepCount: Int = 0  // 用于 SAVE_TASK_PROMPT 类型显示步骤数
     ) : MessageItem()
 }
 
@@ -56,5 +57,6 @@ enum class SystemMessageType {
     INFO,       // 信息提示（蓝色）
     SUCCESS,    // 成功提示（绿色）
     WARNING,    // 警告提示（橙色）
-    ERROR       // 错误提示（红色）
+    ERROR,      // 错误提示（红色）
+    SAVE_TASK_PROMPT  // 保存Task提示（带按钮）
 }

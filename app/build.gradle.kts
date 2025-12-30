@@ -73,6 +73,15 @@ android {
     }
     // ==================== Lint 配置结束 ====================
 
+    // ==================== 测试配置 ====================
+    testOptions {
+        unitTests {
+            // 允许 Android 方法（如 Log.e）在单元测试中返回默认值
+            isReturnDefaultValues = true
+        }
+    }
+    // ==================== 测试配置结束 ====================
+
     buildFeatures {
         aidl = true
         viewBinding = true
@@ -108,6 +117,12 @@ android {
 }
 
 dependencies {
+    // Hidden APIs module for UiAutomation
+    implementation(project(":hidden-apis"))
+
+    // Rikka Refine runtime
+    implementation("dev.rikka.tools.refine:runtime:4.4.0")
+
     // Jetpack Compose BOM (统一版本管理)
     implementation(platform("androidx.compose:compose-bom:2024.06.00"))
     implementation("androidx.compose.ui:ui")

@@ -28,11 +28,13 @@ import kotlinx.coroutines.launch
  * - 移除复杂动画以提升滚动性能
  *
  * @param messages 消息列表
+ * @param onSaveAsTask 保存为Task的回调
  * @param modifier 修饰符
  */
 @Composable
 fun MessageList(
     messages: List<MessageItem>,
+    onSaveAsTask: (() -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     val listState = rememberLazyListState()
@@ -79,7 +81,10 @@ fun MessageList(
                 when (message) {
                     is MessageItem.ThinkMessage -> ThinkMessageBubble(message)
                     is MessageItem.ActionMessage -> ActionMessageBubble(message)
-                    is MessageItem.SystemMessage -> SystemMessageBubble(message)
+                    is MessageItem.SystemMessage -> SystemMessageBubble(
+                        message = message,
+                        onSaveAsTask = onSaveAsTask
+                    )
                 }
             }
         }

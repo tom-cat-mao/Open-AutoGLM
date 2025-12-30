@@ -5,26 +5,22 @@ import androidx.room.Database
 import androidx.room.Room
 import androidx.room.RoomDatabase
 import androidx.sqlite.db.SupportSQLiteDatabase
+import com.taskwizard.android.data.template.TaskTemplateDao
+import com.taskwizard.android.data.template.TaskTemplateEntity
 
 /**
- * Room database for task history
+ * Room database for task history and templates
  *
- * Configuration:
- * - Version 2 (added apiContextMessagesJson for conversation continuation)
- * - Single table: task_history
- * - Destructive migration for development
- * - Callback for data seeding in future
+ * Version 3: Added task_templates table
  */
 @Database(
-    entities = [TaskHistoryEntity::class],
-    version = 2,
+    entities = [TaskHistoryEntity::class, TaskTemplateEntity::class],
+    version = 3,
     exportSchema = false
 )
 abstract class TaskHistoryDatabase : RoomDatabase() {
-    /**
-     * Get the DAO for task history operations
-     */
     abstract fun historyDao(): TaskHistoryDao
+    abstract fun templateDao(): TaskTemplateDao
 
     companion object {
         private const val DATABASE_NAME = "task_history.db"

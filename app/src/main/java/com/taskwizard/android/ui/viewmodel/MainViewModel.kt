@@ -15,6 +15,8 @@ import com.taskwizard.android.core.AgentCore
 import com.taskwizard.android.data.*
 import com.taskwizard.android.data.history.HistoryRepository
 import com.taskwizard.android.data.history.TaskStatus
+import com.taskwizard.android.data.template.TaskTemplateEntity
+import com.taskwizard.android.data.template.TemplateRepository
 import com.taskwizard.android.manager.OverlayPermissionManager
 import com.taskwizard.android.manager.ShizukuManager
 import com.taskwizard.android.service.OverlayService
@@ -69,6 +71,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val pendingActionsToSave = mutableListOf<Action>()
     private var isBatching = false
 
+    /**
+     * 获取所有动作（已保存 + 待保存）
+     * 由于批量处理有100ms延迟，需要合并两个列表
+     */
+    private fun getAllActions(): List<Action> {
+        return taskActions + pendingActionsToSave
+    }
+
     // SharedPreferences用于主题持久化
     private val prefs = application.getSharedPreferences("app_prefs", 0)
 
@@ -82,6 +92,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     // ==================== 历史记录追踪 ====================
 
     private val historyRepository = HistoryRepository(application)
+    private val templateRepository: TemplateRepository
     private val gson = Gson()
     private var currentTaskHistoryId: Long? = null
     private var taskStartTime: Long = 0
@@ -89,6 +100,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val taskActions = mutableListOf<Action>()
     private val taskErrors = mutableListOf<String>()
     private val apiContextMessages = mutableListOf<Message>()  // For AI context restoration
+
+    // 截图尺寸记录（用于模板保存时保持坐标一致性）
+    private var lastScreenshotWidth: Int = 0
+    private var lastScreenshotHeight: Int = 0
 
     // 对话框状态
     private val _confirmationRequest = MutableStateFlow<String?>(null)
@@ -100,6 +115,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     // 对话框响应的CompletableDeferred
     private var confirmationDeferred: CompletableDeferred<Boolean>? = null
     private var takeOverDeferred: CompletableDeferred<Unit>? = null
+
+    // 保存模板对话框状态
+    private val _showSaveTemplateDialog = MutableStateFlow(false)
+    val showSaveTemplateDialog: StateFlow<Boolean> = _showSaveTemplateDialog.asStateFlow()
 
     // 悬浮窗控制
     private val _overlayEnabled = MutableStateFlow(false)
@@ -211,6 +230,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val shouldMoveToBackground: StateFlow<Boolean> = _shouldMoveToBackground.asStateFlow()
 
     init {
+        // 初始化 TemplateRepository
+        val db = com.taskwizard.android.data.history.TaskHistoryDatabase.getDatabase(application)
+        templateRepository = TemplateRepository(db.templateDao())
+
         // 初始化SettingsManager
         SettingsManager.init(application)
 
@@ -583,6 +606,33 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             it.copy(messages = (it.messages + message).toPersistentList())
         }
         // 系统消息不需要保存到历史记录
+    }
+
+    /**
+     * 添加保存Task提示消息
+     * 在任务完成后显示，允许用户选择是否保存为可重复执行的Task
+     */
+    fun addSaveTaskPrompt(stepCount: Int) {
+        val message = MessageItem.SystemMessage(
+            content = "任务完成！是否保存为可重复执行的Task？",
+            type = SystemMessageType.SAVE_TASK_PROMPT,
+            stepCount = stepCount
+        )
+        _state.update {
+            it.copy(messages = (it.messages + message).toPersistentList())
+        }
+    }
+
+    /**
+     * 处理从消息气泡中点击"保存为Task"按钮
+     * 显示保存对话框（复用现有的 SaveTemplateDialog）
+     */
+    fun handleSaveAsTaskFromMessage() {
+        val allActions = getAllActions()
+        if (allActions.isNotEmpty()) {
+            _state.update { it.copy(templateStepCount = allActions.size) }
+            showSaveTemplateDialog()
+        }
     }
 
     /**
@@ -1053,11 +1103,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     // 检查是否是finish动作
                     if (action.action?.lowercase() == "finish") {
                         val message = action.message ?: action.content ?: "任务完成"
-                        // ✅ 恢复：添加到主界面消息列表
+                        // 计算总动作数量（使用 getAllActions() 合并已保存和待保存的动作）
+                        val actionCount = getAllActions().size
+
+                        // 添加到主界面消息列表
                         withContext(Dispatchers.Main) {
                             addSystemMessage(message, SystemMessageType.SUCCESS)
-                            // ✅ 修复：任务完成后清空输入框
-                            clearTask()
+                            // 添加保存Task提示消息（如果有动作可保存）
+                            if (actionCount > 0) {
+                                addSaveTaskPrompt(actionCount)
+                            }
                         }
                         Log.d(TAG, "Task finished: $message")
                         // 标记任务完成
@@ -1230,6 +1285,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     if (bitmap != null) {
                         // 更新ActionExecutor的屏幕尺寸（使用截图实际尺寸）
                         actionExecutor?.updateScreenSize(bitmap.width, bitmap.height)
+
+                        // 记录截图尺寸（用于模板保存时保持坐标一致性）
+                        lastScreenshotWidth = bitmap.width
+                        lastScreenshotHeight = bitmap.height
 
                         // 转换为JPEG字节数组
                         val outputStream = ByteArrayOutputStream()
@@ -1539,6 +1598,98 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to record task action", e)
+            }
+        }
+    }
+
+    // ==================== 模板保存功能 ====================
+
+    /**
+     * 显示保存模板对话框
+     */
+    fun showSaveTemplateDialog() {
+        if (getAllActions().isNotEmpty()) {
+            _showSaveTemplateDialog.value = true
+        }
+    }
+
+    /**
+     * 隐藏保存模板对话框
+     */
+    fun hideSaveTemplateDialog() {
+        _showSaveTemplateDialog.value = false
+        // 移除保存提示消息
+        removeSaveTaskPromptMessage()
+        // 用户取消保存后，清理任务状态
+        clearTask()
+    }
+
+    /**
+     * 移除保存Task提示消息
+     * 在保存成功或取消后调用
+     */
+    private fun removeSaveTaskPromptMessage() {
+        _state.update { state ->
+            state.copy(
+                messages = state.messages.filterNot {
+                    it is MessageItem.SystemMessage &&
+                    it.type == SystemMessageType.SAVE_TASK_PROMPT
+                }.toPersistentList()
+            )
+        }
+    }
+
+    /**
+     * 保存当前任务为模板
+     */
+    fun saveAsTemplate(name: String) {
+        viewModelScope.launch {
+            try {
+                val allActions = getAllActions()
+                if (allActions.isEmpty()) {
+                    Log.w(TAG, "No actions to save as template")
+                    return@launch
+                }
+
+                // 调试日志：打印保存的动作内容
+                Log.d(TAG, "=== Saving template: $name ===")
+                Log.d(TAG, "Total actions: ${allActions.size}")
+                allActions.forEachIndexed { i, action ->
+                    Log.d(TAG, "  [$i] ${action.action} location=${action.location} content=${action.content?.take(20)}")
+                }
+
+                // 使用截图尺寸（与 AI 任务执行时的坐标转换保持一致）
+                // 如果没有截图尺寸记录，则使用 displayMetrics 作为后备
+                val screenWidth = if (lastScreenshotWidth > 0) lastScreenshotWidth else {
+                    getApplication<Application>().resources.displayMetrics.widthPixels
+                }
+                val screenHeight = if (lastScreenshotHeight > 0) lastScreenshotHeight else {
+                    getApplication<Application>().resources.displayMetrics.heightPixels
+                }
+                Log.d(TAG, "Screen size for template: ${screenWidth}x${screenHeight} (from screenshot: ${lastScreenshotWidth > 0})")
+
+                val actionsJson = gson.toJson(allActions)
+                val template = TaskTemplateEntity(
+                    name = name,
+                    description = _state.value.currentTask,
+                    actionsJson = actionsJson,
+                    screenWidth = screenWidth,
+                    screenHeight = screenHeight,
+                    stepCount = allActions.size,
+                    estimatedDurationMs = allActions.size * 1000L,
+                    createdFromHistoryId = currentTaskHistoryId
+                )
+
+                val id = templateRepository.insert(template)
+                Log.i(TAG, "Template saved: $name (id=$id, screen=${screenWidth}x${screenHeight})")
+
+                _showSaveTemplateDialog.value = false
+                // 移除保存提示消息
+                removeSaveTaskPromptMessage()
+                // 保存成功后清理任务状态
+                clearTask()
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to save template", e)
             }
         }
     }

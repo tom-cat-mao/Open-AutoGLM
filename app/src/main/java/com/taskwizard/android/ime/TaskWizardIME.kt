@@ -109,9 +109,13 @@ class TaskWizardIME : InputMethodService() {
     private inner class AdbBroadcastReceiver : BroadcastReceiver() {
 
         override fun onReceive(context: Context?, intent: Intent?) {
+            Log.d(TAG, "onReceive: action=${intent?.action}")
+
             if (intent == null) return
 
             val ic = currentInputConnection
+            Log.d(TAG, "currentInputConnection: $ic")
+
             if (ic == null) {
                 Log.w(TAG, "No input connection available")
                 return
@@ -142,15 +146,21 @@ class TaskWizardIME : InputMethodService() {
          * 处理 Base64 编码文本输入
          */
         private fun handleInputBase64(intent: Intent) {
-            val base64 = intent.getStringExtra("msg") ?: return
+            Log.d(TAG, "handleInputBase64 called")
+            val base64 = intent.getStringExtra("msg")
+            Log.d(TAG, "base64 msg length: ${base64?.length}")
+
+            if (base64 == null) return
             val ic = currentInputConnection ?: return
 
             try {
                 val decoded = String(Base64.decode(base64, Base64.DEFAULT), Charsets.UTF_8)
-                ic.commitText(decoded, 1)
-                Log.d(TAG, "Input B64: ${decoded.take(20)}${if (decoded.length > 20) "..." else ""}")
+                Log.d(TAG, "Decoded text: ${decoded.take(20)}...")
+
+                val result = ic.commitText(decoded, 1)
+                Log.d(TAG, "commitText result: $result")
             } catch (e: Exception) {
-                Log.e(TAG, "Failed to decode base64", e)
+                Log.e(TAG, "Failed to decode/commit", e)
             }
         }
 

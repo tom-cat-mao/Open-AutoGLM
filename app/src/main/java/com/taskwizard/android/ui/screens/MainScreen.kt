@@ -25,6 +25,7 @@ import kotlinx.coroutines.delay
  *
  * @param onNavigateToSettings 导航到设置页面的回调
  * @param onNavigateToHistory 导航到历史页面的回调
+ * @param onNavigateToTasks 导航到Tasks页面的回调
  * @param viewModel 共享的ViewModel实例
  * @param historyIdToLoad 要加载的历史记录ID（用于继续对话）
  */
@@ -32,6 +33,7 @@ import kotlinx.coroutines.delay
 fun MainScreen(
     onNavigateToSettings: () -> Unit,
     onNavigateToHistory: () -> Unit,
+    onNavigateToTasks: () -> Unit,
     viewModel: MainViewModel,
     historyIdToLoad: Long? = null
 ) {
@@ -45,6 +47,7 @@ fun MainScreen(
     val showADBKeyboardGuide by viewModel.showADBKeyboardGuide.collectAsStateWithLifecycle()
     val showOverlayPermissionGuide by viewModel.showOverlayPermissionGuide.collectAsStateWithLifecycle()
     val showTaskWizardIMEGuide by viewModel.showTaskWizardIMEGuide.collectAsStateWithLifecycle()
+    val showSaveTemplateDialog by viewModel.showSaveTemplateDialog.collectAsStateWithLifecycle()
 
     // Load historical conversation if historyId is provided
     LaunchedEffect(historyIdToLoad) {
@@ -100,6 +103,7 @@ fun MainScreen(
                     hasADBKeyboard = state.isADBKeyboardEnabled,
                     onSettingsClick = onNavigateToSettings,
                     onHistoryClick = onNavigateToHistory,
+                    onTasksClick = onNavigateToTasks,
                     onNewConversationClick = onNewConversationClickStable,
                     onShizukuClick = onShizukuClickStable,
                     onKeyboardClick = onKeyboardClickStable
@@ -120,6 +124,7 @@ fun MainScreen(
         // 消息列表
         MessageList(
             messages = state.messages,
+            onSaveAsTask = { viewModel.handleSaveAsTaskFromMessage() },
             modifier = Modifier
                 .fillMaxSize()
                 .padding(innerPadding)
@@ -232,6 +237,20 @@ fun MainScreen(
                 },
                 onDismiss = {
                     viewModel.dismissOverlayPermissionGuide()
+                }
+            )
+        }
+
+        // 保存模板对话框
+        if (showSaveTemplateDialog) {
+            SaveTemplateDialog(
+                defaultName = state.currentTask.take(30),
+                stepCount = state.templateStepCount,
+                onSave = { name ->
+                    viewModel.saveAsTemplate(name)
+                },
+                onDismiss = {
+                    viewModel.hideSaveTemplateDialog()
                 }
             )
         }

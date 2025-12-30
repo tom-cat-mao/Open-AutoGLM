@@ -154,6 +154,7 @@ fun ActionMessageBubble(
 @Composable
 fun SystemMessageBubble(
     message: MessageItem.SystemMessage,
+    onSaveAsTask: (() -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     Row(
@@ -167,6 +168,7 @@ fun SystemMessageBubble(
                     SystemMessageType.SUCCESS -> MaterialTheme.colorScheme.primaryContainer
                     SystemMessageType.WARNING -> MaterialTheme.colorScheme.tertiaryContainer
                     SystemMessageType.ERROR -> MaterialTheme.colorScheme.errorContainer
+                    SystemMessageType.SAVE_TASK_PROMPT -> MaterialTheme.colorScheme.secondaryContainer
                 }
             ),
             elevation = CardDefaults.cardElevation(
@@ -186,6 +188,7 @@ fun SystemMessageBubble(
                         SystemMessageType.SUCCESS -> Icons.Rounded.CheckCircle
                         SystemMessageType.WARNING -> Icons.Rounded.Warning
                         SystemMessageType.ERROR -> Icons.Rounded.Error
+                        SystemMessageType.SAVE_TASK_PROMPT -> Icons.Rounded.Save
                     },
                     contentDescription = null,
                     modifier = Modifier.size(16.dp),
@@ -194,6 +197,7 @@ fun SystemMessageBubble(
                         SystemMessageType.SUCCESS -> MaterialTheme.colorScheme.onPrimaryContainer
                         SystemMessageType.WARNING -> MaterialTheme.colorScheme.onTertiaryContainer
                         SystemMessageType.ERROR -> MaterialTheme.colorScheme.onErrorContainer
+                        SystemMessageType.SAVE_TASK_PROMPT -> MaterialTheme.colorScheme.onSecondaryContainer
                     }
                 )
 
@@ -209,6 +213,7 @@ fun SystemMessageBubble(
                             SystemMessageType.SUCCESS -> MaterialTheme.colorScheme.onPrimaryContainer
                             SystemMessageType.WARNING -> MaterialTheme.colorScheme.onTertiaryContainer
                             SystemMessageType.ERROR -> MaterialTheme.colorScheme.onErrorContainer
+                            SystemMessageType.SAVE_TASK_PROMPT -> MaterialTheme.colorScheme.onSecondaryContainer
                         }
                     )
 
@@ -220,8 +225,29 @@ fun SystemMessageBubble(
                             SystemMessageType.SUCCESS -> MaterialTheme.colorScheme.onPrimaryContainer
                             SystemMessageType.WARNING -> MaterialTheme.colorScheme.onTertiaryContainer
                             SystemMessageType.ERROR -> MaterialTheme.colorScheme.onErrorContainer
+                            SystemMessageType.SAVE_TASK_PROMPT -> MaterialTheme.colorScheme.onSecondaryContainer
                         }.copy(alpha = 0.7f)
                     )
+
+                    // 保存为Task按钮（仅在 SAVE_TASK_PROMPT 类型时显示）
+                    if (message.type == SystemMessageType.SAVE_TASK_PROMPT) {
+                        Spacer(modifier = Modifier.height(8.dp))
+                        OutlinedButton(
+                            onClick = { onSaveAsTask?.invoke() },
+                            modifier = Modifier.fillMaxWidth(),
+                            colors = ButtonDefaults.outlinedButtonColors(
+                                contentColor = MaterialTheme.colorScheme.primary
+                            )
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.Save,
+                                contentDescription = null,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text("保存为Task (${message.stepCount}步)")
+                        }
+                    }
                 }
             }
         }

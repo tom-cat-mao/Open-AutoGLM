@@ -15,3 +15,4 @@ dependencyResolutionManagement {
 }
 rootProject.name = "Open-AutoGLM-Android"
 include(":app")
+include(":hidden-apis")
