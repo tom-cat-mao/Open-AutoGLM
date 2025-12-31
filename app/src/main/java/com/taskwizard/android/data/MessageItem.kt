@@ -47,6 +47,16 @@ sealed class MessageItem {
         val type: SystemMessageType,
         val timestamp: Long = System.currentTimeMillis()
     ) : MessageItem()
+
+    /**
+     * 用户输入消息
+     * 显示用户的任务请求，用于聊天界面展示
+     */
+    data class UserMessage(
+        override val id: String = UUID.randomUUID().toString(),
+        val content: String,
+        val timestamp: Long = System.currentTimeMillis()
+    ) : MessageItem()
 }
 
 /**

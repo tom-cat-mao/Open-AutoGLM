@@ -80,6 +80,7 @@ fun MessageList(
                     is MessageItem.ThinkMessage -> ThinkMessageBubble(message)
                     is MessageItem.ActionMessage -> ActionMessageBubble(message)
                     is MessageItem.SystemMessage -> SystemMessageBubble(message)
+                    is MessageItem.UserMessage -> UserMessageBubble(message)
                 }
             }
         }

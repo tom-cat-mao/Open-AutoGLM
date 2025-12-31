@@ -586,6 +586,19 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
+     * 添加用户消息
+     * 显示用户的任务请求，用于聊天界面展示
+     */
+    fun addUserMessage(content: String) {
+        val message = MessageItem.UserMessage(content = content)
+        _state.update {
+            it.copy(messages = (it.messages + message).toPersistentList())
+        }
+        // 批量写入数据库
+        batchRecordTaskMessage(message)
+    }
+
+    /**
      * 批量写入消息到数据库
      * 性能优化：100ms内的消息会被批量写入，减少IO操作
      */
@@ -842,6 +855,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private fun startTaskAfterPreCheck(task: String) {
         // Check if continuing from history
         val isContinuation = currentTaskHistoryId != null && _state.value.isContinuedConversation
+
+        // 添加用户消息到聊天界面（新任务和继续任务都需要）
+        addUserMessage(task)
 
         if (!isContinuation) {
             // New task - create new history record
@@ -1706,15 +1722,35 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 // 3. Convert actions to ActionMessage items
                 val actionMessages = actions.map { MessageItem.ActionMessage(action = it) }
 
-                // 4. Merge all messages - combine think and action messages
-                val allMessages = thinkMessages + actionMessages
+                // 4. Merge all messages and sort by timestamp
+                val mergedMessages = (thinkMessages + actionMessages).sortedBy { msg ->
+                    when (msg) {
+                        is MessageItem.ThinkMessage -> msg.timestamp
+                        is MessageItem.ActionMessage -> msg.timestamp
+                        is MessageItem.SystemMessage -> msg.timestamp
+                        is MessageItem.UserMessage -> msg.timestamp
+                    }
+                }
 
-                // 5. Restore UI messages to AppState
+                // 5. Check if messages already contain UserMessage (backward compatibility)
+                val hasUserMessage = mergedMessages.any { it is MessageItem.UserMessage }
+                val allMessages = if (!hasUserMessage) {
+                    // Create UserMessage from taskDescription for old records
+                    val userMessage = MessageItem.UserMessage(
+                        content = task.taskDescription,
+                        timestamp = task.startTime
+                    )
+                    listOf(userMessage) + mergedMessages
+                } else {
+                    mergedMessages
+                }
+
+                // 6. Restore UI messages to AppState (clear input field)
                 withContext(Dispatchers.Main) {
                     _state.update {
                         it.copy(
                             messages = allMessages.toPersistentList(),
-                            currentTask = task.taskDescription,
+                            currentTask = "",  // 清空输入框，让用户输入新指令
                             model = task.model,
                             isContinuedConversation = true,
                             originalTaskId = historyId
@@ -1722,7 +1758,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     }
                 }
 
-                // 6. Set current task history ID to update existing record
+                // 7. Set current task history ID to update existing record
                 currentTaskHistoryId = task.id
                 taskStartTime = System.currentTimeMillis()
 
