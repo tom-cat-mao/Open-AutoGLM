@@ -7,6 +7,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
+import java.util.concurrent.CopyOnWriteArrayList
 
 /**
  * TaskScope - Application 级别的协程作用域
@@ -34,8 +35,8 @@ object TaskScope {
     // 当前任务的 AgentCore 引用
     private var currentAgentCore: AgentCore? = null
 
-    // 清理回调列表
-    private val cleanupCallbacks = mutableListOf<() -> Unit>()
+    // 清理回调列表（使用线程安全的 CopyOnWriteArrayList）
+    private val cleanupCallbacks = CopyOnWriteArrayList<() -> Unit>()
 
     // 任务停止回调（用于通知 ViewModel 更新状态）
     private var onTaskStoppedCallback: (() -> Unit)? = null

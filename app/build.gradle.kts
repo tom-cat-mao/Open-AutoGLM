@@ -168,7 +168,7 @@ dependencies {
     testImplementation("junit:junit:4.13.2")
 
     // Kotlin Test
-    testImplementation("org.jetbrains.kotlin:kotlin-test:1.9.22")
+    testImplementation("org.jetbrains.kotlin:kotlin-test:2.0.0")
 
     // Coroutines Test
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.7.3")
@@ -183,6 +183,9 @@ dependencies {
     // MockK (Kotlin mocking library)
     testImplementation("io.mockk:mockk:1.13.8")
     testImplementation("io.mockk:mockk-android:1.13.8")
+
+    // MockWebServer for network testing
+    testImplementation("com.squareup.okhttp3:mockwebserver:4.12.0")
 
     // AndroidX Test
     testImplementation("androidx.test:core:1.5.0")

@@ -43,6 +43,7 @@ object ShizukuManager {
 
     /**
      * 绑定 UserService (带服务存活检测和自动重连)
+     * 使用 invokeOnCancellation 确保协程取消时正确清理资源
      */
     suspend fun bindService(context: Context): IAutoGLMService = suspendCancellableCoroutine { cont ->
         // 检查现有服务是否存活
@@ -75,7 +76,7 @@ object ShizukuManager {
             .debuggable(BuildConfig.DEBUG)
             .version(BuildConfig.VERSION_CODE) // 使用版本号，升级时自动重新绑定
 
-        Shizuku.bindUserService(args, object : ServiceConnection {
+        val connection = object : ServiceConnection {
             override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
                 Log.d(TAG, "UserService connected")
                 if (binder != null && binder.pingBinder()) {
@@ -91,7 +92,19 @@ object ShizukuManager {
                 Log.w(TAG, "UserService disconnected unexpectedly")
                 service = null
             }
-        })
+        }
+
+        // 关键修复：注册取消回调，确保协程取消时解绑服务，防止资源泄漏
+        cont.invokeOnCancellation {
+            Log.w(TAG, "bindService cancelled, unbinding connection to prevent leak")
+            try {
+                Shizuku.unbindUserService(args, connection, true)
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to unbind on cancellation", e)
+            }
+        }
+
+        Shizuku.bindUserService(args, connection)
     }
     
     /**

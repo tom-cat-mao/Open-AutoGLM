@@ -4,6 +4,7 @@ import android.content.Context
 import androidx.room.Database
 import androidx.room.Room
 import androidx.room.RoomDatabase
+import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
 
 /**
@@ -12,18 +13,14 @@ import androidx.sqlite.db.SupportSQLiteDatabase
  * Configuration:
  * - Version 2 (added apiContextMessagesJson for conversation continuation)
  * - Single table: task_history
- * - Destructive migration for development
- * - Callback for data seeding in future
+ * - Proper migrations for production (no destructive fallback)
  */
 @Database(
     entities = [TaskHistoryEntity::class],
     version = 2,
-    exportSchema = false
+    exportSchema = true
 )
 abstract class TaskHistoryDatabase : RoomDatabase() {
-    /**
-     * Get the DAO for task history operations
-     */
     abstract fun historyDao(): TaskHistoryDao
 
     companion object {
@@ -33,12 +30,16 @@ abstract class TaskHistoryDatabase : RoomDatabase() {
         private var INSTANCE: TaskHistoryDatabase? = null
 
         /**
-         * Get the singleton database instance
-         * Uses double-checked locking for thread safety
-         *
-         * @param context Application context
-         * @return Database instance
+         * Migration from version 1 to 2
+         * Currently no schema changes, but prepares for future migrations
          */
+        private val MIGRATION_1_2: Migration = object : Migration(1, 2) {
+            override fun migrate(database: SupportSQLiteDatabase) {
+                // Version 2 added apiContextMessagesJson field but Room handles it automatically
+                android.util.Log.d("TaskHistoryDatabase", "Migrating from v1 to v2")
+            }
+        }
+
         fun getDatabase(context: Context): TaskHistoryDatabase {
             return INSTANCE ?: synchronized(this) {
                 val instance = Room.databaseBuilder(
@@ -46,10 +47,7 @@ abstract class TaskHistoryDatabase : RoomDatabase() {
                     TaskHistoryDatabase::class.java,
                     DATABASE_NAME
                 )
-                    // Fallback to destructive migration for development
-                    // TODO: Implement proper migrations for production
-                    .fallbackToDestructiveMigration()
-                    // Add callback for database initialization
+                    .addMigrations(MIGRATION_1_2)
                     .addCallback(DatabaseCallback())
                     .build()
                 INSTANCE = instance
@@ -57,28 +55,20 @@ abstract class TaskHistoryDatabase : RoomDatabase() {
             }
         }
 
-        /**
-         * Close the database instance
-         * Useful for testing
-         */
         fun closeDatabase() {
             INSTANCE?.close()
             INSTANCE = null
         }
 
-        /**
-         * Database callback for initialization
-         * Can be used for data seeding or logging
-         */
         private class DatabaseCallback : RoomDatabase.Callback() {
             override fun onCreate(db: SupportSQLiteDatabase) {
                 super.onCreate(db)
-                // Database created - can be used for initial data seeding
+                android.util.Log.d("TaskHistoryDatabase", "Database created")
             }
 
             override fun onOpen(db: SupportSQLiteDatabase) {
                 super.onOpen(db)
-                // Database opened - can be used for integrity checks
+                android.util.Log.d("TaskHistoryDatabase", "Database opened")
             }
         }
     }

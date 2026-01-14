@@ -61,6 +61,10 @@ google-services.json
 # OSX
 .DS_Store
 
+# Claude Code configuration
+.claude/
+AGENTS.md
+
 # Temporary files
 tmp/
 

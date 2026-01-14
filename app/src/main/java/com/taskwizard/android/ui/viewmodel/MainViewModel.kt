@@ -10,6 +10,8 @@ import com.google.gson.reflect.TypeToken
 import com.taskwizard.android.IAutoGLMService
 import com.taskwizard.android.TaskScope
 import com.taskwizard.android.api.ApiClient
+import com.taskwizard.android.api.ApiException
+import com.taskwizard.android.api.CircuitBreakerOpenException
 import com.taskwizard.android.core.ActionExecutor
 import com.taskwizard.android.core.AgentCore
 import com.taskwizard.android.data.*
@@ -31,6 +33,8 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -65,6 +69,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     // ==================== 消息数据库批量写入优化 ====================
 
     // 性能优化：批量写入数据库，避免频繁的IO操作
+    // 使用 Mutex 保护并发访问，防止竞态条件
+    private val batchMutex = Mutex()
     private val pendingMessagesToSave = mutableListOf<MessageItem>()
     private val pendingActionsToSave = mutableListOf<Action>()
     private var isBatching = false
@@ -601,19 +607,27 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     /**
      * 批量写入消息到数据库
      * 性能优化：100ms内的消息会被批量写入，减少IO操作
+     * 使用 Mutex 保护并发访问，防止竞态条件
      */
     private fun batchRecordTaskMessage(message: MessageItem) {
-        pendingMessagesToSave.add(message)
+        viewModelScope.launch(Dispatchers.IO) {
+            batchMutex.withLock {
+                pendingMessagesToSave.add(message)
 
-        if (!isBatching) {
-            isBatching = true
-            viewModelScope.launch(Dispatchers.IO) {
-                delay(100) // 批量100ms内的消息
-                val messagesToSave = pendingMessagesToSave.toList()
-                pendingMessagesToSave.clear()
-                isBatching = false
-
-                messagesToSave.forEach { recordTaskMessage(it) }
+                if (!isBatching) {
+                    isBatching = true
+                    // 启动批量保存协程（在 mutex 外执行）
+                    launch {
+                        delay(100) // 批量100ms内的消息
+                        batchMutex.withLock {
+                            val messagesToSave = pendingMessagesToSave.toList()
+                            pendingMessagesToSave.clear()
+                            isBatching = false
+                            // 在 mutex 外执行实际的保存操作
+                            messagesToSave
+                        }.forEach { recordTaskMessage(it) }
+                    }
+                }
             }
         }
     }
@@ -621,19 +635,27 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     /**
      * 批量写入操作到数据库
      * 性能优化：100ms内的操作会被批量写入，减少IO操作
+     * 使用 Mutex 保护并发访问，防止竞态条件
      */
     private fun batchRecordTaskAction(action: Action) {
-        pendingActionsToSave.add(action)
+        viewModelScope.launch(Dispatchers.IO) {
+            batchMutex.withLock {
+                pendingActionsToSave.add(action)
 
-        if (!isBatching) {
-            isBatching = true
-            viewModelScope.launch(Dispatchers.IO) {
-                delay(100) // 批量100ms内的操作
-                val actionsToSave = pendingActionsToSave.toList()
-                pendingActionsToSave.clear()
-                isBatching = false
-
-                actionsToSave.forEach { recordTaskAction(it) }
+                if (!isBatching) {
+                    isBatching = true
+                    // 启动批量保存协程（在 mutex 外执行）
+                    launch {
+                        delay(100) // 批量100ms内的操作
+                        batchMutex.withLock {
+                            val actionsToSave = pendingActionsToSave.toList()
+                            pendingActionsToSave.clear()
+                            isBatching = false
+                            // 在 mutex 外执行实际的保存操作
+                            actionsToSave
+                        }.forEach { recordTaskAction(it) }
+                    }
+                }
             }
         }
     }
@@ -806,34 +828,68 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
      */
     private suspend fun performNetworkPreCheck(): PreCheckResult {
         return try {
-            // 发送一个简单的测试请求
             val testMessages = listOf(
                 Message("system", "You are a helpful assistant."),
                 Message("user", "Hello")
             )
 
-            val response = ApiClient.getService().chatCompletion(
-                OpenAIRequest(
-                    model = _state.value.model,
-                    messages = testMessages,
-                    max_tokens = 5,
-                    temperature = 0.0
-                )
+            val request = OpenAIRequest(
+                model = _state.value.model,
+                messages = testMessages,
+                max_tokens = 5,
+                temperature = 0.0
             )
 
-            if (response.isSuccessful) {
+            // Use executeWithRetry for automatic retry and circuit breaker
+            val result = ApiClient.executeWithRetry {
+                ApiClient.getService().chatCompletion(request)
+            }
+
+            if (result.isSuccess) {
                 Log.d(TAG, "Network pre-check successful")
                 PreCheckResult(success = true)
             } else {
-                val errorMsg = when (response.code()) {
-                    401 -> "API Key 无效或已过期"
-                    403 -> "API 访问被拒绝，请检查权限"
-                    404 -> "API 地址不存在，请检查 Base URL"
-                    429 -> "API 请求频率超限，请稍后再试"
-                    500, 502, 503 -> "API 服务器错误，请稍后再试"
-                    else -> "API 错误 (${response.code()})"
+                val exception = result.exceptionOrNull()!!
+                val errorMsg = when (exception) {
+                    is ApiException -> when (exception.code) {
+                        401 -> "API Key 无效或已过期"
+                        403 -> "API 访问被拒绝，请检查权限"
+                        404 -> "API 地址不存在，请检查 Base URL"
+                        429 -> "API 请求频率超限，请稍后再试"
+                        500, 502, 503 -> "API 服务器错误，请稍后再试"
+                        else -> "API 错误 (${exception.code})"
+                    }
+                    is CircuitBreakerOpenException -> "服务暂时不可用，请稍后再试"
+                    is java.net.SocketTimeoutException -> "网络连接超时"
+                    is java.net.UnknownHostException -> "无法连接到服务器，请检查网络"
+                    is javax.net.ssl.SSLException -> "SSL 证书错误"
+                    else -> "网络错误: ${exception.message}"
                 }
-                Log.e(TAG, "Network pre-check failed: $errorMsg (code=${response.code()})")
+                Log.e(TAG, "Network pre-check failed: $errorMsg", exception)
+                PreCheckResult(success = false, errorMessage = errorMsg)
+            }
+
+            if (result.isSuccess) {
+                Log.d(TAG, "Network pre-check successful")
+                PreCheckResult(success = true)
+            } else {
+                val exception = result.exceptionOrNull()!!
+                val errorMsg = when (exception) {
+                    is ApiException -> when (exception.code) {
+                        401 -> "API Key 无效或已过期"
+                        403 -> "API 访问被拒绝，请检查权限"
+                        404 -> "API 地址不存在，请检查 Base URL"
+                        429 -> "API 请求频率超限，请稍后再试"
+                        500, 502, 503 -> "API 服务器错误，请稍后再试"
+                        else -> "API 错误 (${exception.code})"
+                    }
+                    is CircuitBreakerOpenException -> "服务暂时不可用，请稍后再试"
+                    is java.net.SocketTimeoutException -> "网络连接超时"
+                    is java.net.UnknownHostException -> "无法连接到服务器，请检查网络"
+                    is javax.net.ssl.SSLException -> "SSL 证书错误"
+                    else -> "网络错误: ${exception.message}"
+                }
+                Log.e(TAG, "Network pre-check failed: $errorMsg", exception)
                 PreCheckResult(success = false, errorMessage = errorMsg)
             }
         } catch (e: Exception) {

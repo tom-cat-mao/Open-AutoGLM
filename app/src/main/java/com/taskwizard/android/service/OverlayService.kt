@@ -24,6 +24,7 @@ import com.taskwizard.android.R
 import com.taskwizard.android.ui.overlay.OverlayContent
 import com.taskwizard.android.ui.theme.AutoGLMTheme
 import com.taskwizard.android.ui.viewmodel.OverlayViewModel
+import java.lang.ref.WeakReference
 
 /**
  * OverlayService - 悬浮窗服务
@@ -45,8 +46,14 @@ class OverlayService : LifecycleService() {
         private const val CHANNEL_ID = "overlay_service_channel"
         private const val NOTIFICATION_ID = 1001
 
-        // 单例引用，用于外部更新状态
-        var instance: OverlayService? = null
+        // 单例弱引用，避免内存泄漏
+        private var instanceRef: WeakReference<OverlayService>? = null
+
+        var instance: OverlayService?
+            get() = instanceRef?.get()
+            private set(value) {
+                instanceRef = value?.let { WeakReference(it) }
+            }
 
         // 人工接管完成回调
         var onTakeoverCompleteCallback: (() -> Unit)? = null
@@ -113,8 +120,11 @@ class OverlayService : LifecycleService() {
     override fun onDestroy() {
         Log.d(TAG, "onDestroy")
 
-        // 清理单例引用
-        instance = null
+        // 清理单例引用（WeakReference 自动清理，但显式设为 null 更清晰）
+        instanceRef = null
+
+        // 清理接管回调，防止内存泄漏
+        onTakeoverCompleteCallback = null
 
         // 移除悬浮窗
         overlayView?.let {
