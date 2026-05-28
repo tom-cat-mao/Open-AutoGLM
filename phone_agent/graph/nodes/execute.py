@@ -29,14 +29,12 @@ def execute_node(state: "AgentState", config: RunnableConfig) -> dict:
     """
     Execute node: run action, strip images, append assistant message.
 
-    Uses dispatch_tool (Phase 3) for action execution, falling back to
-    action_handler.execute() if use_tools is False in config.
+    Uses dispatch_tool for action execution.
 
     Corresponds to agent.py:185-243 (execute + strip images + append context + finish check).
     """
     configurable = config.get("configurable", {})
     verbose = configurable.get("verbose", True)
-    use_tools = configurable.get("use_tools", True)  # Phase 3: default to tool dispatch
 
     action_parsed = state.get("action_parsed")
     messages = list(state["messages"])  # copy
@@ -101,13 +99,9 @@ def execute_node(state: "AgentState", config: RunnableConfig) -> dict:
             "interrupt_message": action_parsed["message"],
         }
 
-    # 3. Execute action via tool dispatch (Phase 3) or legacy ActionHandler
+    # 3. Execute action via tool dispatch
     try:
-        if use_tools:
-            result = dispatch_tool(action_parsed, screen_width, screen_height, device_id)
-        else:
-            action_handler = configurable["action_handler"]
-            result = action_handler.execute(action_parsed, screen_width, screen_height)
+        result = dispatch_tool(action_parsed, screen_width, screen_height, device_id)
     except Exception as e:
         if verbose:
             traceback.print_exc()

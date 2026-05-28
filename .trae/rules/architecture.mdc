@@ -7,40 +7,28 @@ alwaysApply: true
 
 ## Agent Loop (the core)
 
-`PhoneAgent` implements the following loop:
+`PhoneAgent` uses a LangGraph StateGraph implementing the **Plan-Execute-Reflect** pattern:
 
 ```
-run(task)
-  -> reset context + step_count
-  -> _execute_step(task, is_first=True)   # First step: system prompt + user task + screenshot
-  -> while not finished and step_count < max_steps:
-       _execute_step(is_first=False)       # Subsequent steps: screenshot only
+START → plan → execute → [confirm|takeover|reflect|replan|end]
+                         ├─ confirm → after_interrupt → [reflect|end]
+                         ├─ takeover → after_interrupt → [reflect|end]
+                         ├─ reflect → should_continue → [replan|end]
+                         ├─ replan → plan (skip reflect for Wait/Note/Call_API/Interact)
+                         └─ end → END
 ```
 
-### `_execute_step()` flow (agent.py:136-243)
+### Node responsibilities
 
-1. **Capture screen**: Get screenshot + current app name
-2. **Build messages**:
-   - First step: system prompt + `{task}\n\n{screen_info}` + screenshot image
-   - Later steps: `** Screen Info **\n\n{screen_info}` + screenshot image
-3. **Model inference**: `self.model_client.request(self._context)` -> `ModelResponse(thinking, action, ...)`
-4. **Parse action**: `parse_action(response.action)` -> `dict` with `_metadata` key ("do" or "finish")
-5. **Strip images**: `MessageBuilder.remove_images_from_message(self._context[-1])`
-6. **Execute action**: `self.action_handler.execute(action, width, height)` -> `ActionResult`
-7. **Append assistant message**: `MessageBuilder.create_assistant_message(f"<think...>{response.thinking}</think...>\n<answer>{response.action}</answer>")`
-8. **Check finish**: `action.get("_metadata") == "finish" or result.should_finish`
+- **plan_node**: Screenshot → build messages → model inference → parse action
+- **execute_node**: Execute action via `dispatch_tool()` → strip images → append assistant message
+- **reflect_node**: Screenshot → model judges if action succeeded → output reflection
+- **confirm_node**: `interrupt()` for sensitive operations (payment, privacy)
+- **takeover_node**: `interrupt()` for login/captcha
 
 ### Key data structures
 
 ```python
-@dataclass
-class StepResult:
-    success: bool
-    finished: bool
-    action: dict[str, Any] | None
-    thinking: str
-    message: str | None = None
-
 @dataclass
 class ActionResult:
     success: bool
@@ -60,9 +48,10 @@ class ModelResponse:
 
 ## Context Management
 
-- Context is a `list[dict]` in OpenAI chat format: `[system_msg, user_msg, assistant_msg, user_msg, ...]`
+- Context is stored in `AgentState.messages` as `Annotated[list[dict], add]` (append reducer)
+- Messages follow OpenAI chat format: `[system_msg, user_msg, assistant_msg, user_msg, ...]`
 - Images are added as `image_url` content blocks in user messages
-- After each step, the last user message's images are stripped (only text remains)
+- After each step, `execute_node` strips images from the last user message (only text remains)
 - This means the model only sees the CURRENT screenshot, not historical ones
 - Assistant messages contain the full `<think+answer>` text (no images)
 
@@ -88,9 +77,11 @@ class DeviceFactory:
 
 When modifying the agent loop, check ALL of these:
 
+- [ ] State schema updated if new fields needed (see `graph/state.py`)
 - [ ] Context format still valid (system -> user -> assistant -> user -> ...)
-- [ ] Image stripping still happens after model inference
-- [ ] `StepResult` / `ActionResult` dataclass updated if new fields needed
+- [ ] Image stripping still happens in `execute_node`
+- [ ] `ActionResult` dataclass updated if new fields needed
 - [ ] `parse_action()` can handle any new output format
-- [ ] `max_steps` guard still works
-- [ ] `confirmation_callback` / `takeover_callback` still invoked for sensitive actions
+- [ ] `max_steps` guard still works via `should_continue` edge
+- [ ] HITL: sensitive actions route through `confirm_node`, login/captcha through `takeover_node`
+- [ ] New actions have corresponding `@tool` function in `graph/tools/`

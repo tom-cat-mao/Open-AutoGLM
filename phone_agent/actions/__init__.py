@@ -1,5 +1,5 @@
 """Action handling module for Phone Agent."""
 
-from phone_agent.actions.handler import ActionHandler, ActionResult
+from phone_agent.actions.handler import ActionResult, parse_action, do, finish
 
-__all__ = ["ActionHandler", "ActionResult"]
+__all__ = ["ActionResult", "parse_action", "do", "finish"]
