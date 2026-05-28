@@ -1,22 +1,19 @@
-"""Device factory for selecting ADB or HDC based on device type."""
+"""Device factory for Android ADB device control."""
 
 from enum import Enum
-from typing import Any
 
 
 class DeviceType(Enum):
     """Type of device connection tool."""
 
     ADB = "adb"
-    HDC = "hdc"
-    IOS = "ios"
 
 
 class DeviceFactory:
     """
     Factory class for getting device-specific implementations.
 
-    This allows the system to work with both Android (ADB) and HarmonyOS (HDC) devices.
+    This allows the system to work with Android (ADB) devices.
     """
 
     def __init__(self, device_type: DeviceType = DeviceType.ADB):
@@ -24,23 +21,19 @@ class DeviceFactory:
         Initialize the device factory.
 
         Args:
-            device_type: The type of device to use (ADB or HDC).
+            device_type: The type of device to use (ADB).
         """
         self.device_type = device_type
         self._module = None
 
     @property
     def module(self):
-        """Get the appropriate device module (adb or hdc)."""
+        """Get the appropriate device module (adb)."""
         if self._module is None:
             if self.device_type == DeviceType.ADB:
                 from phone_agent import adb
 
                 self._module = adb
-            elif self.device_type == DeviceType.HDC:
-                from phone_agent import hdc
-
-                self._module = hdc
             else:
                 raise ValueError(f"Unknown device type: {self.device_type}")
         return self._module
@@ -126,17 +119,10 @@ class DeviceFactory:
         return self.module.list_devices()
 
     def get_connection_class(self):
-        """Get the connection class (ADBConnection or HDCConnection)."""
-        if self.device_type == DeviceType.ADB:
-            from phone_agent.adb import ADBConnection
+        """Get the connection class (ADBConnection)."""
+        from phone_agent.adb import ADBConnection
 
-            return ADBConnection
-        elif self.device_type == DeviceType.HDC:
-            from phone_agent.hdc import HDCConnection
-
-            return HDCConnection
-        else:
-            raise ValueError(f"Unknown device type: {self.device_type}")
+        return ADBConnection
 
 
 # Global device factory instance
@@ -148,7 +134,7 @@ def set_device_type(device_type: DeviceType):
     Set the global device type.
 
     Args:
-        device_type: The device type to use (ADB or HDC).
+        device_type: The device type to use (ADB).
     """
     global _device_factory
     _device_factory = DeviceFactory(device_type)
