@@ -34,7 +34,7 @@ hooks:
           cat <<'EOF'
           {
             "hookSpecificOutput": {
-              "additionalContext": "任务已标记完成。如当前 Phase 已结束，请按 AGENTS.md 的 Version Management 规范执行 git commit。"
+              "additionalContext": "任务已标记完成。如当前 Phase 已结束，请先更新 .trae/rules/graph.mdc 的 Roadmap section（标记 Phase ✅），然后按 AGENTS.md 的 Version Management 规范执行 git commit。"
             }
           }
           EOF
