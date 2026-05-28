@@ -1,0 +1,102 @@
+---
+description: 模型交互：ModelClient、流式推理、响应解析、系统提示词
+alwaysApply: false
+globs: "phone_agent/model/**/*.py, phone_agent/config/prompts*.py"
+---
+
+# Model
+
+## ModelClient (model/client.py)
+
+Uses OpenAI-compatible API with streaming. Works with any vLLM/SGLang/compatible server.
+
+### ModelConfig
+
+```python
+@dataclass
+class ModelConfig:
+    base_url: str = "http://localhost:8000/v1"
+    api_key: str = "EMPTY"
+    model_name: str = "autoglm-phone-9b"
+    max_tokens: int = 3000
+    temperature: float = 0.0        # Deterministic by default
+    top_p: float = 0.85
+    frequency_penalty: float = 0.2
+    extra_body: dict = {}           # Provider-specific params
+    lang: str = "cn"
+```
+
+### Streaming Flow (client.py:53-174)
+
+1. Create streaming chat completion request
+2. Accumulate chunks into `raw_content`
+3. Print thinking tokens in real-time
+4. When action markers detected (`finish(message=` or `do(action=`), stop printing
+5. Parse final response into `(thinking, action)` tuple
+6. Return `ModelResponse` with timing metrics
+
+### Response Parsing (_parse_response, client.py:176-216)
+
+Priority order:
+1. Split on `finish(message=` -> thinking before, action after
+2. Split on `do(action=` -> thinking before, action after
+3. Legacy: split on `<answer>` XML tag
+4. Fallback: empty thinking, full content as action
+
+### Timing Metrics
+
+- `time_to_first_token`: Time from request start to first chunk
+- `time_to_thinking_end`: Time from request start to action marker detection
+- `total_time`: Total request duration
+
+## MessageBuilder (model/client.py:219-291)
+
+Static helper class for constructing OpenAI-format messages:
+
+- `create_system_message(content)` -> `{"role": "system", "content": str}`
+- `create_user_message(text, image_base64)` -> `{"role": "user", "content": [image_url, text]}`
+- `create_assistant_message(content)` -> `{"role": "assistant", "content": str}`
+- `remove_images_from_message(msg)` -> Strips `image_url` blocks, keeps `text` blocks
+- `build_screen_info(current_app)` -> `{"current_app": "xxx"}` as JSON string
+
+## System Prompts (config/prompts.py, prompts_zh.py, prompts_en.py)
+
+### Structure
+
+The system prompt defines:
+1. **Role**: "You are an intelligent agent analysis expert"
+2. **Output format**: `<think...>{think}</think...>\n<answer>{action}</answer>`
+3. **Action grammar**: `do(action=..., ...)` and `finish(message=...)`
+4. **18 behavioral rules**: Covering navigation, error recovery, task completion, etc.
+
+### Key Prompt Rules (from prompts.py)
+
+- Rule 1: Check current app before acting, Launch if wrong app
+- Rule 2: Use Back for wrong pages, try X/close button if Back doesn't work
+- Rule 3: Max 3 consecutive Waits, then Back and re-enter
+- Rule 5: Swipe to find items not visible on screen
+- Rule 14: Verify previous action took effect before proceeding
+- Rule 18: Double-check task completion before finish
+
+### Adding/Modifying Prompts
+
+- Chinese prompt: `prompts.py` (default) or `prompts_zh.py`
+- English prompt: `prompts_en.py`
+- Selected via `--lang cn` or `--lang en`
+- `get_system_prompt(lang)` in `config/__init__.py` returns the appropriate prompt
+
+## Model Deployment Check
+
+```bash
+python scripts/check_deployment_cn.py --base-url http://localhost:8000/v1 --model autoglm-phone-9b
+python scripts/check_deployment_en.py --base-url http://localhost:8000/v1 --model autoglm-phone-9b
+```
+
+## Swapping Models
+
+The `ModelClient` uses OpenAI-compatible API, so any VLM server works:
+- Change `--model` and `--base-url` CLI flags
+- Or set `PHONE_AGENT_MODEL` and `PHONE_AGENT_BASE_URL` env vars
+- Use `ModelConfig.extra_body` for provider-specific parameters
+- The model MUST support the action output format (`do(...)` / `finish(...)`)
+- The model MUST support image input (vision-language model)

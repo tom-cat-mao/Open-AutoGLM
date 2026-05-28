@@ -1,0 +1,96 @@
+---
+description: Agent 架构设计：核心循环、上下文管理
+alwaysApply: true
+---
+
+# Architecture
+
+## Agent Loop (the core)
+
+`PhoneAgent` implements the following loop:
+
+```
+run(task)
+  -> reset context + step_count
+  -> _execute_step(task, is_first=True)   # First step: system prompt + user task + screenshot
+  -> while not finished and step_count < max_steps:
+       _execute_step(is_first=False)       # Subsequent steps: screenshot only
+```
+
+### `_execute_step()` flow (agent.py:136-243)
+
+1. **Capture screen**: Get screenshot + current app name
+2. **Build messages**:
+   - First step: system prompt + `{task}\n\n{screen_info}` + screenshot image
+   - Later steps: `** Screen Info **\n\n{screen_info}` + screenshot image
+3. **Model inference**: `self.model_client.request(self._context)` -> `ModelResponse(thinking, action, ...)`
+4. **Parse action**: `parse_action(response.action)` -> `dict` with `_metadata` key ("do" or "finish")
+5. **Strip images**: `MessageBuilder.remove_images_from_message(self._context[-1])`
+6. **Execute action**: `self.action_handler.execute(action, width, height)` -> `ActionResult`
+7. **Append assistant message**: `MessageBuilder.create_assistant_message(f"<think...>{response.thinking}</think...>\n<answer>{response.action}</answer>")`
+8. **Check finish**: `action.get("_metadata") == "finish" or result.should_finish`
+
+### Key data structures
+
+```python
+@dataclass
+class StepResult:
+    success: bool
+    finished: bool
+    action: dict[str, Any] | None
+    thinking: str
+    message: str | None = None
+
+@dataclass
+class ActionResult:
+    success: bool
+    should_finish: bool
+    message: str | None = None
+    requires_confirmation: bool = False
+
+@dataclass
+class ModelResponse:
+    thinking: str
+    action: str
+    raw_content: str
+    time_to_first_token: float | None
+    time_to_thinking_end: float | None
+    total_time: float | None
+```
+
+## Context Management
+
+- Context is a `list[dict]` in OpenAI chat format: `[system_msg, user_msg, assistant_msg, user_msg, ...]`
+- Images are added as `image_url` content blocks in user messages
+- After each step, the last user message's images are stripped (only text remains)
+- This means the model only sees the CURRENT screenshot, not historical ones
+- Assistant messages contain the full `<think+answer>` text (no images)
+
+## DeviceFactory Pattern
+
+```python
+class DeviceFactory:
+    def __init__(self, device_type: DeviceType):  # ADB
+        self._module = None  # Lazy-loaded
+
+    @property
+    def module(self):
+        # Dynamically imports phone_agent.adb
+        ...
+
+    # Delegates all device operations to self.module
+```
+
+- Global singleton via `get_device_factory()` / `set_device_type()`
+- The factory delegates every call to the underlying module (adb)
+
+## Modification Checklist: Agent Loop
+
+When modifying the agent loop, check ALL of these:
+
+- [ ] Context format still valid (system -> user -> assistant -> user -> ...)
+- [ ] Image stripping still happens after model inference
+- [ ] `StepResult` / `ActionResult` dataclass updated if new fields needed
+- [ ] `parse_action()` can handle any new output format
+- [ ] `max_steps` guard still works
+- [ ] `confirmation_callback` / `takeover_callback` still invoked for sensitive actions
