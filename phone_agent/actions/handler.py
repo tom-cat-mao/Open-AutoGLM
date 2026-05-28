@@ -256,66 +256,13 @@ class ActionHandler:
         return ActionResult(True, False, message="User interaction required")
 
     def _send_keyevent(self, keycode: str) -> None:
-        """Send a keyevent to the device."""
-        from phone_agent.device_factory import DeviceType, get_device_factory
-        from phone_agent.hdc.connection import _run_hdc_command
-
-        device_factory = get_device_factory()
-
-        # Handle HDC devices with HarmonyOS-specific keyEvent command
-        if device_factory.device_type == DeviceType.HDC:
-            hdc_prefix = ["hdc", "-t", self.device_id] if self.device_id else ["hdc"]
-            
-            # Map common keycodes to HarmonyOS keyEvent codes
-            # KEYCODE_ENTER (66) -> 2054 (HarmonyOS Enter key code)
-            if keycode == "KEYCODE_ENTER" or keycode == "66":
-                _run_hdc_command(
-                    hdc_prefix + ["shell", "uitest", "uiInput", "keyEvent", "2054"],
-                    capture_output=True,
-                    text=True,
-                )
-            else:
-                # For other keys, try to use the numeric code directly
-                # If keycode is a string like "KEYCODE_ENTER", convert it
-                try:
-                    # Try to extract numeric code from string or use as-is
-                    if keycode.startswith("KEYCODE_"):
-                        # For now, only handle ENTER, other keys may need mapping
-                        if "ENTER" in keycode:
-                            _run_hdc_command(
-                                hdc_prefix + ["shell", "uitest", "uiInput", "keyEvent", "2054"],
-                                capture_output=True,
-                                text=True,
-                            )
-                        else:
-                            # Fallback to ADB-style command for unsupported keys
-                            subprocess.run(
-                                hdc_prefix + ["shell", "input", "keyevent", keycode],
-                                capture_output=True,
-                                text=True,
-                            )
-                    else:
-                        # Assume it's a numeric code
-                        _run_hdc_command(
-                            hdc_prefix + ["shell", "uitest", "uiInput", "keyEvent", str(keycode)],
-                            capture_output=True,
-                            text=True,
-                        )
-                except Exception:
-                    # Fallback to ADB-style command
-                    subprocess.run(
-                        hdc_prefix + ["shell", "input", "keyevent", keycode],
-                        capture_output=True,
-                        text=True,
-                    )
-        else:
-            # ADB devices use standard input keyevent command
-            cmd_prefix = ["adb", "-s", self.device_id] if self.device_id else ["adb"]
-            subprocess.run(
-                cmd_prefix + ["shell", "input", "keyevent", keycode],
-                capture_output=True,
-                text=True,
-            )
+        """Send a keyevent to the Android device."""
+        cmd_prefix = ["adb", "-s", self.device_id] if self.device_id else ["adb"]
+        subprocess.run(
+            cmd_prefix + ["shell", "input", "keyevent", keycode],
+            capture_output=True,
+            text=True,
+        )
 
     @staticmethod
     def _default_confirmation(message: str) -> bool:
