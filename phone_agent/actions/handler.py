@@ -48,6 +48,10 @@ class ActionHandler:
         """
         Execute an action from the AI model.
 
+        .. deprecated::
+            Use ``phone_agent.graph.tools.dispatch_tool`` instead.
+            This method will be removed in Phase 4.
+
         Args:
             action: The action dictionary from the model.
             screen_width: Current screen width in pixels.

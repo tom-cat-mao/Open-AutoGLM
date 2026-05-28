@@ -37,10 +37,23 @@ phone_agent/
     ├── state.py                 # AgentState TypedDict
     ├── builder.py               # create_agent_graph()
     ├── edges.py                 # Conditional edges
-    └── nodes/
-        ├── plan.py              # plan_node
-        ├── execute.py           # execute_node
-        └── reflect.py           # reflect_node
+    ├── nodes/
+    │   ├── plan.py              # plan_node
+    │   ├── execute.py           # execute_node (uses dispatch_tool)
+    │   ├── reflect.py           # reflect_node
+    │   ├── confirm.py           # confirm_node (interrupt)
+    │   └── takeover.py          # takeover_node (interrupt)
+    └── tools/                   # @tool functions (Phase 3)
+        ├── __init__.py          # dispatch_tool, get_tool_map, get_all_tools
+        ├── coords.py            # convert_relative_to_absolute
+        ├── tap.py
+        ├── type_text.py
+        ├── swipe.py
+        ├── navigation.py        # back / home
+        ├── launch.py
+        ├── press.py             # double_tap / long_press
+        ├── wait.py
+        └── misc.py              # note / call_api / interact
 ```
 
 ## Quick Reference
@@ -56,7 +69,7 @@ phone_agent/
 
 **Goal**: Replace PhoneAgent while-loop with LangGraph StateGraph (Plan-Execute-Reflect)
 
-**Current Phase**: Phase 2 — Human-in-the-Loop ✅ Completed (41/41 tests passing)
+**Current Phase**: Phase 3 — Tool Abstraction ✅ Completed (80/80 tests passing)
 
 ### Phase 1 Status: Completed
 - AgentState, plan_node, execute_node, reflect_node implemented
@@ -78,10 +91,20 @@ phone_agent/
 
 **Design Doc**: `.trae/rules/graph.mdc` — detailed State/Node/Edge/HITL spec, read before touching `phone_agent/graph/`.
 
-### Phase 3 (Planned): Tool Abstraction
-- Each Action 封装为 `@tool` 装饰器函数
-- `ToolNode` 统一调度
-- `parse_action()` 逐步废弃
+### Phase 3 Status: Completed
+- Each Action 封装为 `@tool` 装饰器函数（tap, type_text, swipe, back, home, launch, double_tap, long_press, wait, note, call_api, interact）
+- `dispatch_tool()` 统一调度，替代 `ActionHandler.execute()`
+- `convert_relative_to_absolute()` 提取为 `tools/coords.py` 独立 utility
+- `execute_node` 通过 `use_tools` config 切换新旧路径，默认 `use_tools=True`
+- `ActionHandler.execute()` 标记 deprecated，Phase 4 移除
+- 坐标转换、dispatch 路由、全图集成、向后兼容测试（39 新增 tests）
+
+**Key New Files** (Phase 3): `phone_agent/graph/tools/{__init__.py, coords.py, tap.py, type_text.py, swipe.py, navigation.py, launch.py, press.py, wait.py, misc.py}`
+
+### Phase 4 (Planned): Cleanup
+- 移除旧 `_execute_step` while 循环
+- 移除旧 `ActionHandler` 类
+- 更新 AGENTS.md 和 `.trae/rules`
 
 ## Version Management
 
