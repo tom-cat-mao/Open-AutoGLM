@@ -1,0 +1,106 @@
+---
+description: Action 系统：解析、注册、执行、新增 Action 的 checklist
+alwaysApply: false
+globs: "phone_agent/actions/**/*.py"
+---
+
+# Actions
+
+## Action System Overview
+
+The action system has two layers:
+1. **Parsing**: `parse_action()` converts raw model text -> `dict` with `_metadata` key
+2. **Execution**: `ActionHandler.execute()` dispatches to handler methods
+
+## Action Dictionary Format
+
+All actions are plain dicts with a `_metadata` key:
+
+```python
+# "do" action
+{"_metadata": "do", "action": "Tap", "element": [500, 300]}
+
+# "finish" action
+{"_metadata": "finish", "message": "Task completed successfully"}
+```
+
+Helper functions:
+- `do(**kwargs)` -> adds `_metadata="do"`
+- `finish(**kwargs)` -> adds `_metadata="finish"`
+
+## parse_action() (handler.py:332-387)
+
+Parsing priority:
+1. **Type/Type_Name shortcut**: If response starts with `do(action="Type"` or `do(action="Type_Name"`, special-cased to handle text with special characters
+2. **AST parsing**: If response starts with `do`, parse with `ast.parse()` + `ast.literal_eval()` for safety
+3. **Finish**: If response starts with `finish`, extract message via string replacement
+4. **Fallback**: Raise `ValueError`
+
+**Critical**: Never use `eval()`. Always use `ast.parse()` for new parsing logic.
+
+## Action Registry (handler.py:90-108)
+
+The handler uses a hardcoded dict mapping action names to methods:
+
+```python
+handlers = {
+    "Launch": self._handle_launch,
+    "Tap": self._handle_tap,
+    "Type": self._handle_type,
+    "Type_Name": self._handle_type,  # Same handler as Type
+    "Swipe": self._handle_swipe,
+    "Back": self._handle_back,
+    "Home": self._handle_home,
+    "Double Tap": self._handle_double_tap,
+    "Long Press": self._handle_long_press,
+    "Wait": self._handle_wait,
+    "Take_over": self._handle_takeover,
+    "Note": self._handle_note,        # STUB
+    "Call_API": self._handle_call_api, # STUB
+    "Interact": self._handle_interact, # STUB
+}
+```
+
+## Action Details
+
+### Coordinate Actions (Tap, Double Tap, Long Press, Swipe)
+- Model outputs coordinates in 0-1000 range
+- `_convert_relative_to_absolute(element, width, height)` converts to absolute pixels
+- Formula: `x = int(element[0] / 1000 * screen_width)`
+
+### Tap with Confirmation
+- If action dict contains `"message"` key (e.g., `do(action="Tap", element=[x,y], message="支付")`)
+- Triggers `confirmation_callback(message)` before executing
+- If callback returns False, action is cancelled with `should_finish=True`
+
+### Type / Type_Name
+- Switches to ADB keyboard -> clears text -> types -> restores keyboard
+- Text is auto-cleared before typing (no separate clear step needed)
+
+### Launch
+- Looks up app name in `APP_PACKAGES` (Android)
+- Returns `ActionResult(False, False, "App not found")` if name not in mapping
+
+### Stub Actions (Note, Call_API, Interact)
+- `Note`: Returns `ActionResult(True, False)` - no actual implementation
+- `Call_API`: Returns `ActionResult(True, False)` - no actual implementation
+- `Interact`: Returns `ActionResult(True, False, message="User interaction required")`
+
+## Adding a New Action: Checklist
+
+1. [ ] Add action name + handler method to `_get_handler()` in `handler.py`
+2. [ ] Implement handler: `def _handle_xxx(self, action: dict, width: int, height: int) -> ActionResult`
+3. [ ] Update system prompt in `prompts.py` (CN) and `prompts_en.py` (EN)
+4. [ ] If action uses coordinates, call `_convert_relative_to_absolute()`
+5. [ ] If action is sensitive, check for `"message"` key and call `confirmation_callback`
+6. [ ] If action needs new device-level commands, add them to `adb/` module
+7. [ ] Test with Android path
+
+## Action Details by Platform
+
+| Action | Android |
+|---|---|
+| Type | ADB keyboard switch + restore |
+| Back | `input keyevent 4` |
+| Launch | `am start` |
+| Long Press | `swipe with duration=3000` |
