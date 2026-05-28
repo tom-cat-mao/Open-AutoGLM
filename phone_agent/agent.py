@@ -11,6 +11,8 @@ from phone_agent.config import get_messages, get_system_prompt
 from phone_agent.device_factory import get_device_factory
 from phone_agent.model import ModelClient, ModelConfig
 from phone_agent.model.client import MessageBuilder
+from phone_agent.graph.builder import create_agent_graph
+from phone_agent.graph.state import AgentState
 
 
 @dataclass
@@ -22,6 +24,7 @@ class AgentConfig:
     lang: str = "cn"
     system_prompt: str | None = None
     verbose: bool = True
+    use_graph: bool = False  # Use LangGraph Plan-Execute-Reflect architecture
 
     def __post_init__(self):
         if self.system_prompt is None:
@@ -81,6 +84,11 @@ class PhoneAgent:
         self._context: list[dict[str, Any]] = []
         self._step_count = 0
 
+        # LangGraph support
+        self._graph = None
+        if self.agent_config.use_graph:
+            self._graph = create_agent_graph()
+
     def run(self, task: str) -> str:
         """
         Run the agent to complete a task.
@@ -91,6 +99,12 @@ class PhoneAgent:
         Returns:
             Final message from the agent.
         """
+        if self.agent_config.use_graph and self._graph is not None:
+            return self._run_graph(task)
+        return self._run_loop(task)
+
+    def _run_loop(self, task: str) -> str:
+        """Original while-loop implementation (backward compatible)."""
         self._context = []
         self._step_count = 0
 
@@ -107,6 +121,53 @@ class PhoneAgent:
             if result.finished:
                 return result.message or "Task completed"
 
+        return "Max steps reached"
+
+    def _run_graph(self, task: str) -> str:
+        """LangGraph Plan-Execute-Reflect implementation."""
+        device_factory = get_device_factory()
+        screenshot = device_factory.get_screenshot(self.agent_config.device_id)
+
+        initial_state: AgentState = {
+            "task": task,
+            "messages": [],
+            "step_count": 0,
+            "max_steps": self.agent_config.max_steps,
+            "lang": self.agent_config.lang,
+            "screen_width": screenshot.width,
+            "screen_height": screenshot.height,
+            "screenshot_b64": None,
+            "current_app": "",
+            "thinking": "",
+            "action_raw": "",
+            "action_parsed": None,
+            "action_result": None,
+            "reflection": None,
+            "action_succeeded": True,
+            "pending_interrupt": None,
+            "interrupt_message": None,
+            "interrupt_result": None,
+            "finished": False,
+            "error": None,
+            "device_id": self.agent_config.device_id,
+        }
+
+        config = {
+            "configurable": {
+                "model_client": self.model_client,
+                "device_factory": device_factory,
+                "action_handler": self.action_handler,
+                "system_prompt": self.agent_config.system_prompt,
+                "verbose": self.agent_config.verbose,
+            }
+        }
+
+        result = self._graph.invoke(initial_state, config)
+
+        if result.get("error"):
+            return f"Error: {result['error']}"
+        if result.get("action_result"):
+            return result["action_result"].get("message") or "Task completed"
         return "Max steps reached"
 
     def step(self, task: str | None = None) -> StepResult:

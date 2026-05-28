@@ -1,0 +1,24 @@
+---
+description: MCP 文档检索工具使用决策：Context7 查第三方库文档，Fast Context 搜本项目代码
+alwaysApply: false
+globs: "phone_agent/**/*.py"
+---
+
+# Tools
+
+## 何时用哪个
+
+| 场景 | 工具 |
+|------|------|
+| 查第三方库 API（LangGraph/LangChain） | Context7 |
+| 搜本项目代码 | Fast Context |
+
+## Context7
+
+两步调用：`resolve-library-id` → `query-docs`
+
+常用 ID：LangGraph=`/langchain-ai/langgraph`，LangChain=`/langchain-ai/langchain`
+
+## Fast Context
+
+直接调用 `fast_context_search(query, project_path)` 即可。

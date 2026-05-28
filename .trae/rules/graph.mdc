@@ -1,0 +1,430 @@
+---
+description: LangGraph StateGraph 详细设计：State/Node/Edge/Tool/HITL 规范
+alwaysApply: false
+globs: "phone_agent/graph/**/*.py"
+---
+
+# LangGraph Refactoring Design
+
+## 1. Overview
+
+将 `PhoneAgent._execute_step()` 的 while 循环重构为 LangGraph StateGraph，采用 **Plan-Execute-Reflect** 三节点拓扑。
+
+### 为什么是 Plan-Execute-Reflect
+
+| 方案 | 节点数 | 优点 | 缺点 |
+|------|--------|------|------|
+| observe-think-parse-act | 4 | 粒度细 | 节点多，首次实现复杂 |
+| **Plan-Execute-Reflect** | **3** | **图拓扑极简，Reflect 是真正新增价值** | plan 节点内部逻辑稍重 |
+
+选择理由：
+1. 3 个 Node + 1 条条件边，立刻能跑
+2. **Reflect 是当前代码缺失的能力**——action 执行完直接进下一步，不判断是否成功
+3. 渐进式：先跑通最小图，后续可拆 plan 为 observe+think
+
+### 图拓扑
+
+```
+START → plan → execute → reflect → should_continue?
+                                    ├─ "end" → END
+                                    └─ "replan" → plan
+```
+
+## 2. State Schema
+
+```python
+# phone_agent/graph/state.py
+from typing import TypedDict, Annotated
+from operator import add
+
+class AgentState(TypedDict):
+    # === 对话上下文 ===
+    messages: Annotated[list[dict], add]      # OpenAI chat 格式，替代 PhoneAgent._context
+
+    # === 任务 ===
+    task: str                                  # 用户原始任务
+    step_count: int                            # 当前步数
+    max_steps: int                             # 最大步数
+    lang: str                                  # 语言
+
+    # === 屏幕 ===
+    screen_width: int                          # 设备屏幕宽度（像素）
+    screen_height: int                         # 设备屏幕高度（像素）
+    screenshot_b64: str | None                 # 当前截图 base64
+    current_app: str                           # 当前前台 app 名
+
+    # === Plan 节点输出 ===
+    thinking: str                              # 模型思考过程
+    action_raw: str                            # 模型原始 action 文本
+    action_parsed: dict | None                 # parse_action() 解析结果
+
+    # === Execute 节点输出 ===
+    action_result: dict | None                 # ActionResult 序列化为 dict
+
+    # === Reflect 节点输出 ===
+    reflection: str | None                     # 反思结论
+    action_succeeded: bool                     # 上一步动作是否生效
+
+    # === 控制 ===
+    finished: bool                             # 任务是否完成
+    error: str | None                          # 错误信息
+    device_id: str | None                      # 设备 ID（可选）
+```
+```
+
+### State 字段与旧代码的映射
+
+| State 字段 | 旧代码来源 | 说明 |
+|------------|-----------|------|
+| `messages` | `PhoneAgent._context` | 统一为 reducer 追加模式 |
+| `step_count` | `PhoneAgent._step_count` | |
+| `task` | `PhoneAgent.run(task)` 参数 | |
+| `screenshot_b64` | `device_factory.get_screenshot()` | |
+| `current_app` | `device_factory.get_current_app()` | |
+| `thinking` | `ModelResponse.thinking` | |
+| `action_raw` | `ModelResponse.action` | |
+| `action_parsed` | `parse_action(response.action)` | |
+| `action_result` | `ActionHandler.execute()` 返回值 | |
+| `reflection` | **新增** | 旧代码无反思机制 |
+| `finished` | `PhoneAgent._finished` | |
+| `lang` | `AgentConfig.lang` | |
+| `device_id` | `AgentConfig.device_id` | |
+
+### messages Reducer 设计
+
+- 使用 `Annotated[list[dict], add]`（追加模式）
+- 图片剥离在 `execute` Node 内完成，不放在 reducer 中
+- 原因：剥离是业务逻辑（"模型推理后移除图片"），不是通用的消息合并策略
+
+## 3. Node 设计
+
+### 3.1 plan Node
+
+**职责**：截图 → 构建消息 → 模型推理 → 解析 action
+
+```
+输入 State: task, step_count, screenshot_b64, current_app, reflection(上轮), messages
+输出 State: screenshot_b64(新), current_app(新), thinking, action_raw, action_parsed, messages(+2), step_count(+1)
+```
+
+**内部流程**：
+
+1. **截图**：`device_factory.get_screenshot()` → 更新 `screenshot_b64`, `screen_width`, `screen_height`
+2. **获取当前 app**：`device_factory.get_current_app()` → 更新 `current_app`
+3. **构建消息**：
+   - `step_count == 0`：追加 system message + user message（task + screen_info + screenshot）
+   - `step_count > 0`：追加 user message（screen_info + screenshot + 上轮 reflection）
+4. **模型推理**：`ModelClient.request(messages)` → 得到 `ModelResponse`
+5. **解析 action**：`parse_action(response.action)` → 更新 `action_parsed`
+6. **更新 State**：`thinking`, `action_raw`, `action_parsed`, `step_count += 1`
+
+**与旧代码的对应**：`agent.py:148-183`（截图 + 构建消息 + 推理 + 解析）
+
+### 3.2 execute Node
+
+**职责**：执行 action → 剥离图片 → 追加 assistant 消息
+
+```
+输入 State: action_parsed, screen_width, screen_height, messages
+输出 State: action_result, messages(图片剥离 + assistant 追加), finished(可能)
+```
+
+**内部流程**：
+
+1. **检查 action_parsed**：
+   - `_metadata == "finish"` → 设置 `finished=True`，`action_result={success: True, should_finish: True}`
+   - `_metadata != "do"` → 设置 `error=...`
+2. **执行 action**：`ActionHandler.execute(action_parsed, screen_width, screen_height)` → `ActionResult`
+3. **剥离图片**：`MessageBuilder.remove_images_from_message(messages[-1])`（最后一条 user 消息）
+4. **追加 assistant 消息**：`MessageBuilder.create_assistant_message(f"<think...>{thinking}</think...>\n<answer>{action_raw}</answer>")`
+5. **检查 should_finish**：`ActionResult.should_finish` → 设置 `finished=True`
+
+**与旧代码的对应**：`agent.py:185-243`（执行 + 图片剥离 + 上下文追加 + 完成判断）
+
+### 3.3 reflect Node
+
+**职责**：再截一张图 → 模型判断动作是否生效 → 输出反思
+
+```
+输入 State: action_parsed, action_result, task, step_count, messages
+输出 State: screenshot_b64(新), current_app(新), reflection, action_succeeded, finished(可能)
+```
+
+**内部流程**：
+
+1. **截图**：`device_factory.get_screenshot()` → 更新 `screenshot_b64`
+2. **获取当前 app**：`device_factory.get_current_app()` → 更新 `current_app`
+3. **构建反思 prompt**：
+   ```
+   你刚执行了动作：{action_parsed}
+   执行结果：{action_result}
+   请观察当前截图，判断：
+   1. 动作是否生效（如页面是否如预期变化）
+   2. 任务进度如何
+   3. 下一步建议
+   ```
+4. **模型推理**：调用 ModelClient（使用轻量 prompt，非完整 system prompt）
+5. **解析反思**：更新 `reflection`, `action_succeeded`
+6. **判断任务完成**：如果反思认为任务已完成 → 设置 `finished=True`
+
+**这是全新节点**，旧代码没有对应。这是 Plan-Execute-Reflect 架构的核心价值。
+
+### reflect 的 skip 条件
+
+以下情况跳过 reflect，直接回到 plan：
+- `action_parsed._metadata == "finish"`（模型主动结束）
+- `action_parsed.action == "Wait"`（等待动作无需反思）
+- `action_parsed.action == "Note"` / `"Call_API"` / `"Interact"`（stub 动作）
+
+## 4. Edge 设计
+
+### should_continue 条件边
+
+```python
+# phone_agent/graph/edges.py
+
+def should_continue(state: AgentState) -> Literal["end", "replan"]:
+    if state.get("finished"):
+        return "end"
+    if state.get("error"):
+        return "end"
+    if state["step_count"] >= state["max_steps"]:
+        return "end"
+    return "replan"
+```
+
+### reflect 后的路由
+
+```python
+def after_execute(state: AgentState) -> Literal["reflect", "end"]:
+    """execute 之后决定是否需要 reflect"""
+    action = state.get("action_parsed")
+    if not action:
+        return "end"
+    if action.get("_metadata") == "finish":
+        return "end"
+    # skip reflect 的动作类型
+    skip_actions = {"Wait", "Note", "Call_API", "Interact"}
+    if action.get("action") in skip_actions:
+        return "end"  # 不 reflect，但 should_continue 会路由回 plan
+    return "reflect"
+```
+
+### 完整图定义
+
+```python
+# phone_agent/graph/builder.py
+
+from langgraph.graph import StateGraph, START, END
+
+def create_agent_graph():
+    graph = StateGraph(AgentState)
+
+    graph.add_node("plan", plan_node)
+    graph.add_node("execute", execute_node)
+    graph.add_node("reflect", reflect_node)
+
+    graph.add_edge(START, "plan")
+    graph.add_edge("plan", "execute")
+    graph.add_conditional_edges("execute", after_execute, {"reflect": "reflect", "end": END})
+    graph.add_conditional_edges("reflect", should_continue, {"replan": "plan", "end": END})
+
+    return graph.compile()
+```
+
+**注意**：skip reflect 的动作走 `execute → END`，但 `should_continue` 在 `reflect` 之后。对于 skip 的情况，需要在 `execute` 节点内设置 `finished=False`，然后由 `after_execute` 路由到 END。这意味着 skip reflect 时循环会中断。
+
+**修正方案**：skip reflect 的动作不直接到 END，而是走一个轻量路径回到 plan：
+
+```python
+def after_execute(state: AgentState) -> Literal["reflect", "replan", "end"]:
+    action = state.get("action_parsed")
+    if not action:
+        return "end"
+    if action.get("_metadata") == "finish":
+        return "end"
+    skip_actions = {"Wait", "Note", "Call_API", "Interact"}
+    if action.get("action") in skip_actions:
+        return "replan"  # 跳过 reflect，直接回到 plan
+    return "reflect"
+
+# 更新边定义
+graph.add_conditional_edges("execute", after_execute, {
+    "reflect": "reflect",
+    "replan": "plan",
+    "end": END,
+})
+graph.add_conditional_edges("reflect", should_continue, {
+    "replan": "plan",
+    "end": END,
+})
+```
+
+## 5. 依赖注入
+
+### 问题
+
+当前 `DeviceFactory` 和 `ModelClient` 是全局单例/构造器注入。LangGraph Node 是纯函数，不能直接访问实例。
+
+### 方案：通过 config 传入
+
+```python
+# 调用方
+graph = create_agent_graph()
+result = graph.invoke(
+    initial_state,
+    config={"configurable": {
+        "model_client": model_client,
+        "device_factory": device_factory,
+        "action_handler": action_handler,
+    }}
+)
+
+# Node 内部获取
+def plan_node(state: AgentState, config: RunnableConfig) -> dict:
+    model_client = config["configurable"]["model_client"]
+    device_factory = config["configurable"]["device_factory"]
+    ...
+```
+
+### 为什么不用全局单例
+
+- 便于测试：可以注入 mock
+- LangGraph 的设计哲学：Node 是纯函数，副作用通过 config/State 传入
+- 未来多 Agent 并发时，全局单例会冲突
+
+## 6. Human-in-the-Loop（Phase 2，当前不实现）
+
+当前 Phase 1 保留 `confirmation_callback` / `takeover_callback`，通过 config 注入。
+
+Phase 2 计划：
+- `confirmation_callback` → `interrupt()` + `Command(resume=...)`
+- `takeover_callback` → `interrupt()` + `Command(resume=...)`
+- 好处：可暂停、可恢复、可跨进程持久化
+
+## 7. 向后兼容策略
+
+### PhoneAgent.run() 内部切换
+
+```python
+# agent.py 修改（Phase 1 末尾）
+class PhoneAgent:
+    def __init__(self, ..., use_graph: bool = False):
+        self.use_graph = use_graph
+        if use_graph:
+            self.graph = create_agent_graph()
+
+    def run(self, task: str) -> StepResult:
+        if self.use_graph:
+            return self._run_graph(task)
+        return self._run_loop(task)  # 旧逻辑不动
+
+    def _run_graph(self, task: str) -> StepResult:
+        initial_state = {
+            "task": task,
+            "messages": [],
+            "step_count": 0,
+            "max_steps": self.config.max_steps,
+            ...
+        }
+        config = {"configurable": {
+            "model_client": self.model_client,
+            "device_factory": get_device_factory(),
+            "action_handler": self.action_handler,
+        }}
+        result = self.graph.invoke(initial_state, config)
+        return StepResult(...)
+```
+
+### main.py 无需修改
+
+`PhoneAgent.run()` 签名不变，通过 `--use-graph` CLI flag 或环境变量切换。
+
+## 8. 文件结构
+
+```
+phone_agent/graph/
+├── __init__.py              # 导出 create_agent_graph, AgentState
+├── state.py                 # AgentState TypedDict
+├── builder.py               # create_agent_graph() + compile
+├── edges.py                 # after_execute, should_continue
+├── nodes/
+│   ├── __init__.py
+│   ├── plan.py              # plan_node
+│   ├── execute.py           # execute_node
+│   └── reflect.py           # reflect_node
+```
+
+Phase 2 新增：
+```
+│   ├── confirm.py           # confirmation interrupt
+│   └── takeover.py          # takeover interrupt
+```
+
+Phase 3 新增：
+```
+└── tools/                   # @tool 装饰器替代 ActionHandler
+    ├── tap.py
+    ├── type_text.py
+    ├── swipe.py
+    ├── navigation.py        # back / home
+    ├── launch.py
+    ├── press.py             # double_tap / long_press
+    ├── wait.py
+    ├── misc.py              # note / call_api / interact
+    └── coords.py            # 坐标转换 utility
+```
+
+## 9. Roadmap
+
+### Phase 1: Plan-Execute-Reflect MVP（✅ 已完成）
+
+| Step | 任务 | 产出 | 状态 |
+|------|------|------|------|
+| 1.1 | 定义 AgentState | `graph/state.py` | ✅ |
+| 1.2 | 实现 plan_node | `graph/nodes/plan.py` | ✅ |
+| 1.3 | 实现 execute_node | `graph/nodes/execute.py` | ✅ |
+| 1.4 | 实现 reflect_node + reflect prompt | `graph/nodes/reflect.py` | ✅ |
+| 1.5 | 实现条件边 | `graph/edges.py` | ✅ |
+| 1.6 | 构建图 + 工厂函数 | `graph/builder.py` | ✅ |
+| 1.7 | PhoneAgent 添加 use_graph 开关 | `agent.py` 修改 | ✅ |
+| 1.8 | 验证：mock 跑通基本循环 | 16/16 tests passing | ✅ |
+
+### Phase 2: Human-in-the-Loop（✅ 已完成）
+
+| Step | 任务 | 状态 |
+|------|------|------|
+| 2.1 | 用 interrupt() 替代 confirmation_callback | ✅ |
+| 2.2 | 用 interrupt() 替代 takeover_callback | ✅ |
+| 2.3 | 实现 Command 恢复逻辑 | ✅ |
+| 2.4 | 添加 confirm/takeover 节点到图拓扑 | ✅ |
+| 2.5 | 验证：全路径测试 41/41 passing | ✅ |
+
+### Phase 3: Tool 抽象
+
+| Step | 任务 | 状态 |
+|------|------|------|
+| 3.1 | 每个 Action 封装为 @tool 函数 | |
+| 3.2 | ToolNode 统一调度 | |
+| 3.3 | 坐标转换提取为 tool 内部 utility | |
+| 3.4 | parse_action() 逐步废弃 | |
+
+### Phase 4: 清理
+
+| Step | 任务 | 状态 |
+|------|------|------|
+| 4.1 | 移除旧 _execute_step while 循环 | |
+| 4.2 | 移除旧 ActionHandler 类 | |
+| 4.3 | 更新 AGENTS.md 和 .trae/rules | |
+
+## 10. 约束 Checklist
+
+修改 `phone_agent/graph/` 下任何文件前，确认：
+
+- [ ] State schema 已定义（禁止未定义 State 就写 Node）
+- [ ] 不用 while 循环替代 StateGraph 边循环
+- [ ] 不在 Node 中使用 self._context（用 State 的 messages）
+- [ ] 坐标转换在 execute/tool 内部完成
+- [ ] 图片剥离在 execute Node 内完成
+- [ ] ast.parse + ast.literal_eval 解析 action（禁止 eval）
+- [ ] DeviceFactory / ModelClient 通过 config 注入（禁止全局单例）

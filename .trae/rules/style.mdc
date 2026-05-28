@@ -66,20 +66,20 @@ from phone_agent.config import get_system_prompt
 
 ## Testing
 
-**Current state**: No formal test suite exists.
+**Current state**: Test suite exists for LangGraph graph layer.
 
-- `setup.py` lists `pytest>=7.0.0` as optional dev dependency
-- No test files in the repository
+- `tests/graph/test_graph.py` — 16 mock tests for Plan-Execute-Reflect graph
+- Run with: `source .venv/bin/activate && pytest tests/graph/test_graph.py -v`
 - `examples/basic_usage.py` and `examples/demo_thinking.py` serve as integration smoke tests
 - `scripts/check_deployment_cn.py` and `scripts/check_deployment_en.py` validate model API
 
 **When adding tests**:
-- Place in `tests/` directory (to be created)
+- Place in `tests/` directory, mirror `phone_agent/` structure
 - Use `pytest` framework
+- Mock `ModelClient`, `DeviceFactory`, `ActionHandler` for unit tests
 - Test `parse_action()` thoroughly (many edge cases with special characters)
 - Test `_convert_relative_to_absolute()` with boundary values
 - Test `MessageBuilder` message construction
-- Mock `ModelClient` and device modules for unit tests
 
 ## Chinese-First Convention
 

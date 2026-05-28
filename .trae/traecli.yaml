@@ -22,3 +22,45 @@ append_system_prompt:
     - 禁止用 while 循环替代 StateGraph 的边循环
     - 禁止在 Node 中使用 self._context 列表——State 的 messages 字段才是上下文
     - 禁止忽略 AGENTS.md 中的 6 条全局约束（坐标系、ast 安全解析、图片剥离等）
+
+hooks:
+  - type: command
+    command: |
+      input=$(cat)
+      tool=$(echo "$input" | jq -r '.tool_name // empty')
+      if [ "$tool" = "TaskUpdate" ]; then
+        status=$(echo "$input" | jq -r '.tool_input.status // empty')
+        if [ "$status" = "completed" ]; then
+          cat <<'EOF'
+          {
+            "hookSpecificOutput": {
+              "additionalContext": "任务已标记完成。如当前 Phase 已结束，请按 AGENTS.md 的 Version Management 规范执行 git commit。"
+            }
+          }
+          EOF
+        fi
+      fi
+    matchers:
+      - event: post_tool_use
+        tool: '^TaskUpdate$'
+
+mcp_servers:
+  - name: Context7
+    type: stdio
+    command: bunx
+    args:
+      - "-y"
+      - "@upstash/context7-mcp@latest"
+  - name: fast-context
+    type: stdio
+    command: bunx
+    args:
+      - "@sammysnake/fast-context-mcp"
+    env:
+      - key: WINDSURF_API_KEY
+        value: "devin-session-token$eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzZXNzaW9uX2lkIjoid2luZHN1cmYtc2Vzc2lvbi0wOWY3YTQ5ZjRmMGI0ZWMwYTdlZTAxMzY2NmY4NjAyOCJ9.TVYX_ekjd0-FoA7jghTHxuQ2GoagkfjgU_-J71HKuBI"
+  - name: python-lsp
+    type: stdio
+    command: uvx
+    args:
+      - "python-lsp-mcp@latest"
