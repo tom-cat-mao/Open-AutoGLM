@@ -11,7 +11,7 @@ if TYPE_CHECKING:
     from phone_agent.graph.state import AgentState
 
 
-REFLECT_SYSTEM_PROMPT = """你是一个手机自动化任务的反思专家。你的职责是观察动作执行后的屏幕截图，判断动作是否生效，并给出下一步建议。
+REFLECT_SYSTEM_PROMPT_CN = """你是一个手机自动化任务的反思专家。你的职责是观察动作执行后的屏幕截图，判断动作是否生效，并给出下一步建议。
 
 你必须严格按照要求输出以下格式：
 <think>{think}</think>
@@ -29,6 +29,24 @@ REFLECT_SYSTEM_PROMPT = """你是一个手机自动化任务的反思专家。�
 3. 任务完成：如果当前页面显示任务已经完成，输出 continue(message="任务已完成")
 """
 
+REFLECT_SYSTEM_PROMPT_EN = """You are a mobile automation reflection expert. Your job is to observe the screenshot after an action and judge whether the action succeeded, then give next-step advice.
+
+You MUST strictly output in the following format:
+<think>{think}</think>
+<answer>{action}</answer>
+
+Where:
+- {think} is your reasoning process.
+- {action} must be one of the following:
+  - continue(message="xxx") means the action succeeded, continue the task
+  - retry(message="xxx") means the action failed, retry or adjust strategy
+
+Judgment criteria:
+1. Action succeeded: the page changed as expected (e.g., navigated after tap, text appeared after input, content changed after swipe)
+2. Action failed: the page did not change, or the change was unexpected
+3. Task completed: if the current page shows the task is done, output continue(message="Task completed")
+"""
+
 
 def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
     """
@@ -41,6 +59,7 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
     device_factory = configurable["device_factory"]
     device_id = state.get("device_id")
     verbose = configurable.get("verbose", True)
+    lang = state.get("lang", "cn")
 
     action_parsed = state.get("action_parsed")
     action_result = state.get("action_result")
@@ -52,22 +71,37 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
     screenshot = device_factory.get_screenshot(device_id)
     current_app = device_factory.get_current_app(device_id)
 
-    # 2. Build reflection prompt
+    # 2. Build reflection prompt with language selection
+    if lang == "en":
+        system_prompt = REFLECT_SYSTEM_PROMPT_EN
+    else:
+        system_prompt = REFLECT_SYSTEM_PROMPT_CN
+
     action_str = str(action_parsed) if action_parsed else "None"
     result_str = str(action_result) if action_result else "None"
 
     screen_info = MessageBuilder.build_screen_info(current_app)
-    reflect_text = (
-        f"原始任务：{task}\n"
-        f"当前步数：{step_count} / {max_steps}\n"
-        f"刚执行的动作：{action_str}\n"
-        f"执行结果：{result_str}\n"
-        f"当前屏幕信息：{screen_info}\n\n"
-        f"请观察当前截图，判断动作是否生效，并给出下一步建议。"
-    )
+    if lang == "en":
+        reflect_text = (
+            f"Original task: {task}\n"
+            f"Current step: {step_count} / {max_steps}\n"
+            f"Action just executed: {action_str}\n"
+            f"Execution result: {result_str}\n"
+            f"Current screen info: {screen_info}\n\n"
+            f"Please observe the current screenshot, judge if the action succeeded, and give next-step advice."
+        )
+    else:
+        reflect_text = (
+            f"原始任务：{task}\n"
+            f"当前步数：{step_count} / {max_steps}\n"
+            f"刚执行的动作：{action_str}\n"
+            f"执行结果：{result_str}\n"
+            f"当前屏幕信息：{screen_info}\n\n"
+            f"请观察当前截图，判断动作是否生效，并给出下一步建议。"
+        )
 
     reflect_messages = [
-        MessageBuilder.create_system_message(REFLECT_SYSTEM_PROMPT),
+        MessageBuilder.create_system_message(system_prompt),
         MessageBuilder.create_user_message(
             text=reflect_text, image_base64=screenshot.base64_data
         ),
@@ -89,7 +123,10 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
     # 4. Parse reflection
     raw_action = response.action.strip()
     action_succeeded = raw_action.startswith("continue")
-    task_finished = "任务已完成" in raw_action or "finished" in raw_action.lower()
+    if lang == "en":
+        task_finished = "Task completed" in raw_action or "任务已完成" in raw_action or "finished" in raw_action.lower()
+    else:
+        task_finished = "任务已完成" in raw_action or "Task completed" in raw_action or "finished" in raw_action.lower()
 
     reflection = response.thinking.strip()
     if not reflection:

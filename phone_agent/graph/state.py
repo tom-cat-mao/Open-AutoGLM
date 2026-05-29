@@ -1,6 +1,30 @@
 from __future__ import annotations
 from typing import TypedDict, Annotated, Optional
-from operator import add
+
+
+def messages_reducer(existing: list[dict], new: list[dict]) -> list[dict]:
+    """Custom reducer for messages field.
+
+    Dual-mode:
+    - Append mode: new is a single new message (plan_node) → append to existing.
+    - Replace mode: new is a full rebuilt list (execute_node) → replace existing.
+
+    Heuristic: if new is non-empty and its first element is already present
+    in existing (by role+content), treat as a replace (execute rebuilt list).
+    Otherwise, append new to existing (plan added one message).
+    """
+    if not new:
+        return existing
+
+    # Replace mode: if new list looks like a full rebuilt list
+    # (first message matches existing first message, or existing is empty)
+    if existing and len(new) >= len(existing):
+        first_match = existing[0].get("role") == new[0].get("role")
+        if first_match:
+            return new
+
+    # Append mode: just append new messages
+    return existing + new
 
 
 class AgentState(TypedDict):
@@ -9,7 +33,7 @@ class AgentState(TypedDict):
     Contains all persistent state across the Plan-Execute-Reflect loop.
     """
     # === 对话上下文 ===
-    messages: Annotated[list[dict], add]      # OpenAI chat 格式，替代 PhoneAgent._context
+    messages: Annotated[list[dict], messages_reducer]  # OpenAI chat 格式，替代 PhoneAgent._context
 
     # === 任务 ===
     task: str                                  # 用户原始任务
@@ -39,6 +63,10 @@ class AgentState(TypedDict):
     pending_interrupt: Optional[str]           # 待处理的中断类型: "confirmation" / "takeover"
     interrupt_message: Optional[str]           # 中断消息
     interrupt_result: Optional[bool]           # 中断结果: confirmation 的用户选择
+
+    # === Pending execute (Phase 5 BUG 2 fix) ===
+    pending_execute: bool                      # 待执行的确认动作（confirm后dispatch）
+    action_confirmed: bool                     # 当前动作已通过确认
 
     # === 控制 ===
     finished: bool                             # 任务是否完成

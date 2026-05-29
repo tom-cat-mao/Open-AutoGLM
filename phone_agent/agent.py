@@ -99,6 +99,8 @@ class PhoneAgent:
             "pending_interrupt": None,
             "interrupt_message": None,
             "interrupt_result": None,
+            "pending_execute": False,
+            "action_confirmed": False,
             "finished": False,
             "error": None,
             "device_id": self.agent_config.device_id,

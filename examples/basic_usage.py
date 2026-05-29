@@ -42,27 +42,18 @@ def example_basic_task(lang: str = "cn"):
 
 
 def example_with_callbacks(lang: str = "cn"):
-    """Task example with callbacks / 带回调的任务示例"""
+    """Task example with callbacks / 带回调的任务示例
+
+    Note: Callbacks are deprecated. Confirmation now uses LangGraph interrupt().
+    """
     msgs = get_messages(lang)
+    print("Callbacks are deprecated in LangGraph mode and not supported anymore.")
+    print("Sensitive operations use automatic interrupt().")
 
-    def my_confirmation(message: str) -> bool:
-        """Sensitive operation confirmation callback / 敏感操作确认回调"""
-        print(f"\n[{msgs['confirmation_required']}] {message}")
-        response = input(f"{msgs['continue_prompt']}: ")
-        return response.lower() in ("yes", "y", "是")
-
-    def my_takeover(message: str) -> None:
-        """Manual takeover callback / 人工接管回调"""
-        print(f"\n[{msgs['manual_operation_required']}] {message}")
-        print(msgs["manual_operation_hint"])
-        input(f"{msgs['press_enter_when_done']}: ")
-
-    # Create Agent with custom callbacks
+    # Create Agent (callbacks are removed, use default config)
     agent_config = AgentConfig(lang=lang)
     agent = PhoneAgent(
         agent_config=agent_config,
-        confirmation_callback=my_confirmation,
-        takeover_callback=my_takeover,
     )
 
     # Execute task that may require confirmation

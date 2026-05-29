@@ -52,7 +52,7 @@ def create_agent_graph():
     graph.add_conditional_edges(
         "confirm",
         after_interrupt,
-        {"reflect": "reflect", "end": END},
+        {"reflect": "reflect", "execute": "execute", "end": END},
     )
     graph.add_conditional_edges(
         "takeover",

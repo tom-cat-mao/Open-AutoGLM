@@ -46,6 +46,12 @@ def after_execute(state: AgentState) -> Literal["reflect", "replan", "confirm", 
     if action.get("_metadata") == "finish":
         return "end"
 
+    # CRITICAL-1: action_confirmed check BEFORE HITL routing
+    # If the action was already confirmed (pending_execute branch executed it),
+    # skip HITL and go straight to reflect
+    if state.get("action_confirmed"):
+        return "reflect"
+
     # Human-in-the-Loop routing
     if action.get("action") == "Take_over":
         return "takeover"
@@ -60,14 +66,20 @@ def after_execute(state: AgentState) -> Literal["reflect", "replan", "confirm", 
     return "reflect"
 
 
-def after_interrupt(state: AgentState) -> Literal["reflect", "end"]:
+def after_interrupt(state: AgentState) -> Literal["reflect", "execute", "end"]:
     """
     Decide the route after confirm/takeover interrupt node.
 
     Routes:
     - "end" if user cancelled or task finished
+    - "execute" if confirm accepted and pending action needs dispatch
     - "reflect" otherwise (continue to reflect node)
     """
     if state.get("finished"):
         return "end"
+
+    # BUG 2 fix: if confirm accepted and there's a pending action, route to execute
+    if state.get("pending_execute") and state.get("interrupt_result") is True:
+        return "execute"
+
     return "reflect"

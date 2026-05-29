@@ -34,14 +34,15 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
     screenshot = device_factory.get_screenshot(device_id)
     current_app = device_factory.get_current_app(device_id)
 
-    # 2. Build messages
+    # 2. Build new messages (only the new ones, reducer will append)
+    new_messages = []
     if step_count == 0:
         system_prompt = configurable.get("system_prompt") or get_system_prompt(lang)
-        messages.append(MessageBuilder.create_system_message(system_prompt))
+        new_messages.append(MessageBuilder.create_system_message(system_prompt))
 
         screen_info = MessageBuilder.build_screen_info(current_app)
         text_content = f"{task}\n\n{screen_info}"
-        messages.append(
+        new_messages.append(
             MessageBuilder.create_user_message(
                 text=text_content, image_base64=screenshot.base64_data
             )
@@ -54,20 +55,21 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
             text_content = f"** Screen Info **\n\n{screen_info}\n\n** Reflection **\n\n{reflection}"
         else:
             text_content = f"** Screen Info **\n\n{screen_info}"
-        messages.append(
+        new_messages.append(
             MessageBuilder.create_user_message(
                 text=text_content, image_base64=screenshot.base64_data
             )
         )
 
-    # 3. Model inference
+    # 3. Model inference (pass full messages for context)
+    full_messages = list(state["messages"]) + new_messages
     try:
-        response = model_client.request(messages)
+        response = model_client.request(full_messages)
     except Exception as e:
         if configurable.get("verbose", True):
             traceback.print_exc()
         return {
-            "messages": messages,
+            "messages": new_messages,
             "step_count": step_count + 1,
             "screenshot_b64": screenshot.base64_data,
             "current_app": current_app,
@@ -78,6 +80,7 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
             "action_parsed": finish(message=f"Model error: {e}"),
             "error": f"Model error: {e}",
             "finished": True,
+            "action_confirmed": False,
         }
 
     # 4. Parse action
@@ -87,7 +90,7 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
         action_parsed = finish(message=response.action)
 
     return {
-        "messages": messages,
+        "messages": new_messages,
         "step_count": step_count + 1,
         "screenshot_b64": screenshot.base64_data,
         "current_app": current_app,
@@ -96,4 +99,5 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
         "thinking": response.thinking,
         "action_raw": response.action,
         "action_parsed": action_parsed,
+        "action_confirmed": False,
     }

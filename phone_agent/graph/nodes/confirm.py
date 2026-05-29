@@ -43,6 +43,7 @@ def confirm_node(state: "AgentState", config: RunnableConfig) -> dict:
         "pending_interrupt": None,
         "interrupt_message": None,
         "interrupt_result": confirmed,
+        "pending_execute": state.get("pending_execute"),
         # If not confirmed, end task
         "finished": not confirmed,
         "action_result": {

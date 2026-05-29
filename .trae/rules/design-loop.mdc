@@ -96,10 +96,10 @@ notes: <short text>
 
 ```
 输入: task + 当前 graph.mdc 内容 + 项目上下文（AGENTS.md、相关代码文件）
-输出: 更新后的 .trae/rules/graph.mdc（含新 Phase 的 State/Node/Edge 设计、Roadmap、RALPLAN-DR 摘要）
+输出: 更新后的 .trae/rules/graph.mdc（含 Design Loop Status、Roadmap、RALPLAN-DR 摘要、约束 Checklist）
 ```
 
-**关键**：planner 直接通过 Edit/Write 更新 graph.mdc。architect 和 critic 通过 Read graph.mdc 获取设计内容，无需主 Agent 中转文本。
+**关键**：planner 用 Write 整体覆写 graph.mdc。architect 和 critic 通过 Read graph.mdc 获取计划内容，通过 Read 代码获取架构信息。
 
 **RALPLAN-DR 摘要要求**：
 - **Principles** (3-5)：本计划遵循的核心原则
@@ -167,10 +167,10 @@ notes: <short text>
 ```
 
 **审查重点**：
-- State 设计是否完整？字段是否跨 Node 持久化？
-- Node 拆分是否符合单一职责？
-- Edge 路由是否覆盖所有分支？
-- 是否违反 AGENTS.md 的全局约束？
+- 方案选择是否合理（Options Considered 是否充分，Selected Approach 理由是否成立）
+- 步骤是否可执行（验收标准是否可验证，修改文件列表是否完整）
+- 是否违反 AGENTS.md 的全局约束
+- 对照代码验证计划中的技术声明是否与当前架构一致
 - 最强反方论点（steelman antithesis）
 - 至少一个真实的权衡张力（tradeoff tension）
 
@@ -337,10 +337,11 @@ return best_version
 
 ### graph.mdc 的角色
 
-`graph.mdc` 同时承担三个职责：
-1. **设计规范**：State Schema、Node 设计、Edge 设计、依赖注入、HITL（globs 匹配 `phone_agent/graph/**/*.py` 时自动注入）
-2. **Roadmap**：Phase 列表及完成状态，Agent 据此逐 Phase 执行
-3. **约束 Checklist**：编码时必须遵守的规则
+`graph.mdc` 承担两个职责：
+1. **Roadmap**：Phase 列表及完成状态，Agent 据此逐 Phase 执行
+2. **约束 Checklist**：编码时必须遵守的规则
+
+架构信息（State/Node/Edge 等）从代码获取，不写入 graph.mdc。
 
 ## 6. Trigger Keywords
 

@@ -81,7 +81,30 @@ def execute_node(state: "AgentState", config: RunnableConfig) -> dict:
             "error": result.message,
         }
 
-    # 2. Human-in-the-Loop checks (Phase 2)
+    # 2. Pending execute branch (BUG 2 fix)
+    # If confirm was accepted, execute the pending action directly
+    if state.get("pending_execute"):
+        # CRITICAL-1: do NOT call _strip_and_append again (images already stripped on first pass)
+        try:
+            result = dispatch_tool(action_parsed, screen_width, screen_height, device_id)
+        except Exception as e:
+            if verbose:
+                traceback.print_exc()
+            result = ActionResult(
+                success=False, should_finish=True, message=f"Action failed: {e}"
+            )
+
+        # CRITICAL-2: mark action_confirmed=True (keep action_parsed for reflect)
+        finished = result.should_finish
+        return {
+            "action_result": result.__dict__,
+            "messages": messages,  # unchanged (already stripped + assistant appended)
+            "finished": finished,
+            "pending_execute": False,
+            "action_confirmed": True,
+        }
+
+    # 3. Human-in-the-Loop checks (Phase 2)
     action_name = action_parsed.get("action")
     if action_name == "Take_over":
         messages = _strip_and_append(messages, thinking, action_raw)
@@ -97,9 +120,10 @@ def execute_node(state: "AgentState", config: RunnableConfig) -> dict:
             "messages": messages,
             "pending_interrupt": "confirmation",
             "interrupt_message": action_parsed["message"],
+            "pending_execute": True,
         }
 
-    # 3. Execute action via tool dispatch
+    # 4. Execute action via tool dispatch
     try:
         result = dispatch_tool(action_parsed, screen_width, screen_height, device_id)
     except Exception as e:
@@ -109,10 +133,10 @@ def execute_node(state: "AgentState", config: RunnableConfig) -> dict:
             success=False, should_finish=True, message=f"Action failed: {e}"
         )
 
-    # 4. Strip images and append assistant message
+    # 5. Strip images and append assistant message
     messages = _strip_and_append(messages, thinking, action_raw)
 
-    # 5. Check should_finish
+    # 6. Check should_finish
     finished = result.should_finish
 
     return {

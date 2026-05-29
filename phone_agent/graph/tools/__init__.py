@@ -83,7 +83,7 @@ def dispatch_tool(
 
     if action_type == "finish":
         return ActionResult(
-            success=True, should_finish=True, message=action.get("message")
+            success=True, should_finish=True, message=action.get("message", "")
         )
 
     if action_type != "do":
@@ -93,8 +93,14 @@ def dispatch_tool(
             message=f"Unknown action type: {action_type}",
         )
 
-    action_name = action.get("action")
+    action_name: str | None = action.get("action")
     tool_map = get_tool_map()
+    if action_name is None:
+        return ActionResult(
+            success=False,
+            should_finish=False,
+            message="Missing action name in action dict",
+        )
     tool_fn = tool_map.get(action_name)
 
     if tool_fn is None:

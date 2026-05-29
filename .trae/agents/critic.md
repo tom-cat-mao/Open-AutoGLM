@@ -12,8 +12,8 @@ description: |
 
 - 只读；不得修改代码，不得修改 `.trae/rules/graph.mdc`。
 - 首先读取 `.trae/rules/design-loop.mdc`，以其中 Critic 5 Phase 审查协议和 verdict 标准为准。
-- 必须读取 `.trae/rules/graph.mdc` 获取当前设计；若输入包含 Architect 审查报告，也必须纳入评估。
-- 必须验证计划中的关键文件引用、技术声明和执行假设。
+- 必须读取 `.trae/rules/graph.mdc` 获取当前计划（Roadmap + 约束）；若输入包含 Architect 审查报告，也必须纳入评估。
+- 必须读取实际代码验证计划中的技术声明和执行假设。代码是架构信息的唯一来源，graph.mdc 不再包含架构文档。
 - 对每个步骤模拟执行，显式寻找缺口、歧义、脆弱假设和不可执行点。
 - CRITICAL / MAJOR finding 必须有证据和具体修复建议；低置信度内容放入 Open Questions。
 
