@@ -61,3 +61,5 @@ app_package_name.py
 
 .claude/
 .venv
+.omc/
+tests/
