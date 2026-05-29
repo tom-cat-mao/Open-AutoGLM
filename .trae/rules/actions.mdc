@@ -1,7 +1,7 @@
 ---
 description: Action 系统：解析、注册、执行、新增 Action 的 checklist
 alwaysApply: false
-globs: "phone_agent/actions/**/*.py"
+globs: "phone_agent/actions/**/*.py,phone_agent/graph/tools/**/*.py,phone_agent/graph/nodes/execute.py"
 ---
 
 # Actions
@@ -10,7 +10,7 @@ globs: "phone_agent/actions/**/*.py"
 
 The action system has two layers:
 1. **Parsing**: `parse_action()` converts raw model text -> `dict` with `_metadata` key
-2. **Execution**: `ActionHandler.execute()` dispatches to handler methods
+2. **Execution**: `execute_node` calls `dispatch_tool()` to route actions to `@tool` functions in `phone_agent/graph/tools/`
 
 ## Action Dictionary Format
 
@@ -38,40 +38,48 @@ Parsing priority:
 
 **Critical**: Never use `eval()`. Always use `ast.parse()` for new parsing logic.
 
-## Action Registry (handler.py:90-108)
+## Tool Registry (graph/tools/__init__.py)
 
-The handler uses a hardcoded dict mapping action names to methods:
+Tool dispatch uses `get_tool_map()` to map action names to `@tool` functions:
 
 ```python
-handlers = {
-    "Launch": self._handle_launch,
-    "Tap": self._handle_tap,
-    "Type": self._handle_type,
-    "Type_Name": self._handle_type,  # Same handler as Type
-    "Swipe": self._handle_swipe,
-    "Back": self._handle_back,
-    "Home": self._handle_home,
-    "Double Tap": self._handle_double_tap,
-    "Long Press": self._handle_long_press,
-    "Wait": self._handle_wait,
-    "Take_over": self._handle_takeover,
-    "Note": self._handle_note,        # STUB
-    "Call_API": self._handle_call_api, # STUB
-    "Interact": self._handle_interact, # STUB
-}
+def get_tool_map() -> dict[str, Any]:
+    return {
+        "Tap": tap,
+        "Type": type_text,
+        "Type_Name": type_text,
+        "Swipe": swipe,
+        "Back": back,
+        "Home": home,
+        "Launch": launch,
+        "Double Tap": double_tap,
+        "Long Press": long_press,
+        "Wait": wait,
+        "Note": note,
+        "Call_API": call_api,
+        "Interact": interact,
+    }
 ```
+
+`dispatch_tool()` handles `_metadata="do"` and `_metadata="finish"`, filters kwargs by tool function signature, injects `screen_width` / `screen_height` / `device_id` when supported, and converts tool dict results back to `ActionResult`.
 
 ## Action Details
 
 ### Coordinate Actions (Tap, Double Tap, Long Press, Swipe)
 - Model outputs coordinates in 0-1000 range
-- `_convert_relative_to_absolute(element, width, height)` converts to absolute pixels
+- `convert_relative_to_absolute(element, screen_width, screen_height)` from `phone_agent/graph/tools/coords.py` converts to absolute pixels
 - Formula: `x = int(element[0] / 1000 * screen_width)`
 
 ### Tap with Confirmation
-- If action dict contains `"message"` key (e.g., `do(action="Tap", element=[x,y], message="支付")`)
-- Triggers `confirmation_callback(message)` before executing
-- If callback returns False, action is cancelled with `should_finish=True`
+- If `execute_node` sees `Tap` with a `"message"` key (e.g., `do(action="Tap", element=[x,y], message="支付")`), it does not execute the tap immediately.
+- It sets `pending_interrupt="confirmation"` and `interrupt_message=action["message"]`.
+- The conditional edge routes to `confirm_node`, which uses LangGraph `interrupt()` for resumable Human-in-the-Loop.
+- After user confirmation/cancellation, `after_interrupt` routes to `reflect` or `END`.
+
+### Take_over
+- `execute_node` detects `action="Take_over"` and does not call `dispatch_tool()`.
+- It sets `pending_interrupt="takeover"` and `interrupt_message`.
+- The graph routes to `takeover_node`, which uses LangGraph `interrupt()` to pause and resume after manual user operation.
 
 ### Type / Type_Name
 - Switches to ADB keyboard -> clears text -> types -> restores keyboard
@@ -88,13 +96,14 @@ handlers = {
 
 ## Adding a New Action: Checklist
 
-1. [ ] Add action name + handler method to `_get_handler()` in `handler.py`
-2. [ ] Implement handler: `def _handle_xxx(self, action: dict, width: int, height: int) -> ActionResult`
-3. [ ] Update system prompt in `prompts.py` (CN) and `prompts_en.py` (EN)
-4. [ ] If action uses coordinates, call `_convert_relative_to_absolute()`
-5. [ ] If action is sensitive, check for `"message"` key and call `confirmation_callback`
-6. [ ] If action needs new device-level commands, add them to `adb/` module
-7. [ ] Test with Android path
+1. [ ] Add or update a `@tool` function under `phone_agent/graph/tools/`
+2. [ ] Register the action name in `get_tool_map()` in `phone_agent/graph/tools/__init__.py`
+3. [ ] Return `ActionResult.__dict__` from the tool function
+4. [ ] Update system prompt in `prompts.py` (CN) and `prompts_en.py` (EN) if the model needs to emit the new action
+5. [ ] If action uses coordinates, call `convert_relative_to_absolute()` from `phone_agent/graph/tools/coords.py`
+6. [ ] If action is sensitive, route through `execute_node` to `confirm_node` / `takeover_node` using `interrupt()`, not callbacks
+7. [ ] If action needs new device-level commands, add them to `adb/` module
+8. [ ] Add tests for the tool function and `dispatch_tool()` routing
 
 ## Action Details by Platform
 

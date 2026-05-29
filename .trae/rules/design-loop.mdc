@@ -1,7 +1,7 @@
 ---
 description: Design Loop 工作流：Plan-Review-Revise 迭代设计，产物写入 graph.mdc
-globs: ".trae/rules/graph.mdc,.trae/agents/*.md"
-alwaysApply: true
+globs: ".trae/rules/graph.mdc,.trae/rules/design-loop.mdc,.trae/agents/*.md,.trae/commands/design-loop.md"
+alwaysApply: false
 ---
 
 # Design Loop: Plan-Review-Revise
@@ -59,6 +59,34 @@ User Task
                         ^                                         |
                         └──────────── max 5 iterations ──────────┘
 ```
+
+### 显式入口与状态
+
+- 显式入口：使用项目级 prompt command `/design-loop <task>`。
+- 主流程由 `/design-loop` 编排：Planner → Architect → Critic，Critic 未 `APPROVE` 前不得进入实现。
+- 运行状态写入 `.trae/rules/graph.mdc` 的 `Design Loop Status` section。
+- Hook 只做提醒/guardrail，不负责自动调用 subagent，不自动注入完整 design-loop 协议。
+
+### Design Loop Status 约定
+
+`graph.mdc` 中必须维护轻量状态块：
+
+```yaml
+status: idle | draft | architect_reviewed | critic_approved | iterate | rejected
+iteration: <non-negative integer>
+last_planner_update: <short text or null>
+last_architect_review: <short text or null>
+last_critic_verdict: APPROVE | ITERATE | REJECT | null
+approved_for_execution: true | false
+notes: <short text>
+```
+
+状态更新规则：
+- Planner 写入/修订 roadmap 后：`status: draft`，`approved_for_execution: false`。
+- Architect 审查完成后：`status: architect_reviewed`。
+- Critic 输出 `APPROVE`：`status: critic_approved`，`approved_for_execution: true`。
+- Critic 输出 `ITERATE`：`status: iterate`，`approved_for_execution: false`，再回 Planner。
+- Critic 输出 `REJECT`：`status: rejected`，`approved_for_execution: false`，返回用户澄清。
 
 ## 2. Agent 角色定义
 

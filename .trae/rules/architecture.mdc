@@ -1,87 +1,31 @@
 ---
-description: Agent 架构设计：核心循环、上下文管理
-alwaysApply: true
+description: Agent 核心架构守门规则：仅在修改 PhoneAgent / LangGraph / ModelClient context / DeviceFactory 时加载
+alwaysApply: false
+globs: "phone_agent/agent.py,phone_agent/graph/**/*.py,phone_agent/model/client.py,phone_agent/device_factory.py,main.py"
 ---
 
-# Architecture
+# Architecture Guardrails
 
-## Agent Loop (the core)
+本文件是轻量架构守门规则，不承载完整设计。完整 State/Node/Edge/Tool/HITL 设计以 `.trae/rules/graph.mdc` 为准。
 
-`PhoneAgent` uses a LangGraph StateGraph implementing the **Plan-Execute-Reflect** pattern:
+## 何时加载
 
-```
-START → plan → execute → [confirm|takeover|reflect|replan|end]
-                         ├─ confirm → after_interrupt → [reflect|end]
-                         ├─ takeover → after_interrupt → [reflect|end]
-                         ├─ reflect → should_continue → [replan|end]
-                         ├─ replan → plan (skip reflect for Wait/Note/Call_API/Interact)
-                         └─ end → END
-```
+- 修改 `phone_agent/agent.py`、`phone_agent/graph/**/*.py`、`phone_agent/model/client.py`、`phone_agent/device_factory.py`、`main.py` 时加载。
+- 用户要求分析 Agent loop、LangGraph 拓扑、上下文管理、设备/模型注入边界时加载。
+- 需要 roadmap、架构审查或 Plan-Architect-Critic 流程时，再读取 `.trae/rules/design-loop.mdc`。
 
-### Node responsibilities
+## 核心不变量
 
-- **plan_node**: Screenshot → build messages → model inference → parse action
-- **execute_node**: Execute action via `dispatch_tool()` → strip images → append assistant message
-- **reflect_node**: Screenshot → model judges if action succeeded → output reflection
-- **confirm_node**: `interrupt()` for sensitive operations (payment, privacy)
-- **takeover_node**: `interrupt()` for login/captcha
+1. **State first**：跨 Node 持久化数据必须进入 `AgentState`；不要恢复 `self._context` 式隐藏上下文。
+2. **Graph loop only**：不得用 `while` 循环替代 StateGraph 条件边循环。
+3. **Image stripping**：每步执行后必须剥离历史消息中的图片，只保留当前截图进入下一轮推理。
+4. **Safe action parsing**：动作解析必须使用 `ast.parse` + `ast.literal_eval`；禁止 `eval()`。
+5. **Coordinate conversion**：模型 0-1000 相对坐标必须在 tool 内转为绝对像素，不能直接传给设备命令。
+6. **HITL via interrupt**：确认、接管、登录/验证码等 Human-in-the-Loop 必须通过 LangGraph `interrupt()`。
+7. **Explicit dependencies**：`ModelClient` / `DeviceFactory` 等副作用依赖应通过 StateGraph config 或明确边界注入，避免新增隐式全局依赖。
 
-### Key data structures
+## 修改前检查
 
-```python
-@dataclass
-class ActionResult:
-    success: bool
-    should_finish: bool
-    message: str | None = None
-    requires_confirmation: bool = False
-
-@dataclass
-class ModelResponse:
-    thinking: str
-    action: str
-    raw_content: str
-    time_to_first_token: float | None
-    time_to_thinking_end: float | None
-    total_time: float | None
-```
-
-## Context Management
-
-- Context is stored in `AgentState.messages` as `Annotated[list[dict], add]` (append reducer)
-- Messages follow OpenAI chat format: `[system_msg, user_msg, assistant_msg, user_msg, ...]`
-- Images are added as `image_url` content blocks in user messages
-- After each step, `execute_node` strips images from the last user message (only text remains)
-- This means the model only sees the CURRENT screenshot, not historical ones
-- Assistant messages contain the full `<think+answer>` text (no images)
-
-## DeviceFactory Pattern
-
-```python
-class DeviceFactory:
-    def __init__(self, device_type: DeviceType):  # ADB
-        self._module = None  # Lazy-loaded
-
-    @property
-    def module(self):
-        # Dynamically imports phone_agent.adb
-        ...
-
-    # Delegates all device operations to self.module
-```
-
-- Global singleton via `get_device_factory()` / `set_device_type()`
-- The factory delegates every call to the underlying module (adb)
-
-## Modification Checklist: Agent Loop
-
-When modifying the agent loop, check ALL of these:
-
-- [ ] State schema updated if new fields needed (see `graph/state.py`)
-- [ ] Context format still valid (system -> user -> assistant -> user -> ...)
-- [ ] Image stripping still happens in `execute_node`
-- [ ] `ActionResult` dataclass updated if new fields needed
-- [ ] `parse_action()` can handle any new output format
-- [ ] `max_steps` guard still works via `should_continue` edge
-- [ ] HITL: sensitive actions route through `confirm_node`, login/captcha through `takeover_node`
-- [ ] New actions have corresponding `@tool` function in `graph/tools/`
+- 如果新增或改变 State 字段、Node 职责、Edge 路由、Tool 行为或 HITL 流程，先读取 `.trae/rules/graph.mdc`。
+- 如果需要先设计 roadmap 或引入 Planner/Architect/Critic 审查，先读取 `.trae/rules/design-loop.mdc`。
+- 修改后保持旧入口兼容：`PhoneAgent.run()` 仍应可调用。

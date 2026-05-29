@@ -10,6 +10,18 @@ globs: "phone_agent/graph/**/*.py"
 
 `PhoneAgent` 使用 LangGraph StateGraph 实现 **Plan-Execute-Reflect** 三节点拓扑，替代旧的 while 循环。
 
+### Design Loop Status
+
+```yaml
+status: critic_approved
+iteration: 0
+last_planner_update: "Phase 4 cleanup completed"
+last_architect_review: "Existing graph design accepted"
+last_critic_verdict: APPROVE
+approved_for_execution: true
+notes: "Current LangGraph refactor roadmap is completed; new architecture work should run /design-loop before implementation."
+```
+
 ### 图拓扑
 
 ```
