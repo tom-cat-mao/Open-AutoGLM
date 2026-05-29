@@ -67,7 +67,7 @@ from phone_agent.graph.tools import dispatch_tool
 
 ## Testing
 
-**Current state**: Phase 4 completed with 79/79 tests passing.
+**Current state**: Phase 5 completed with 89/89 tests passing, mypy zero errors on `phone_agent/graph/`.
 
 - `tests/graph/` — graph loop, HITL, tool dispatch, coordinate conversion, and integration-style graph tests
 - Run targeted graph tests with: `.venv/bin/pytest tests/graph -v`

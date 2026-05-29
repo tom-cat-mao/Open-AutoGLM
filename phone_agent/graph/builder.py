@@ -17,17 +17,13 @@ def create_agent_graph():
 
     Graph topology:
     ```
-    START → plan → execute → reflect → should_continue?
-                                    ├─ "end" → END
-                                    └─ "replan" → plan
+    START → plan → execute → [confirm|takeover|reflect|replan|end]
+                             ├─ confirm → after_interrupt → [execute|reflect|end]
+                             ├─ takeover → after_interrupt → [reflect|end]
+                             ├─ reflect → should_continue → [replan|end]
+                             ├─ replan → plan (skip reflect for Wait/Note/Call_API/Interact)
+                             └─ end → END
     ```
-
-    execute node also has a conditional edge:
-    - "reflect" → reflect
-    - "replan" → plan (skip reflect for Wait/Note/Call_API/Interact)
-    - "confirm" → confirm → reflect/end
-    - "takeover" → takeover → reflect/end
-    - "end" → END (finish or error)
     """
     graph = StateGraph(AgentState)
 

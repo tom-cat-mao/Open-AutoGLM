@@ -15,6 +15,8 @@ Every component exists to serve this loop. The loop is implemented as a LangGrap
 3. **Image context management**: After each step, images MUST be stripped from conversation history via `MessageBuilder.remove_images_from_message()`. This prevents token overflow.
 4. **Human-in-the-Loop**: Sensitive operations (payment, privacy) MUST go through `confirm_node` (interrupt). Login/captcha MUST go through `takeover_node` (interrupt). Both use LangGraph `interrupt()` for resumable pauses.
 5. **Device abstraction**: All device operations go through `DeviceFactory` -> `phone_agent/adb/` module. Single platform, single code path.
+6. **messages_reducer semantics**: `plan_node` returns only new messages (append mode); `execute_node` returns full rebuilt list (replace mode). Violating this causes message duplication and token explosion.
+7. **Confirm-then-execute**: After confirm accepts a sensitive Tap, `after_interrupt` routes to `execute` (not `reflect`). The `pending_execute` branch in `execute_node` MUST NOT call `_strip_and_append` again and MUST set `action_confirmed=True`.
 
 ## Architecture at a Glance
 
@@ -77,7 +79,7 @@ phone_agent/
 
 ```
 START → plan → execute → [confirm|takeover|reflect|replan|end]
-                         ├─ confirm → after_interrupt → [reflect|end]
+                         ├─ confirm → after_interrupt → [execute|reflect|end]
                          ├─ takeover → after_interrupt → [reflect|end]
                          ├─ reflect → should_continue → [replan|end]
                          ├─ replan → plan (skip reflect for Wait/Note/Call_API/Interact)
@@ -119,7 +121,7 @@ START → plan → execute → [confirm|takeover|reflect|replan|end]
 
 压缩时始终保留：
 - 当前正在执行的任务描述和进度
-- Global Constraints 中的 5 条不变量
+- Global Constraints 中的 7 条不变量
 - Architecture at a Glance 中的目录结构
 - LangGraph Refactoring 段（当前阶段 + 图拓扑）
 - Version Management 段（phase 完成状态）

@@ -75,7 +75,7 @@ START → plan → execute → [confirm|takeover|reflect|replan|end]
 | 4.4 更新 AGENTS.md 和 .trae/rules | ✅ |
 | 4.5 验证：79/79 tests passing | ✅ |
 
-### Phase 5: Bugfix — 5 BUGs + 2 测试覆盖缺口
+### Phase 5: Bugfix — 5 BUGs + 2 测试覆盖缺口 ✅
 
 #### RALPLAN-DR 摘要
 

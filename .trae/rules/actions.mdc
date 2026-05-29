@@ -72,9 +72,9 @@ def get_tool_map() -> dict[str, Any]:
 
 ### Tap with Confirmation
 - If `execute_node` sees `Tap` with a `"message"` key (e.g., `do(action="Tap", element=[x,y], message="支付")`), it does not execute the tap immediately.
-- It sets `pending_interrupt="confirmation"` and `interrupt_message=action["message"]`.
+- It sets `pending_execute = True`, `pending_interrupt="confirmation"` and `interrupt_message=action["message"]`.
 - The conditional edge routes to `confirm_node`, which uses LangGraph `interrupt()` for resumable Human-in-the-Loop.
-- After user confirmation/cancellation, `after_interrupt` routes to `reflect` or `END`.
+- After user confirmation (`interrupt_result=True`), `after_interrupt` routes to **execute** (dispatches the confirmed action) then reflect; on cancel, routes to `reflect` or `END`.
 
 ### Take_over
 - `execute_node` detects `action="Take_over"` and does not call `dispatch_tool()`.
