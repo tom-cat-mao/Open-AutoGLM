@@ -52,6 +52,8 @@ def run_dry_task(task: EvalTask, trace_dir: str = ".traces") -> RunResult:
     """Run a deterministic dry-run task without model or device dependencies."""
     started_at = time.perf_counter()
     hitl_count = 1 if task.category == "hitl" else 0
+    failure_cause = "element_not_found" if task.category == "failed" else None
+    retry_count = 1 if failure_cause else 0
     trace_id = f"dry-{uuid.uuid4()}"
     trace_writer = JsonlTraceWriter(trace_id=trace_id, trace_dir=trace_dir)
     trace_writer.emit(
@@ -71,6 +73,8 @@ def run_dry_task(task: EvalTask, trace_dir: str = ".traces") -> RunResult:
         hitl_count=hitl_count,
         trace_id=trace_id,
         trace_path=str(trace_writer.path),
+        failure_cause=failure_cause,
+        retry_count=retry_count,
     )
 
 
@@ -126,6 +130,13 @@ def run_eval(args: argparse.Namespace) -> dict[str, Any]:
     total_steps = sum(int(item["steps"]) for item in records)
     total_duration = sum(float(item["duration"]) for item in records)
     total_hitl = sum(int(item["hitl_count"]) for item in records)
+    failure_cause_histogram: dict[str, int] = {}
+    total_retries = 0
+    for item in records:
+        total_retries += int(item.get("retry_count") or 0)
+        cause = item.get("failure_cause")
+        if cause:
+            failure_cause_histogram[str(cause)] = failure_cause_histogram.get(str(cause), 0) + 1
 
     return {
         "summary": {
@@ -135,6 +146,8 @@ def run_eval(args: argparse.Namespace) -> dict[str, Any]:
             "avg_steps": total_steps / len(records) if records else 0.0,
             "avg_duration": total_duration / len(records) if records else 0.0,
             "hitl_count": total_hitl,
+            "retry_count": total_retries,
+            "failure_cause_histogram": failure_cause_histogram,
             "dry_run": args.dry_run,
             "trace_dir": args.trace_dir,
         },

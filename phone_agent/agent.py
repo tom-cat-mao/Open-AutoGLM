@@ -57,6 +57,8 @@ class RunResult:
     hitl_count: int = 0
     trace_id: str = ""
     trace_path: str | None = None
+    failure_cause: str | None = None
+    retry_count: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize the result to a JSON-friendly dictionary."""
@@ -174,6 +176,10 @@ class PhoneAgent:
             "action_result": None,
             "reflection": None,
             "action_succeeded": True,
+            "reflection_verdict": None,
+            "failure_cause": None,
+            "suggested_strategy": None,
+            "retry_count": 0,
             "pending_interrupt": None,
             "interrupt_message": None,
             "interrupt_result": None,
@@ -243,6 +249,8 @@ class PhoneAgent:
             hitl_count=int(state.get("hitl_count") or 0),
             trace_id=trace_id,
             trace_path=trace_path,
+            failure_cause=state.get("failure_cause"),
+            retry_count=int(state.get("retry_count") or 0),
         )
 
     def reset(self) -> None:

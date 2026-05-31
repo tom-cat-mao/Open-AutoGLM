@@ -67,7 +67,7 @@ from phone_agent.graph.tools import dispatch_tool
 
 ## Testing
 
-**Current state**: Phase 8 completed with executable graph/actions/evals regression tests; current local gate is `.venv/bin/pytest tests -q` passing. `run_structured()` returns trace-aware metrics and eval dry-run can export local JSONL traces.
+**Current state**: Phase 9 completed with executable graph/actions/evals regression tests; current local gate is `.venv/bin/pytest tests -q` passing. `run_structured()` returns trace-aware metrics plus `failure_cause` / `retry_count`, and eval dry-run exports local JSONL traces plus failure-cause histograms.
 
 - `tests/graph/` — graph loop, HITL, tool dispatch, coordinate conversion, and integration-style graph tests
 - `tests/evals/` — evaluation harness and trace export tests

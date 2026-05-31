@@ -116,7 +116,7 @@ print(result)
 ```python
 structured = agent.run_structured("打开淘宝搜索无线耳机")
 print(structured.to_dict())
-# 包含 success / finished / steps / duration / error / hitl_count / trace_id / trace_path
+# 包含 success / finished / steps / duration / error / hitl_count / trace_id / trace_path / failure_cause / retry_count
 ```
 
 默认启用本地 JSONL trace，文件写入 `.traces/{trace_id}.jsonl`。trace 记录 run id、trace id、step id、node、event、timestamp 与脱敏后的 payload；截图、prompt、API key、任务文本、thinking、reflection、HITL 消息默认不会以原文写入。
@@ -221,7 +221,7 @@ python main.py --device-id 192.168.1.100:5555 --base-url http://localhost:8000/v
 .venv/bin/python evals/run_eval.py --dry-run --trace-dir .traces/smoke
 ```
 
-当前 Evaluation Harness 覆盖结构化结果、基础指标、HITL interrupt routing 计数与 trace 文件关联；不承诺跨进程持久 resume，完整 resume 指标将在 checkpoint/resume 阶段补齐。
+当前 Evaluation Harness 覆盖结构化结果、基础指标、HITL interrupt routing 计数、trace 文件关联、retry count 与 failure cause histogram；不承诺跨进程持久 resume，完整 resume 指标将在 checkpoint/resume 阶段补齐。
 
 ## 常见问题
 

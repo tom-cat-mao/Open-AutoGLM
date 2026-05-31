@@ -14,6 +14,26 @@ if TYPE_CHECKING:
     from phone_agent.graph.state import AgentState
 
 
+def _build_reflection_context(state: "AgentState") -> str:
+    reflection = state.get("reflection")
+    verdict = state.get("reflection_verdict")
+    cause = state.get("failure_cause")
+    strategy = state.get("suggested_strategy")
+    parts = []
+    if reflection:
+        parts.append(f"** Reflection **\n\n{reflection}")
+    structured = []
+    if verdict:
+        structured.append(f"verdict: {verdict}")
+    if cause:
+        structured.append(f"failure_cause: {cause}")
+    if strategy:
+        structured.append(f"suggested_strategy: {strategy}")
+    if structured:
+        parts.append("** Structured Reflection **\n\n" + "\n".join(structured))
+    return "\n\n".join(parts)
+
+
 def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
     """
     Plan node: capture screen, build messages, get model response, parse action.
@@ -57,10 +77,9 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
         )
     else:
         screen_info = MessageBuilder.build_screen_info(current_app)
-        # Include previous reflection if available
-        reflection = state.get("reflection")
-        if reflection:
-            text_content = f"** Screen Info **\n\n{screen_info}\n\n** Reflection **\n\n{reflection}"
+        reflection_context = _build_reflection_context(state)
+        if reflection_context:
+            text_content = f"** Screen Info **\n\n{screen_info}\n\n{reflection_context}"
         else:
             text_content = f"** Screen Info **\n\n{screen_info}"
         new_messages.append(

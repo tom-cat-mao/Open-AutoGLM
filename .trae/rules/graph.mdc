@@ -17,7 +17,7 @@ last_planner_update: "按 Critic ITERATE 窄修：Phase 6 补充 .gitignore/test
 last_architect_review: "Iteration 3: 窄修项已完成；Phase 6 包含 .gitignore/tests tracking 验收；Tool DI schema 隐藏约束已补充；无 Critical/Major。"
 last_critic_verdict: APPROVE
 approved_for_execution: true
-notes: "Iteration 3 APPROVED。Phase 8 已完成：本地 JSONL trace、默认脱敏、RunResult/Eval trace 关联与本地测试门禁均已落地。"
+notes: "Iteration 3 APPROVED。Phase 9 已完成：结构化 reflection、失败原因分类、plan 反馈闭环、eval retry/failure histogram 与测试门禁均已落地。"
 ```
 
 # Roadmap
@@ -34,8 +34,9 @@ notes: "Iteration 3 APPROVED。Phase 8 已完成：本地 JSONL trace、默认�
 | 6 | 已恢复测试/打包/文档可信地基；Tool DI seam 已通过 config 注入且 schema 隐藏 `device_factory` | 见 Phase 6 门禁、依赖注入、Tool DI 条目 |
 | 7 | 已新增 `RunResult` / `run_structured()` 结构化 API 与本地 dry-run Evaluation Harness；Phase 7 仅统计 HITL interrupt routing，不承诺持久 resume | 见 Eval / Trace、HITL、checkpoint 条目 |
 | 8 | 已新增默认本地 JSONL trace；记录 run/step/node/event/timestamp，覆盖 plan/execute/reflect/HITL/end/error；默认脱敏敏感文本与图片/API key；RunResult 与 eval JSON 可关联 trace 文件 | 见 Eval / Trace、隐私与收益验证条目 |
+| 9 | 已新增结构化 reflection schema、失败原因分类、建议策略、Plan 反馈闭环，以及 eval retry/failure_cause 统计 | 见 Reflection、Eval / Trace 条目 |
 
-> 已完成 Phase 不再在本文件展开实现细节；执行约束统一维护在文末 Checklist，当前未完成计划从 Phase 9 开始。
+> 已完成 Phase 不再在本文件展开实现细节；执行约束统一维护在文末 Checklist，当前未完成计划从 Phase 10 开始。
 
 ## RALPLAN-DR 摘要
 
@@ -68,33 +69,6 @@ notes: "Iteration 3 APPROVED。Phase 8 已完成：本地 JSONL trace、默认�
 理由：这条路线用最小变更先修复可安装、可测试、可注入、可文档验证的地基；再用结构化 API 和 Evaluation Harness 量化成功率、步数、耗时、HITL interrupt 触发；随后 trace 解释失败原因，reflection 改善重试策略；最后先落地 minimal checkpoint/resume，明确持久恢复边界，再做 UI grounding。跨会话 memory/技能复用仍后置到 trace、checkpoint 与足够成功轨迹之后，不进入当前 6 个执行 Phase。
 
 ## 当前规划 Phase
-
-### Phase 9: 策略级 Reflection 与失败分类
-
-**目标**：把当前二元 `continue/retry` 反思升级为可评测的失败原因分类与恢复策略建议，提升长任务鲁棒性。
-
-**根因**：当前 `reflect_node` 主要通过 `raw_action.startswith("continue")` 判断成功，失败后缺少 cause 与 strategy；面对真实 app、长任务、多 app 时，盲目 retry 会增加步数并降低成功率。
-
-**修改文件候选**：
-- `phone_agent/graph/state.py`
-- `phone_agent/graph/nodes/reflect.py`
-- `phone_agent/graph/nodes/plan.py`
-- `phone_agent/graph/edges.py`（仅当策略需要影响 replan/end，优先保持拓扑不变）
-- `phone_agent/config/prompts_zh.py`
-- `phone_agent/config/prompts_en.py`
-- `tests/graph/test_reflection_strategy.py`
-- `evals/` 评测任务与结果 schema
-
-**执行步骤与验收标准**：
-1. **Reflection schema** — State 能记录 `reflection_verdict`、`failure_cause`、`suggested_strategy` 等结构化字段。验收：解析成功、解析失败、安全降级均有单测覆盖。
-2. **失败分类** — 至少支持 `succeeded` / `failed` / `partial` verdict，以及 `element_not_found`、`wrong_page`、`app_not_responding`、`network_or_loading`、`unsafe_or_sensitive` 等原因分类。验收：中英文 prompt 输出样例均能解析到结构化字段。
-3. **Plan 反馈闭环** — Plan 节点能在下一轮看到上一轮结构化 reflection，用于调整动作而不是盲目重复。验收：fake model 单测断言下一轮 user message 或 state context 包含 failure cause/strategy。
-4. **评测统计** — Evaluation Harness 能统计失败原因分布与 retry 次数，策略变更前后可比较平均步数/成功率。验收：eval JSON 汇总包含 failure_cause histogram 与 retry count。
-
-**风险/边界**：
-- 不改成模型自主动态路由；仍由条件边和 State 字段保持可审计控制。
-- 不引入多 Agent critic/reflection agent；保持单图主线。
-- Reflection schema 必须兼容中英文提示，不能破坏现有 `lang` 行为。
 
 ### Phase 10: Minimal Checkpoint/Resume — HITL 与长任务持久恢复
 
@@ -171,6 +145,7 @@ notes: "Iteration 3 APPROVED。Phase 8 已完成：本地 JSONL trace、默认�
 - [ ] **pending_execute 约束**：`after_interrupt` 仅在 `pending_execute=True & interrupt_result=True` 时到 `execute`；pending 分支不得 `_strip_and_append`，必须设置 `action_confirmed=True` 并保留 `action_parsed`；`after_execute` 先检查 `action_confirmed`；`plan_node` 每轮重置 `action_confirmed=False`；`confirm_node` 显式返回 `pending_execute`。
 - [ ] **Phase 6 门禁**：保留 `setup.py` 并补 runtime deps；`.gitignore` 不得忽略 `tests/`；测试/文档不得声明未经验证的 passing 数；README 拓扑必须与 `builder.py` 一致。
 - [ ] **Eval / Trace**：`PhoneAgent.run() -> str` 保持兼容；结构化评测使用 `run_structured()` 或等价参数；Evaluation Harness 至少记录 success/steps/duration/error/HITL count/trace_id/trace_path；Trace 默认本地可用，LangFuse 可选且未配置不影响主流程。
+- [ ] **Reflection 策略**：`reflect_node` 输出/解析结构化 verdict、failure_cause、suggested_strategy；解析失败必须安全降级；Plan 下一轮必须能看到结构化 reflection；不通过模型动态改图拓扑。
 - [ ] **隐私与收益验证**：Trace/checkpoint/memory 默认不得上传或长期保存敏感截图/API key/隐私文本；Reflection、grounding、memory 的收益必须通过 Evaluation Harness 对比验证。
 - [ ] **后续能力边界**：checkpoint/resume 先于 UI grounding，且不得绕过 HITL；Accessibility/OCR 不破坏 Android 主线和坐标转换约束；Memory 不得绕过 HITL/安全确认/当前设备状态检查。
 - [ ] **暂不做**：Dreaming、多 Agent 架构、Command 动态路由、复杂 Prompt 外部化、iOS 主线、早期技能记忆。

@@ -62,6 +62,10 @@ class AgentState(TypedDict):
     # === Reflect 节点输出 ===
     reflection: Optional[str]  # 反思结论
     action_succeeded: bool  # 上一步动作是否生效
+    reflection_verdict: Optional[str]  # succeeded / failed / partial
+    failure_cause: Optional[str]  # 结构化失败原因分类
+    suggested_strategy: Optional[str]  # 建议恢复策略
+    retry_count: int  # 失败/部分成功反思累计次数
 
     # === Human-in-the-Loop (Phase 2) ===
     pending_interrupt: Optional[str]  # 待处理的中断类型: "confirmation" / "takeover"

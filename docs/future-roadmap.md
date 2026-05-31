@@ -6,13 +6,14 @@
 
 ## 当前状态
 
-- **Phase 1-8**: ✅ 全部完成
+- **Phase 1-9**: ✅ 全部完成
 - **测试**: 已恢复可执行 graph/actions/evals 回归测试与安装门禁；当前本地门禁为 `.venv/bin/pytest tests -q` 全绿
 - **架构**: LangGraph Plan-Execute-Reflect StateGraph
 - **图拓扑**: `plan → execute → [confirm|takeover|reflect|replan|end]`
 - **结构化 API**: 已提供 `PhoneAgent.run_structured()` / `RunResult`，`run()` 继续保持字符串返回兼容
 - **可观测性**: 已提供默认本地 JSONL trace，`RunResult` / eval JSON 可通过 `trace_id` 与 `trace_path` 关联 trace 文件；默认脱敏敏感截图、prompt/API key 与隐私文本
-- **评测地基**: 已提供 `evals/run_eval.py --dry-run` smoke harness；当前统计结构化结果、HITL interrupt routing 与 trace 文件关联，不承诺跨进程 resume
+- **策略反思**: 已支持结构化 `reflection_verdict`、`failure_cause`、`suggested_strategy`，下一轮 plan 可读取失败原因和建议策略
+- **评测地基**: 已提供 `evals/run_eval.py --dry-run` smoke harness；当前统计结构化结果、HITL interrupt routing、trace 文件关联、retry count 与 failure cause histogram；不承诺跨进程 resume
 
 ---
 
@@ -135,27 +136,29 @@ evals/
 
 ---
 
-## P1: 策略级反思 (Strategic Reflection)
+## 已完成 MVP: 策略级反思 (Strategic Reflection)
 
 **目标**: 将当前二元反思（生效/不生效）升级为因果分析 + 策略切换。
 
 **为什么需要**: 当前 reflect 只判断 continue/retry，Agent 失败后只会盲目重试。策略级反思让 Agent 分析失败原因并切换策略。
 
-**当前状态**:
+**当前状态**: Phase 9 已落地结构化 reflection schema、失败原因分类、建议策略、Plan 反馈闭环与 eval 统计。
+
+**兼容旧状态**:
 
 ```python
 # reflect_node 当前逻辑
 action_succeeded = raw_action.startswith("continue")  # 二元判断
 ```
 
-**目标状态**:
+**已落地目标状态**:
 
 ```python
 # 升级后的 reflect prompt 要求模型输出
 {
-    "verdict": "succeeded" | "failed" | "partial",
-    "cause": "element_not_found" | "app_not_responding" | "wrong_page" | "network_error" | ...,
-    "strategy": "retry" | "retry_with_offset" | "go_back" | "swipe_to_find" | "restart_app" | "skip",
+    "reflection_verdict": "succeeded" | "failed" | "partial",
+    "failure_cause": "element_not_found" | "app_not_responding" | "wrong_page" | "network_or_loading" | ...,
+    "suggested_strategy": "retry" | "retry_with_offset" | "go_back" | "swipe_to_find" | "wait" | "finish",
     "reasoning": "..."
 }
 ```
@@ -167,14 +170,21 @@ action_succeeded = raw_action.startswith("continue")  # 二元判断
 ```python
 class AgentState(TypedDict):
     # ... 现有字段 ...
+    reflection_verdict: Optional[str] # succeeded / failed / partial
     failure_cause: Optional[str]      # 失败原因分类
     suggested_strategy: Optional[str] # 建议的恢复策略
+    retry_count: int                  # failed / partial 累计次数
 ```
 
-**复杂度**: 🟡 中等
-- 搭建: 0 天（不需要新基础设施）
-- 实现: 2-3 天
-- 调试: 1-2 天
+**Eval 输出**:
+- `retry_count`
+- `failure_cause_histogram`
+
+**验证命令**:
+
+```bash
+.venv/bin/pytest tests/graph tests/evals -q
+```
 
 ---
 
