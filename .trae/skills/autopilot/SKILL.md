@@ -15,6 +15,8 @@ RALPLAN -> execution -> RALPH/verification -> qa -> complete
 
 - 推荐用户手动调用 `/autopilot <task>`。
 - 已有 approved roadmap 且明确要复用时，调用 `/autopilot --use-current-plan`。
+- 需要多 subagent 执行时，调用 `/autopilot --execution=team <task>`。
+- 可配置规划与验证：`--planning=ralplan|direct|false`、`--verification=false`、`--qa=false`。
 - 不建议对架构级变更使用 `--direct`。
 - 管理当前 pipeline：`/autopilot status`、`/autopilot cancel`、`/autopilot resume`、`/autopilot reset`。
 
@@ -23,4 +25,5 @@ RALPLAN -> execution -> RALPH/verification -> qa -> complete
 - 读取 `.trae/rules/autopilot.mdc` 获取 pipeline 协议。
 - RALPLAN 产物以 `.trae/rules/graph.mdc` 为准，不使用 `.omc/plans`。
 - 每个 stage 完成后单独输出 `AUTOPILOT_SIGNAL: <SIGNAL>`。
+- execution=team 时先拆任务并调度 subagent，主 Agent 负责合并与最终一致性。
 - 不主动 commit，不清理用户已有改动。

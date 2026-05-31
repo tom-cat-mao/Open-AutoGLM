@@ -5,20 +5,30 @@ import json
 import os
 import re
 import sys
-from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 
-STAGE_ORDER = ["ralplan", "execution", "ralph", "qa"]
-SIGNALS = {
-    "ralplan": "PIPELINE_RALPLAN_COMPLETE",
-    "execution": "PIPELINE_EXECUTION_COMPLETE",
-    "ralph": "PIPELINE_RALPH_COMPLETE",
-    "qa": "PIPELINE_QA_COMPLETE",
-}
 MAX_STAGE_ITERATIONS = 10
+SUBAGENT_FRESH_SECONDS = 5
+
+
+class PipelineAdapter(NamedTuple):
+    id: str
+    name: str
+    completion_signal: str
+
+
+ADAPTERS: tuple[PipelineAdapter, ...] = (
+    PipelineAdapter("ralplan", "RALPLAN", "PIPELINE_RALPLAN_COMPLETE"),
+    PipelineAdapter("execution", "Execution", "PIPELINE_EXECUTION_COMPLETE"),
+    PipelineAdapter("ralph", "RALPH / Verification", "PIPELINE_RALPH_COMPLETE"),
+    PipelineAdapter("qa", "QA", "PIPELINE_QA_COMPLETE"),
+)
+ADAPTER_BY_ID = {adapter.id: adapter for adapter in ADAPTERS}
+STAGE_ORDER = [adapter.id for adapter in ADAPTERS]
+SIGNALS = {adapter.id: adapter.completion_signal for adapter in ADAPTERS}
 
 
 def now_iso() -> str:
@@ -45,6 +55,10 @@ def state_path(workspace: Path) -> Path:
     return workspace / ".trae" / "autopilot" / "state.json"
 
 
+def subagent_tracking_path(workspace: Path) -> Path:
+    return workspace / ".trae" / "autopilot" / "subagent-tracking.json"
+
+
 def graph_path(workspace: Path) -> Path:
     return workspace / ".trae" / "rules" / "graph.mdc"
 
@@ -66,20 +80,75 @@ def write_state(workspace: Path, state: dict[str, Any]) -> None:
     path.write_text(json.dumps(state, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
-def parse_args(prompt: str) -> tuple[set[str], str]:
+def parse_args(prompt: str) -> tuple[dict[str, str | bool], str]:
     text = prompt.strip()
     if text.startswith("/autopilot"):
         text = text[len("/autopilot") :].strip()
     elif text.startswith("/auto-pilot"):
         text = text[len("/auto-pilot") :].strip()
-    flags: set[str] = set()
+    flags: dict[str, str | bool] = {}
     parts: list[str] = []
     for part in text.split():
-        if part.startswith("--"):
-            flags.add(part)
-        else:
+        if not part.startswith("--"):
             parts.append(part)
+            continue
+        key_value = part[2:]
+        if "=" in key_value:
+            key, value = key_value.split("=", 1)
+            flags[key] = value
+        else:
+            flags[key_value] = True
     return flags, " ".join(parts).strip()
+
+
+def truthy(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def falsey(value: Any) -> bool:
+    return str(value).strip().lower() in {"0", "false", "no", "off", "none"}
+
+
+def int_flag(flags: dict[str, str | bool], key: str, default: int) -> int:
+    value = flags.get(key)
+    if value is None or isinstance(value, bool):
+        return default
+    try:
+        parsed = int(value)
+    except ValueError:
+        return default
+    return parsed if parsed > 0 else default
+
+
+def build_pipeline_config(flags: dict[str, str | bool]) -> dict[str, Any]:
+    planning = str(flags.get("planning") or "ralplan").lower()
+    execution = str(flags.get("execution") or "solo").lower()
+    verification_flag = flags.get("verification")
+    qa_flag = flags.get("qa")
+
+    if truthy(flags.get("direct")):
+        planning = "direct"
+    if truthy(flags.get("no-verification")) or falsey(verification_flag):
+        verification: dict[str, Any] | bool = False
+    else:
+        verification = {
+            "engine": "ralph",
+            "max_iterations": int_flag(flags, "max-verification-iterations", 100),
+        }
+    qa = not truthy(flags.get("no-qa")) and not falsey(qa_flag)
+    if planning not in {"ralplan", "direct", "false"}:
+        planning = "ralplan"
+    if execution not in {"solo", "team"}:
+        execution = "solo"
+    return {
+        "planning": False if planning == "false" else planning,
+        "execution": execution,
+        "verification": verification,
+        "qa": qa,
+        "max_stage_iterations": int_flag(flags, "max-stage-iterations", MAX_STAGE_ITERATIONS),
+    }
 
 
 def parse_command(prompt: str) -> tuple[str, str]:
@@ -130,11 +199,37 @@ def graph_is_approved(workspace: Path) -> bool:
     )
 
 
-def build_stages(first_stage: str, *, no_verification: bool, no_qa: bool) -> list[dict[str, Any]]:
+def adapter_should_skip(stage_id: str, config: dict[str, Any]) -> bool:
+    if stage_id == "ralplan":
+        return config.get("planning") is False
+    if stage_id == "ralph":
+        return config.get("verification") is False
+    if stage_id == "qa":
+        return not bool(config.get("qa", True))
+    return False
+
+
+def default_pipeline_config(*, no_verification: bool = False, no_qa: bool = False) -> dict[str, Any]:
+    flags: dict[str, str | bool] = {}
+    if no_verification:
+        flags["no-verification"] = True
+    if no_qa:
+        flags["no-qa"] = True
+    return build_pipeline_config(flags)
+
+
+def build_stages(
+    first_stage: str,
+    *,
+    no_verification: bool = False,
+    no_qa: bool = False,
+    config: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    pipeline_config = config or default_pipeline_config(no_verification=no_verification, no_qa=no_qa)
     stages: list[dict[str, Any]] = []
     activated = False
     for stage in STAGE_ORDER:
-        skipped = (stage == "ralph" and no_verification) or (stage == "qa" and no_qa)
+        skipped = adapter_should_skip(stage, pipeline_config)
         if skipped:
             status = "skipped"
         elif stage == first_stage and not activated:
@@ -149,6 +244,16 @@ def build_stages(first_stage: str, *, no_verification: bool, no_qa: bool) -> lis
             item["started_at"] = now_iso()
         stages.append(item)
     return stages
+
+
+def first_stage_for(workspace: Path, flags: dict[str, str | bool], config: dict[str, Any], task: str) -> str:
+    use_current = truthy(flags.get("use-current-plan")) or not task
+    planning = config.get("planning")
+    if planning in {False, "direct"}:
+        return "execution"
+    if use_current and graph_is_approved(workspace):
+        return "execution"
+    return "ralplan"
 
 
 def current_stage(state: dict[str, Any]) -> dict[str, Any] | None:
@@ -171,27 +276,18 @@ def init_state(event: dict[str, Any]) -> dict[str, Any] | None:
         return None
     workspace = workspace_from_event(event)
     flags, task = parse_args(prompt)
-    use_current = "--use-current-plan" in flags or not task
-    direct = "--direct" in flags
-    if direct:
-        first_stage = "execution"
-    elif use_current and graph_is_approved(workspace):
-        first_stage = "execution"
-    else:
-        first_stage = "ralplan"
+    pipeline_config = build_pipeline_config(flags)
+    first_stage = first_stage_for(workspace, flags, pipeline_config, task)
     state = {
-        "version": 1,
+        "version": 2,
         "status": "active",
         "session_id": event.get("session_id"),
         "task": task,
-        "flags": sorted(flags),
+        "flags": flags,
+        "pipeline_config": pipeline_config,
         "created_at": now_iso(),
         "updated_at": now_iso(),
-        "stages": build_stages(
-            first_stage,
-            no_verification="--no-verification" in flags,
-            no_qa="--no-qa" in flags,
-        ),
+        "stages": build_stages(first_stage, config=pipeline_config),
     }
     write_state(workspace, state)
     return state
@@ -204,8 +300,66 @@ def summarize_state(state: dict[str, Any] | None) -> str:
     stage_text = current.get("id") if current else "none"
     return (
         f"Autopilot status={state.get('status', 'unknown')}, "
-        f"stage={stage_text}, task={state.get('task') or 'current plan'}"
+        f"stage={stage_text}, task={state.get('task') or 'current plan'}, "
+        f"{format_pipeline_hud(state)}"
     )
+
+
+def format_pipeline_hud(state: dict[str, Any]) -> str:
+    stages = state.get("stages") if isinstance(state.get("stages"), list) else []
+    total = len([stage for stage in stages if isinstance(stage, dict) and stage.get("status") != "skipped"])
+    active_index = 0
+    parts: list[str] = []
+    seen_runnable = 0
+    for stage in stages:
+        if not isinstance(stage, dict):
+            continue
+        stage_id = str(stage.get("id"))
+        status = str(stage.get("status"))
+        adapter = ADAPTER_BY_ID.get(stage_id)
+        name = adapter.name if adapter else stage_id
+        if status != "skipped":
+            seen_runnable += 1
+        if status == "complete":
+            marker = "OK"
+        elif status == "active":
+            marker = ">>"
+            active_index = seen_runnable
+        elif status == "skipped":
+            marker = "SKIP"
+        else:
+            marker = ".."
+        suffix = f" (iter {stage.get('iterations', 0)})" if status == "active" else ""
+        parts.append(f"[{marker}] {name}{suffix}")
+    return f"Pipeline {active_index or total}/{total}: " + " | ".join(parts)
+
+
+def track_subagent(event: dict[str, Any], active: bool) -> None:
+    workspace = workspace_from_event(event)
+    path = subagent_tracking_path(workspace)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    data = {
+        "active": active,
+        "updated_at": now_iso(),
+        "session_id": event.get("session_id"),
+        "agent": event.get("agent") or event.get("subagent") or event.get("name"),
+    }
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def subagent_active(workspace: Path) -> bool:
+    path = subagent_tracking_path(workspace)
+    if not path.exists():
+        return False
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        updated = datetime.fromisoformat(str(data.get("updated_at")))
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return False
+    if not data.get("active"):
+        return False
+    age = (datetime.now(timezone.utc) - updated).total_seconds()
+    return age <= SUBAGENT_FRESH_SECONDS
 
 
 def collect_assistant_text(obj: Any) -> list[str]:
@@ -245,12 +399,48 @@ def transcript_has_signal(transcript_path: str | None, signal: str) -> bool:
     return False
 
 
+def execution_prompt(task: str, state: dict[str, Any]) -> str:
+    config = state.get("pipeline_config") if isinstance(state.get("pipeline_config"), dict) else {}
+    mode = config.get("execution", "solo")
+    if mode == "team":
+        return f"""
+## Stage: Execution / Team
+
+任务：{task}
+
+执行：
+1. 读取 `.trae/rules/graph.mdc` 的 approved roadmap 与约束 Checklist。
+2. 使用 TodoWrite 拆分任务，并按风险/文件边界分派多个 subagent：
+   - Explore：快速定位相关文件、调用点、测试入口。
+   - Plan：对复杂实现点给出局部方案和风险。
+   - general-purpose：并行处理相互独立的实现/验证子任务。
+3. 主 Agent 负责合并结果、编辑文件、解决冲突、保持整体一致性。
+4. 不主动 commit，不清理用户已有改动。
+5. 完成实现后输出完成信号；测试失败可留给 RALPH stage 继续修复。
+"""
+    return f"""
+## Stage: Execution / Solo
+
+任务：{task}
+
+执行：
+1. 读取 `.trae/rules/graph.mdc` 的 approved roadmap 与约束 Checklist。
+2. 使用 TodoWrite 跟踪多步骤执行。
+3. 必要时调用 Explore / Plan / general-purpose subagent 辅助查代码或局部设计，但主 Agent 负责最终编辑。
+4. 不主动 commit，不清理用户已有改动。
+5. 完成实现后输出完成信号；测试失败可留给 RALPH stage 继续修复。
+"""
+
+
 def stage_prompt(stage_id: str, state: dict[str, Any]) -> str:
     task = state.get("task") or "当前 approved roadmap"
     signal = SIGNALS[stage_id]
+    stage = current_stage(state) or {}
+    max_iterations = state.get("pipeline_config", {}).get("max_stage_iterations", MAX_STAGE_ITERATIONS)
     common = (
         "<autopilot-pipeline-continuation>\n"
-        f"[AUTOPILOT PIPELINE - STAGE: {stage_id} | SIGNAL: {signal}]\n"
+        f"{format_pipeline_hud(state)}\n\n"
+        f"[AUTOPILOT PIPELINE - STAGE: {stage_id} | ITERATION {stage.get('iterations', 0)}/{max_iterations} | SIGNAL: {signal}]\n"
         "读取 `.trae/rules/autopilot.mdc` 获取协议；完成本 stage 后单独输出：\n"
         f"AUTOPILOT_SIGNAL: {signal}\n\n"
     )
@@ -270,27 +460,18 @@ def stage_prompt(stage_id: str, state: dict[str, Any]) -> str:
 7. Critic 未 APPROVE 前不得修改业务代码。
 """
     elif stage_id == "execution":
-        body = f"""
-## Stage: Execution
-
-任务：{task}
-
-执行：
-1. 读取 `.trae/rules/graph.mdc` 的 approved roadmap 与约束 Checklist。
-2. 按当前规划 Phase 实现代码/配置/文档变更。
-3. 使用 TodoWrite 跟踪多步骤执行。
-4. 不主动 commit，不清理用户已有改动。
-5. 完成实现后输出完成信号；测试失败可留给 verification stage 继续修复。
-"""
+        body = execution_prompt(task, state)
     elif stage_id == "ralph":
         body = """
 ## Stage: RALPH / Verification
 
 执行：
-1. 运行相关测试；Python/pytest/pip 优先使用 `.venv/bin/*`。
-2. 检查新增配置语法、hook 脚本语法、关键路径行为。
-3. 修复发现的问题并重跑目标测试。
-4. 仅清理本 stage 产生的临时产物，不清理用户已有改动。
+1. 并行调用只读审查类 subagent：architect（架构一致性）、critic（质量门/遗漏项）、general-purpose 或 issue-validator（具体风险验证）。
+2. 主 Agent 汇总 findings，修复高置信问题。
+3. 运行相关测试；Python/pytest/pip 优先使用 `.venv/bin/*`。
+4. 检查新增配置语法、hook 脚本语法、关键路径行为。
+5. 修复发现的问题并重跑目标测试。
+6. 仅清理本 stage 产生的临时产物，不清理用户已有改动。
 """
     else:
         body = """
@@ -361,6 +542,8 @@ def handle_stop(event: dict[str, Any]) -> None:
     state = read_state(workspace)
     if not state or state.get("status") != "active":
         return
+    if subagent_active(workspace):
+        return
     session_id = state.get("session_id")
     if session_id and event.get("session_id") and session_id != event.get("session_id"):
         return
@@ -388,9 +571,10 @@ def handle_stop(event: dict[str, Any]) -> None:
         return
     stage["iterations"] = int(stage.get("iterations") or 0) + 1
     state["updated_at"] = now_iso()
-    if stage["iterations"] > MAX_STAGE_ITERATIONS:
+    max_iterations = state.get("pipeline_config", {}).get("max_stage_iterations", MAX_STAGE_ITERATIONS)
+    if stage["iterations"] > int(max_iterations):
         state["status"] = "blocked"
-        state["blocked_reason"] = f"stage {stage_id} exceeded {MAX_STAGE_ITERATIONS} continuation iterations"
+        state["blocked_reason"] = f"stage {stage_id} exceeded {max_iterations} continuation iterations"
         write_state(workspace, state)
         print(json.dumps({"continue": False, "stopReason": state["blocked_reason"]}, ensure_ascii=False))
         return
@@ -405,6 +589,10 @@ def main() -> int:
         handle_user_prompt_submit(event)
     elif name == "stop":
         handle_stop(event)
+    elif name in {"subagent_start", "subagentstart"}:
+        track_subagent(event, True)
+    elif name in {"subagent_stop", "subagentstop"}:
+        track_subagent(event, False)
     return 0
 
 

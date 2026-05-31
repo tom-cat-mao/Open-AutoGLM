@@ -16,6 +16,7 @@ Autopilot 是 TraeCLI-native 的持续执行工作流，不迁移 `.omc`，不�
 | RALPLAN 产物 | `.trae/rules/graph.mdc` | Planner/Agent | roadmap、approval、执行约束唯一真相源 |
 | Autopilot 协议 | `.trae/rules/autopilot.mdc` | Agent | stage、信号、续跑规则 |
 | Autopilot 状态 | `.trae/autopilot/state.json` | hook | runtime state，不进入默认上下文，不提交 |
+| subagent tracking | `.trae/autopilot/subagent-tracking.json` | hook | 感知 subagent 活跃，避免 stop hook 误续跑 |
 | Transcript | TraeCLI cache | hook | 只扫描 assistant 输出的完成信号 |
 
 ## 2. Stage 顺序
@@ -32,29 +33,69 @@ ralplan -> execution -> ralph -> qa -> complete
 | `qa` | `PIPELINE_QA_COMPLETE` | 最终自检、清理临时产物、同步状态 |
 | `complete` | `PIPELINE_COMPLETE` | Autopilot 完成，hook 停止续跑 |
 
-## 3. RALPLAN 联动
+## 3. PipelineConfig
+
+Autopilot 使用轻量 Pipeline Adapter 模式；不引入 TypeScript runtime，但每个 stage 有统一的 `id / name / completion_signal / should_skip / prompt` 语义。
+
+默认配置：
+
+```yaml
+planning: ralplan        # ralplan | direct | false
+execution: solo          # solo | team
+verification:
+  engine: ralph
+  max_iterations: 100
+qa: true
+max_stage_iterations: 10
+```
+
+支持参数：
+
+| 参数 | 行为 |
+|---|---|
+| `--planning=ralplan|direct|false` | 选择规划方式；`direct/false` 从 execution 开始 |
+| `--execution=solo|team` | solo 主 Agent 实现；team 强化 subagent 拆分与并行 |
+| `--verification=false` / `--no-verification` | 跳过 RALPH/verification stage |
+| `--qa=false` / `--no-qa` | 跳过 QA stage |
+| `--max-stage-iterations=N` | 单 stage stop-hook 最大续跑次数 |
+| `--use-current-plan` | graph 已 approved 时复用当前计划，从 execution 开始 |
+
+## 4. RALPLAN 联动
 
 - 默认先运行 `ralplan`，避免复用旧 `graph.mdc` 执行新需求。
 - 只有用户明确传入 `--use-current-plan` 或无任务正文时，才可在 `graph.mdc` 已满足以下条件时跳过 `ralplan`：
   - `design_status: critic_approved`
   - `last_critic_verdict: APPROVE`
   - `approved_for_execution: true`
-- `--direct` 可跳过 RALPLAN，但仍必须先生成清晰执行计划；架构级变更不建议使用。
+- `--direct` 等价于 `--planning=direct`，可跳过 RALPLAN，但仍必须先生成清晰执行计划；架构级变更不建议使用。
 
-## 4. Completion Signal 规则
+## 5. Completion Signal 规则
 
 - Agent 完成当前 stage 后，必须单独输出一行：`AUTOPILOT_SIGNAL: <SIGNAL>`。
 - hook 只从 assistant transcript 中识别该格式，避免把 prompt 中的信号说明误判为完成。
 - 未输出信号时，stop hook 会以 `decision:block` 注入当前 stage continuation prompt。
+- continuation prompt 顶部包含 HUD，例如：`Pipeline 2/4: [OK] RALPLAN | [>>] Execution (iter 3) | [..] RALPH | [..] QA`。
 
-## 5. 执行约束
+## 6. Subagent 编排
+
+| Stage | 推荐 subagent 用法 |
+|---|---|
+| `ralplan` | 串行调用 planner → architect → critic；ITERATE 回 planner |
+| `execution/solo` | 主 Agent 实现，按需调用 Explore / Plan / general-purpose 辅助 |
+| `execution/team` | TodoWrite 拆分后并行调用 Explore / Plan / general-purpose，主 Agent 负责合并与一致性 |
+| `ralph` | 并行只读审查：architect、critic、general-purpose 或 issue-validator；主 Agent 修复高置信问题 |
+| `qa` | 最终 diff/测试/临时产物/状态边界检查 |
+
+Autopilot 监听 `subagent_start` / `subagent_stop`，subagent 活跃窗口内不注入新的 continuation prompt。
+
+## 7. 执行约束
 
 - Critic 未 `APPROVE` 前不得修改业务代码，除非用户显式 `--direct`。
 - 不把 Autopilot runtime state 写进 `.trae/rules/*.mdc`。
 - 不主动 commit；完成后只汇总变更和验证结果。
 - 测试临时产物可清理，已有用户/项目改动不得过度清理。
 
-## 6. 管理命令
+## 8. 管理命令
 
 | 命令 | 行为 |
 |---|---|
