@@ -8,7 +8,7 @@
 
 ```
 START → plan → execute → [confirm|takeover|reflect|replan|end]
-                         ├─ confirm → after_interrupt → [reflect|end]
+                         ├─ confirm → after_interrupt → [execute|reflect|end]
                          ├─ takeover → after_interrupt → [reflect|end]
                          ├─ reflect → should_continue → [replan|end]
                          ├─ replan → plan
@@ -18,7 +18,7 @@ START → plan → execute → [confirm|takeover|reflect|replan|end]
 - **plan** — 截图 + 模型推理 + 解析 action
 - **execute** — `dispatch_tool()` 路由到 `@tool` 函数执行动作
 - **reflect** — 再截图 + 模型判断动作是否生效
-- **confirm / takeover** — LangGraph `interrupt()` 实现可恢复的 Human-in-the-Loop
+- **confirm / takeover** — LangGraph `interrupt()` 实现 Human-in-the-Loop；当前保证 interrupt 路由语义，持久 resume 将在后续 checkpoint/resume 阶段完善
 
 ### 项目结构
 
@@ -72,7 +72,7 @@ cd Open-AutoGLM
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-pip install -e .
+pip install -e ".[dev]"
 ```
 
 ### ADB Keyboard 安装（Android 文本输入必需）

@@ -1,127 +1,61 @@
 # Open-AutoGLM Agent Guide
 
-## Core Loop (MUST READ)
+## Core Loop
 
-```
-Screenshot -> VLM inference (thinking + action) -> Parse action -> Execute on device -> Reflect -> Repeat
-```
+`Screenshot -> VLM inference -> Parse action -> Execute on device -> Reflect -> Repeat`
 
-Every component exists to serve this loop. The loop is implemented as a LangGraph StateGraph.
+项目核心循环由 LangGraph `StateGraph` 实现；详细 roadmap 与阶段状态按需读取 `.trae/rules/graph.mdc`。
 
-## Global Constraints (MUST follow before ANY code change)
+## Non-Negotiable Constraints
 
-1. **Coordinate system**: Model outputs 0-1000 relative coordinates. Tools MUST convert to absolute pixels via `convert_relative_to_absolute()` in `graph/tools/coords.py`. Never pass raw model coordinates to device commands.
-2. **Action parsing safety**: MUST use `ast.parse` + `ast.literal_eval`. NEVER use `eval()`. See `phone_agent/actions/handler.py:parse_action()`.
-3. **Image context management**: After each step, images MUST be stripped from conversation history via `MessageBuilder.remove_images_from_message()`. This prevents token overflow.
-4. **Human-in-the-Loop**: Sensitive operations (payment, privacy) MUST go through `confirm_node` (interrupt). Login/captcha MUST go through `takeover_node` (interrupt). Both use LangGraph `interrupt()` for resumable pauses.
-5. **Device abstraction**: All device operations go through `DeviceFactory` -> `phone_agent/adb/` module. Single platform, single code path.
-6. **messages_reducer semantics**: `plan_node` returns only new messages (append mode); `execute_node` returns full rebuilt list (replace mode). Violating this causes message duplication and token explosion.
-7. **Confirm-then-execute**: After confirm accepts a sensitive Tap, `after_interrupt` routes to `execute` (not `reflect`). The `pending_execute` branch in `execute_node` MUST NOT call `_strip_and_append` again and MUST set `action_confirmed=True`.
+| 约束 | 要求 |
+|---|---|
+| 坐标 | 模型输出 0-1000 相对坐标；tool 内必须用 `convert_relative_to_absolute()` 转绝对像素 |
+| 动作解析 | 必须用 `ast.parse` + `ast.literal_eval`；禁止 `eval()` |
+| 图片上下文 | 每步后必须用 `MessageBuilder.remove_images_from_message()` 剥离历史图片 |
+| HITL | 支付/隐私走 `confirm_node`；登录/验证码走 `takeover_node`；均使用 LangGraph `interrupt()` |
+| 设备抽象 | 设备操作统一经 `DeviceFactory` -> `phone_agent/adb/` |
+| messages reducer | `plan_node` 只返回新增消息；`execute_node` 返回完整重建列表，避免 token 爆炸 |
+| confirm-then-execute | confirm 接受敏感 Tap 后路由到 `execute`；`pending_execute` 分支不得再次 `_strip_and_append` |
+| Tool DI | `execute_node` 从 graph config 注入 `device_factory`；tool schema 不得暴露 `device_factory` |
 
-## Architecture at a Glance
+## Key Paths
 
-```
-main.py                          # CLI entry: arg parsing, system checks, agent creation
-phone_agent/
-├── agent.py                     # PhoneAgent — uses LangGraph StateGraph
-├── device_factory.py            # DeviceFactory: loads adb module
-├── model/
-│   └── client.py                # ModelClient (OpenAI streaming), ModelConfig, MessageBuilder
-├── actions/
-│   └── handler.py               # ActionResult, parse_action(), do(), finish()
-├── adb/                         # Android device control
-├── config/
-│   ├── apps.py
-│   ├── prompts.py / prompts_zh.py / prompts_en.py
-│   ├── i18n.py
-│   └── timing.py
-└── graph/                       # LangGraph Plan-Execute-Reflect
-    ├── state.py                 # AgentState TypedDict
-    ├── builder.py               # create_agent_graph()
-    ├── edges.py                 # Conditional edges
-    ├── nodes/
-    │   ├── plan.py              # plan_node
-    │   ├── execute.py           # execute_node (uses dispatch_tool)
-    │   ├── reflect.py           # reflect_node
-    │   ├── confirm.py           # confirm_node (interrupt)
-    │   └── takeover.py          # takeover_node (interrupt)
-    └── tools/                   # @tool functions
-        ├── __init__.py          # dispatch_tool, get_tool_map, get_all_tools
-        ├── coords.py            # convert_relative_to_absolute
-        ├── tap.py
-        ├── type_text.py
-        ├── swipe.py
-        ├── navigation.py        # back / home
-        ├── launch.py
-        ├── press.py             # double_tap / long_press
-        ├── wait.py
-        └── misc.py              # note / call_api / interact
-```
+| 范围 | 路径 |
+|---|---|
+| CLI 入口 | `main.py` |
+| Agent | `phone_agent/agent.py` |
+| Graph | `phone_agent/graph/{state.py,builder.py,edges.py,nodes/,tools/}` |
+| Actions | `phone_agent/actions/handler.py` |
+| Model | `phone_agent/model/client.py` |
+| Device | `phone_agent/device_factory.py`, `phone_agent/adb/` |
+| Prompts | `phone_agent/config/prompts.py`, `prompts_zh.py`, `prompts_en.py` |
 
-## Quick Reference
+## Rule Loading Policy
 
-- **Entry**: `main.py`
-- **Agent**: `phone_agent/agent.py:PhoneAgent`
-- **Graph**: `phone_agent/graph/builder.py:create_agent_graph()`
-- **Tools**: `phone_agent/graph/tools/` — `dispatch_tool()` for action execution
-- **Actions**: `phone_agent/actions/handler.py` — `parse_action()`, `ActionResult`, `do()`, `finish()`
-- **Model**: `phone_agent/model/client.py:ModelClient`
-- **Device**: `phone_agent/device_factory.py:DeviceFactory`
-- **Prompts**: `phone_agent/config/prompts.py` (CN), `phone_agent/config/prompts_en.py` (EN)
+| 任务 | 读取规则 |
+|---|---|
+| LangGraph / Agent loop / HITL / Tool 变更 | `.trae/rules/graph.mdc` + `.trae/rules/architecture.mdc` |
+| roadmap / 实现计划 / 架构审查 | `.trae/rules/design-loop.mdc` |
+| Python 代码风格或测试 | `.trae/rules/style.mdc` |
+| 配置、模型、设备、动作系统 | 对应 `.trae/rules/{config,model,devices,actions}.mdc` |
+| 普通问答或轻量改动 | 不主动加载重型规则 |
 
-## LangGraph Refactoring
+## Commands & Validation
 
-**Goal**: Replace PhoneAgent while-loop with LangGraph StateGraph (Plan-Execute-Reflect) ✅ COMPLETED
-
-**Current Phase**: Phase 5 — Bugfix ✅ Completed (89/89 tests passing, mypy zero errors)
-
-### Graph Topology
-
-```
-START → plan → execute → [confirm|takeover|reflect|replan|end]
-                         ├─ confirm → after_interrupt → [execute|reflect|end]
-                         ├─ takeover → after_interrupt → [reflect|end]
-                         ├─ reflect → should_continue → [replan|end]
-                         ├─ replan → plan (skip reflect for Wait/Note/Call_API/Interact)
-                         └─ end → END
-```
-
-### Phase 1 Status: Completed
-- AgentState, plan_node, execute_node, reflect_node implemented
-- Conditional edges (after_execute, should_continue) working
-- Mock tests verify graph loop, skip-reflect, finish-routing (16 tests)
-
-### Phase 2 Status: Completed
-- `confirm_node` + `takeover_node` using `interrupt()` for resumable Human-in-the-Loop
-- `execute_node` detects sensitive actions (`Tap` with `message`) and `Take_over`, routes to HITL nodes
-- `after_execute` edge expanded with `confirm` / `takeover` routes
-- `after_interrupt` edge routes to `reflect` or `END` based on user response
-- End-to-end tests: max_steps termination, plan error, skip_reflect, multi-loop, confirm/takeover flows (25 tests)
-
-### Phase 3 Status: Completed
-- Each Action 封装为 `@tool` 装饰器函数（tap, type_text, swipe, back, home, launch, double_tap, long_press, wait, note, call_api, interact）
-- `dispatch_tool()` 统一调度
-- `convert_relative_to_absolute()` 提取为 `tools/coords.py` 独立 utility
-- 坐标转换、dispatch 路由、全图集成测试（39 新增 tests）
-
-### Phase 4 Status: Completed
-- 移除旧 `_execute_step` while 循环和 `_run_loop` 方法
-- 移除旧 `ActionHandler` 类（保留 `ActionResult`, `parse_action`, `do`, `finish`）
-- 移除 `use_graph` 开关，`PhoneAgent` 默认使用 StateGraph
-- 移除 `use_tools` 开关，`execute_node` 默认使用 `dispatch_tool`
-- 移除 `confirmation_callback` / `takeover_callback` 参数，改用 `interrupt()` HITL 节点
-- 更新文档和测试（79 tests passing）
+| 场景 | 命令 |
+|---|---|
+| 安装开发依赖 | `.venv/bin/pip install -e ".[dev]"` |
+| 全量测试 | `.venv/bin/pytest` |
+| Graph 测试 | `.venv/bin/pytest tests/graph -v` |
+| 部署检查 | `.venv/bin/python scripts/check_deployment_cn.py` 或 `check_deployment_en.py` |
 
 ## Version Management
 
-- **Phase 完成即提交**：每个 Phase 完成后必须运行 `git commit`，message 格式：`feat(graph): <phase 目标>`
-- **禁止 force push**：`main` 和 `feature/langgraph-refactor` 分支禁止 `git push --force`
+- Phase 完成后按项目规范更新 `.trae/rules/graph.mdc` 并提交；commit message：`feat(graph): <phase 目标>`。
+- 禁止对 `main` 和 `feature/langgraph-refactor` 执行 `git push --force`。
+- 未经用户明确要求，不主动创建 commit。
 
 ## Compact Instructions
 
-压缩时始终保留：
-- 当前正在执行的任务描述和进度
-- Global Constraints 中的 7 条不变量
-- Architecture at a Glance 中的目录结构
-- LangGraph Refactoring 段（当前阶段 + 图拓扑）
-- Version Management 段（phase 完成状态）
+压缩时保留：当前任务与进度、Non-Negotiable Constraints、Key Paths、必要 roadmap 状态与未完成 TODO。

@@ -6,74 +6,53 @@ alwaysApply: false
 
 # Design Loop: Plan-Review-Revise
 
-## 1. Overview
+## 1. 目标与边界
 
-通过 Planner、Architect、Critic 三个角色的协作，生成并审核 roadmap，确保架构方案在编码前经过充分审查。最终产物写入 `.trae/rules/graph.mdc`，作为设计与执行的唯一真相源。
+Design Loop 用于在编码前生成并审核 roadmap：
 
-### 两阶段流水线
-
-```
-阶段 A：设计（本 Loop）
-  @planner 生成 roadmap 并直接写入 graph.mdc
-  → @architect 读取 graph.mdc 审查架构合理性
-  → @critic 读取 graph.mdc 质量把关 → APPROVE / ITERATE / REJECT
-  → 循环直到 APPROVE
-  → graph.mdc 即为已批准的设计
-
-阶段 B：执行
-  Trae CLI 加载 graph.mdc（globs 匹配 phone_agent/graph/**/*.py）
-  → Agent 按 graph.mdc 的 Roadmap section 逐 Phase 执行
-  → 每个 Phase 完成后更新 graph.mdc（标记 ✅）+ git commit
+```text
+/design-loop <task>
+  → Planner 写入完整 graph.mdc
+  → Architect 只读审查
+  → Critic 只读给出 APPROVE / ITERATE / REJECT
+  → ITERATE 回 Planner 窄修，APPROVE 后 Final Check
 ```
 
-### 为什么是 Plan-Review-Revise
+- Critic 未 `APPROVE` 前不得修改业务代码。
+- `.trae/rules/graph.mdc` 是当前设计与执行约束的唯一真相源，不是历史日志。
+- Architect / Critic 的完整报告只在本轮 loop 内传递，不能写入 `graph.mdc`。
 
-| 方案 | 角色数 | 优点 | 缺点 |
-|------|--------|------|------|
-| 单 Planner 直接输出 | 1 | 简单快速 | 容易遗漏边界情况，架构缺陷进入编码后修复成本高 |
-| **Plan-Review-Revise** | **3** | **架构缺陷在编码前被发现，多视角审查减少盲区** | 需要多轮迭代，前期耗时增加 |
+## 2. graph.mdc 格式约定
 
-选择理由：
-1. **Architect 提供最强反方论点**，避免 Planner 的思维定式
-2. **Critic 的 5 Phase 审查协议**能系统性发现遗漏
-3. **最大 5 轮迭代限制**，防止无限循环
-4. **渐进式**：先跑通最小闭环，后续可扩展 deliberate 模式
+`graph.mdc` 是 Trae CLI rule 文件，必须保持 YAML frontmatter + Markdown 正文结构。
 
-### Loop 拓扑
+### 2.1 frontmatter 模板
 
-```
-User Task
-    |
-    v
-@planner ──→ 写入 graph.mdc（新 Phase 设计）
-    |
-    v
-@architect ──→ 读取 graph.mdc → 架构审查报告
-    |
-    v
-@critic ──→ 读取 graph.mdc → Verdict: APPROVE / ITERATE / REJECT
-    |
-    ├─ APPROVE ──→ graph.mdc 已批准 ──→ 用户确认 ──→ 编码
-    ├─ REJECT  ──→ 返回用户，重新澄清需求
-    └─ ITERATE ──→ 收集 feedback ──→ @planner 修订 graph.mdc ──→ 继续循环
-                        ^                                         |
-                        └──────────── max 5 iterations ──────────┘
-```
-
-### 显式入口与状态
-
-- 显式入口：使用项目级 prompt command `/design-loop <task>`。
-- 主流程由 `/design-loop` 编排：Planner → Architect → Critic，Critic 未 `APPROVE` 前不得进入实现。
-- 运行状态写入 `.trae/rules/graph.mdc` 的 `Design Loop Status` section。
-- Hook 只做提醒/guardrail，不负责自动调用 subagent，不自动注入完整 design-loop 协议。
-
-### Design Loop Status 约定
-
-`graph.mdc` 中必须维护轻量状态块：
+除非明确要改变规则加载范围，否则 Planner 必须保留当前 frontmatter，或按以下模板恢复：
 
 ```yaml
-status: idle | draft | architect_reviewed | critic_approved | iterate | rejected
+---
+description: LangGraph roadmap 与核心执行约束；仅在修改 graph/Agent loop/Tool/HITL 或执行 roadmap 时加载
+alwaysApply: false
+globs: "phone_agent/graph/**/*.py,phone_agent/agent.py,phone_agent/actions/**/*.py,phone_agent/device_factory.py,phone_agent/adb/**/*.py,tests/**/*.py,setup.py,README.md,docs/**/*.md"
+---
+```
+
+- `globs` 是规则加载配置，不是 roadmap 内容；默认不得自由重写。
+- 业务状态不得放入 frontmatter，必须放入正文 `Design Loop Status` 的 fenced yaml 块。
+
+### 2.2 正文固定结构
+
+````markdown
+# Design Loop Status
+
+```yaml
+status: idle | draft | architect_reviewed | iterate | critic_approved | in_progress | completed | blocked | rejected
+design_status: idle | draft | architect_reviewed | iterate | critic_approved | rejected
+execution_status: not_started | in_progress | completed | blocked
 iteration: <non-negative integer>
+planner_mode: initial_rewrite | feedback_revision | null
+revision_scope: full_roadmap | targeted_findings | null
 last_planner_update: <short text or null>
 last_architect_review: <short text or null>
 last_critic_verdict: APPROVE | ITERATE | REJECT | null
@@ -81,298 +60,132 @@ approved_for_execution: true | false
 notes: <short text>
 ```
 
-状态更新规则：
-- Planner 写入/修订 roadmap 后：`status: draft`，`approved_for_execution: false`。
-- Architect 审查完成后：`status: architect_reviewed`。
-- Critic 输出 `APPROVE`：`status: critic_approved`，`approved_for_execution: true`。
-- Critic 输出 `ITERATE`：`status: iterate`，`approved_for_execution: false`，再回 Planner。
-- Critic 输出 `REJECT`：`status: rejected`，`approved_for_execution: false`，返回用户澄清。
+# Roadmap
 
-## 2. Agent 角色定义
+## 已完成 Phase
+...
 
-### 2.1 Planner
+## RALPLAN-DR 摘要
+...
 
-**职责**：根据 task 制定 roadmap，直接写入 `.trae/rules/graph.mdc`
+## 当前规划 Phase
+...
 
-```
-输入: task + 当前 graph.mdc 内容 + 项目上下文（AGENTS.md、相关代码文件）
-输出: 更新后的 .trae/rules/graph.mdc（含 Design Loop Status、Roadmap、RALPLAN-DR 摘要、约束 Checklist）
-```
+# 约束 Checklist
+...
+````
 
-**关键**：planner 用 Write 整体覆写 graph.mdc。architect 和 critic 通过 Read graph.mdc 获取计划内容，通过 Read 代码获取架构信息。
+- `design_status` 表示设计 loop 状态。
+- `execution_status` 表示已批准计划的执行状态。
+- `status` 保留为兼容/摘要字段；设计判断优先看 `design_status`，执行判断优先看 `execution_status`。
+- 设计已批准并进入执行后，`planner_mode` / `revision_scope` 可为 `null`；只有设计轮次中的 `draft` / `iterate` 状态必须明确二者。
 
-**RALPLAN-DR 摘要要求**：
-- **Principles** (3-5)：本计划遵循的核心原则
-- **Decision Drivers** (top 3)：驱动决策的关键因素
-- **Viable Options** (>=2)：可行方案及 bounded pros/cons
-- 若只剩一个可行方案，需显式说明替代方案被排除的原因
+## 3. Planner 协议
 
-**输出格式**：
+Planner 只规划，不实现；唯一允许修改的目标是 `.trae/rules/graph.mdc`。
 
-```markdown
-# Plan: {name}
+### 3.1 文件操作规则
 
-## Context
-{项目背景}
+- 永远读取当前 `graph.mdc` 后，用 `Write` 输出一个完整、合法、自洽的 `graph.mdc`。
+- 禁止用 `Edit` / `MultiEdit` 追加、局部打补丁或把审查报告拼进文件。
+- “窄修”是内容策略，不是文件操作策略：迭代轮仍然整体覆写完整文件。
 
-## Principles
-1. {原则1}
-2. {原则2}
-3. {原则3}
+### 3.2 双模式语义
 
-## Decision Drivers
-1. {驱动因素1}
-2. {驱动因素2}
-3. {驱动因素3}
+| 模式 | 触发条件 | Planner 行为 |
+|---|---|---|
+| `initial_rewrite` | `iteration == 0` 或新 task 首轮 | 重建当前 roadmap；保留已完成 Phase 摘要和有效约束；删除过期/冲突/历史性内容 |
+| `feedback_revision` | Critic `ITERATE` 后 | 基于 Architect/Critic findings 做最小必要修订；不无故重排 Phase；不删除无关约束 |
 
-## Options Considered
-| 方案 | 优点 | 缺点 |
-|------|------|------|
-| A | ... | ... |
-| B | ... | ... |
+### 3.3 RALPLAN-DR 摘要要求
 
-## Selected Approach
-{选择的方案及理由}
+- **Principles**：3-5 条核心原则。
+- **Decision Drivers**：top 3 决策驱动。
+- **Viable Options**：至少 2 个可行方案及 bounded pros/cons；若只剩一个可行方案，说明替代方案被排除原因。
+- **Selected Approach**：明确选择和理由。
+- 每个执行步骤必须包含根因、修改文件候选、可验证验收标准。
 
-## Task Flow
-1. {步骤1} — 验收标准: {可验证的条件}
-2. {步骤2} — 验收标准: {可验证的条件}
-3. {步骤3} — 验收标准: {可验证的条件}
+## 4. Architect 协议
 
-## File Changes
-- 新增: {文件路径}
-- 修改: {文件路径}
-- 删除: {文件路径}
+Architect 只读审查，不修改文件。
 
-## Success Criteria
-- {可衡量的成功标准1}
-- {可衡量的成功标准2}
+- 读取 `graph.mdc` 和相关代码，代码是 State/Node/Edge/Tool/HITL 架构事实来源。
+- 审查方案选择、步骤可执行性、验收标准、修改文件列表、项目不变量。
+- 必须给出最强反方论点和至少一个真实权衡张力。
+- 输出短报告；不要要求把完整报告写入 `graph.mdc`。
 
-## ADR
-- Decision: {决策}
-- Drivers: {驱动因素}
-- Alternatives considered: {替代方案}
-- Why chosen: {选择理由}
-- Consequences: {后果}
-- Follow-ups: {后续跟进}
-```
+## 5. Critic 协议
 
-### 2.2 Architect
-
-**职责**：审查架构合理性，提供最强反方论点和权衡张力
-
-```
-输入: 读取 .trae/rules/graph.mdc + 代码库实际文件
-输出: 架构审查报告（只读，不修改代码）
-```
-
-**审查重点**：
-- 方案选择是否合理（Options Considered 是否充分，Selected Approach 理由是否成立）
-- 步骤是否可执行（验收标准是否可验证，修改文件列表是否完整）
-- 是否违反 AGENTS.md 的全局约束
-- 对照代码验证计划中的技术声明是否与当前架构一致
-- 最强反方论点（steelman antithesis）
-- 至少一个真实的权衡张力（tradeoff tension）
-
-### 2.3 Critic
-
-**职责**：质量把关，执行 5 Phase 审查协议，输出 verdict
-
-```
-输入: 读取 .trae/rules/graph.mdc + Architect 审查报告
-输出: Verdict (APPROVE / ITERATE / REJECT) + 结构化 findings
-```
-
-**5 Phase 审查协议**：
-
-**Phase 1 — Pre-commitment**
-- 在读取 plan 前，预测 3-5 个最可能的问题区域
-- 写下预测，然后有针对性地调查
-
-**Phase 2 — Verification**
-- 读取 plan 中引用的所有文件
-- 验证每个技术声明（file:line 证据）
-- 模拟每个任务的实现过程
-
-**Phase 3 — Multi-perspective**
-- **Executor 视角**: "我能按这个计划执行吗？会在哪里卡住？"
-- **Stakeholder 视角**: "这个计划真的解决了问题吗？成功标准可衡量吗？"
-- **Skeptic 视角**: "这个方案最可能失败的原因是什么？"
-
-**Phase 4 — Gap Analysis**
-- 显式寻找"缺什么"：
-  - "什么会破坏这个计划？"
-  - "什么边界情况没处理？"
-  - "什么假设可能是错的？"
-
-**Phase 4.5 — Self-Audit**
-- 对每个 CRITICAL/MAJOR finding：
-  - 置信度：HIGH / MEDIUM / LOW
-  - "作者能否用我缺少的上下文反驳？"
-  - LOW 置信度 → 移入 Open Questions
-
-**Phase 4.75 — Realist Check**
-- 压力测试 severity：
-  - "现实最坏情况是什么？"
-  - "有什么缓解因素？"
-  - "检测速度有多快？"
-
-**Phase 5 — Synthesis**
-- 对比预测与实际发现
-- 输出结构化 verdict
-
-## 3. Iteration Protocol
-
-### 3.1 循环规则
-
-```python
-iteration = 0
-max_iterations = 5
-
-while iteration < max_iterations:
-    # Step 1: Planner 制定/修订 roadmap，直接写入 graph.mdc
-    planner.revise(task, feedback if iteration > 0 else None)
-    # planner 内部: Read graph.mdc → 生成设计 → Edit/Write graph.mdc
-
-    # Step 2: Architect 读取 graph.mdc 进行架构审查（必须等 Planner 完成）
-    arch_report = architect.review()
-    # architect 内部: Read graph.mdc → 审查 → 返回报告
-
-    # Step 3: Critic 读取 graph.mdc 进行质量评估（必须等 Architect 完成）
-    verdict = critic.evaluate(arch_report)
-    # critic 内部: Read graph.mdc → 评估 → 返回 verdict
-
-    if verdict == "APPROVE":
-        return "graph.mdc 已批准"  # 进入编码阶段
-
-    elif verdict == "REJECT":
-        return None  # 需要用户介入，重新澄清需求
-
-    else:  # ITERATE
-        feedback = critic.findings
-        iteration += 1
-
-# 5 轮未通过，返回最佳版本给用户决策
-return best_version
-```
-
-### 3.2 终止条件
-
-| 条件 | 行为 |
-|------|------|
-| Critic verdict == APPROVE | 循环终止，主 Agent 写入 graph.mdc，进入用户确认 |
-| Critic verdict == REJECT | 循环终止，返回用户重新澄清 |
-| iteration >= 5 | 循环终止，返回最佳版本 |
-
-### 3.3 串行约束
-
-**Step 2 和 Step 3 必须串行执行**：
-- Architect 审查完成后，Critic 才能开始评估
-- 禁止将 Architect 和 Critic 并行调用
-
-## 4. Verdict & Routing
-
-### 4.1 Verdict 定义
+Critic 只读质量门，输出 `APPROVE` / `ITERATE` / `REJECT`。
 
 | Verdict | 条件 | 下一步 |
-|---------|------|--------|
-| **APPROVE** | 零阻塞项，且 MAJOR <= 1 | 主 Agent 写入 graph.mdc，用户确认后进入编码 |
-| **ITERATE** | 存在阻塞项，或 MAJOR >= 2 | 收集 feedback，修订 roadmap |
-| **REJECT** | 需求 fundamentally flawed | 返回用户重新澄清 |
+|---|---|---|
+| `APPROVE` | 无阻塞项，且重大问题不超过 1 个 | 进入 Final Check |
+| `ITERATE` | 存在阻塞项、多个重大问题、计划不可执行或关键假设未验证 | findings 回 Planner，`planner_mode=feedback_revision` |
+| `REJECT` | 需求或方向存在根本性错误 | 停止并返回用户澄清 |
 
-### 4.2 Critic 输出格式
+输出应包含：Critical / Major / Minor Findings、What's Missing、Ambiguity Risks、Multi-Perspective Notes、Verdict Justification、Open Questions。低置信度内容放 Open Questions。
 
-```markdown
-**VERDICT: [APPROVE / ITERATE / REJECT]**
+## 6. Iteration Protocol
 
-**Overall Assessment**: [2-3 sentence summary]
+```python
+iteration = current_iteration
+max_iterations = 5
+feedback = None
 
-**Pre-commitment Predictions**: [What I expected vs what I found]
+while iteration < max_iterations:
+    planner_mode = "initial_rewrite" if iteration == 0 else "feedback_revision"
+    revision_scope = "full_roadmap" if iteration == 0 else "targeted_findings"
 
-**Critical Findings** (blocks execution):
-1. [Finding with file:line or backtick-quoted evidence]
-   - Confidence: [HIGH/MEDIUM]
-   - Why this matters: [Impact]
-   - Fix: [Specific actionable remediation]
+    # Planner: Read graph.mdc → 按 mode 生成完整 graph.mdc → Write graph.mdc
+    planner.write_graph(task, feedback, planner_mode, revision_scope)
 
-**Major Findings** (causes significant rework):
-1. [Finding with evidence]
-   - Confidence: [HIGH/MEDIUM]
-   - Why this matters: [Impact]
-   - Fix: [Specific suggestion]
+    # Architect / Critic 必须串行，不能并行
+    arch_report = architect.review_graph()
+    verdict, findings = critic.evaluate_graph(arch_report)
 
-**Minor Findings** (suboptimal but functional):
-1. [Finding]
+    if verdict == "APPROVE":
+        final_check_graph()
+        return "approved"
+    if verdict == "REJECT":
+        return "rejected"
 
-**What's Missing** (gaps, unhandled edge cases, unstated assumptions):
-- [Gap 1]
-- [Gap 2]
+    feedback = findings
+    iteration += 1
 
-**Ambiguity Risks**:
-- [Quote from plan] → Interpretation A: ... / Interpretation B: ...
-  - Risk if wrong interpretation chosen: [consequence]
-
-**Multi-Perspective Notes**:
-- Executor: [...]
-- Stakeholder: [...]
-- Skeptic: [...]
-
-**Verdict Justification**: [Why this verdict, what would need to change for an upgrade]
-
-**Open Questions (unscored)**: [speculative follow-ups AND low-confidence findings]
+return "max_iterations_reached"
 ```
 
-## 5. File Structure
+## 7. Final Check
 
-```
-.trae/
-├── rules/
-│   ├── graph.mdc              # 唯一真相源：设计规范 + Roadmap + 约束 Checklist
-│   └── design-loop.mdc        # 本文件：Design Loop 流程规范
-└── agents/
-    ├── planner.md             # Planner subagent 定义
-    ├── architect.md           # Architect subagent 定义
-    └── critic.md              # Critic subagent 定义
-```
+Critic `APPROVE` 后，主 Agent 必须先把最终完成态写入/确认到 `graph.mdc`，再重新读取 `graph.mdc` 执行 Final Check；通过后才停止等待用户确认执行。
 
-### graph.mdc 的角色
+检查项：
 
-`graph.mdc` 承担两个职责：
-1. **Roadmap**：Phase 列表及完成状态，Agent 据此逐 Phase 执行
-2. **约束 Checklist**：编码时必须遵守的规则
+- `.mdc` frontmatter 存在且包含 `description`、`alwaysApply`、`globs`。
+- `# Design Loop Status` 存在，且 fenced yaml 块可读。
+- `design_status: critic_approved`，`last_critic_verdict: APPROVE`，`approved_for_execution: true` 三者一致。
+- `execution_status` 为 `not_started`、`in_progress`、`completed` 或 `blocked`。
+- `iteration` 是非负整数；设计轮次中的 `planner_mode` / `revision_scope` 与轮次语义一致，已批准或执行中可为 `null`。
+- Roadmap 至少包含当前 Phase、目标/根因、修改文件候选、验收标准。
+- 已完成 Phase 只摘要，不展开长实现细节。
+- `graph.mdc` 未嵌入完整 Architect/Critic 报告或历史 diff。
 
-架构信息（State/Node/Edge 等）从代码获取，不写入 graph.mdc。
+Final Check 失败时：结构问题由主 Agent 修正；语义问题退回 Planner 做 `feedback_revision`。
 
-## 6. Trigger Keywords
+## 8. Context Budget
 
-### 6.1 自动触发
+- `design-loop.mdc` 只放流程协议，不放长背景论证。
+- Agent prompt 只放角色职责和硬约束，不复制完整协议。
+- `graph.mdc` 只保留当前 roadmap、已完成 Phase 摘要和有效约束。
+- 每轮 ITERATE 只传当前 findings，不累计所有历史报告。
+- 完整审查报告不得写入 `graph.mdc`；状态字段只写一句 summary。
 
-当用户消息包含以下关键词时，Agent 自动启动 Design Loop：
+## 9. Checklist
 
-| 关键词 | 行为 |
-|--------|------|
-| `"plan this"`, `"plan the"`, `"let's plan"` | 启动完整 Loop |
-| `"roadmap"`, `"设计 roadmap"` | 启动完整 Loop |
-| `"review plan"`, `"critique plan"` | 对当前 graph.mdc 运行 Critic |
-
-### 6.2 手动触发
-
-```
-@planner 制定 Phase 5 的实现计划
-@architect 审查当前 graph.mdc 的架构设计
-@critic 评估当前 graph.mdc 的质量
-```
-
-## 7. Constraints Checklist
-
-修改 `.trae/agents/` 或 `.trae/rules/graph.mdc` 下任何文件前，确认：
-
-- [ ] Planner 输出包含 RALPLAN-DR 摘要（Principles / Drivers / Options）
-- [ ] Roadmap 有 3-6 个可执行步骤，每步有明确验收标准
-- [ ] Architect 审查包含最强反方论点和至少一个权衡张力
-- [ ] Critic 执行完整的 5 Phase 审查协议
-- [ ] Critic verdict 明确（APPROVE / ITERATE / REJECT）
-- [ ] 阻塞项必须为零才能 APPROVE
-- [ ] 迭代次数不超过 5 轮
-- [ ] Critic APPROVE 后，主 Agent 将最终设计写入 `.trae/rules/graph.mdc`
-- [ ] Phase 完成后，先更新 graph.mdc 的 Roadmap section（标记 ✅），再 git commit
+- [ ] Planner 使用 `Write` 整体覆写完整合法 `graph.mdc`。
+- [ ] 首轮为 `initial_rewrite`，迭代轮为 `feedback_revision`。
+- [ ] `globs` / frontmatter 默认保留。
+- [ ] Architect 和 Critic 只读且串行。
+- [ ] Critic APPROVE 后执行 Final Check。
+- [ ] 未通过 Final Check 不进入实现。
