@@ -66,6 +66,7 @@ max_stage_iterations: 10
 
 - 默认先运行 `ralplan`，避免复用旧 `graph.mdc` 执行新需求。
 - 启动前检查 `.trae/modes/state.json`；若 RALPLAN/team/RALPH 等互斥模式正由其他 session 持有，则拒绝启动或恢复。
+- 若 RALPLAN 处于 `pending_approval` 且用户调用 `/autopilot --use-current-plan`，Autopilot 会把 RALPLAN state 标记为 `handoff` 后接管 mode registry。
 - 只有用户明确传入 `--use-current-plan` 或无任务正文时，才可在 `graph.mdc` 已满足以下条件时跳过 `ralplan`：
   - `design_status: critic_approved`
   - `last_critic_verdict: APPROVE`

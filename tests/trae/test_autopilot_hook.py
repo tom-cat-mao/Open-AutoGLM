@@ -209,6 +209,29 @@ def test_mode_registry_blocks_conflicting_mode(tmp_path: Path, capsys) -> None:
     assert "ralplan mode is active" in output["reason"]
 
 
+def test_use_current_plan_consumes_ralplan_pending_handoff(tmp_path: Path) -> None:
+    write_graph(tmp_path / ".trae" / "rules" / "graph.mdc", approved=True)
+    registry = tmp_path / ".trae" / "modes" / "state.json"
+    registry.parent.mkdir(parents=True, exist_ok=True)
+    registry.write_text(json.dumps({"active": {"mode": "ralplan", "session_id": "s1"}}), encoding="utf-8")
+    ralplan_state = tmp_path / ".trae" / "ralplan" / "state.json"
+    ralplan_state.parent.mkdir(parents=True, exist_ok=True)
+    ralplan_state.write_text(
+        json.dumps({"active": True, "current_phase": "pending_approval", "phase": "pending_approval", "status": "pending_approval"}),
+        encoding="utf-8",
+    )
+
+    state = autopilot.init_state({"cwd": str(tmp_path), "session_id": "s1", "prompt": "/autopilot --use-current-plan"})
+
+    assert state is not None
+    assert autopilot.current_stage(state)["id"] == "execution"
+    saved_ralplan = json.loads(ralplan_state.read_text(encoding="utf-8"))
+    assert saved_ralplan["active"] is False
+    assert saved_ralplan["current_phase"] == "handoff"
+    saved_registry = json.loads(registry.read_text(encoding="utf-8"))
+    assert saved_registry["active"]["mode"] == "autopilot"
+
+
 def test_resume_expires_old_state(tmp_path: Path, capsys) -> None:
     state = {
         "status": "cancelled",

@@ -72,6 +72,10 @@ def state_path(workspace: Path) -> Path:
     return workspace / ".trae" / "autopilot" / "state.json"
 
 
+def ralplan_state_path(workspace: Path) -> Path:
+    return workspace / ".trae" / "ralplan" / "state.json"
+
+
 def mode_registry_path(workspace: Path) -> Path:
     return workspace / ".trae" / "modes" / "state.json"
 
@@ -129,6 +133,33 @@ def active_mode_conflict(workspace: Path, session_id: Any) -> str | None:
     if not mode or mode == MODE_NAME or mode not in MODE_EXCLUSIVE_PEERS:
         return None
     return mode
+
+
+def phase_of(state: dict[str, Any] | None) -> str:
+    if not state:
+        return ""
+    return str(state.get("current_phase") or state.get("phase") or state.get("status") or "")
+
+
+def can_handoff_from_ralplan(workspace: Path, flags: dict[str, str | bool], task: str) -> bool:
+    if not (truthy(flags.get("use-current-plan")) or not task):
+        return False
+    state = read_json(ralplan_state_path(workspace)) or {}
+    return phase_of(state) == "pending_approval" and graph_is_approved(workspace)
+
+
+def consume_ralplan_handoff(workspace: Path) -> None:
+    state = read_json(ralplan_state_path(workspace)) or {}
+    if phase_of(state) != "pending_approval":
+        return
+    state["active"] = False
+    state["current_phase"] = "handoff"
+    state["phase"] = "handoff"
+    state["status"] = "handoff"
+    state["deactivated_reason"] = "autopilot_use_current_plan"
+    state["completed_at"] = now_iso()
+    state["updated_at"] = now_iso()
+    write_json(ralplan_state_path(workspace), state)
 
 
 def acquire_mode(workspace: Path, event: dict[str, Any]) -> None:
@@ -409,10 +440,13 @@ def init_state(event: dict[str, Any]) -> dict[str, Any] | None:
     if not should_start(prompt):
         return None
     workspace = workspace_from_event(event)
+    flags, task = parse_args(prompt)
     conflict = active_mode_conflict(workspace, event.get("session_id"))
+    if conflict == "ralplan" and can_handoff_from_ralplan(workspace, flags, task):
+        consume_ralplan_handoff(workspace)
+        conflict = None
     if conflict:
         return {"status": "blocked", "blocked_reason": f"Cannot start Autopilot while {conflict} mode is active."}
-    flags, task = parse_args(prompt)
     pipeline_config = build_pipeline_config(flags)
     first_stage = first_stage_for(workspace, flags, pipeline_config, task)
     state = {

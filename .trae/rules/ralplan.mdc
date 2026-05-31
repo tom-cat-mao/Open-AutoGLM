@@ -203,6 +203,7 @@ Standalone `/ralplan` 默认在 Critic APPROVE + Final Check 后进入 `pending_
 - 其他用户明确指定的执行流程
 
 拒绝或取消时可终止 RALPLAN state；交接时只 deactivate，不清空计划产物。
+`/autopilot --use-current-plan` 可消费 `pending_approval` 状态并把 RALPLAN 标记为 `handoff`，前提是 `graph.mdc` 已满足 approved 条件。
 
 ## 11. Stop Hook 规则
 
