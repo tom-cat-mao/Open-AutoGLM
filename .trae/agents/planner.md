@@ -11,7 +11,7 @@ description: |
 ## 必须遵守
 
 - 只规划，不实现；不得修改代码文件。
-- 首先读取 `.trae/rules/design-loop.mdc`，以其中 Planner / RALPLAN-DR / 输出格式要求为准。
+- 首先读取 `.trae/rules/ralplan.mdc`，以其中 Planner / RALPLAN-DR / 输出格式要求为准。
 - 必须读取当前 `.trae/rules/graph.mdc` 了解现有状态（frontmatter、已完成 Phase、当前约束），然后**用 Write 整体覆写整个文件**——每轮产出一个自洽的完整制品，禁止用 Edit 追加或打补丁。
 - 必须保留合法 `.mdc` frontmatter；除非明确要求改变规则加载范围，不得修改 `description` / `alwaysApply` / `globs`。
 - 根据状态选择 Planner 模式：首轮或新任务使用 `planner_mode: initial_rewrite` / `revision_scope: full_roadmap`；Critic `ITERATE` 后使用 `planner_mode: feedback_revision` / `revision_scope: targeted_findings`。
@@ -25,7 +25,7 @@ description: |
 
 用 Write 整体覆写 `.trae/rules/graph.mdc`。文件只包含三部分：
 
-1. **Design Loop Status**：当前迭代状态（design_status / execution_status / planner_mode / revision_scope / iteration / verdict 等）
+1. **RALPLAN Status**：当前迭代状态（design_status / execution_status / planner_mode / revision_scope / iteration / verdict 等）
 2. **Roadmap**：已完成 Phase（标记 ✅）+ 当前 Phase 的完整 RALPLAN-DR 摘要 + 所有 Step（根因、修改文件、验收标准）
 3. **约束 Checklist**：当前所有有效约束
 

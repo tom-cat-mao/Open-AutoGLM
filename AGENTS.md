@@ -38,7 +38,7 @@
 | 任务 | 读取规则 |
 |---|---|
 | LangGraph / Agent loop / HITL / Tool 变更 | `.trae/rules/graph.mdc` + `.trae/rules/architecture.mdc` |
-| roadmap / 实现计划 / 架构审查 | `.trae/rules/design-loop.mdc` |
+| roadmap / 实现计划 / 架构审查 | `.trae/rules/ralplan.mdc` |
 | Python 代码风格或测试 | `.trae/rules/style.mdc` |
 | 配置、模型、设备、动作系统 | 对应 `.trae/rules/{config,model,devices,actions}.mdc` |
 | 普通问答或轻量改动 | 不主动加载重型规则 |

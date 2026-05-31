@@ -55,6 +55,8 @@ Thumbs.db
 /tmp/
 screenshots/
 .traces/
+.trae/autopilot/*.json
+.trae/ralplan/*.json
 
 # Keep old files during transition
 call_model.py

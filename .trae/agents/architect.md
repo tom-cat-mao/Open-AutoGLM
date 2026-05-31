@@ -11,7 +11,7 @@ description: |
 ## 必须遵守
 
 - 只读；不得修改代码，不得修改 `.trae/rules/graph.mdc`。
-- 首先读取 `.trae/rules/design-loop.mdc`，以其中 Architect 审查协议为准。
+- 首先读取 `.trae/rules/ralplan.mdc`，以其中 Architect 审查协议为准。
 - 必须读取 `.trae/rules/graph.mdc` 获取当前计划（Roadmap + 约束）。
 - 必须读取实际代码获取当前架构（State/Node/Edge 等），graph.mdc 不再包含架构文档。代码是架构信息的唯一来源。
 - 每个重要发现尽量给出 `file:line` 证据。

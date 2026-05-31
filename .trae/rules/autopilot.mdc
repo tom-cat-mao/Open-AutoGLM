@@ -1,0 +1,64 @@
+---
+description: Autopilot pipeline：与 RALPLAN 联动的持续执行状态机协议
+alwaysApply: false
+globs: ".trae/commands/autopilot.md,.trae/hooks/autopilot.py,.trae/rules/autopilot.mdc,.trae/rules/ralplan.mdc,.trae/rules/graph.mdc,.trae/traecli.yaml"
+---
+
+# Autopilot Pipeline
+
+Autopilot 是 TraeCLI-native 的持续执行工作流，不迁移 `.omc`，不引入 TypeScript pipeline runtime。
+
+## 1. 状态与产物边界
+
+| 类型 | 路径 | 读写方 | 说明 |
+|---|---|---|---|
+| RALPLAN 协议 | `.trae/rules/ralplan.mdc` | Agent | Plan → Architect → Critic 共识规划 |
+| RALPLAN 产物 | `.trae/rules/graph.mdc` | Planner/Agent | roadmap、approval、执行约束唯一真相源 |
+| Autopilot 协议 | `.trae/rules/autopilot.mdc` | Agent | stage、信号、续跑规则 |
+| Autopilot 状态 | `.trae/autopilot/state.json` | hook | runtime state，不进入默认上下文，不提交 |
+| Transcript | TraeCLI cache | hook | 只扫描 assistant 输出的完成信号 |
+
+## 2. Stage 顺序
+
+```text
+ralplan -> execution -> ralph -> qa -> complete
+```
+
+| Stage | 完成信号 | 目标 |
+|---|---|---|
+| `ralplan` | `PIPELINE_RALPLAN_COMPLETE` | 运行 RALPLAN，直到 `graph.mdc` Final Check 通过 |
+| `execution` | `PIPELINE_EXECUTION_COMPLETE` | 按 approved roadmap 实现变更 |
+| `ralph` | `PIPELINE_RALPH_COMPLETE` | 运行 RALPH/verification 检查并修复失败 |
+| `qa` | `PIPELINE_QA_COMPLETE` | 最终自检、清理临时产物、同步状态 |
+| `complete` | `PIPELINE_COMPLETE` | Autopilot 完成，hook 停止续跑 |
+
+## 3. RALPLAN 联动
+
+- 默认先运行 `ralplan`，避免复用旧 `graph.mdc` 执行新需求。
+- 只有用户明确传入 `--use-current-plan` 或无任务正文时，才可在 `graph.mdc` 已满足以下条件时跳过 `ralplan`：
+  - `design_status: critic_approved`
+  - `last_critic_verdict: APPROVE`
+  - `approved_for_execution: true`
+- `--direct` 可跳过 RALPLAN，但仍必须先生成清晰执行计划；架构级变更不建议使用。
+
+## 4. Completion Signal 规则
+
+- Agent 完成当前 stage 后，必须单独输出一行：`AUTOPILOT_SIGNAL: <SIGNAL>`。
+- hook 只从 assistant transcript 中识别该格式，避免把 prompt 中的信号说明误判为完成。
+- 未输出信号时，stop hook 会以 `decision:block` 注入当前 stage continuation prompt。
+
+## 5. 执行约束
+
+- Critic 未 `APPROVE` 前不得修改业务代码，除非用户显式 `--direct`。
+- 不把 Autopilot runtime state 写进 `.trae/rules/*.mdc`。
+- 不主动 commit；完成后只汇总变更和验证结果。
+- 测试临时产物可清理，已有用户/项目改动不得过度清理。
+
+## 6. 管理命令
+
+| 命令 | 行为 |
+|---|---|
+| `/autopilot status` | 查看当前 `.trae/autopilot/state.json` 摘要 |
+| `/autopilot cancel` | 标记当前 pipeline cancelled，stop hook 不再续跑 |
+| `/autopilot resume` | 将已有 state 绑定当前 session 并继续当前 active stage |
+| `/autopilot reset` | 取消旧 pipeline，下一次启动重新初始化 |

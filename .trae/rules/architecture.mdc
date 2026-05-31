@@ -12,7 +12,7 @@ globs: "phone_agent/agent.py,phone_agent/graph/**/*.py,phone_agent/model/client.
 
 - 修改 `phone_agent/agent.py`、`phone_agent/graph/**/*.py`、`phone_agent/model/client.py`、`phone_agent/device_factory.py`、`main.py` 时加载。
 - 用户要求分析 Agent loop、LangGraph 拓扑、上下文管理、设备/模型注入边界时加载。
-- 需要 roadmap、架构审查或 Plan-Architect-Critic 流程时，再读取 `.trae/rules/design-loop.mdc`。
+- 需要 roadmap、架构审查或 Plan-Architect-Critic 流程时，再读取 `.trae/rules/ralplan.mdc`。
 
 ## 核心不变量
 
@@ -29,5 +29,5 @@ globs: "phone_agent/agent.py,phone_agent/graph/**/*.py,phone_agent/model/client.
 ## 修改前检查
 
 - 如果新增或改变 State 字段、Node 职责、Edge 路由、Tool 行为或 HITL 流程，先读取 `.trae/rules/graph.mdc`。
-- 如果需要先设计 roadmap 或引入 Planner/Architect/Critic 审查，先读取 `.trae/rules/design-loop.mdc`。
+- 如果需要先设计 roadmap 或引入 Planner/Architect/Critic 审查，先读取 `.trae/rules/ralplan.mdc`。
 - 修改后保持旧入口兼容：`PhoneAgent.run()` 仍应可调用。

@@ -4,7 +4,7 @@ alwaysApply: false
 globs: "phone_agent/graph/**/*.py,phone_agent/agent.py,phone_agent/actions/**/*.py,phone_agent/device_factory.py,phone_agent/adb/**/*.py,tests/**/*.py,setup.py,README.md,docs/**/*.md"
 ---
 
-# Design Loop Status
+# RALPLAN Status
 
 ```yaml
 status: completed
@@ -136,7 +136,7 @@ notes: "Iteration 3 APPROVED。Phase 9 已完成：结构化 reflection、失败
 
 修改 `phone_agent/graph/`、评测、trace、checkpoint、grounding、memory 或相关文档前，确认：
 
-- [ ] **Design Loop**：`design_status=critic_approved`、`last_critic_verdict=APPROVE`、`approved_for_execution=true` 三者一致后才能实现；Phase 完成后先更新本文件，再按用户要求决定是否 commit。
+- [ ] **RALPLAN**：`design_status=critic_approved`、`last_critic_verdict=APPROVE`、`approved_for_execution=true` 三者一致后才能实现；Phase 完成后先更新本文件，再按用户要求决定是否 commit。
 - [ ] **Graph 不变量**：State schema 先行；不用 while loop 替代 StateGraph；不恢复 `_execute_step` 双轨；Node 不使用 `self._context`，上下文走 State `messages` + config。
 - [ ] **依赖注入**：DeviceFactory / ModelClient 通过 StateGraph config 注入；tool 不直接 `get_device_factory()`；`device_factory` 不得进入 `@tool` 模型可见 schema，需有 fake-device 与 schema 断言测试。
 - [ ] **动作安全**：坐标保持 0-1000 相对值，绝对像素转换只在 execute/tool 内调用 `convert_relative_to_absolute()`；动作解析用 `ast.parse` + `ast.literal_eval`，禁止 `eval()`。
