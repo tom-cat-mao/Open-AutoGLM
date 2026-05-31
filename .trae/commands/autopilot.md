@@ -21,8 +21,9 @@ $ARGUMENTS
 AUTOPILOT_SIGNAL: PIPELINE_<STAGE>_COMPLETE
 ```
 
-4. 若 stop hook 已启用，它会根据 `.trae/autopilot/state.json` 和 transcript 自动推进下一 stage。
+4. 若 stop hook 已启用，它会根据 `.trae/autopilot/state.json`、`.trae/modes/state.json` 和 transcript 自动推进下一 stage。
 5. `--execution=team` 时，execution stage 应先拆分任务并使用 subagent 并行探索/设计/执行，主 Agent 负责合并和最终一致性。
+6. 自然语言触发必须足够明确；过短且无文件/错误/测试/验收锚点的请求不自动进入 Autopilot。
 
 ## 当前 Stage 初始指令
 
@@ -34,5 +35,5 @@ AUTOPILOT_SIGNAL: PIPELINE_<STAGE>_COMPLETE
 |---|---|
 | `/autopilot status` | 显示当前 state |
 | `/autopilot cancel` | 标记当前 Autopilot cancelled |
-| `/autopilot resume` | 绑定当前 session 并恢复 active |
+| `/autopilot resume` | 24 小时内绑定当前 session 并恢复 active |
 | `/autopilot reset` | 等价 cancel，下一次 `/autopilot <task>` 重新初始化 |

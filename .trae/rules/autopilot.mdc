@@ -17,6 +17,8 @@ Autopilot 是 TraeCLI-native 的持续执行工作流，不迁移 `.omc`，不�
 | Autopilot 协议 | `.trae/rules/autopilot.mdc` | Agent | stage、信号、续跑规则 |
 | Autopilot 状态 | `.trae/autopilot/state.json` | hook | runtime state，不进入默认上下文，不提交 |
 | subagent tracking | `.trae/autopilot/subagent-tracking.json` | hook | 感知 subagent 活跃，避免 stop hook 误续跑 |
+| mode registry | `.trae/modes/state.json` | hook | 与 RALPLAN/team/RALPH 等互斥模式共享的运行时锁 |
+| transition log | `.trae/autopilot/transitions.jsonl` | hook | 轻量记录 stage on_enter/on_exit，便于诊断 |
 | Transcript | TraeCLI cache | hook | 只扫描 assistant 输出的完成信号 |
 
 ## 2. Stage 顺序
@@ -63,11 +65,13 @@ max_stage_iterations: 10
 ## 4. RALPLAN 联动
 
 - 默认先运行 `ralplan`，避免复用旧 `graph.mdc` 执行新需求。
+- 启动前检查 `.trae/modes/state.json`；若 RALPLAN/team/RALPH 等互斥模式正由其他 session 持有，则拒绝启动或恢复。
 - 只有用户明确传入 `--use-current-plan` 或无任务正文时，才可在 `graph.mdc` 已满足以下条件时跳过 `ralplan`：
   - `design_status: critic_approved`
   - `last_critic_verdict: APPROVE`
   - `approved_for_execution: true`
 - `--direct` 等价于 `--planning=direct`，可跳过 RALPLAN，但仍必须先生成清晰执行计划；架构级变更不建议使用。
+- 自然语言触发仅接受明确提到 autopilot/自动持续执行/端到端流水线的任务；过短且无锚点的请求不会自动启动。
 
 ## 5. Completion Signal 规则
 
@@ -75,6 +79,7 @@ max_stage_iterations: 10
 - hook 只从 assistant transcript 中识别该格式，避免把 prompt 中的信号说明误判为完成。
 - 未输出信号时，stop hook 会以 `decision:block` 注入当前 stage continuation prompt。
 - continuation prompt 顶部包含 HUD，例如：`Pipeline 2/4: [OK] RALPLAN | [>>] Execution (iter 3) | [..] RALPH | [..] QA`。
+- stage 进入、退出和 pipeline 完成会追加写入 `.trae/autopilot/transitions.jsonl`，不影响主状态机。
 
 ## 6. Subagent 编排
 
@@ -101,5 +106,5 @@ Autopilot 监听 `subagent_start` / `subagent_stop`，subagent 活跃窗口内�
 |---|---|
 | `/autopilot status` | 查看当前 `.trae/autopilot/state.json` 摘要 |
 | `/autopilot cancel` | 标记当前 pipeline cancelled，stop hook 不再续跑 |
-| `/autopilot resume` | 将已有 state 绑定当前 session 并继续当前 active stage |
+| `/autopilot resume` | 24 小时内将已有 state 绑定当前 session 并继续当前 active stage |
 | `/autopilot reset` | 取消旧 pipeline，下一次启动重新初始化 |

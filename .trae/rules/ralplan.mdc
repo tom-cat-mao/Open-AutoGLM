@@ -17,6 +17,7 @@ RALPLAN 是 TraeCLI-native 的纯规划模式：Planner → Architect → Critic
 | runtime state | `.trae/ralplan/state.json` | session 级状态，不进入默认上下文，不提交 |
 | stop breaker | `.trae/ralplan/stop-breaker.json` | 防止无限续跑 |
 | subagent tracking | `.trae/ralplan/subagent-tracking.json` | subagent 活跃感知 |
+| mode registry | `.trae/modes/state.json` | 与 Autopilot/team/RALPH 等互斥模式共享的运行时锁 |
 
 ## 2. 入口
 
@@ -24,6 +25,7 @@ RALPLAN 是 TraeCLI-native 的纯规划模式：Planner → Architect → Critic
 - 用户消息显式调用 `ralplan` / `共识规划` / `先规划再执行` / `规划模式` 时，由 hook 初始化。
 - 模糊执行请求会被 Pre-Execution Gate 重定向到 RALPLAN。
 - Autopilot 第一阶段复用本协议，但 pipeline 语义由 `.trae/rules/autopilot.mdc` 决定。
+- 启动或 resume 前检查 mode registry；若 Autopilot/team/RALPH 等互斥模式正由其他 session 持有，则拒绝接管。
 
 ## 3. graph.mdc 格式约定
 
@@ -208,6 +210,7 @@ Standalone `/ralplan` 默认在 Critic APPROVE + Final Check 后进入 `pending_
 - 终端阶段允许停止：`complete`、`failed`、`cancelled`、`rejected`、`handoff`、`pending_approval`。
 - subagent 5 秒内活跃时允许主 Agent 暂停，不消耗熔断器。
 - 熔断器上限 30 次，TTL 45 分钟；耗尽后自动 deactivated。
+- 进入 `cancelled`、`rejected`、`handoff`、`failed` 等终端阶段时释放 mode registry。
 
 ## 12. Pre-Execution Gate
 

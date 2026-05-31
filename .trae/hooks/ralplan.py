@@ -33,6 +33,8 @@ TERMINAL_PHASES = {
 }
 EXECUTION_KEYWORDS = {"ralph", "autopilot", "team", "ultrawork", "ultrapilot", "fix", "implement", "execute"}
 COMMAND_PREFIXES = ("/ralplan",)
+MODE_NAME = "ralplan"
+MODE_EXCLUSIVE_PEERS = {"autopilot", "team", "ralph"}
 
 
 def now() -> datetime:
@@ -74,6 +76,10 @@ def subagent_path(workspace: Path) -> Path:
     return state_dir(workspace) / "subagent-tracking.json"
 
 
+def mode_registry_path(workspace: Path) -> Path:
+    return workspace / ".trae" / "modes" / "state.json"
+
+
 def graph_path(workspace: Path) -> Path:
     return workspace / ".trae" / "rules" / "graph.mdc"
 
@@ -108,6 +114,41 @@ def clear_runtime(workspace: Path) -> None:
             path.unlink()
         except FileNotFoundError:
             pass
+    release_mode(workspace)
+
+
+def active_mode_conflict(workspace: Path, session_id: Any) -> str | None:
+    registry = read_json(mode_registry_path(workspace)) or {}
+    active = registry.get("active")
+    if not isinstance(active, dict):
+        return None
+    mode = str(active.get("mode") or "")
+    if not mode or mode == MODE_NAME or mode not in MODE_EXCLUSIVE_PEERS:
+        return None
+    return mode
+
+
+def acquire_mode(workspace: Path, event: dict[str, Any]) -> None:
+    write_json(
+        mode_registry_path(workspace),
+        {
+            "active": {
+                "mode": MODE_NAME,
+                "session_id": event.get("session_id"),
+                "started_at": now_iso(),
+                "updated_at": now_iso(),
+            }
+        },
+    )
+
+
+def release_mode(workspace: Path) -> None:
+    registry = read_json(mode_registry_path(workspace)) or {}
+    active = registry.get("active")
+    if isinstance(active, dict) and active.get("mode") == MODE_NAME:
+        registry["active"] = None
+        registry["updated_at"] = now_iso()
+        write_json(mode_registry_path(workspace), registry)
 
 
 def parse_dt(value: Any) -> datetime | None:
@@ -258,6 +299,7 @@ def init_state(event: dict[str, Any], task: str, flags: set[str], *, source: str
     }
     write_state(workspace, state)
     write_json(breaker_path(workspace), {"count": 0, "started_at": now_iso(), "updated_at": now_iso()})
+    acquire_mode(workspace, event)
     return state
 
 
@@ -279,6 +321,7 @@ def set_terminal(workspace: Path, state: dict[str, Any], phase: str, reason: str
     if reason:
         state["deactivated_reason"] = reason
     write_state(workspace, state)
+    release_mode(workspace)
     return state
 
 
@@ -403,6 +446,10 @@ def handle_user_prompt_submit(event: dict[str, Any]) -> None:
         print(json.dumps({"decision": "block", "reason": "RALPLAN runtime state reset; graph.mdc preserved."}, ensure_ascii=False))
         return
     if command == "resume":
+        conflict = active_mode_conflict(workspace, event.get("session_id"))
+        if conflict:
+            print(json.dumps({"decision": "block", "reason": f"Cannot resume RALPLAN while {conflict} mode is active."}, ensure_ascii=False))
+            return
         state = read_state(workspace) or init_state(event, task, flags, source="resume")
         state["active"] = True
         state["status"] = "active"
@@ -411,6 +458,7 @@ def handle_user_prompt_submit(event: dict[str, Any]) -> None:
         state["session_id"] = event.get("session_id")
         state["awaiting_confirmation"] = False
         write_state(workspace, state)
+        acquire_mode(workspace, event)
         print(json.dumps({"decision": "block", "reason": continuation_prompt(state, 1)}, ensure_ascii=False))
         return
     if command == "approve":
@@ -422,12 +470,19 @@ def handle_user_prompt_submit(event: dict[str, Any]) -> None:
             print(json.dumps({"decision": "block", "reason": "Cannot approve: graph.mdc is not critic_approved with APPROVE verdict."}, ensure_ascii=False))
         return
     if command == "start" or has_explicit_ralplan_invocation(prompt):
+        conflict = active_mode_conflict(workspace, event.get("session_id"))
+        if conflict:
+            print(json.dumps({"decision": "block", "reason": f"Cannot start RALPLAN while {conflict} mode is active."}, ensure_ascii=False))
+            return
         if command != "start":
             flags, task = parse_flags(prompt)
         state = init_state(event, task, flags, source="explicit")
         print(json.dumps({"decision": "block", "reason": continuation_prompt(state, 1)}, ensure_ascii=False))
         return
     if is_underspecified_for_execution(prompt):
+        conflict = active_mode_conflict(workspace, event.get("session_id"))
+        if conflict:
+            return
         state = init_state(event, prompt.strip(), {"--gate"}, source="pre_execution_gate")
         print(json.dumps({"decision": "block", "reason": gate_prompt(prompt, state)}, ensure_ascii=False))
 

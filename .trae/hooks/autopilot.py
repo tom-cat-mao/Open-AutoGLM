@@ -5,13 +5,17 @@ import json
 import os
 import re
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, NamedTuple
 
 
 MAX_STAGE_ITERATIONS = 10
 SUBAGENT_FRESH_SECONDS = 5
+RESUME_TTL_HOURS = 24
+MODE_NAME = "autopilot"
+MODE_EXCLUSIVE_PEERS = {"ralplan", "team", "ralph"}
+COMMAND_PREFIXES = ("/autopilot", "/auto-pilot")
 
 
 class PipelineAdapter(NamedTuple):
@@ -35,6 +39,19 @@ def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def parse_dt(value: Any) -> datetime | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
 def load_json_stdin() -> dict[str, Any]:
     raw = sys.stdin.read()
     if not raw.strip():
@@ -55,8 +72,16 @@ def state_path(workspace: Path) -> Path:
     return workspace / ".trae" / "autopilot" / "state.json"
 
 
+def mode_registry_path(workspace: Path) -> Path:
+    return workspace / ".trae" / "modes" / "state.json"
+
+
 def subagent_tracking_path(workspace: Path) -> Path:
     return workspace / ".trae" / "autopilot" / "subagent-tracking.json"
+
+
+def transition_log_path(workspace: Path) -> Path:
+    return workspace / ".trae" / "autopilot" / "transitions.jsonl"
 
 
 def graph_path(workspace: Path) -> Path:
@@ -74,18 +99,85 @@ def read_state(workspace: Path) -> dict[str, Any] | None:
     return data if isinstance(data, dict) else None
 
 
+def read_json(path: Path) -> dict[str, Any] | None:
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def write_json(path: Path, data: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
 def write_state(workspace: Path, state: dict[str, Any]) -> None:
     path = state_path(workspace)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(state, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
+def active_mode_conflict(workspace: Path, session_id: Any) -> str | None:
+    registry = read_json(mode_registry_path(workspace)) or {}
+    active = registry.get("active")
+    if not isinstance(active, dict):
+        return None
+    mode = str(active.get("mode") or "")
+    if not mode or mode == MODE_NAME or mode not in MODE_EXCLUSIVE_PEERS:
+        return None
+    return mode
+
+
+def acquire_mode(workspace: Path, event: dict[str, Any]) -> None:
+    write_json(
+        mode_registry_path(workspace),
+        {
+            "active": {
+                "mode": MODE_NAME,
+                "session_id": event.get("session_id"),
+                "started_at": now_iso(),
+                "updated_at": now_iso(),
+            }
+        },
+    )
+
+
+def release_mode(workspace: Path) -> None:
+    registry = read_json(mode_registry_path(workspace)) or {}
+    active = registry.get("active")
+    if isinstance(active, dict) and active.get("mode") == MODE_NAME:
+        registry["active"] = None
+        registry["updated_at"] = now_iso()
+        write_json(mode_registry_path(workspace), registry)
+
+
+def log_transition(workspace: Path, event: str, stage: str | None, state: dict[str, Any]) -> None:
+    path = transition_log_path(workspace)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    record = {
+        "ts": now_iso(),
+        "event": event,
+        "stage": stage,
+        "session_id": state.get("session_id"),
+        "task": state.get("task") or "current plan",
+        "status": state.get("status"),
+    }
+    try:
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+    except OSError:
+        return
+
+
 def parse_args(prompt: str) -> tuple[dict[str, str | bool], str]:
     text = prompt.strip()
-    if text.startswith("/autopilot"):
-        text = text[len("/autopilot") :].strip()
-    elif text.startswith("/auto-pilot"):
-        text = text[len("/auto-pilot") :].strip()
+    for prefix in COMMAND_PREFIXES:
+        if text.startswith(prefix):
+            text = text[len(prefix) :].strip()
+            break
     flags: dict[str, str | bool] = {}
     parts: list[str] = []
     for part in text.split():
@@ -153,7 +245,7 @@ def build_pipeline_config(flags: dict[str, str | bool]) -> dict[str, Any]:
 
 def parse_command(prompt: str) -> tuple[str, str]:
     text = prompt.strip()
-    for prefix in ("/autopilot", "/auto-pilot"):
+    for prefix in COMMAND_PREFIXES:
         if text.startswith(prefix):
             rest = text[len(prefix) :].strip()
             if not rest:
@@ -165,9 +257,51 @@ def parse_command(prompt: str) -> tuple[str, str]:
     return "", text
 
 
+def effective_word_count(prompt: str) -> int:
+    return len(re.findall(r"[A-Za-z0-9_./#:-]+|[\u4e00-\u9fff]", prompt))
+
+
+def has_task_anchor(prompt: str) -> bool:
+    text = prompt.strip()
+    patterns = [
+        r"`{3}[\s\S]*?`{3}",
+        r"(?:^|\s)[\w./-]+\.(?:py|ts|tsx|js|jsx|go|rs|java|md|yaml|yml|json)(?::\d+)?",
+        r"#[0-9]+",
+        r"\b(pytest|npm test|pnpm test|yarn test|go test|cargo test)\b",
+        r"(^|\n)\s*\d+[.)]\s+",
+        r"验收标准|acceptance criteria|expected|actual|traceback|stack trace|error:",
+    ]
+    return any(re.search(pattern, text, re.I | re.M) for pattern in patterns)
+
+
+def has_explicit_autopilot_invocation(prompt: str) -> bool:
+    text = prompt.strip().lower()
+    if text.startswith(COMMAND_PREFIXES):
+        return True
+    if re.search(r"自动持续执行|端到端流水线|自动执行流水线", prompt):
+        return True
+    if "autopilot" not in text and "auto-pilot" not in text:
+        return False
+    return bool(re.search(r"(^|\s)(run|use|start|invoke|执行|启动|使用|进入|用)\s+auto-?pilot\b", text) or text.startswith(("autopilot", "auto-pilot")))
+
+
+def task_size_allows_autopilot(prompt: str) -> bool:
+    stripped = prompt.strip()
+    if stripped.startswith(COMMAND_PREFIXES):
+        return True
+    return effective_word_count(stripped) >= 8 or has_task_anchor(stripped)
+
+
 def should_start(prompt: str) -> bool:
     stripped = prompt.lstrip()
-    return stripped.startswith("/autopilot") or stripped.startswith("/auto-pilot")
+    return has_explicit_autopilot_invocation(stripped) and task_size_allows_autopilot(stripped)
+
+
+def state_is_resumeable(state: dict[str, Any] | None) -> bool:
+    if not state:
+        return False
+    ts = parse_dt(state.get("updated_at") or state.get("created_at"))
+    return bool(ts and now() - ts <= timedelta(hours=RESUME_TTL_HOURS))
 
 
 def graph_status(workspace: Path) -> dict[str, str]:
@@ -275,6 +409,9 @@ def init_state(event: dict[str, Any]) -> dict[str, Any] | None:
     if not should_start(prompt):
         return None
     workspace = workspace_from_event(event)
+    conflict = active_mode_conflict(workspace, event.get("session_id"))
+    if conflict:
+        return {"status": "blocked", "blocked_reason": f"Cannot start Autopilot while {conflict} mode is active."}
     flags, task = parse_args(prompt)
     pipeline_config = build_pipeline_config(flags)
     first_stage = first_stage_for(workspace, flags, pipeline_config, task)
@@ -290,6 +427,8 @@ def init_state(event: dict[str, Any]) -> dict[str, Any] | None:
         "stages": build_stages(first_stage, config=pipeline_config),
     }
     write_state(workspace, state)
+    acquire_mode(workspace, event)
+    log_transition(workspace, "on_enter", first_stage, state)
     return state
 
 
@@ -518,19 +657,33 @@ def handle_user_prompt_submit(event: dict[str, Any]) -> None:
         state = read_state(workspace) or {}
         state.update({"status": "cancelled", "updated_at": now_iso(), "cancelled_at": now_iso()})
         write_state(workspace, state)
+        release_mode(workspace)
         print(json.dumps({"decision": "block", "reason": "Autopilot cancelled."}, ensure_ascii=False))
         return
     if command == "resume":
         state = read_state(workspace)
-        if state:
+        conflict = active_mode_conflict(workspace, event.get("session_id"))
+        if conflict:
+            print(json.dumps({"decision": "block", "reason": f"Cannot resume Autopilot while {conflict} mode is active."}, ensure_ascii=False))
+            return
+        if state and state_is_resumeable(state):
             state["status"] = "active"
             state["session_id"] = event.get("session_id")
             state["updated_at"] = now_iso()
             write_state(workspace, state)
+            acquire_mode(workspace, event)
+        elif state:
+            state["status"] = "expired"
+            state["updated_at"] = now_iso()
+            write_state(workspace, state)
+            release_mode(workspace)
         print(json.dumps({"decision": "block", "reason": summarize_state(state)}, ensure_ascii=False))
         return
     state = init_state(event)
     if state is None:
+        return
+    if state.get("status") == "blocked":
+        print(json.dumps({"decision": "block", "reason": state.get("blocked_reason")}, ensure_ascii=False))
         return
     stage = current_stage(state)
     stage_id = stage.get("id") if stage else "unknown"
@@ -558,9 +711,13 @@ def handle_stop(event: dict[str, Any]) -> None:
     if transcript_has_signal(event.get("transcript_path"), signal):
         state, previous, next_stage = advance_state(state)
         write_state(workspace, state)
+        log_transition(workspace, "on_exit", previous, state)
         if next_stage is None:
+            release_mode(workspace)
+            log_transition(workspace, "pipeline_complete", None, state)
             print(json.dumps({"systemMessage": "AUTOPILOT COMPLETE"}, ensure_ascii=False))
             return
+        log_transition(workspace, "on_enter", next_stage, state)
         reason = (
             "<autopilot-pipeline-transition>\n"
             f"Stage complete: {previous} -> {next_stage}\n\n"
@@ -576,6 +733,7 @@ def handle_stop(event: dict[str, Any]) -> None:
         state["status"] = "blocked"
         state["blocked_reason"] = f"stage {stage_id} exceeded {max_iterations} continuation iterations"
         write_state(workspace, state)
+        release_mode(workspace)
         print(json.dumps({"continue": False, "stopReason": state["blocked_reason"]}, ensure_ascii=False))
         return
     write_state(workspace, state)

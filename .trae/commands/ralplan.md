@@ -18,6 +18,7 @@ $ARGUMENTS
 3. Planner 只允许整体覆写 `.trae/rules/graph.mdc`；Critic 未 `APPROVE` 前不得修改业务代码。
 4. `--deliberate` 或高风险任务必须包含 pre-mortem 与 expanded test plan。
 5. APPROVE + Final Check 后进入 `pending_approval`，等待用户明确批准执行。
+6. 启动或 resume 前检查 `.trae/modes/state.json`；不抢占其他 active mode。
 
 ## 管理子命令
 
