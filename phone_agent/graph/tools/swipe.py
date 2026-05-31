@@ -4,6 +4,7 @@ from langchain_core.tools import tool
 
 from phone_agent.actions.handler import ActionResult
 from phone_agent.graph.tools.coords import convert_relative_to_absolute
+from phone_agent.graph.tools.runtime import get_tool_device_factory
 
 
 @tool
@@ -26,11 +27,9 @@ def swipe(
     Returns:
         ActionResult serialized as dict.
     """
-    from phone_agent.device_factory import get_device_factory
-
     start_x, start_y = convert_relative_to_absolute(start, screen_width, screen_height)
     end_x, end_y = convert_relative_to_absolute(end, screen_width, screen_height)
 
-    device_factory = get_device_factory()
+    device_factory = get_tool_device_factory()
     device_factory.swipe(start_x, start_y, end_x, end_y, device_id=device_id)
     return ActionResult(success=True, should_finish=False).__dict__

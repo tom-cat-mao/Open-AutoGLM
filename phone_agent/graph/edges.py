@@ -22,7 +22,9 @@ def should_continue(state: AgentState) -> Literal["end", "replan"]:
     return "replan"
 
 
-def after_execute(state: AgentState) -> Literal["reflect", "replan", "confirm", "takeover", "end"]:
+def after_execute(
+    state: AgentState,
+) -> Literal["reflect", "replan", "confirm", "takeover", "end"]:
     """
     Decide the route after execute node.
 

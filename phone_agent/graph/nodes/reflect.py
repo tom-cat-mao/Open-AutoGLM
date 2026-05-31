@@ -124,9 +124,17 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
     raw_action = response.action.strip()
     action_succeeded = raw_action.startswith("continue")
     if lang == "en":
-        task_finished = "Task completed" in raw_action or "任务已完成" in raw_action or "finished" in raw_action.lower()
+        task_finished = (
+            "Task completed" in raw_action
+            or "任务已完成" in raw_action
+            or "finished" in raw_action.lower()
+        )
     else:
-        task_finished = "任务已完成" in raw_action or "Task completed" in raw_action or "finished" in raw_action.lower()
+        task_finished = (
+            "任务已完成" in raw_action
+            or "Task completed" in raw_action
+            or "finished" in raw_action.lower()
+        )
 
     reflection = response.thinking.strip()
     if not reflection:

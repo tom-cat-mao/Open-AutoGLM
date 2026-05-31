@@ -20,7 +20,8 @@ def messages_reducer(existing: list[dict], new: list[dict]) -> list[dict]:
     # (first message matches existing first message, or existing is empty)
     if existing and len(new) >= len(existing):
         first_match = existing[0].get("role") == new[0].get("role")
-        if first_match:
+        content_match = existing[0].get("content") == new[0].get("content")
+        if first_match and content_match:
             return new
 
     # Append mode: just append new messages
@@ -32,43 +33,46 @@ class AgentState(TypedDict):
 
     Contains all persistent state across the Plan-Execute-Reflect loop.
     """
+
     # === 对话上下文 ===
-    messages: Annotated[list[dict], messages_reducer]  # OpenAI chat 格式，替代 PhoneAgent._context
+    messages: Annotated[
+        list[dict], messages_reducer
+    ]  # OpenAI chat 格式，替代 PhoneAgent._context
 
     # === 任务 ===
-    task: str                                  # 用户原始任务
-    step_count: int                            # 当前步数
-    max_steps: int                             # 最大步数
-    lang: str                                  # 语言
+    task: str  # 用户原始任务
+    step_count: int  # 当前步数
+    max_steps: int  # 最大步数
+    lang: str  # 语言
 
     # === 屏幕 ===
-    screen_width: int                          # 设备屏幕宽度（像素）
-    screen_height: int                         # 设备屏幕高度（像素）
-    screenshot_b64: Optional[str]              # 当前截图 base64
-    current_app: str                           # 当前前台 app 名
+    screen_width: int  # 设备屏幕宽度（像素）
+    screen_height: int  # 设备屏幕高度（像素）
+    screenshot_b64: Optional[str]  # 当前截图 base64
+    current_app: str  # 当前前台 app 名
 
     # === Plan 节点输出 ===
-    thinking: str                              # 模型思考过程
-    action_raw: str                            # 模型原始 action 文本
-    action_parsed: Optional[dict]              # parse_action() 解析结果
+    thinking: str  # 模型思考过程
+    action_raw: str  # 模型原始 action 文本
+    action_parsed: Optional[dict]  # parse_action() 解析结果
 
     # === Execute 节点输出 ===
-    action_result: Optional[dict]              # ActionResult 序列化为 dict
+    action_result: Optional[dict]  # ActionResult 序列化为 dict
 
     # === Reflect 节点输出 ===
-    reflection: Optional[str]                  # 反思结论
-    action_succeeded: bool                     # 上一步动作是否生效
+    reflection: Optional[str]  # 反思结论
+    action_succeeded: bool  # 上一步动作是否生效
 
     # === Human-in-the-Loop (Phase 2) ===
-    pending_interrupt: Optional[str]           # 待处理的中断类型: "confirmation" / "takeover"
-    interrupt_message: Optional[str]           # 中断消息
-    interrupt_result: Optional[bool]           # 中断结果: confirmation 的用户选择
+    pending_interrupt: Optional[str]  # 待处理的中断类型: "confirmation" / "takeover"
+    interrupt_message: Optional[str]  # 中断消息
+    interrupt_result: Optional[bool]  # 中断结果: confirmation 的用户选择
 
     # === Pending execute (Phase 5 BUG 2 fix) ===
-    pending_execute: bool                      # 待执行的确认动作（confirm后dispatch）
-    action_confirmed: bool                     # 当前动作已通过确认
+    pending_execute: bool  # 待执行的确认动作（confirm后dispatch）
+    action_confirmed: bool  # 当前动作已通过确认
 
     # === 控制 ===
-    finished: bool                             # 任务是否完成
-    error: Optional[str]                       # 错误信息
-    device_id: Optional[str]                   # 设备 ID（可选）
+    finished: bool  # 任务是否完成
+    error: Optional[str]  # 错误信息
+    device_id: Optional[str]  # 设备 ID（可选）

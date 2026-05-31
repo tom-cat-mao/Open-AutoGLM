@@ -32,6 +32,9 @@ setup(
     install_requires=[
         "Pillow>=12.0.0",
         "openai>=2.9.0",
+        "langgraph>=0.2.0",
+        "langchain-core>=0.3.0",
+        "requests>=2.31.0",
     ],
     extras_require={
         "dev": [

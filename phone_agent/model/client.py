@@ -3,7 +3,7 @@
 import json
 import time
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, cast
 
 from openai import OpenAI
 
@@ -68,8 +68,8 @@ class ModelClient:
         time_to_first_token = None
         time_to_thinking_end = None
 
-        stream = self.client.chat.completions.create(
-            messages=messages,
+        stream: Any = self.client.chat.completions.create(
+            messages=cast(Any, messages),
             model=self.config.model_name,
             max_tokens=self.config.max_tokens,
             temperature=self.config.temperature,

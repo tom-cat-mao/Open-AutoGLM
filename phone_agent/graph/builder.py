@@ -38,7 +38,13 @@ def create_agent_graph():
     graph.add_conditional_edges(
         "execute",
         after_execute,
-        {"reflect": "reflect", "replan": "plan", "confirm": "confirm", "takeover": "takeover", "end": END},
+        {
+            "reflect": "reflect",
+            "replan": "plan",
+            "confirm": "confirm",
+            "takeover": "takeover",
+            "end": END,
+        },
     )
     graph.add_conditional_edges(
         "reflect",

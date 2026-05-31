@@ -46,9 +46,15 @@ def confirm_node(state: "AgentState", config: RunnableConfig) -> dict:
         "pending_execute": state.get("pending_execute"),
         # If not confirmed, end task
         "finished": not confirmed,
-        "action_result": {
-            "success": False,
-            "should_finish": not confirmed,
-            "message": "User cancelled sensitive operation" if not confirmed else None,
-        } if not confirmed else None,
+        "action_result": (
+            {
+                "success": False,
+                "should_finish": not confirmed,
+                "message": (
+                    "User cancelled sensitive operation" if not confirmed else None
+                ),
+            }
+            if not confirmed
+            else None
+        ),
     }

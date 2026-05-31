@@ -16,6 +16,10 @@ from phone_agent.graph.tools.launch import launch
 from phone_agent.graph.tools.press import double_tap, long_press
 from phone_agent.graph.tools.wait import wait
 from phone_agent.graph.tools.misc import note, call_api, interact
+from phone_agent.graph.tools.runtime import (
+    reset_tool_device_factory,
+    set_tool_device_factory,
+)
 
 
 def get_tool_map() -> dict[str, Any]:
@@ -61,6 +65,7 @@ def dispatch_tool(
     screen_width: int,
     screen_height: int,
     device_id: str | None = None,
+    device_factory: Any | None = None,
 ) -> ActionResult:
     """Dispatch an action dict to the appropriate @tool function.
 
@@ -72,6 +77,7 @@ def dispatch_tool(
         screen_width: Screen width in pixels.
         screen_height: Screen height in pixels.
         device_id: Optional ADB device ID.
+        device_factory: Optional DeviceFactory injected from StateGraph config.
 
     Returns:
         ActionResult from tool execution.
@@ -115,6 +121,7 @@ def dispatch_tool(
 
     # Get the underlying Python function from StructuredTool for signature inspection
     import inspect
+
     raw_func = tool_fn.func if hasattr(tool_fn, "func") else tool_fn
     sig = inspect.signature(raw_func)
     valid_params = set(sig.parameters.keys())
@@ -132,8 +139,14 @@ def dispatch_tool(
     if "device_id" in valid_params:
         call_kwargs["device_id"] = device_id
 
-    # Invoke the underlying function directly (bypassing StructuredTool.invoke overhead)
-    result_dict = raw_func(**call_kwargs)
+    # Invoke the underlying function directly (bypassing StructuredTool.invoke overhead).
+    # DeviceFactory is injected via a runtime context so it never appears in the
+    # model-visible @tool schema.
+    token = set_tool_device_factory(device_factory)
+    try:
+        result_dict = raw_func(**call_kwargs)
+    finally:
+        reset_tool_device_factory(token)
 
     # Tool functions return ActionResult.__dict__, convert back
     if isinstance(result_dict, dict):

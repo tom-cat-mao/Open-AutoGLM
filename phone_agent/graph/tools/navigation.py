@@ -3,6 +3,7 @@
 from langchain_core.tools import tool
 
 from phone_agent.actions.handler import ActionResult
+from phone_agent.graph.tools.runtime import get_tool_device_factory
 
 
 @tool
@@ -15,9 +16,7 @@ def back(device_id: str | None = None) -> dict:
     Returns:
         ActionResult serialized as dict.
     """
-    from phone_agent.device_factory import get_device_factory
-
-    device_factory = get_device_factory()
+    device_factory = get_tool_device_factory()
     device_factory.back(device_id)
     return ActionResult(success=True, should_finish=False).__dict__
 
@@ -32,8 +31,6 @@ def home(device_id: str | None = None) -> dict:
     Returns:
         ActionResult serialized as dict.
     """
-    from phone_agent.device_factory import get_device_factory
-
-    device_factory = get_device_factory()
+    device_factory = get_tool_device_factory()
     device_factory.home(device_id)
     return ActionResult(success=True, should_finish=False).__dict__

@@ -6,6 +6,7 @@ from langchain_core.tools import tool
 
 from phone_agent.actions.handler import ActionResult
 from phone_agent.config.timing import TIMING_CONFIG
+from phone_agent.graph.tools.runtime import get_tool_device_factory
 
 
 @tool
@@ -25,9 +26,7 @@ def type_text(
     Returns:
         ActionResult serialized as dict.
     """
-    from phone_agent.device_factory import get_device_factory
-
-    device_factory = get_device_factory()
+    device_factory = get_tool_device_factory()
 
     # Switch to ADB keyboard
     original_ime = device_factory.detect_and_set_adb_keyboard(device_id)

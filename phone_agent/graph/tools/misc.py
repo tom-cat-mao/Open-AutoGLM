@@ -41,4 +41,6 @@ def interact(message: str = "") -> dict:
     Returns:
         ActionResult serialized as dict.
     """
-    return ActionResult(success=True, should_finish=False, message="User interaction required").__dict__
+    return ActionResult(
+        success=True, should_finish=False, message="User interaction required"
+    ).__dict__

@@ -13,7 +13,9 @@ if TYPE_CHECKING:
     from phone_agent.graph.state import AgentState
 
 
-def _strip_and_append(messages: list[dict], thinking: str, action_raw: str) -> list[dict]:
+def _strip_and_append(
+    messages: list[dict], thinking: str, action_raw: str
+) -> list[dict]:
     """Strip images from last user message and append assistant message."""
     if messages:
         messages[-1] = MessageBuilder.remove_images_from_message(messages[-1])
@@ -35,6 +37,7 @@ def execute_node(state: "AgentState", config: RunnableConfig) -> dict:
     """
     configurable = config.get("configurable", {})
     verbose = configurable.get("verbose", True)
+    device_factory = configurable.get("device_factory")
 
     action_parsed = state.get("action_parsed")
     messages = list(state["messages"])  # copy
@@ -86,7 +89,13 @@ def execute_node(state: "AgentState", config: RunnableConfig) -> dict:
     if state.get("pending_execute"):
         # CRITICAL-1: do NOT call _strip_and_append again (images already stripped on first pass)
         try:
-            result = dispatch_tool(action_parsed, screen_width, screen_height, device_id)
+            result = dispatch_tool(
+                action_parsed,
+                screen_width,
+                screen_height,
+                device_id,
+                device_factory=device_factory,
+            )
         except Exception as e:
             if verbose:
                 traceback.print_exc()
@@ -111,7 +120,9 @@ def execute_node(state: "AgentState", config: RunnableConfig) -> dict:
         return {
             "messages": messages,
             "pending_interrupt": "takeover",
-            "interrupt_message": action_parsed.get("message", "User intervention required"),
+            "interrupt_message": action_parsed.get(
+                "message", "User intervention required"
+            ),
         }
 
     if action_name == "Tap" and "message" in action_parsed:
@@ -125,7 +136,13 @@ def execute_node(state: "AgentState", config: RunnableConfig) -> dict:
 
     # 4. Execute action via tool dispatch
     try:
-        result = dispatch_tool(action_parsed, screen_width, screen_height, device_id)
+        result = dispatch_tool(
+            action_parsed,
+            screen_width,
+            screen_height,
+            device_id,
+            device_factory=device_factory,
+        )
     except Exception as e:
         if verbose:
             traceback.print_exc()

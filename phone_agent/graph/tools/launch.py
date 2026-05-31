@@ -3,6 +3,7 @@
 from langchain_core.tools import tool
 
 from phone_agent.actions.handler import ActionResult
+from phone_agent.graph.tools.runtime import get_tool_device_factory
 
 
 @tool
@@ -19,10 +20,10 @@ def launch(app: str, device_id: str | None = None) -> dict:
     Returns:
         ActionResult serialized as dict.
     """
-    from phone_agent.device_factory import get_device_factory
-
-    device_factory = get_device_factory()
+    device_factory = get_tool_device_factory()
     success = device_factory.launch_app(app, device_id)
     if success:
         return ActionResult(success=True, should_finish=False).__dict__
-    return ActionResult(success=False, should_finish=False, message=f"App not found: {app}").__dict__
+    return ActionResult(
+        success=False, should_finish=False, message=f"App not found: {app}"
+    ).__dict__

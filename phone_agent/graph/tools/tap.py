@@ -4,6 +4,7 @@ from langchain_core.tools import tool
 
 from phone_agent.actions.handler import ActionResult
 from phone_agent.graph.tools.coords import convert_relative_to_absolute
+from phone_agent.graph.tools.runtime import get_tool_device_factory
 
 
 @tool
@@ -29,9 +30,7 @@ def tap(
     Returns:
         ActionResult serialized as dict.
     """
-    from phone_agent.device_factory import get_device_factory
-
     x, y = convert_relative_to_absolute(element, screen_width, screen_height)
-    device_factory = get_device_factory()
+    device_factory = get_tool_device_factory()
     device_factory.tap(x, y, device_id)
     return ActionResult(success=True, should_finish=False).__dict__
