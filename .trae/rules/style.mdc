@@ -67,9 +67,10 @@ from phone_agent.graph.tools import dispatch_tool
 
 ## Testing
 
-**Current state**: Phase 5 completed with 89/89 tests passing, mypy zero errors on `phone_agent/graph/`.
+**Current state**: Phase 8 completed with executable graph/actions/evals regression tests; current local gate is `.venv/bin/pytest tests -q` passing. `run_structured()` returns trace-aware metrics and eval dry-run can export local JSONL traces.
 
 - `tests/graph/` — graph loop, HITL, tool dispatch, coordinate conversion, and integration-style graph tests
+- `tests/evals/` — evaluation harness and trace export tests
 - Run targeted graph tests with: `.venv/bin/pytest tests/graph -v`
 - Run the full suite with: `.venv/bin/pytest`
 - `examples/basic_usage.py` and `examples/demo_thinking.py` serve as integration smoke tests

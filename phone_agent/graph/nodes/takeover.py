@@ -7,6 +7,8 @@ from typing import TYPE_CHECKING
 from langgraph.types import interrupt
 from langchain_core.runnables import RunnableConfig
 
+from phone_agent.graph.trace import emit_trace
+
 if TYPE_CHECKING:
     from phone_agent.graph.state import AgentState
 
@@ -19,6 +21,7 @@ def takeover_node(state: "AgentState", config: RunnableConfig) -> dict:
     continues after the user completes the manual operation.
     """
     message = state.get("interrupt_message") or "User intervention required"
+    emit_trace(config, state, "takeover", "takeover_interrupt", {"message": message})
     # interrupt() raises GraphInterrupt on first call, returns resume value on second
     interrupt(
         {
@@ -27,6 +30,7 @@ def takeover_node(state: "AgentState", config: RunnableConfig) -> dict:
             "prompt": f"{message}\nPress Enter after completing manual operation...",
         }
     )
+    emit_trace(config, state, "takeover", "takeover_result", {"completed": True})
     # Clear interrupt state
     return {
         "pending_interrupt": None,

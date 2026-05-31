@@ -7,6 +7,7 @@ from langchain_core.runnables import RunnableConfig
 
 from phone_agent.actions.handler import parse_action, finish
 from phone_agent.config import get_system_prompt
+from phone_agent.graph.trace import emit_trace
 from phone_agent.model.client import MessageBuilder
 
 if TYPE_CHECKING:
@@ -33,6 +34,13 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
     # 1. Capture screen
     screenshot = device_factory.get_screenshot(device_id)
     current_app = device_factory.get_current_app(device_id)
+    emit_trace(
+        config,
+        state,
+        "plan",
+        "plan_start",
+        {"task": task, "current_app": current_app},
+    )
 
     # 2. Build new messages (only the new ones, reducer will append)
     new_messages = []
@@ -68,6 +76,7 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
     except Exception as e:
         if configurable.get("verbose", True):
             traceback.print_exc()
+        emit_trace(config, state, "plan", "plan_error", {"message": str(e)})
         return {
             "messages": new_messages,
             "step_count": step_count + 1,
@@ -88,6 +97,20 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
         action_parsed = parse_action(response.action)
     except ValueError:
         action_parsed = finish(message=response.action)
+
+    emit_trace(
+        config,
+        state,
+        "plan",
+        "plan_result",
+        {
+            "current_app": current_app,
+            "thinking": response.thinking,
+            "action_raw": response.action,
+            "action": action_parsed.get("action") if isinstance(action_parsed, dict) else None,
+            "metadata": action_parsed.get("_metadata") if isinstance(action_parsed, dict) else None,
+        },
+    )
 
     return {
         "messages": new_messages,

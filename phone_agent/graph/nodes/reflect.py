@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING
 
 from langchain_core.runnables import RunnableConfig
 
+from phone_agent.graph.trace import emit_trace
 from phone_agent.model.client import MessageBuilder
 
 if TYPE_CHECKING:
@@ -70,6 +71,13 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
     # 1. Capture screen again
     screenshot = device_factory.get_screenshot(device_id)
     current_app = device_factory.get_current_app(device_id)
+    emit_trace(
+        config,
+        state,
+        "reflect",
+        "reflect_start",
+        {"current_app": current_app, "action": action_parsed, "action_result": action_result},
+    )
 
     # 2. Build reflection prompt with language selection
     if lang == "en":
@@ -113,6 +121,7 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
     except Exception as e:
         if verbose:
             traceback.print_exc()
+        emit_trace(config, state, "reflect", "reflect_error", {"message": str(e)})
         return {
             "screenshot_b64": screenshot.base64_data,
             "current_app": current_app,
@@ -139,6 +148,19 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
     reflection = response.thinking.strip()
     if not reflection:
         reflection = raw_action
+
+    emit_trace(
+        config,
+        state,
+        "reflect",
+        "reflect_result",
+        {
+            "reflection": reflection,
+            "action_raw": raw_action,
+            "action_succeeded": action_succeeded,
+            "finished": task_finished,
+        },
+    )
 
     return {
         "screenshot_b64": screenshot.base64_data,

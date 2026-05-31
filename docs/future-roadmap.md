@@ -1,28 +1,54 @@
 # Future Roadmap
 
-> 本文档记录 Phase 5 完成后，项目的未来发展方向。按优先级排序，每个方向包含设计思路、实现方案、复杂度评估。
+> 本文档记录 LangGraph roadmap 的阶段进展与未来方向。详细执行约束以 `.trae/rules/graph.mdc` 为准。
 
 ---
 
 ## 当前状态
 
-- **Phase 1-5**: ✅ 全部完成
-- **测试**: Phase 6 将恢复可执行 graph/actions 回归测试与安装门禁；不再声明未经当前仓库验证的固定 passing 数
+- **Phase 1-8**: ✅ 全部完成
+- **测试**: 已恢复可执行 graph/actions/evals 回归测试与安装门禁；当前本地门禁为 `.venv/bin/pytest tests -q` 全绿
 - **架构**: LangGraph Plan-Execute-Reflect StateGraph
 - **图拓扑**: `plan → execute → [confirm|takeover|reflect|replan|end]`
+- **结构化 API**: 已提供 `PhoneAgent.run_structured()` / `RunResult`，`run()` 继续保持字符串返回兼容
+- **可观测性**: 已提供默认本地 JSONL trace，`RunResult` / eval JSON 可通过 `trace_id` 与 `trace_path` 关联 trace 文件；默认脱敏敏感截图、prompt/API key 与隐私文本
+- **评测地基**: 已提供 `evals/run_eval.py --dry-run` smoke harness；当前统计结构化结果、HITL interrupt routing 与 trace 文件关联，不承诺跨进程 resume
 
 ---
 
-## P0: LangFuse 可观测性
+## 已完成 MVP: 可观测性（本地 Trace 优先，LangFuse 可选）
 
 **目标**: 让 Agent 的每一步行为可追踪、可回放。
 
-**为什么需要**: 当前调试靠 print 日志，无法回溯历史执行过程。面试时无法展示 Agent 的实际工作流程。
+**当前状态**: Phase 8 已落地默认本地 JSONL trace。`PhoneAgent.run_structured()` 返回 `trace_id` / `trace_path`，`evals/run_eval.py --dry-run` 输出的每条结果也包含可解析 trace 文件路径。
 
-**方案**:
+**为什么需要**: 长任务失败时需要定位具体 graph step；真实手机 GUI Agent 涉及隐私、支付、账号操作，必须能解释每一步为什么发生，并且默认不上传敏感数据。
+
+**已落地方案**:
+
+```
+.traces/{trace_id}.jsonl
+```
+
+每行 JSON 包含：
+- `run_id` / `trace_id`
+- `step_id`
+- `node`
+- `event`
+- `timestamp`
+- `payload`（默认脱敏）
+
+覆盖事件：
+- `agent`: `run_start` / `run_end` / `run_error`
+- `plan`: `plan_start` / `plan_result` / `plan_error`
+- `execute`: `execute_result` / `execute_finish` / `confirm_interrupt` / `takeover_interrupt` / `execute_error`
+- `reflect`: `reflect_start` / `reflect_result` / `reflect_error`
+- `confirm` / `takeover`: interrupt 与 resume 结果事件
+
+**可选增强方向**:
 
 ```python
-# LangGraph 官方集成，几行代码
+# 可选：LangGraph / LangFuse callback 集成
 from langfuse.callback import CallbackHandler
 
 langfuse_handler = CallbackHandler(
@@ -38,31 +64,34 @@ result = graph.invoke(initial_state, config={
 ```
 
 **产出**:
-- 每一步的截图、推理、动作、结果自动记录
-- LangFuse Dashboard 可视化追踪
-- 面试时可直接打开 Dashboard 展示
+- 默认本地 JSONL trace，关联 `RunResult.trace_id` / `RunResult.trace_path`
+- Eval JSON 每条结果包含 `trace_id` / `trace_path`
+- 每一步的动作、结果、reflection、HITL interrupt 可追踪；截图、prompt、API key、任务文本与隐私文本默认脱敏
+- LangFuse Dashboard 作为可选增强，不作为本地运行和测试硬依赖
 
-**复杂度**: 🟢 低
-- 搭建: 0.5 天
-- 实现: 1 天
-- 调试: 0.5 天
+**验证命令**:
+
+```bash
+.venv/bin/pytest tests/graph tests/evals -q
+.venv/bin/python evals/run_eval.py --dry-run --trace-dir .traces/smoke
+```
 
 ---
 
-## P0: 评估基准 (Evaluation Harness)
+## 已完成 MVP: 评估基准 (Evaluation Harness)
 
 **目标**: 量化 Agent 的任务完成能力。
 
+**当前状态**: Phase 7 已落地 MVP，且已在 Phase 8 接入 trace 关联：`RunResult` / `run_structured()` 提供结构化结果与 `trace_id` / `trace_path`，`evals/run_eval.py --dry-run` 可在无模型、无设备情况下输出稳定 JSON 指标与本地 JSONL trace 路径。
+
 **为什么需要**: 当前没有任何量化指标。面试时无法回答"成功率多少？平均几步？"。
 
-**方案**:
+**已落地方案**:
 
 ```
 evals/
 ├── tasks.json          # 标准任务集
-├── run_eval.py         # 自动化评估脚本
-└── results/
-    └── YYYY-MM-DD.json # 评估结果
+└── run_eval.py         # 自动化评估脚本，支持 --dry-run
 ```
 
 **tasks.json 示例**:
@@ -86,16 +115,23 @@ evals/
 ]
 ```
 
-**评估指标**:
+**当前评估指标**:
 - 成功率 (task completed / total)
 - 平均步数
 - 平均耗时
-- Token 消耗
+- 错误信息
+- HITL interrupt routing 计数 (`hitl_count`)
+- `trace_id` / `trace_path`，用于关联本地 JSONL trace
 
-**复杂度**: 🟢 低
-- 搭建: 0.5 天
-- 实现: 2-3 天
-- 调试: 1 天
+**暂未承诺**:
+- Token 消耗统计
+- 真实 AndroidWorld 规模 benchmark
+- 跨进程 checkpoint/resume 成功率（Phase 10 后补）
+
+**后续扩展复杂度**: 🟡 中等
+- 接入真实设备状态检查器
+- 保存历史结果与对比趋势
+- 与 Phase 10 resume 指标打通
 
 ---
 
@@ -330,8 +366,8 @@ CREATE TABLE skills (
 
 | 优先级 | 功能 | 时间 | 简历价值 | 理由 |
 |--------|------|------|----------|------|
-| P0 | LangFuse 追踪 | 2 天 | ⭐⭐⭐ | 零风险，立即让项目看起来专业 |
-| P0 | 评估基准 | 3.5 天 | ⭐⭐⭐⭐ | 量化指标，面试有数据可讲 |
+| P0 | 本地 Trace + 可选 LangFuse | 2 天 | ⭐⭐⭐ | 先本地可追踪，再可选接 Dashboard |
+| ✅ | 评估基准 MVP | 已完成 | ⭐⭐⭐⭐ | 已有结构化 API 与 dry-run smoke 指标，后续扩展真实 benchmark |
 | P1 | 策略级反思 | 3.5 天 | ⭐⭐⭐⭐ | 不改架构，Agent 智能深度明显提升 |
 | P2 | 跨会话记忆 | 4 天 | ⭐⭐⭐⭐ | LangGraph 原生能力，展示记忆设计 |
 | P3 | 技能记忆 | 7 天 | ⭐⭐⭐⭐⭐ | 需要重复任务数据积累 |

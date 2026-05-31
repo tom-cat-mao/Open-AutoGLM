@@ -17,7 +17,7 @@ last_planner_update: "按 Critic ITERATE 窄修：Phase 6 补充 .gitignore/test
 last_architect_review: "Iteration 3: 窄修项已完成；Phase 6 包含 .gitignore/tests tracking 验收；Tool DI schema 隐藏约束已补充；无 Critical/Major。"
 last_critic_verdict: APPROVE
 approved_for_execution: true
-notes: "Iteration 3 APPROVED。Phase 7 已完成：RunResult/run_structured 兼容 API、dry-run Evaluation Harness、HITL interrupt 计数与本地测试门禁均已落地。"
+notes: "Iteration 3 APPROVED。Phase 8 已完成：本地 JSONL trace、默认脱敏、RunResult/Eval trace 关联与本地测试门禁均已落地。"
 ```
 
 # Roadmap
@@ -33,8 +33,9 @@ notes: "Iteration 3 APPROVED。Phase 7 已完成：RunResult/run_structured 兼�
 | 5 | 已修复 messages reducer、confirm-then-execute、reflect i18n、mypy clean 等问题 | 见 messages reducer、confirm-then-execute 条目 |
 | 6 | 已恢复测试/打包/文档可信地基；Tool DI seam 已通过 config 注入且 schema 隐藏 `device_factory` | 见 Phase 6 门禁、依赖注入、Tool DI 条目 |
 | 7 | 已新增 `RunResult` / `run_structured()` 结构化 API 与本地 dry-run Evaluation Harness；Phase 7 仅统计 HITL interrupt routing，不承诺持久 resume | 见 Eval / Trace、HITL、checkpoint 条目 |
+| 8 | 已新增默认本地 JSONL trace；记录 run/step/node/event/timestamp，覆盖 plan/execute/reflect/HITL/end/error；默认脱敏敏感文本与图片/API key；RunResult 与 eval JSON 可关联 trace 文件 | 见 Eval / Trace、隐私与收益验证条目 |
 
-> 已完成 Phase 不再在本文件展开实现细节；执行约束统一维护在文末 Checklist，当前未完成计划从 Phase 8 开始。
+> 已完成 Phase 不再在本文件展开实现细节；执行约束统一维护在文末 Checklist，当前未完成计划从 Phase 9 开始。
 
 ## RALPLAN-DR 摘要
 
@@ -48,9 +49,9 @@ notes: "Iteration 3 APPROVED。Phase 7 已完成：RunResult/run_structured 兼�
 
 ### Decision Drivers
 
-1. **当前验证事实不可信**：`docs/future-roadmap.md` 声称 89/89 passing，但当前源码侧 `tests/graph/` 只有 pycache 残留，缺少可执行 graph 测试；README 拓扑还把 confirm 后路由写成 `[reflect|end]`，与 `builder.py` 中 confirm → `after_interrupt` → `[execute|reflect|end]` 不一致。
-2. **打包入口不闭合**：`setup.py` 已存在且 `requirements.txt` 包含 `langgraph`、`langchain-core`、`requests`，但 `setup.py install_requires` 只列出 `Pillow` 与 `openai`；fresh install 后可能无法 import graph。
-3. **测试 seam 受全局单例污染**：多个 tool 当前在函数体内直接 `get_device_factory()`，fake-device 测试只能依赖 monkeypatch 全局单例；这会阻碍 eval、trace、checkpoint 等后续可重复测试。
+1. **验证地基已恢复，下一步应围绕可量化能力增长**：Phase 6-8 已补齐测试、Tool DI、结构化 eval 与本地 trace；后续能力必须继续提供可执行回归测试和 eval 指标。
+2. **Trace 已成为排障与评测关联基础设施**：`RunResult.trace_id/trace_path` 与 eval JSON 已能关联本地 JSONL trace；Reflection、checkpoint/resume、grounding 的新增指标应复用该链路。
+3. **持久恢复仍未承诺**：HITL 当前只保证 interrupt routing；Phase 10 前不得在文档/API 中承诺跨进程 resume 成功率。
 
 ### Viable Options
 
@@ -67,36 +68,6 @@ notes: "Iteration 3 APPROVED。Phase 7 已完成：RunResult/run_structured 兼�
 理由：这条路线用最小变更先修复可安装、可测试、可注入、可文档验证的地基；再用结构化 API 和 Evaluation Harness 量化成功率、步数、耗时、HITL interrupt 触发；随后 trace 解释失败原因，reflection 改善重试策略；最后先落地 minimal checkpoint/resume，明确持久恢复边界，再做 UI grounding。跨会话 memory/技能复用仍后置到 trace、checkpoint 与足够成功轨迹之后，不进入当前 6 个执行 Phase。
 
 ## 当前规划 Phase
-
-### Phase 8: Observability — 本地 Trace 优先，LangFuse 可选
-
-**目标**：让每一步 screenshot、prompt、action、result、reflection、HITL interrupt 与评测指标可追踪、可回放、可脱敏导出。
-
-**根因**：没有 trace 时，长任务失败难以定位；真实手机 GUI Agent 涉及隐私/支付/账号操作，必须能解释每一步为什么发生；同时 Evaluation Harness 需要把失败样本关联到具体 graph step。
-
-**修改文件候选**：
-- `phone_agent/agent.py`
-- `phone_agent/graph/nodes/plan.py`
-- `phone_agent/graph/nodes/execute.py`
-- `phone_agent/graph/nodes/reflect.py`
-- `phone_agent/graph/nodes/confirm.py`
-- `phone_agent/graph/nodes/takeover.py`
-- `phone_agent/graph/state.py`
-- `phone_agent/config/` 下新增或扩展 trace 配置（执行阶段决定具体文件）
-- `tests/graph/test_trace.py`
-- `tests/evals/test_trace_export.py`
-- `README.md`
-
-**执行步骤与验收标准**：
-1. **本地 JSONL trace** — 默认支持无外部服务的本地 JSONL trace，记录 run id / trace id / step id / node / event / timestamp。验收：fake run 后生成可解析 JSONL，RunResult.trace_id 可关联到 trace 文件。
-2. **事件覆盖** — 记录 plan、execute、reflect、confirm interrupt、takeover interrupt、end/error 的关键事件。验收：单测断言各事件类型在 fake graph run 中出现。
-3. **脱敏与降级** — 图片、prompt、API key、隐私文本有明确脱敏/关闭策略；默认不把敏感截图上传第三方；LangFuse callback 未配置时不影响主流程。验收：未配置 LangFuse 时测试全绿；开启脱敏后 trace 不含原始敏感字段。
-4. **Eval 关联** — Evaluation Harness 能把失败任务结果关联到 trace 文件与具体 step。验收：eval JSON 中包含 trace_id / trace_path 或等价字段。
-
-**风险/边界**：
-- LangFuse 是可选增强，不得成为运行、测试或本地评测的硬依赖。
-- trace 不改变图路由语义；观测逻辑失败不得导致任务执行失败，除非显式开启 strict tracing。
-- 不把复杂 dashboard 建设放入本 Phase；先保证可记录、可导出、可关联。
 
 ### Phase 9: 策略级 Reflection 与失败分类
 
@@ -199,7 +170,7 @@ notes: "Iteration 3 APPROVED。Phase 7 已完成：RunResult/run_structured 兼�
 - [ ] **HITL / confirm-then-execute**：敏感操作走 `confirm_node`，登录/验证码走 `takeover_node`，均用 `interrupt()`；当前只承诺 interrupt 路由语义，持久 resume 等 Phase 10 完成后再对外承诺。
 - [ ] **pending_execute 约束**：`after_interrupt` 仅在 `pending_execute=True & interrupt_result=True` 时到 `execute`；pending 分支不得 `_strip_and_append`，必须设置 `action_confirmed=True` 并保留 `action_parsed`；`after_execute` 先检查 `action_confirmed`；`plan_node` 每轮重置 `action_confirmed=False`；`confirm_node` 显式返回 `pending_execute`。
 - [ ] **Phase 6 门禁**：保留 `setup.py` 并补 runtime deps；`.gitignore` 不得忽略 `tests/`；测试/文档不得声明未经验证的 passing 数；README 拓扑必须与 `builder.py` 一致。
-- [ ] **Eval / Trace**：`PhoneAgent.run() -> str` 保持兼容；结构化评测使用 `run_structured()` 或等价参数；Evaluation Harness 至少记录 success/steps/duration/error/HITL count；Trace 默认本地可用，LangFuse 可选且未配置不影响主流程。
+- [ ] **Eval / Trace**：`PhoneAgent.run() -> str` 保持兼容；结构化评测使用 `run_structured()` 或等价参数；Evaluation Harness 至少记录 success/steps/duration/error/HITL count/trace_id/trace_path；Trace 默认本地可用，LangFuse 可选且未配置不影响主流程。
 - [ ] **隐私与收益验证**：Trace/checkpoint/memory 默认不得上传或长期保存敏感截图/API key/隐私文本；Reflection、grounding、memory 的收益必须通过 Evaluation Harness 对比验证。
 - [ ] **后续能力边界**：checkpoint/resume 先于 UI grounding，且不得绕过 HITL；Accessibility/OCR 不破坏 Android 主线和坐标转换约束；Memory 不得绕过 HITL/安全确认/当前设备状态检查。
 - [ ] **暂不做**：Dreaming、多 Agent 架构、Command 动态路由、复杂 Prompt 外部化、iOS 主线、早期技能记忆。

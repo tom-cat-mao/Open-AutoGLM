@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from phone_agent.agent import AgentConfig, PhoneAgent, RunResult
+from phone_agent.graph.trace import JsonlTraceWriter
 from phone_agent.model import ModelConfig
 
 DEFAULT_TASKS_PATH = Path(__file__).with_name("tasks.json")
@@ -47,10 +48,19 @@ def load_tasks(path: Path) -> list[EvalTask]:
     return [EvalTask.from_dict(item) for item in data]
 
 
-def run_dry_task(task: EvalTask) -> RunResult:
+def run_dry_task(task: EvalTask, trace_dir: str = ".traces") -> RunResult:
     """Run a deterministic dry-run task without model or device dependencies."""
     started_at = time.perf_counter()
     hitl_count = 1 if task.category == "hitl" else 0
+    trace_id = f"dry-{uuid.uuid4()}"
+    trace_writer = JsonlTraceWriter(trace_id=trace_id, trace_dir=trace_dir)
+    trace_writer.emit(
+        "eval",
+        "dry_run_start",
+        0,
+        {"task_id": task.id, "task": task.task, "category": task.category},
+    )
+    trace_writer.emit("eval", "dry_run_end", 1, {"success": True})
     return RunResult(
         success=True,
         finished=True,
@@ -59,7 +69,8 @@ def run_dry_task(task: EvalTask) -> RunResult:
         final_message="Dry-run task completed",
         error=None,
         hitl_count=hitl_count,
-        trace_id=f"dry-{uuid.uuid4()}",
+        trace_id=trace_id,
+        trace_path=str(trace_writer.path),
     )
 
 
@@ -77,6 +88,8 @@ def run_agent_task(task: EvalTask, args: argparse.Namespace) -> RunResult:
             device_id=args.device_id,
             lang=args.lang,
             verbose=not args.quiet,
+            trace_enabled=not args.no_trace,
+            trace_dir=args.trace_dir,
         ),
     )
     return agent.run_structured(task.task)
@@ -102,7 +115,11 @@ def run_eval(args: argparse.Namespace) -> dict[str, Any]:
     tasks = load_tasks(Path(args.tasks))
     records = []
     for task in tasks:
-        result = run_dry_task(task) if args.dry_run else run_agent_task(task, args)
+        result = (
+            run_dry_task(task, args.trace_dir)
+            if args.dry_run
+            else run_agent_task(task, args)
+        )
         records.append(result_record(task, result))
 
     success_count = sum(1 for item in records if item["success"])
@@ -119,6 +136,7 @@ def run_eval(args: argparse.Namespace) -> dict[str, Any]:
             "avg_duration": total_duration / len(records) if records else 0.0,
             "hitl_count": total_hitl,
             "dry_run": args.dry_run,
+            "trace_dir": args.trace_dir,
         },
         "results": records,
     }
@@ -145,6 +163,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--quiet", action="store_true", help="Suppress agent verbose output"
     )
+    parser.add_argument("--trace-dir", default=".traces", help="Local JSONL trace dir")
+    parser.add_argument("--no-trace", action="store_true", help="Disable agent tracing")
     return parser.parse_args()
 
 

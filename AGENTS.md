@@ -18,6 +18,7 @@
 | messages reducer | `plan_node` 只返回新增消息；`execute_node` 返回完整重建列表，避免 token 爆炸 |
 | confirm-then-execute | confirm 接受敏感 Tap 后路由到 `execute`；`pending_execute` 分支不得再次 `_strip_and_append` |
 | Tool DI | `execute_node` 从 graph config 注入 `device_factory`；tool schema 不得暴露 `device_factory` |
+| Trace | 默认本地 JSONL trace；`RunResult.trace_id/trace_path` 与 eval JSON 可关联 `.traces/{trace_id}.jsonl`；敏感截图/API key/隐私文本默认脱敏 |
 
 ## Key Paths
 
@@ -25,7 +26,7 @@
 |---|---|
 | CLI 入口 | `main.py` |
 | Agent | `phone_agent/agent.py` |
-| Graph | `phone_agent/graph/{state.py,builder.py,edges.py,nodes/,tools/}` |
+| Graph | `phone_agent/graph/{state.py,builder.py,edges.py,trace.py,nodes/,tools/}` |
 | Actions | `phone_agent/actions/handler.py` |
 | Model | `phone_agent/model/client.py` |
 | Device | `phone_agent/device_factory.py`, `phone_agent/adb/` |
@@ -48,14 +49,16 @@
 | 安装开发依赖 | `.venv/bin/pip install -e ".[dev]"` |
 | 全量测试 | `.venv/bin/pytest` |
 | Graph 测试 | `.venv/bin/pytest tests/graph -v` |
+| Eval/Trace 测试 | `.venv/bin/pytest tests/evals tests/graph/test_trace.py -v` |
+| Dry-run eval trace | `.venv/bin/python evals/run_eval.py --dry-run --trace-dir .traces/smoke` |
 | 部署检查 | `.venv/bin/python scripts/check_deployment_cn.py` 或 `check_deployment_en.py` |
 
 ## Version Management
 
-- Phase 完成后按项目规范更新 `.trae/rules/graph.mdc` 并提交；commit message：`feat(graph): <phase 目标>`。
+- Phase 完成后按项目规范更新 `.trae/rules/graph.mdc`，若改动架构/API/评测/trace，同步更新 `README.md`、`docs/future-roadmap.md` 与本文件；commit message：`feat(graph): <phase 目标>`。
 - 禁止对 `main` 和 `feature/langgraph-refactor` 执行 `git push --force`。
 - 未经用户明确要求，不主动创建 commit。
 
 ## Compact Instructions
 
-压缩时保留：当前任务与进度、Non-Negotiable Constraints、Key Paths、必要 roadmap 状态与未完成 TODO。
+压缩时保留：当前任务与进度、Non-Negotiable Constraints、Key Paths、Phase 8 trace 现状、必要 roadmap 状态与未完成 TODO。

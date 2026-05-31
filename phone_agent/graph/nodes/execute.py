@@ -7,6 +7,7 @@ from langchain_core.runnables import RunnableConfig
 
 from phone_agent.actions.handler import ActionResult, finish
 from phone_agent.graph.tools import dispatch_tool
+from phone_agent.graph.trace import emit_trace
 from phone_agent.model.client import MessageBuilder
 
 if TYPE_CHECKING:
@@ -49,6 +50,7 @@ def execute_node(state: "AgentState", config: RunnableConfig) -> dict:
 
     # 1. Check action_parsed
     if action_parsed is None:
+        emit_trace(config, state, "execute", "execute_error", {"message": "No action to execute"})
         return {
             "action_result": ActionResult(
                 success=False, should_finish=True, message="No action to execute"
@@ -64,6 +66,7 @@ def execute_node(state: "AgentState", config: RunnableConfig) -> dict:
             message=action_parsed.get("message"),
         )
         messages = _strip_and_append(messages, thinking, action_raw)
+        emit_trace(config, state, "execute", "execute_finish", {"message": result.message})
         return {
             "action_result": result.__dict__,
             "messages": messages,
@@ -77,6 +80,7 @@ def execute_node(state: "AgentState", config: RunnableConfig) -> dict:
             message=f"Unknown action type: {action_parsed.get('_metadata')}",
         )
         messages = _strip_and_append(messages, thinking, action_raw)
+        emit_trace(config, state, "execute", "execute_error", {"message": result.message})
         return {
             "action_result": result.__dict__,
             "messages": messages,
@@ -102,6 +106,13 @@ def execute_node(state: "AgentState", config: RunnableConfig) -> dict:
             result = ActionResult(
                 success=False, should_finish=True, message=f"Action failed: {e}"
             )
+        emit_trace(
+            config,
+            state,
+            "execute",
+            "execute_result",
+            {"action": action_parsed.get("action"), "result": result.__dict__, "pending_execute": True},
+        )
 
         # CRITICAL-2: mark action_confirmed=True (keep action_parsed for reflect)
         finished = result.should_finish
@@ -119,6 +130,13 @@ def execute_node(state: "AgentState", config: RunnableConfig) -> dict:
     action_name = action_parsed.get("action")
     if action_name == "Take_over":
         messages = _strip_and_append(messages, thinking, action_raw)
+        emit_trace(
+            config,
+            state,
+            "execute",
+            "takeover_interrupt",
+            {"interrupt_message": action_parsed.get("message", "User intervention required")},
+        )
         return {
             "messages": messages,
             "pending_interrupt": "takeover",
@@ -130,6 +148,13 @@ def execute_node(state: "AgentState", config: RunnableConfig) -> dict:
 
     if action_name == "Tap" and "message" in action_parsed:
         messages = _strip_and_append(messages, thinking, action_raw)
+        emit_trace(
+            config,
+            state,
+            "execute",
+            "confirm_interrupt",
+            {"interrupt_message": action_parsed["message"]},
+        )
         return {
             "messages": messages,
             "pending_interrupt": "confirmation",
@@ -153,6 +178,13 @@ def execute_node(state: "AgentState", config: RunnableConfig) -> dict:
         result = ActionResult(
             success=False, should_finish=True, message=f"Action failed: {e}"
         )
+    emit_trace(
+        config,
+        state,
+        "execute",
+        "execute_result",
+        {"action": action_parsed.get("action"), "result": result.__dict__},
+    )
 
     # 5. Strip images and append assistant message
     messages = _strip_and_append(messages, thinking, action_raw)

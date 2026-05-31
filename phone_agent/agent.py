@@ -9,6 +9,7 @@ from phone_agent.device_factory import get_device_factory
 from phone_agent.model import ModelClient, ModelConfig
 from phone_agent.graph.builder import create_agent_graph
 from phone_agent.graph.state import AgentState
+from phone_agent.graph.trace import JsonlTraceWriter
 
 
 @dataclass
@@ -20,6 +21,10 @@ class AgentConfig:
     lang: str = "cn"
     system_prompt: str | None = None
     verbose: bool = True
+    trace_enabled: bool = True
+    trace_dir: str = ".traces"
+    trace_redact: bool = True
+    trace_strict: bool = False
 
     def __post_init__(self):
         if self.system_prompt is None:
@@ -51,6 +56,7 @@ class RunResult:
     error: str | None = None
     hitl_count: int = 0
     trace_id: str = ""
+    trace_path: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize the result to a JSON-friendly dictionary."""
@@ -116,13 +122,18 @@ class PhoneAgent:
         started_at = time.perf_counter()
         trace_id = str(uuid.uuid4())
         device_factory = get_device_factory()
+        trace_writer = self._build_trace_writer(trace_id)
+        if trace_writer:
+            trace_writer.emit("agent", "run_start", 0, {"task": task})
 
         try:
             screenshot = device_factory.get_screenshot(self.agent_config.device_id)
             initial_state = self._build_initial_state(task, screenshot)
-            config = self._build_graph_config(device_factory, trace_id)
+            config = self._build_graph_config(device_factory, trace_id, trace_writer)
             result = self._graph.invoke(initial_state, config)
         except Exception as e:
+            if trace_writer:
+                trace_writer.emit("agent", "run_error", 0, {"message": str(e)})
             return RunResult(
                 success=False,
                 finished=True,
@@ -132,11 +143,18 @@ class PhoneAgent:
                 error=str(e),
                 hitl_count=0,
                 trace_id=trace_id,
+                trace_path=str(trace_writer.path) if trace_writer else None,
             )
 
-        return self._state_to_run_result(
-            result, time.perf_counter() - started_at, trace_id
+        run_result = self._state_to_run_result(
+            result,
+            time.perf_counter() - started_at,
+            trace_id,
+            str(trace_writer.path) if trace_writer else None,
         )
+        if trace_writer:
+            trace_writer.emit("agent", "run_end", run_result.steps, run_result.to_dict())
+        return run_result
 
     def _build_initial_state(self, task: str, screenshot: Any) -> AgentState:
         """Build the initial LangGraph state for a task."""
@@ -167,7 +185,23 @@ class PhoneAgent:
             "device_id": self.agent_config.device_id,
         }
 
-    def _build_graph_config(self, device_factory: Any, trace_id: str) -> dict[str, Any]:
+    def _build_trace_writer(self, trace_id: str) -> JsonlTraceWriter | None:
+        """Build the best-effort local trace writer when enabled."""
+        if not self.agent_config.trace_enabled:
+            return None
+        return JsonlTraceWriter(
+            trace_id=trace_id,
+            trace_dir=self.agent_config.trace_dir,
+            redact=self.agent_config.trace_redact,
+            strict=self.agent_config.trace_strict,
+        )
+
+    def _build_graph_config(
+        self,
+        device_factory: Any,
+        trace_id: str,
+        trace_writer: JsonlTraceWriter | None = None,
+    ) -> dict[str, Any]:
         """Build LangGraph invocation config."""
         return {
             "configurable": {
@@ -176,11 +210,16 @@ class PhoneAgent:
                 "system_prompt": self.agent_config.system_prompt,
                 "verbose": self.agent_config.verbose,
                 "trace_id": trace_id,
+                "trace_writer": trace_writer,
             }
         }
 
     def _state_to_run_result(
-        self, state: dict[str, Any], duration: float, trace_id: str
+        self,
+        state: dict[str, Any],
+        duration: float,
+        trace_id: str,
+        trace_path: str | None = None,
     ) -> RunResult:
         """Convert final graph state into RunResult."""
         action_result = state.get("action_result") or {}
@@ -203,6 +242,7 @@ class PhoneAgent:
             error=error,
             hitl_count=int(state.get("hitl_count") or 0),
             trace_id=trace_id,
+            trace_path=trace_path,
         )
 
     def reset(self) -> None:
