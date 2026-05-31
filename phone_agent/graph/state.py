@@ -72,6 +72,9 @@ class AgentState(TypedDict):
     pending_execute: bool  # 待执行的确认动作（confirm后dispatch）
     action_confirmed: bool  # 当前动作已通过确认
 
+    # === Eval metrics (Phase 7) ===
+    hitl_count: int  # HITL interrupt routing count within this run
+
     # === 控制 ===
     finished: bool  # 任务是否完成
     error: Optional[str]  # 错误信息

@@ -1,6 +1,8 @@
 """Main PhoneAgent class for orchestrating phone automation."""
 
-from dataclasses import dataclass
+import time
+import uuid
+from dataclasses import asdict, dataclass
 from typing import Any
 
 from phone_agent.device_factory import get_device_factory
@@ -22,6 +24,7 @@ class AgentConfig:
     def __post_init__(self):
         if self.system_prompt is None:
             from phone_agent.config import get_system_prompt
+
             self.system_prompt = get_system_prompt(self.lang)
 
 
@@ -34,6 +37,24 @@ class StepResult:
     action: dict[str, Any] | None
     thinking: str
     message: str | None = None
+
+
+@dataclass
+class RunResult:
+    """Structured result for a full agent run."""
+
+    success: bool = False
+    finished: bool = False
+    steps: int = 0
+    duration: float = 0.0
+    final_message: str = ""
+    error: str | None = None
+    hitl_count: int = 0
+    trace_id: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize the result to a JSON-friendly dictionary."""
+        return asdict(self)
 
 
 class PhoneAgent:
@@ -77,10 +98,49 @@ class PhoneAgent:
         Returns:
             Final message from the agent.
         """
-        device_factory = get_device_factory()
-        screenshot = device_factory.get_screenshot(self.agent_config.device_id)
+        result = self.run_structured(task)
+        if result.error:
+            return f"Error: {result.error}"
+        return result.final_message or "Max steps reached"
 
-        initial_state: AgentState = {
+    def run_structured(self, task: str) -> RunResult:
+        """Run the agent and return structured metrics for eval/trace consumers.
+
+        Args:
+            task: Natural language description of the task.
+
+        Returns:
+            RunResult containing completion status, step count, duration, error,
+            HITL interrupt routing count, and trace id.
+        """
+        started_at = time.perf_counter()
+        trace_id = str(uuid.uuid4())
+        device_factory = get_device_factory()
+
+        try:
+            screenshot = device_factory.get_screenshot(self.agent_config.device_id)
+            initial_state = self._build_initial_state(task, screenshot)
+            config = self._build_graph_config(device_factory, trace_id)
+            result = self._graph.invoke(initial_state, config)
+        except Exception as e:
+            return RunResult(
+                success=False,
+                finished=True,
+                steps=0,
+                duration=time.perf_counter() - started_at,
+                final_message=f"Error: {e}",
+                error=str(e),
+                hitl_count=0,
+                trace_id=trace_id,
+            )
+
+        return self._state_to_run_result(
+            result, time.perf_counter() - started_at, trace_id
+        )
+
+    def _build_initial_state(self, task: str, screenshot: Any) -> AgentState:
+        """Build the initial LangGraph state for a task."""
+        return {
             "task": task,
             "messages": [],
             "step_count": 0,
@@ -101,27 +161,49 @@ class PhoneAgent:
             "interrupt_result": None,
             "pending_execute": False,
             "action_confirmed": False,
+            "hitl_count": 0,
             "finished": False,
             "error": None,
             "device_id": self.agent_config.device_id,
         }
 
-        config = {
+    def _build_graph_config(self, device_factory: Any, trace_id: str) -> dict[str, Any]:
+        """Build LangGraph invocation config."""
+        return {
             "configurable": {
                 "model_client": self.model_client,
                 "device_factory": device_factory,
                 "system_prompt": self.agent_config.system_prompt,
                 "verbose": self.agent_config.verbose,
+                "trace_id": trace_id,
             }
         }
 
-        result = self._graph.invoke(initial_state, config)
+    def _state_to_run_result(
+        self, state: dict[str, Any], duration: float, trace_id: str
+    ) -> RunResult:
+        """Convert final graph state into RunResult."""
+        action_result = state.get("action_result") or {}
+        error = state.get("error")
+        final_message = action_result.get("message") or (
+            "Task completed" if state.get("finished") else "Max steps reached"
+        )
+        success = (
+            bool(state.get("finished"))
+            and not error
+            and bool(action_result.get("success", True))
+        )
 
-        if result.get("error"):
-            return f"Error: {result['error']}"
-        if result.get("action_result"):
-            return result["action_result"].get("message") or "Task completed"
-        return "Max steps reached"
+        return RunResult(
+            success=success,
+            finished=bool(state.get("finished")),
+            steps=int(state.get("step_count") or 0),
+            duration=duration,
+            final_message=final_message,
+            error=error,
+            hitl_count=int(state.get("hitl_count") or 0),
+            trace_id=trace_id,
+        )
 
     def reset(self) -> None:
         """Reset the agent state for a new task.

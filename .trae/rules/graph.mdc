@@ -17,7 +17,7 @@ last_planner_update: "按 Critic ITERATE 窄修：Phase 6 补充 .gitignore/test
 last_architect_review: "Iteration 3: 窄修项已完成；Phase 6 包含 .gitignore/tests tracking 验收；Tool DI schema 隐藏约束已补充；无 Critical/Major。"
 last_critic_verdict: APPROVE
 approved_for_execution: true
-notes: "Iteration 3 APPROVED。Phase 6 已完成：打包依赖、tests tracking、Tool DI seam、回归测试与文档事实同步均已落地并通过本地门禁。"
+notes: "Iteration 3 APPROVED。Phase 7 已完成：RunResult/run_structured 兼容 API、dry-run Evaluation Harness、HITL interrupt 计数与本地测试门禁均已落地。"
 ```
 
 # Roadmap
@@ -32,8 +32,9 @@ notes: "Iteration 3 APPROVED。Phase 6 已完成：打包依赖、tests tracking
 | 4 | 旧 while loop / ActionHandler 类 / use_graph / use_tools 双轨已清理 | 见禁止恢复旧双轨条目 |
 | 5 | 已修复 messages reducer、confirm-then-execute、reflect i18n、mypy clean 等问题 | 见 messages reducer、confirm-then-execute 条目 |
 | 6 | 已恢复测试/打包/文档可信地基；Tool DI seam 已通过 config 注入且 schema 隐藏 `device_factory` | 见 Phase 6 门禁、依赖注入、Tool DI 条目 |
+| 7 | 已新增 `RunResult` / `run_structured()` 结构化 API 与本地 dry-run Evaluation Harness；Phase 7 仅统计 HITL interrupt routing，不承诺持久 resume | 见 Eval / Trace、HITL、checkpoint 条目 |
 
-> 已完成 Phase 不再在本文件展开实现细节；执行约束统一维护在文末 Checklist，当前未完成计划从 Phase 7 开始。
+> 已完成 Phase 不再在本文件展开实现细节；执行约束统一维护在文末 Checklist，当前未完成计划从 Phase 8 开始。
 
 ## RALPLAN-DR 摘要
 
@@ -66,32 +67,6 @@ notes: "Iteration 3 APPROVED。Phase 6 已完成：打包依赖、tests tracking
 理由：这条路线用最小变更先修复可安装、可测试、可注入、可文档验证的地基；再用结构化 API 和 Evaluation Harness 量化成功率、步数、耗时、HITL interrupt 触发；随后 trace 解释失败原因，reflection 改善重试策略；最后先落地 minimal checkpoint/resume，明确持久恢复边界，再做 UI grounding。跨会话 memory/技能复用仍后置到 trace、checkpoint 与足够成功轨迹之后，不进入当前 6 个执行 Phase。
 
 ## 当前规划 Phase
-
-### Phase 7: Structured API 与 Evaluation Harness — 真实任务评测闭环
-
-**目标**：在保持 `PhoneAgent.run() -> str` 兼容的前提下，新增结构化运行结果 API，建立面向真实 Android app 任务的评测框架，量化任务成功率、平均步数、平均耗时、错误类型与 HITL interrupt 触发情况。
-
-**根因**：当前 `PhoneAgent.run()` 只返回字符串，eval/trace 无法稳定获取 success、finished、steps、duration、error、HITL count 等指标；外部 AndroidWorld/OSWorld/MobileWorld/AndroidDaily 类基准强调可验证任务完成，而项目当前无法回答“成功率多少、平均几步、失败在哪里”。
-
-**修改文件候选**：
-- `phone_agent/agent.py`
-- `phone_agent/graph/state.py`
-- `evals/tasks.json`（执行阶段可创建）
-- `evals/run_eval.py`（执行阶段可创建）
-- `tests/evals/test_eval_harness.py`
-- `tests/graph/test_agent_run_result.py`
-- `README.md`
-
-**执行步骤与验收标准**：
-1. **RunResult 契约定义** — 新增 `RunResult` dataclass/TypedDict 或等价结构，字段至少包含 `success`、`finished`、`steps`、`duration`、`final_message`、`error`、`hitl_count`、`trace_id`。验收：类型测试或单元测试能构造并断言字段默认值与序列化输出。
-2. **兼容 API 暴露** — 保持 `PhoneAgent.run(task) -> str` 兼容，新增 `run_structured(task) -> RunResult` 或 `run(task, structured=True)` 等价参数供 eval/trace 使用。验收：旧调用返回字符串不变；新调用返回结构化对象/字典，错误路径也有 `error` 与 `finished` 语义。
-3. **Eval harness smoke** — 提供 fake-device/fake-model/dry-run 模式，可运行小型本地 smoke benchmark 并输出 JSON 结果。验收：命令输出每条任务的 task id、task 文本、category、expected app、max_steps、success、steps、duration、final_message、error、hitl_count、trace_id。
-4. **HITL 评测边界** — Phase 7 只统计 confirm/takeover interrupt 路由与 `hitl_count`，不承诺完整持久 resume；完整 resume 成功率等指标等 Phase 10 checkpoint/resume 后再加入。验收：HITL fake 任务能触发 interrupt 计数，文档明确“当前 eval 覆盖 interrupt routing，不覆盖持久恢复”。
-
-**风险/边界**：
-- 不追求立刻复刻 AndroidWorld 完整规模；先做项目内可运行、可扩展的 mini harness。
-- 不把主观模型自评当作唯一成功标准；允许人工/规则/状态检查器逐步增强。
-- 不在本 Phase 引入 memory 或策略优化，避免评测目标被实现复杂度污染。
 
 ### Phase 8: Observability — 本地 Trace 优先，LangFuse 可选
 

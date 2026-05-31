@@ -111,6 +111,8 @@ def execute_node(state: "AgentState", config: RunnableConfig) -> dict:
             "finished": finished,
             "pending_execute": False,
             "action_confirmed": True,
+            "pending_interrupt": None,
+            "interrupt_result": None,
         }
 
     # 3. Human-in-the-Loop checks (Phase 2)
@@ -123,6 +125,7 @@ def execute_node(state: "AgentState", config: RunnableConfig) -> dict:
             "interrupt_message": action_parsed.get(
                 "message", "User intervention required"
             ),
+            "hitl_count": state.get("hitl_count", 0) + 1,
         }
 
     if action_name == "Tap" and "message" in action_parsed:
@@ -132,6 +135,7 @@ def execute_node(state: "AgentState", config: RunnableConfig) -> dict:
             "pending_interrupt": "confirmation",
             "interrupt_message": action_parsed["message"],
             "pending_execute": True,
+            "hitl_count": state.get("hitl_count", 0) + 1,
         }
 
     # 4. Execute action via tool dispatch

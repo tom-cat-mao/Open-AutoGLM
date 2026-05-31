@@ -110,6 +110,13 @@ result = agent.run("打开淘宝搜索无线耳机")
 print(result)
 ```
 
+`run()` 保持返回字符串的兼容行为；评测或观测场景可使用结构化 API：
+
+```python
+structured = agent.run_structured("打开淘宝搜索无线耳机")
+print(structured.to_dict())
+```
+
 ## 模型部署
 
 ### 选项 A：第三方 API
@@ -202,7 +209,12 @@ python main.py --device-id 192.168.1.100:5555 --base-url http://localhost:8000/v
 
 # 运行 graph 测试
 .venv/bin/pytest tests/graph -v
+
+# 本地 dry-run 评测 smoke（不依赖模型和设备）
+.venv/bin/python evals/run_eval.py --dry-run
 ```
+
+当前 Evaluation Harness 只覆盖结构化结果、基础指标与 HITL interrupt routing 计数；不承诺跨进程持久 resume，完整 resume 指标将在 checkpoint/resume 阶段补齐。
 
 ## 常见问题
 
