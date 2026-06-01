@@ -32,6 +32,9 @@
 | Model | `phone_agent/model/client.py` |
 | Device | `phone_agent/device_factory.py`, `phone_agent/adb/` |
 | Prompts | `phone_agent/config/prompts.py`, `prompts_zh.py`, `prompts_en.py` |
+| TraeCLI rules | `.trae/rules/{graph,ralplan,autopilot,architecture,style}.mdc` |
+| TraeCLI commands/skills | `.trae/commands/{ralplan,autopilot}.md`, `.trae/skills/{ralplan,autopilot}/SKILL.md` |
+| TraeCLI agents/hooks | `.trae/agents/*.md`, `.trae/hooks/{ralplan,autopilot}.py` |
 
 ## Rule Loading Policy
 
@@ -51,15 +54,16 @@
 | 全量测试 | `.venv/bin/pytest` |
 | Graph 测试 | `.venv/bin/pytest tests/graph -v` |
 | Eval/Trace 测试 | `.venv/bin/pytest tests/evals tests/graph/test_trace.py -v` |
+| TraeCLI Autopilot 测试 | `.venv/bin/pytest tests/trae/test_autopilot_hook.py -q` |
 | Dry-run eval trace | `.venv/bin/python evals/run_eval.py --dry-run --trace-dir .traces/smoke` |
 | 部署检查 | `.venv/bin/python scripts/check_deployment_cn.py` 或 `check_deployment_en.py` |
 
 ## Version Management
 
-- Phase 完成后按项目规范更新 `.trae/rules/graph.mdc`，若改动架构/API/评测/trace，同步更新 `README.md`、`docs/future-roadmap.md` 与本文件；commit message：`feat(graph): <phase 目标>`。
+- Phase 完成后按项目规范更新 `.trae/rules/graph.mdc`，若改动架构/API/评测/trace/TraeCLI 编排，同步更新 `README.md`、`docs/future-roadmap.md` 与本文件；commit message：`feat(graph): <phase 目标>` 或 `feat(trae): <phase 目标>`。
 - 禁止对 `main` 和 `feature/langgraph-refactor` 执行 `git push --force`。
 - 未经用户明确要求，不主动创建 commit。
 
 ## Compact Instructions
 
-压缩时保留：当前任务与进度、Non-Negotiable Constraints、Key Paths、Phase 8 trace 现状、必要 roadmap 状态与未完成 TODO。
+压缩时保留：当前任务与进度、Non-Negotiable Constraints、Key Paths、Phase 8 trace 现状、Phase 10 Autopilot 现状、必要 roadmap 状态与未完成 TODO。

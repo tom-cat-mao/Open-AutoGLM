@@ -223,6 +223,27 @@ python main.py --device-id 192.168.1.100:5555 --base-url http://localhost:8000/v
 
 当前 Evaluation Harness 覆盖结构化结果、基础指标、HITL interrupt routing 计数、trace 文件关联、retry count 与 failure cause histogram；不承诺跨进程持久 resume，完整 resume 指标将在 checkpoint/resume 阶段补齐。
 
+### TraeCLI 项目配置
+
+本仓库包含项目级 TraeCLI 配置，用于约束开发流程和持续执行编排：
+
+| 范围 | 路径 |
+|------|------|
+| 全局 TraeCLI 配置 | `.trae/traecli.yaml` |
+| LangGraph roadmap 与执行约束 | `.trae/rules/graph.mdc` |
+| RALPLAN 共识规划协议 | `.trae/rules/ralplan.mdc` |
+| Autopilot 流水线协议 | `.trae/rules/autopilot.mdc` |
+| Slash commands | `.trae/commands/ralplan.md`, `.trae/commands/autopilot.md` |
+| Skills | `.trae/skills/ralplan/SKILL.md`, `.trae/skills/autopilot/SKILL.md` |
+| Project agents | `.trae/agents/*.md` |
+| Hooks | `.trae/hooks/ralplan.py`, `.trae/hooks/autopilot.py` |
+
+Autopilot 已完成 TraeCLI-native 编排：`ralplan -> execution -> ralph -> qa -> complete`。它复用 RALPLAN `planner` / `architect` / `critic`，并新增 `executor`、`debugger`、`test-engineer`、`designer`、`code-reviewer`、`security-reviewer` 六个项目级 stage agents；不迁移 `.omc` runtime，不修改 `.trae/traecli.yaml`，不改变 `phone_agent/` 业务运行时。
+
+```bash
+.venv/bin/pytest tests/trae/test_autopilot_hook.py -q
+```
+
 ## 常见问题
 
 **设备未找到**：`adb kill-server && adb start-server && adb devices`，检查 USB 调试和数据线。
