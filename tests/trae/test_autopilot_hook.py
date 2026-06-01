@@ -285,7 +285,7 @@ def test_advance_state_moves_to_next_stage(tmp_path: Path) -> None:
     assert autopilot.current_stage(state)["id"] == "execution"
 
 
-def test_stop_hook_blocks_then_advances_on_signal(tmp_path: Path, capsys) -> None:
+def test_stop_hook_waits_then_advances_on_signal(tmp_path: Path, capsys) -> None:
     state = {
         "status": "active",
         "session_id": "s1",
@@ -297,9 +297,7 @@ def test_stop_hook_blocks_then_advances_on_signal(tmp_path: Path, capsys) -> Non
     transcript.write_text("", encoding="utf-8")
 
     autopilot.handle_stop({"cwd": str(tmp_path), "session_id": "s1", "transcript_path": str(transcript)})
-    blocked = json.loads(capsys.readouterr().out)
-    assert blocked["decision"] == "block"
-    assert "PIPELINE_RALPLAN_COMPLETE" in blocked["reason"]
+    assert capsys.readouterr().out == ""
 
     transcript.write_text(
         json.dumps({"role": "assistant", "content": "AUTOPILOT_SIGNAL: PIPELINE_RALPLAN_COMPLETE"})

@@ -87,6 +87,33 @@ def test_ralplan_start_blocks_conflicting_mode(tmp_path: Path, capsys) -> None:
     assert "autopilot mode is active" in out["reason"]
 
 
+def test_slash_ralplan_start_allows_prompt_command_to_run(tmp_path: Path, capsys) -> None:
+    ralplan.handle_user_prompt_submit({"cwd": str(tmp_path), "session_id": "s1", "prompt": "/ralplan plan this"})
+    assert capsys.readouterr().out == ""
+    state = ralplan.read_state(tmp_path)
+    assert state["source"] == "prompt_command"
+    assert state["task"] == "plan this"
+
+
+def test_slash_ralplan_stop_ignores_stale_approved_graph(tmp_path: Path, capsys) -> None:
+    write_graph(tmp_path / ".trae" / "rules" / "graph.mdc", approved=True)
+    ralplan.write_state(
+        tmp_path,
+        {
+            "active": True,
+            "session_id": "s1",
+            "current_phase": "ralplan",
+            "phase": "ralplan",
+            "status": "active",
+            "task": "demo",
+            "source": "prompt_command",
+        },
+    )
+    ralplan.handle_stop({"cwd": str(tmp_path), "session_id": "s1"})
+    assert capsys.readouterr().out == ""
+    assert ralplan.read_state(tmp_path)["current_phase"] == "ralplan"
+
+
 def test_status_cancel_reset_commands(tmp_path: Path, capsys) -> None:
     ralplan.handle_user_prompt_submit({"cwd": str(tmp_path), "prompt": "/ralplan status"})
     assert "RALPLAN is idle" in json.loads(capsys.readouterr().out)["reason"]
@@ -100,7 +127,7 @@ def test_status_cancel_reset_commands(tmp_path: Path, capsys) -> None:
     assert ralplan.read_state(tmp_path) is None
 
 
-def test_stop_injects_continuation_when_not_approved(tmp_path: Path, capsys) -> None:
+def test_stop_does_not_inject_continuation_when_not_approved(tmp_path: Path, capsys) -> None:
     write_graph(tmp_path / ".trae" / "rules" / "graph.mdc", approved=False)
     ralplan.write_state(
         tmp_path,
@@ -114,9 +141,7 @@ def test_stop_injects_continuation_when_not_approved(tmp_path: Path, capsys) -> 
         },
     )
     ralplan.handle_stop({"cwd": str(tmp_path), "session_id": "s1"})
-    out = json.loads(capsys.readouterr().out)
-    assert out["decision"] == "block"
-    assert "REINFORCEMENT 1/30" in out["reason"]
+    assert capsys.readouterr().out == ""
 
 
 def test_stop_moves_to_pending_approval_when_graph_approved(tmp_path: Path, capsys) -> None:
@@ -134,7 +159,7 @@ def test_stop_moves_to_pending_approval_when_graph_approved(tmp_path: Path, caps
     )
     ralplan.handle_stop({"cwd": str(tmp_path), "session_id": "s1"})
     out = json.loads(capsys.readouterr().out)
-    assert "PENDING APPROVAL" in out["reason"]
+    assert "PENDING APPROVAL" in out["systemMessage"]
     state = ralplan.read_state(tmp_path)
     assert state["current_phase"] == "pending_approval"
     assert state["awaiting_confirmation"] is True

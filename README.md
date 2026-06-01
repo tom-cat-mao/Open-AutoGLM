@@ -40,6 +40,7 @@ phone_agent/
     ├── builder.py               # create_agent_graph()
     ├── edges.py                 # 条件边路由
     ├── trace.py                 # 本地 JSONL trace 与脱敏
+    ├── context.py               # 短期 context schema、预算裁剪与脱敏
     ├── nodes/
     │   ├── plan.py
     │   ├── execute.py
@@ -116,10 +117,23 @@ print(result)
 ```python
 structured = agent.run_structured("打开淘宝搜索无线耳机")
 print(structured.to_dict())
-# 包含 success / finished / steps / duration / error / hitl_count / trace_id / trace_path / failure_cause / retry_count
+# 包含 success / finished / steps / duration / error / hitl_count / trace_id / trace_path
+# failure_cause / retry_count / context_mode / context metrics
 ```
 
 默认启用本地 JSONL trace，文件写入 `.traces/{trace_id}.jsonl`。trace 记录 run id、trace id、step id、node、event、timestamp 与脱敏后的 payload；截图、prompt、API key、任务文本、thinking、reflection、HITL 消息默认不会以原文写入。
+
+### Context & Observability Harness
+
+默认启用短期 context 观测模式，用于记录可比较的执行上下文和失败模式，但默认不注入模型 Plan：
+
+| 模式 | 行为 |
+|------|------|
+| `off` | 不生成新增 context 指标 |
+| `observe` | 默认模式；生成 state/trace/eval 指标，但不向 Plan 注入 context block |
+| `inject` | 注入脱敏、裁剪后的短期 context block |
+
+`AgentConfig(context_mode="observe")` 可切换模式。context 字段包括 `screen_belief`、`action_outcome_summary`、`failure_memory`、`summarized_history` 与预算/截断指标；默认预算为 failure memory 最近 3 条、screen belief 摘要 300 字符、history 摘要 800 字符、context block 1500 字符。姓名、手机号、邮箱、订单号、验证码、API key/token、长 base64/JWT 等敏感文本默认脱敏，context 不绕过 HITL/confirm/takeover。
 
 ## 模型部署
 
@@ -221,7 +235,12 @@ python main.py --device-id 192.168.1.100:5555 --base-url http://localhost:8000/v
 .venv/bin/python evals/run_eval.py --dry-run --trace-dir .traces/smoke
 ```
 
-当前 Evaluation Harness 覆盖结构化结果、基础指标、HITL interrupt routing 计数、trace 文件关联、retry count 与 failure cause histogram；不承诺跨进程持久 resume，完整 resume 指标将在 checkpoint/resume 阶段补齐。
+当前 Evaluation Harness 覆盖结构化结果、基础指标、HITL interrupt routing 计数、trace 文件关联、retry count、failure cause histogram，以及 `context_mode`、`context_block_chars`、`context_truncated`、`failure_memory_hit_count`、`repeated_failure_count` 等 context 指标；不承诺跨进程持久 resume，完整 resume 指标将在 checkpoint/resume 阶段补齐。
+
+```bash
+.venv/bin/python evals/run_eval.py --dry-run --context-mode observe --trace-dir .traces/smoke
+.venv/bin/python evals/run_eval.py --dry-run --context-mode inject --trace-dir .traces/smoke
+```
 
 ### TraeCLI 项目配置
 
