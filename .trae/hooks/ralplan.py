@@ -477,6 +477,9 @@ def handle_user_prompt_submit(event: dict[str, Any]) -> None:
         if command != "start":
             flags, task = parse_flags(prompt)
         state = init_state(event, task, flags, source="explicit")
+        if prompt.strip().startswith(COMMAND_PREFIXES):
+            print(json.dumps({"systemMessage": "RALPLAN initialized; prompt command will execute."}, ensure_ascii=False))
+            return
         print(json.dumps({"decision": "block", "reason": continuation_prompt(state, 1)}, ensure_ascii=False))
         return
     if is_underspecified_for_execution(prompt):
@@ -510,14 +513,7 @@ def handle_stop(event: dict[str, Any]) -> None:
         state["awaiting_confirmation"] = True
         state["awaiting_confirmation_set_at"] = now_iso()
         write_state(workspace, state)
-        print(json.dumps({"decision": "block", "reason": approval_prompt(state)}, ensure_ascii=False))
-        return
-    count = breaker_count(workspace)
-    if count > MAX_REINFORCEMENTS:
-        set_terminal(workspace, state, "failed", "stop_breaker_exhausted")
-        print(json.dumps({"systemMessage": "RALPLAN stopped: stop breaker exhausted."}, ensure_ascii=False))
-        return
-    print(json.dumps({"decision": "block", "reason": continuation_prompt(state, count)}, ensure_ascii=False))
+        print(json.dumps({"systemMessage": approval_prompt(state)}, ensure_ascii=False))
 
 
 def main() -> int:

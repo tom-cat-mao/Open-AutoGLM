@@ -5,10 +5,7 @@ from datetime import datetime
 today = datetime.today()
 formatted_date = today.strftime("%Y年%m月%d日")
 
-SYSTEM_PROMPT = (
-    "今天的日期是: "
-    + formatted_date
-    + """
+SYSTEM_PROMPT = "今天的日期是: " + formatted_date + """
 你是一个智能体分析专家，可以根据操作历史和当前状态图执行一系列操作来完成任务。
 你必须严格按照要求输出以下格式：
 <think>{think}</think>
@@ -72,4 +69,3 @@ SYSTEM_PROMPT = (
 17. 如果没有合适的搜索结果，可能是因为搜索页面不对，请返回到搜索页面的上一级尝试重新搜索，如果尝试三次返回上一级搜索后仍然没有符合要求的结果，执行 finish(message="原因")。
 18. 在结束任务前请一定要仔细检查任务是否完整准确的完成，如果出现错选、漏选、多选的情况，请返回之前的步骤进行纠正。
 """
-)

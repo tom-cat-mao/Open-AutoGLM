@@ -6,6 +6,11 @@ from typing import TYPE_CHECKING
 from langchain_core.runnables import RunnableConfig
 
 from phone_agent.actions.handler import ActionResult, finish
+from phone_agent.graph.context import (
+    build_action_outcome_summary,
+    context_enabled,
+    get_context_mode,
+)
 from phone_agent.graph.tools import dispatch_tool
 from phone_agent.graph.trace import emit_trace
 from phone_agent.model.client import MessageBuilder
@@ -47,6 +52,21 @@ def execute_node(state: "AgentState", config: RunnableConfig) -> dict:
     screen_width = state["screen_width"]
     screen_height = state["screen_height"]
     device_id = state.get("device_id")
+    context_mode = get_context_mode(state, config)
+
+    def _context_update(result_dict: dict) -> dict:
+        if not context_enabled(context_mode):
+            return {"context_mode": context_mode}
+        outcome_state = {
+            **state,
+            "action_result": result_dict,
+            "current_app": state.get("current_app") or "unknown",
+            "context_mode": context_mode,
+        }
+        return {
+            "context_mode": context_mode,
+            "action_outcome_summary": build_action_outcome_summary(outcome_state),
+        }
 
     # 1. Check action_parsed
     if action_parsed is None:
@@ -57,6 +77,7 @@ def execute_node(state: "AgentState", config: RunnableConfig) -> dict:
             ).__dict__,
             "finished": True,
             "error": "No action to execute",
+            **_context_update({"success": False, "should_finish": True, "message": "No action to execute"}),
         }
 
     if action_parsed.get("_metadata") == "finish":
@@ -71,6 +92,7 @@ def execute_node(state: "AgentState", config: RunnableConfig) -> dict:
             "action_result": result.__dict__,
             "messages": messages,
             "finished": True,
+            **_context_update(result.__dict__),
         }
 
     if action_parsed.get("_metadata") != "do":
@@ -86,11 +108,34 @@ def execute_node(state: "AgentState", config: RunnableConfig) -> dict:
             "messages": messages,
             "finished": True,
             "error": result.message,
+            **_context_update(result.__dict__),
         }
 
     # 2. Pending execute branch (BUG 2 fix)
     # If confirm was accepted, execute the pending action directly
     if state.get("pending_execute"):
+        if state.get("interrupt_result") is not True:
+            result = ActionResult(
+                success=False,
+                should_finish=True,
+                message="Pending sensitive action requires accepted confirmation",
+            )
+            emit_trace(
+                config,
+                state,
+                "execute",
+                "execute_error",
+                {"message": result.message, "pending_execute": True},
+            )
+            return {
+                "action_result": result.__dict__,
+                "messages": messages,
+                "finished": True,
+                "error": result.message,
+                "pending_execute": False,
+                "action_confirmed": False,
+                **_context_update(result.__dict__),
+            }
         # CRITICAL-1: do NOT call _strip_and_append again (images already stripped on first pass)
         try:
             result = dispatch_tool(
@@ -124,6 +169,7 @@ def execute_node(state: "AgentState", config: RunnableConfig) -> dict:
             "action_confirmed": True,
             "pending_interrupt": None,
             "interrupt_result": None,
+            **_context_update(result.__dict__),
         }
 
     # 3. Human-in-the-Loop checks (Phase 2)
@@ -144,6 +190,7 @@ def execute_node(state: "AgentState", config: RunnableConfig) -> dict:
                 "message", "User intervention required"
             ),
             "hitl_count": state.get("hitl_count", 0) + 1,
+            "context_mode": context_mode,
         }
 
     if action_name == "Tap" and "message" in action_parsed:
@@ -161,6 +208,7 @@ def execute_node(state: "AgentState", config: RunnableConfig) -> dict:
             "interrupt_message": action_parsed["message"],
             "pending_execute": True,
             "hitl_count": state.get("hitl_count", 0) + 1,
+            "context_mode": context_mode,
         }
 
     # 4. Execute action via tool dispatch
@@ -196,4 +244,5 @@ def execute_node(state: "AgentState", config: RunnableConfig) -> dict:
         "action_result": result.__dict__,
         "messages": messages,
         "finished": finished,
+        **_context_update(result.__dict__),
     }

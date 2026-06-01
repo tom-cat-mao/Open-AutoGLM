@@ -67,6 +67,18 @@ class AgentState(TypedDict):
     suggested_strategy: Optional[str]  # 建议恢复策略
     retry_count: int  # 失败/部分成功反思累计次数
 
+    # === Context & Observability Harness (Phase 11) ===
+    context_mode: str  # off / observe / inject
+    screen_belief: dict  # 短期屏幕信念，非事实来源
+    action_outcome_summary: Optional[dict]  # 最近一次动作结果摘要
+    failure_memory: list[dict]  # 当前 run 内最近失败摘要
+    summarized_history: str  # 当前 run 内压缩历史
+    context_budget: dict  # context 裁剪预算
+    context_truncated: bool  # context 是否被裁剪
+    context_block_chars: int  # 注入 context block 字符数
+    failure_memory_hit_count: int  # failure memory 命中次数
+    repeated_failure_count: int  # 重复失败计数
+
     # === Human-in-the-Loop (Phase 2) ===
     pending_interrupt: Optional[str]  # 待处理的中断类型: "confirmation" / "takeover"
     interrupt_message: Optional[str]  # 中断消息

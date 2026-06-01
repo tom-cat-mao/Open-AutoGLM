@@ -12,7 +12,8 @@ from pathlib import Path
 from typing import Any
 
 from phone_agent.agent import AgentConfig, PhoneAgent, RunResult
-from phone_agent.graph.trace import JsonlTraceWriter
+from phone_agent.graph.context import DEFAULT_CONTEXT_MODE, normalize_context_mode
+from phone_agent.graph.trace import JsonlTraceWriter, sanitize_for_trace
 from phone_agent.model import ModelConfig
 
 DEFAULT_TASKS_PATH = Path(__file__).with_name("tasks.json")
@@ -48,7 +49,9 @@ def load_tasks(path: Path) -> list[EvalTask]:
     return [EvalTask.from_dict(item) for item in data]
 
 
-def run_dry_task(task: EvalTask, trace_dir: str = ".traces") -> RunResult:
+def run_dry_task(
+    task: EvalTask, trace_dir: str = ".traces", context_mode: str = DEFAULT_CONTEXT_MODE
+) -> RunResult:
     """Run a deterministic dry-run task without model or device dependencies."""
     started_at = time.perf_counter()
     hitl_count = 1 if task.category == "hitl" else 0
@@ -62,7 +65,18 @@ def run_dry_task(task: EvalTask, trace_dir: str = ".traces") -> RunResult:
         0,
         {"task_id": task.id, "task": task.task, "category": task.category},
     )
-    trace_writer.emit("eval", "dry_run_end", 1, {"success": True})
+    mode = normalize_context_mode(context_mode)
+    context_block_chars = 0 if mode != "inject" else 120
+    trace_writer.emit(
+        "eval",
+        "dry_run_end",
+        1,
+        {
+            "success": True,
+            "context_mode": mode,
+            "context_block_chars": context_block_chars,
+        },
+    )
     return RunResult(
         success=True,
         finished=True,
@@ -75,6 +89,11 @@ def run_dry_task(task: EvalTask, trace_dir: str = ".traces") -> RunResult:
         trace_path=str(trace_writer.path),
         failure_cause=failure_cause,
         retry_count=retry_count,
+        context_mode=mode,
+        context_block_chars=context_block_chars,
+        context_truncated=False,
+        failure_memory_hit_count=1 if failure_cause and mode != "off" else 0,
+        repeated_failure_count=1 if task.category == "failed" and mode != "off" else 0,
     )
 
 
@@ -94,6 +113,7 @@ def run_agent_task(task: EvalTask, args: argparse.Namespace) -> RunResult:
             verbose=not args.quiet,
             trace_enabled=not args.no_trace,
             trace_dir=args.trace_dir,
+            context_mode=args.context_mode,
         ),
     )
     return agent.run_structured(task.task)
@@ -101,15 +121,15 @@ def run_agent_task(task: EvalTask, args: argparse.Namespace) -> RunResult:
 
 def result_record(task: EvalTask, result: RunResult) -> dict[str, Any]:
     """Build a stable JSON record for one eval result."""
-    record = result.to_dict()
+    record = sanitize_for_trace(result.to_dict())
     record.update(
-        {
+        sanitize_for_trace({
             "task_id": task.id,
             "task": task.task,
             "category": task.category,
             "expected_app": task.expected_app,
             "max_steps": task.max_steps,
-        }
+        })
     )
     return record
 
@@ -120,7 +140,7 @@ def run_eval(args: argparse.Namespace) -> dict[str, Any]:
     records = []
     for task in tasks:
         result = (
-            run_dry_task(task, args.trace_dir)
+            run_dry_task(task, args.trace_dir, args.context_mode)
             if args.dry_run
             else run_agent_task(task, args)
         )
@@ -132,8 +152,16 @@ def run_eval(args: argparse.Namespace) -> dict[str, Any]:
     total_hitl = sum(int(item["hitl_count"]) for item in records)
     failure_cause_histogram: dict[str, int] = {}
     total_retries = 0
+    total_context_chars = 0
+    context_truncated_count = 0
+    total_failure_memory_hits = 0
+    total_repeated_failures = 0
     for item in records:
         total_retries += int(item.get("retry_count") or 0)
+        total_context_chars += int(item.get("context_block_chars") or 0)
+        context_truncated_count += 1 if item.get("context_truncated") else 0
+        total_failure_memory_hits += int(item.get("failure_memory_hit_count") or 0)
+        total_repeated_failures += int(item.get("repeated_failure_count") or 0)
         cause = item.get("failure_cause")
         if cause:
             failure_cause_histogram[str(cause)] = failure_cause_histogram.get(str(cause), 0) + 1
@@ -148,6 +176,12 @@ def run_eval(args: argparse.Namespace) -> dict[str, Any]:
             "hitl_count": total_hitl,
             "retry_count": total_retries,
             "failure_cause_histogram": failure_cause_histogram,
+            "context_mode": args.context_mode,
+            "context_block_chars": total_context_chars,
+            "avg_context_block_chars": total_context_chars / len(records) if records else 0.0,
+            "context_truncated_count": context_truncated_count,
+            "failure_memory_hit_count": total_failure_memory_hits,
+            "repeated_failure_count": total_repeated_failures,
             "dry_run": args.dry_run,
             "trace_dir": args.trace_dir,
         },
@@ -175,6 +209,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--quiet", action="store_true", help="Suppress agent verbose output"
+    )
+    parser.add_argument(
+        "--context-mode",
+        choices=["off", "observe", "inject"],
+        default=DEFAULT_CONTEXT_MODE,
+        help="Context harness mode",
     )
     parser.add_argument("--trace-dir", default=".traces", help="Local JSONL trace dir")
     parser.add_argument("--no-trace", action="store_true", help="Disable agent tracing")

@@ -8,6 +8,13 @@ from typing import Any
 from phone_agent.device_factory import get_device_factory
 from phone_agent.model import ModelClient, ModelConfig
 from phone_agent.graph.builder import create_agent_graph
+from phone_agent.graph.context import (
+    DEFAULT_CONTEXT_MODE,
+    build_context_metrics,
+    default_context_budget,
+    default_screen_belief,
+    normalize_context_mode,
+)
 from phone_agent.graph.state import AgentState
 from phone_agent.graph.trace import JsonlTraceWriter
 
@@ -25,8 +32,10 @@ class AgentConfig:
     trace_dir: str = ".traces"
     trace_redact: bool = True
     trace_strict: bool = False
+    context_mode: str = DEFAULT_CONTEXT_MODE
 
     def __post_init__(self):
+        self.context_mode = normalize_context_mode(self.context_mode)
         if self.system_prompt is None:
             from phone_agent.config import get_system_prompt
 
@@ -59,6 +68,11 @@ class RunResult:
     trace_path: str | None = None
     failure_cause: str | None = None
     retry_count: int = 0
+    context_mode: str = DEFAULT_CONTEXT_MODE
+    context_block_chars: int = 0
+    context_truncated: bool = False
+    failure_memory_hit_count: int = 0
+    repeated_failure_count: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize the result to a JSON-friendly dictionary."""
@@ -146,6 +160,7 @@ class PhoneAgent:
                 hitl_count=0,
                 trace_id=trace_id,
                 trace_path=str(trace_writer.path) if trace_writer else None,
+                context_mode=self.agent_config.context_mode,
             )
 
         run_result = self._state_to_run_result(
@@ -180,6 +195,16 @@ class PhoneAgent:
             "failure_cause": None,
             "suggested_strategy": None,
             "retry_count": 0,
+            "context_mode": self.agent_config.context_mode,
+            "screen_belief": default_screen_belief(),
+            "action_outcome_summary": None,
+            "failure_memory": [],
+            "summarized_history": "",
+            "context_budget": default_context_budget(),
+            "context_truncated": False,
+            "context_block_chars": 0,
+            "failure_memory_hit_count": 0,
+            "repeated_failure_count": 0,
             "pending_interrupt": None,
             "interrupt_message": None,
             "interrupt_result": None,
@@ -217,6 +242,7 @@ class PhoneAgent:
                 "verbose": self.agent_config.verbose,
                 "trace_id": trace_id,
                 "trace_writer": trace_writer,
+                "context_mode": self.agent_config.context_mode,
             }
         }
 
@@ -239,6 +265,7 @@ class PhoneAgent:
             and bool(action_result.get("success", True))
         )
 
+        context_metrics = build_context_metrics(state)
         return RunResult(
             success=success,
             finished=bool(state.get("finished")),
@@ -251,6 +278,7 @@ class PhoneAgent:
             trace_path=trace_path,
             failure_cause=state.get("failure_cause"),
             retry_count=int(state.get("retry_count") or 0),
+            **context_metrics,
         )
 
     def reset(self) -> None:

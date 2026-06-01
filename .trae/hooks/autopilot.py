@@ -774,16 +774,7 @@ def handle_stop(event: dict[str, Any]) -> None:
         return
     stage["iterations"] = int(stage.get("iterations") or 0) + 1
     state["updated_at"] = now_iso()
-    max_iterations = state.get("pipeline_config", {}).get("max_stage_iterations", MAX_STAGE_ITERATIONS)
-    if stage["iterations"] > int(max_iterations):
-        state["status"] = "blocked"
-        state["blocked_reason"] = f"stage {stage_id} exceeded {max_iterations} continuation iterations"
-        write_state(workspace, state)
-        release_mode(workspace)
-        print(json.dumps({"continue": False, "stopReason": state["blocked_reason"]}, ensure_ascii=False))
-        return
     write_state(workspace, state)
-    print(json.dumps({"decision": "block", "reason": stage_prompt(stage_id, state)}, ensure_ascii=False))
 
 
 def main() -> int:

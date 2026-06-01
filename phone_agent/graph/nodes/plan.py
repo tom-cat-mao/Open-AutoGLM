@@ -7,6 +7,13 @@ from langchain_core.runnables import RunnableConfig
 
 from phone_agent.actions.handler import parse_action, finish
 from phone_agent.config import get_system_prompt
+from phone_agent.graph.context import (
+    build_context_metrics,
+    build_plan_context_block,
+    get_context_mode,
+    sanitize_context_payload,
+    should_inject_context,
+)
 from phone_agent.graph.trace import emit_trace
 from phone_agent.model.client import MessageBuilder
 
@@ -21,7 +28,8 @@ def _build_reflection_context(state: "AgentState") -> str:
     strategy = state.get("suggested_strategy")
     parts = []
     if reflection:
-        parts.append(f"** Reflection **\n\n{reflection}")
+        safe_reflection = sanitize_context_payload(reflection, "reflection")
+        parts.append(f"** Reflection **\n\n{safe_reflection}")
     structured = []
     if verdict:
         structured.append(f"verdict: {verdict}")
@@ -54,12 +62,18 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
     # 1. Capture screen
     screenshot = device_factory.get_screenshot(device_id)
     current_app = device_factory.get_current_app(device_id)
+    context_mode = get_context_mode(state, config)
+    context_block = ""
+    context_metrics = build_context_metrics({**state, "context_mode": context_mode})
+    if should_inject_context(context_mode):
+        context_block, context_metrics = build_plan_context_block(state, lang)
+        context_metrics = {"context_mode": context_mode, **context_metrics}
     emit_trace(
         config,
         state,
         "plan",
         "plan_start",
-        {"task": task, "current_app": current_app},
+        {"task": task, "current_app": current_app, **context_metrics},
     )
 
     # 2. Build new messages (only the new ones, reducer will append)
@@ -70,6 +84,8 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
 
         screen_info = MessageBuilder.build_screen_info(current_app)
         text_content = f"{task}\n\n{screen_info}"
+        if context_block:
+            text_content = f"{text_content}\n\n{context_block}"
         new_messages.append(
             MessageBuilder.create_user_message(
                 text=text_content, image_base64=screenshot.base64_data
@@ -82,6 +98,8 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
             text_content = f"** Screen Info **\n\n{screen_info}\n\n{reflection_context}"
         else:
             text_content = f"** Screen Info **\n\n{screen_info}"
+        if context_block:
+            text_content = f"{text_content}\n\n{context_block}"
         new_messages.append(
             MessageBuilder.create_user_message(
                 text=text_content, image_base64=screenshot.base64_data
@@ -109,6 +127,8 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
             "error": f"Model error: {e}",
             "finished": True,
             "action_confirmed": False,
+            "context_mode": context_mode,
+            **context_metrics,
         }
 
     # 4. Parse action
@@ -128,6 +148,7 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
             "action_raw": response.action,
             "action": action_parsed.get("action") if isinstance(action_parsed, dict) else None,
             "metadata": action_parsed.get("_metadata") if isinstance(action_parsed, dict) else None,
+            **context_metrics,
         },
     )
 
@@ -142,4 +163,6 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
         "action_raw": response.action,
         "action_parsed": action_parsed,
         "action_confirmed": False,
+        "context_mode": context_mode,
+        **context_metrics,
     }

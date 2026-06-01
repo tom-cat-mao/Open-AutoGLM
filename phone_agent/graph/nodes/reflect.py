@@ -7,6 +7,17 @@ from typing import TYPE_CHECKING
 
 from langchain_core.runnables import RunnableConfig
 
+from phone_agent.graph.context import (
+    FAILURE_TAXONOMY,
+    build_action_outcome_summary,
+    build_screen_belief,
+    context_enabled,
+    detect_repeated_failure,
+    get_context_mode,
+    normalize_failure_cause,
+    update_failure_memory,
+    update_summarized_history,
+)
 from phone_agent.graph.trace import emit_trace
 from phone_agent.model.client import MessageBuilder
 
@@ -22,7 +33,7 @@ REFLECT_SYSTEM_PROMPT_CN = """你是一个手机自动化任务的反思专家�
 
 其中：
 - {think} 是你的推理过程。
-- {action} 必须优先使用：reflection(verdict="succeeded|failed|partial", failure_cause="none|element_not_found|wrong_page|app_not_responding|network_or_loading|unsafe_or_sensitive|unknown", suggested_strategy="continue|retry|retry_with_offset|go_back|swipe_to_find|wait|takeover|finish", message="xxx")
+- {action} 必须优先使用：reflection(verdict="succeeded|failed|partial", failure_cause="none|element_not_found|wrong_page|app_not_responding|network_or_loading|permission_or_login_or_captcha|unsafe_or_sensitive|coordinate_or_tap_offset|context_lost|repeated_action|model_parse_failed|unknown", suggested_strategy="continue|retry|retry_with_offset|go_back|swipe_to_find|wait|takeover|finish", message="xxx")
 - 兼容旧格式：continue(message="xxx") 表示动作生效；retry(message="xxx") 表示动作未生效
 
 判断标准：
@@ -40,7 +51,7 @@ You MUST strictly output in the following format:
 
 Where:
 - {think} is your reasoning process.
-- {action} should use: reflection(verdict="succeeded|failed|partial", failure_cause="none|element_not_found|wrong_page|app_not_responding|network_or_loading|unsafe_or_sensitive|unknown", suggested_strategy="continue|retry|retry_with_offset|go_back|swipe_to_find|wait|takeover|finish", message="xxx")
+- {action} should use: reflection(verdict="succeeded|failed|partial", failure_cause="none|element_not_found|wrong_page|app_not_responding|network_or_loading|permission_or_login_or_captcha|unsafe_or_sensitive|coordinate_or_tap_offset|context_lost|repeated_action|model_parse_failed|unknown", suggested_strategy="continue|retry|retry_with_offset|go_back|swipe_to_find|wait|takeover|finish", message="xxx")
 - Legacy compatible formats are accepted: continue(message="xxx") or retry(message="xxx")
 
 Judgment criteria:
@@ -51,15 +62,7 @@ Judgment criteria:
 """
 
 VALID_VERDICTS = {"succeeded", "failed", "partial"}
-VALID_FAILURE_CAUSES = {
-    "none",
-    "element_not_found",
-    "wrong_page",
-    "app_not_responding",
-    "network_or_loading",
-    "unsafe_or_sensitive",
-    "unknown",
-}
+VALID_FAILURE_CAUSES = FAILURE_TAXONOMY
 VALID_STRATEGIES = {
     "continue",
     "retry",
@@ -107,8 +110,7 @@ def parse_reflection_action(raw_action: str) -> ReflectionResult:
         message = str(kwargs.get("message", raw_action))
         if verdict not in VALID_VERDICTS:
             verdict = "failed"
-        if failure_cause not in VALID_FAILURE_CAUSES:
-            failure_cause = "unknown"
+        failure_cause = normalize_failure_cause(failure_cause)
         if suggested_strategy not in VALID_STRATEGIES:
             suggested_strategy = "retry"
         if verdict == "succeeded" and failure_cause == "none":
@@ -142,6 +144,7 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
     task = state["task"]
     step_count = state["step_count"]
     max_steps = state["max_steps"]
+    context_mode = get_context_mode(state, config)
 
     # 1. Capture screen again
     screenshot = device_factory.get_screenshot(device_id)
@@ -205,6 +208,7 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
             "reflection_verdict": "succeeded",
             "failure_cause": None,
             "suggested_strategy": "continue",
+            "context_mode": context_mode,
         }
 
     # 4. Parse reflection
@@ -233,6 +237,44 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
     if parsed_reflection.verdict in {"failed", "partial"}:
         retry_count += 1
 
+    context_updates = {"context_mode": context_mode}
+    if context_enabled(context_mode):
+        belief = build_screen_belief(
+            current_app=current_app,
+            step_count=step_count,
+            summary=parsed_reflection.message,
+        )
+        outcome_state = {
+            **state,
+            "current_app": current_app,
+            "reflection_verdict": parsed_reflection.verdict,
+            "failure_cause": parsed_reflection.failure_cause,
+            "suggested_strategy": parsed_reflection.suggested_strategy,
+        }
+        outcome = build_action_outcome_summary(outcome_state)
+        existing_failure_memory = list(state.get("failure_memory") or [])
+        repeated = detect_repeated_failure(existing_failure_memory, outcome)
+        failure_memory = update_failure_memory(
+            existing_failure_memory, outcome, state.get("context_budget")
+        )
+        summarized_history, history_truncated = update_summarized_history(
+            str(state.get("summarized_history") or ""),
+            outcome,
+            state.get("context_budget"),
+        )
+        context_updates = {
+            "context_mode": context_mode,
+            "screen_belief": belief,
+            "action_outcome_summary": outcome,
+            "failure_memory": failure_memory,
+            "summarized_history": summarized_history,
+            "context_truncated": bool(state.get("context_truncated")) or history_truncated,
+            "failure_memory_hit_count": int(state.get("failure_memory_hit_count") or 0)
+            + (1 if repeated else 0),
+            "repeated_failure_count": int(state.get("repeated_failure_count") or 0)
+            + (1 if repeated else 0),
+        }
+
     emit_trace(
         config,
         state,
@@ -246,6 +288,10 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
             "suggested_strategy": parsed_reflection.suggested_strategy,
             "action_succeeded": action_succeeded,
             "finished": task_finished,
+            "context_mode": context_mode,
+            "context_truncated": context_updates.get("context_truncated", False),
+            "failure_memory_hit_count": context_updates.get("failure_memory_hit_count", 0),
+            "repeated_failure_count": context_updates.get("repeated_failure_count", 0),
         },
     )
 
@@ -259,4 +305,5 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
         "suggested_strategy": parsed_reflection.suggested_strategy,
         "retry_count": retry_count,
         "finished": task_finished,
+        **context_updates,
     }

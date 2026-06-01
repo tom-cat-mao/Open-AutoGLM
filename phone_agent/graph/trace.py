@@ -11,6 +11,8 @@ from typing import Any
 
 from langchain_core.runnables import RunnableConfig
 
+from phone_agent.graph.context import sanitize_context_payload
+
 SENSITIVE_KEYS = {
     "api_key",
     "apikey",
@@ -28,9 +30,16 @@ PRIVATE_TEXT_KEYS = {
     "interrupt_message",
     "message",
     "reflection",
+    "final_message",
+    "error",
+    "result_message_summary",
+    "summary",
     "system_prompt",
     "task",
     "thinking",
+    "visible_text",
+    "observed_text",
+    "context_block",
 }
 
 
@@ -53,11 +62,14 @@ def sanitize_for_trace(value: Any, redact: bool = True, key: str | None = None) 
     if normalized_key in PRIVATE_TEXT_KEYS and isinstance(value, str):
         return _redacted_text(value)
     if isinstance(value, dict):
-        return {str(k): sanitize_for_trace(v, redact, str(k)) for k, v in value.items()}
+        return {
+            str(k): sanitize_context_payload(sanitize_for_trace(v, redact, str(k)), str(k))
+            for k, v in value.items()
+        }
     if isinstance(value, list):
-        return [sanitize_for_trace(item, redact, key) for item in value]
+        return [sanitize_context_payload(sanitize_for_trace(item, redact, key), key) for item in value]
     if isinstance(value, tuple):
-        return [sanitize_for_trace(item, redact, key) for item in value]
+        return [sanitize_context_payload(sanitize_for_trace(item, redact, key), key) for item in value]
     return value
 
 

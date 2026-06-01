@@ -7,17 +7,17 @@ globs: "phone_agent/graph/**/*.py,phone_agent/agent.py,phone_agent/actions/**/*.
 # RALPLAN Status
 
 ```yaml
-status: completed
+status: critic_approved
 design_status: critic_approved
-execution_status: completed
+execution_status: partially_completed
 iteration: 1
 planner_mode: null
 revision_scope: null
-last_planner_update: "按 Planner feedback_revision 协议对 Phase 10 做语义窄修：明确新增项目级 Autopilot stage agents、复用 RALPLAN 三件套、补齐 Stage→Agent→路径→权限/读写→职责映射与测试验收；不进入实现。"
-last_architect_review: "复审无阻塞：已明确新增 6 个 stage agents、复用 RALPLAN 三件套、Stage→Agent 映射、测试验收、traecli.yaml 不改边界与 QA 主 Agent 最终责任。"
+last_planner_update: "按 Critic/Architect feedback 完成 Phase 11A/11B/11C targeted feedback_revision。"
+last_architect_review: "Architect 复审认为已吸收 ITERATE findings，可进入 Critic 质量门；仅保留 context_mode 配置承载点 minor concern。"
 last_critic_verdict: APPROVE
 approved_for_execution: true
-notes: "Phase 10 已完成：新增项目级 Autopilot stage agents，更新 hook/rule/skill/command，并补充 agent contract 与 prompt 一致性测试。"
+notes: "Phase 11A/11B/11C 已完成 Context & Observability Harness 实现并通过全量测试；后续 long-term memory 仍需另行规划与收益验证。"
 ```
 
 # Roadmap
@@ -35,155 +35,181 @@ notes: "Phase 10 已完成：新增项目级 Autopilot stage agents，更新 hoo
 | ✅ 7 | 已新增 `RunResult` / `run_structured()` 结构化 API 与本地 dry-run Evaluation Harness；Phase 7 仅统计 HITL interrupt routing，不承诺持久 resume | 见 Eval / Trace、HITL、checkpoint 条目 |
 | ✅ 8 | 已新增默认本地 JSONL trace；记录 run/step/node/event/timestamp，覆盖 plan/execute/reflect/HITL/end/error；默认脱敏敏感文本与图片/API key；RunResult 与 eval JSON 可关联 trace 文件 | 见 Eval / Trace、隐私与收益验证条目 |
 | ✅ 9 | 已新增结构化 reflection schema、失败原因分类、建议策略、Plan 反馈闭环，以及 eval retry/failure_cause 统计 | 见 Reflection、Eval / Trace 条目 |
-| ✅ 10 | 已完成 TraeCLI-native Autopilot 多 subagent 编排移植：新增 6 个 stage agents，复用 RALPLAN 三件套，hook/rule/skill/command/tests 已对齐 | 见 Autopilot TraeCLI-native、subagent 编排、agent contract 测试条目 |
+| ✅ 10 | 已完成 TraeCLI-native Autopilot 多 subagent 编排移植：新增 6 个 stage agents，复用 RALPLAN 三件套，hook/rule/skill/command/tests 已对齐；未改变 `phone_agent/` 业务运行时 | 见 Autopilot TraeCLI-native、subagent 编排、agent contract 测试条目 |
 
-已完成 Phase 不再展开实现细节；执行约束统一维护在文末 Checklist。Phase 10 未改变 `phone_agent/` 业务运行时。
+已完成 Phase 不再展开实现细节；执行约束统一维护在文末 Checklist。Phase 11A/11B/11C 已完成实现与测试验收，后续 long-term memory 不直接进入实现。
 
 ## RALPLAN-DR 摘要
 
 ### Principles
 
-1. **TraeCLI-native 优先**：移植 OMC Autopilot 蓝图的编排语义，而不是迁移 `.omc` 目录、TypeScript runtime 或外部 pipeline runner。
-2. **项目级 stage agents 显式化**：明确选择新增项目级 Autopilot stage agents，并以 `.trae/agents/*.md` frontmatter、名称唯一性与 hook prompt 引用测试守住契约。
-3. **复用 RALPLAN 三件套**：规划阶段继续复用 `.trae/agents/planner.md`、`.trae/agents/architect.md`、`.trae/agents/critic.md`，不得复制第二套 planner/architect/critic。
-4. **主 Agent 保持最终责任**：stage agents 可辅助执行、调试、测试、设计或审查；主 Agent 负责最终编辑合并、状态推进、QA 汇总与 `AUTOPILOT_SIGNAL` 输出。
-5. **不触碰业务代码**：本 Phase 仅允许 `.trae/` Autopilot 相关配置/协议/agent/command/hook 与对应 `tests/trae/` 测试变更，不修改 `phone_agent/`、`main.py`、业务文档或打包入口。
+1. **Observe before inject**：先在 observe-only 模式补齐 trace/eval/failure taxonomy 与可比字段，再定义 state schema，最后才允许在 `inject` 模式注入 Plan 上下文。
+2. **短期结构化上下文优先**：优先建设 `screen_belief`、`action_outcome_summary`、`failure_memory`、`summarized_history` 等短期 working memory；长期记忆只保留后续边界，不在本 Phase 默认持久化。
+3. **隐私安全默认值**：新增 context 字段默认不得以明文进入 trace/eval；可识别 UI 文本、截图、API key、验证码、支付/账号信息必须默认脱敏或省略。
+4. **收益可验证且可回滚**：context 改动必须能通过 off/observe/inject 对比 success、steps、retry、failure taxonomy 与 context metrics；若无收益，应优先关闭注入而非扩大记忆系统。
+5. **不破坏 LangGraph/HITL/Tool 不变量**：不恢复 while loop，不绕过 confirm/takeover，不改变 messages reducer、坐标转换和 DeviceFactory/ModelClient 注入边界。
 
 ### Decision Drivers
 
-1. **Architect/Critic findings 指向 agent 策略不明确**：Phase 10 必须从“按需新增或调整 agent”收敛为“新增项目级 Autopilot stage agents”的确定策略，并列出确切文件。
-2. **hook prompt 是实际编排载体**：必须让 hook prompt、agent allowlist、rule、skill、command 的关键词和 stage 语义一致，避免用户入口与运行时指令漂移。
-3. **QA 需要辅助但不能转移责任**：test-engineer/code-reviewer 可协助测试与审查，但最终状态、测试结论、阻塞说明和 completion signal 仍由主 Agent 汇总。
+1. **原规划排序存在冲突**：Selected Approach 声明 trace/eval 先行，但执行步骤先做 context injection；需要拆成 11A/11B/11C 并统一为 observe→schema→inject/eval。
+2. **当前诊断证据仍不足**：已有 JSONL trace 与 reflection schema，但缺少跨节点 action outcome、screen belief、history summary、failure memory 与 failure taxonomy 的统一可比输出。
+3. **隐私与 HITL 风险高**：mobile UI 可见文本可能包含姓名、手机号、订单号、地址、聊天内容、验证码、支付/账号信息；若直接注入或落 trace/eval，会扩大隐私和安全风险。
 
 ### Viable Options
 
 | 方案 | 优点 | 缺点 |
 |---|---|---|
-| A. 仅增强 hook prompt，不新增 stage agents | 文件变更少，短期实现快 | 角色契约仍埋在 prompt 中，无法做 agent frontmatter、名称唯一性、引用一致性等静态验收；不满足 findings |
-| B. 新增项目级 Autopilot stage agents，并复用 RALPLAN 三件套 | 契约清晰、可测试、与 TraeCLI-native 自定义 subagent 模型一致；满足 findings 的确切文件与职责映射要求 | 新增 `.trae/agents/` 文件较多，需要同步 hook/rule/skill/command/tests 防止漂移 |
-| C. 修改 `.trae/traecli.yaml` 注册或重配 agents | 可能让配置入口更显式 | 当前 findings 只要求项目级 agent 文件和 hook prompt 引用；若现有 TraeCLI 自动发现 `.trae/agents/*.md`，改 yaml 会扩大风险且不必要 |
+| A. 直接进入 Long-term Memory Phase | 接近“记忆能力”终局，可能复用历史经验 | 缺少 observe/eval/failure taxonomy 基线；隐私、陈旧状态、HITL 绕过风险高；收益不可归因 |
+| B. 分阶段 Context & Observability Harness：11A observe baseline → 11B schema → 11C inject/eval compare | 消除排序冲突；先可观测再注入；支持 off/observe/inject 对比；隐私与预算可测试 | 交付被拆成三段，需要保持 state、nodes、trace、eval、tests 与 prompts 一致 |
+| C. 仅扩展 prompts，不改 state/trace/eval | 实现最轻，短期可能改善模型行为 | 结构不可验证，无法稳定统计失败与收益；上下文膨胀与隐私泄漏风险更高 |
 
 ### Selected Approach
 
-选择 **方案 B：新增项目级 Autopilot stage agents，并复用现有 RALPLAN `planner` / `architect` / `critic` 三件套**。
+选择 **方案 B：Phase 11A/11B/11C 分阶段 Context & Observability Harness**。
 
-Phase 10 执行时新增以下确切项目级 Autopilot stage agent 文件：
+统一执行顺序：
 
-- `.trae/agents/executor.md`
-- `.trae/agents/debugger.md`
-- `.trae/agents/test-engineer.md`
-- `.trae/agents/designer.md`
-- `.trae/agents/code-reviewer.md`
-- `.trae/agents/security-reviewer.md`
+1. **Phase 11A — Observability Baseline & Failure Taxonomy**：以 `context_mode="observe"` 默认开启 observe-only，不向 Plan 注入新增 context；先补 trace/eval 可比字段、failure taxonomy、隐私脱敏与 baseline 输出。
+2. **Phase 11B — Context State / Outcome / Screen Belief Schema**：在 `AgentState` 或等价短期状态中固化 JSON-serializable schema，生成 action outcome、screen belief、failure memory、summarized history，但仍默认不注入 Plan。
+3. **Phase 11C — Context Injection, Budget, and Eval Comparison**：仅当 `context_mode="inject"` 时把脱敏、裁剪后的 context block 注入 Plan；通过 off/observe/inject 的 eval 字段比较收益与回归。
 
-同时明确复用以下既有 RALPLAN agent 文件，不复制、不改名、不新增替代品：
-
-- `.trae/agents/planner.md`
-- `.trae/agents/architect.md`
-- `.trae/agents/critic.md`
-
-`.trae/traecli.yaml` **不需要修改**：本 Phase 以 `.trae/agents/*.md` 项目级 agent 文件和 `.trae/hooks/autopilot.py` stage prompt 引用作为编排契约；除非执行时发现 TraeCLI 当前版本无法自动发现项目级 agents，否则不得扩大到 yaml 配置变更。
-
-### Stage→Agent→路径→权限/读写→职责映射
-
-| Autopilot Stage | Agent | 路径 | 权限/读写 | 职责 |
-|---|---|---|---|---|
-| ralplan | planner | `.trae/agents/planner.md` | 仅规划；只允许整体更新 `.trae/rules/graph.mdc` | 生成/修订 roadmap，维护 RALPLAN Status、Phase、约束 Checklist |
-| ralplan | architect | `.trae/agents/architect.md` | 只读 | 串行审查 planner 输出、架构可行性、边界与权衡 |
-| ralplan | critic | `.trae/agents/critic.md` | 只读 | 串行质量门，输出 APPROVE / ITERATE / REJECT；APPROVE 前禁止实现 |
-| execution | executor | `.trae/agents/executor.md` | 可写；仅按已批准计划修改允许路径 | 执行低风险实现任务、保持 diff 聚焦、不得 commit、不得清理用户无关改动 |
-| execution | designer | `.trae/agents/designer.md` | 默认只读，可产出设计建议；需主 Agent 落地写入 | 在复杂实现前辅助拆分接口/流程/配置设计，避免偏离已批准 roadmap |
-| execution / ralph | debugger | `.trae/agents/debugger.md` | 可读测试/日志；修复建议交主 Agent 或按 stage 授权窄写 | 定位失败根因、提出最小修复路径，不扩大重构范围 |
-| ralph / qa | test-engineer | `.trae/agents/test-engineer.md` | 可读为主；可按主 Agent 指令新增/调整测试 | 设计并运行验证、补充回归测试建议、报告环境阻塞；QA 阶段辅助但不负责最终汇总 |
-| ralph / qa | code-reviewer | `.trae/agents/code-reviewer.md` | 只读审查 | 审查 diff 的逻辑、健壮性、可维护性与范围边界；QA 阶段辅助但不负责最终汇总 |
-| ralph / qa | security-reviewer | `.trae/agents/security-reviewer.md` | 只读审查 | 审查 prompt/hook/config 的权限、秘密、命令注入、越权写入风险 |
-| qa | 主 Agent | 当前主会话 | 可写状态文件；按批准计划收尾 | 汇总 test-engineer/code-reviewer/security-reviewer 发现，决定是否修复或阻塞，输出最终状态和 `AUTOPILOT_SIGNAL` |
+Feature flag 设计：使用 `context_mode='off|observe|inject'` 或等价配置；默认值为 `observe`。`off` 不生成/输出新增 context；`observe` 生成 state/trace/eval 可比字段但不进入 Plan；`inject` 在满足预算与隐私策略后向 Plan 注入 context block。
 
 ### ADR
 
-- **Decision**：Phase 10 采用“新增项目级 Autopilot stage agents + 复用 RALPLAN 三件套 + hook/rule/skill/command/tests 一致性验证”的 TraeCLI-native 编排方案。
-- **Drivers**：满足 Architect/Critic findings；让 stage 角色契约从 prompt 文本升级为可静态验收的项目级 agent 文件；保持 RALPLAN 审查链单一；避免业务代码变更。
-- **Alternatives**：仅增强 hook prompt；迁移 OMC runtime；修改 `.trae/traecli.yaml` 做额外注册。
-- **Why chosen**：新增项目级 agents 能精确表达 execution/debug/test/design/review/security 分工，且可通过 frontmatter、名称唯一性、hook 引用和关键词一致性测试回归；复用 planner/architect/critic 避免规划协议双轨。
-- **Consequences**：执行时必须同步新增 agent 文件、hook prompt、Autopilot rule/skill/command 和 tests；新增 agent 越多，漂移风险越高，必须以测试约束 allowlist、关键词和权限描述。
-- **Follow-ups**：若执行时发现 TraeCLI agent 自动发现机制与预期不符，先记录阻塞并回到 Planner/Critic；不得擅自修改 `.trae/traecli.yaml` 或扩大配置范围。
+- **Decision**：将原 Phase 11 拆为 11A/11B/11C，采用 observe-only 基线、短期 context schema、受控注入与 eval 对比的递进方案。
+- **Drivers**：Critic 要求修复 trace/eval 先行与步骤顺序冲突；context/memory 收益必须可验证；UI 文本隐私和 HITL 安全需要默认保护。
+- **Alternatives**：直接长期记忆；只 prompt 化；先做 checkpoint/resume 全量持久化。
+- **Why chosen**：该方案让可观测性、schema 与注入各自具备验收标准，能在不破坏 LangGraph/HITL/Tool 不变量的前提下验证 context 是否有收益。
+- **Consequences**：执行时需要同步 state、plan/execute/reflect、trace、eval、tests、prompts 与 ModelClient 相关元数据；短期内不会交付跨任务长期记忆或完整持久 resume。
+- **Follow-ups**：11C 通过 eval 证明收益后，再规划 checkpoint/resume 完整语义或 long-term memory；若 eval 无收益，则保持 observe 或 off，并简化 context schema。
 
 ## 当前规划 Phase
 
-### Phase 10: TraeCLI-native Autopilot 多 subagent 编排移植
+### Phase 11A: Observability Baseline & Failure Taxonomy
 
-**目标**：把 OMC Autopilot 蓝图中的多 subagent 编排落到 TraeCLI 原生机制：新增项目级 Autopilot stage agents，复用 RALPLAN `planner` / `architect` / `critic`，由 Autopilot hook 在各 stage 注入可执行 prompt，rule/skill/command 对齐用户入口与约束，测试覆盖关键一致性。
+**目标**：建立 context 注入前的 observe-only 基线，让 trace/eval 能记录可比的 context/outcome/failure 字段，并统一 failure taxonomy 与隐私脱敏策略；默认不向 Plan 注入新增 context。
 
-**根因**：当前 Autopilot 已有 `ralplan -> execution -> ralph -> qa` 状态机，但 execution/verification/QA 的 agent 契约、读写权限、stage prompt 引用、内置 allowlist、入口文档关键词与测试验收仍不够显式；若不新增项目级 stage agents 并做一致性验证，OMC 多角色协作语义会停留在不可验证的 prompt 描述中。
+**根因**：现有 trace/eval 能关联 run/step/node/error 与基础 failure_cause，但缺少 context_mode、action outcome、failure taxonomy histogram、可比 baseline 与可识别 UI 文本脱敏验证，导致后续 context 改动无法证明收益或排查隐私泄漏。
 
-**修改文件候选**：
-- 新增 `.trae/agents/executor.md`
-- 新增 `.trae/agents/debugger.md`
-- 新增 `.trae/agents/test-engineer.md`
-- 新增 `.trae/agents/designer.md`
-- 新增 `.trae/agents/code-reviewer.md`
-- 新增 `.trae/agents/security-reviewer.md`
-- 复用但不复制 `.trae/agents/planner.md`
-- 复用但不复制 `.trae/agents/architect.md`
-- 复用但不复制 `.trae/agents/critic.md`
-- 更新 `.trae/hooks/autopilot.py`
-- 更新 `.trae/rules/autopilot.mdc`
-- 更新 `.trae/skills/autopilot/SKILL.md`
-- 更新 `.trae/commands/autopilot.md`
-- 更新 `tests/trae/test_autopilot_hook.py` 或同等 TraeCLI Autopilot hook 测试文件
+**修改文件候选与原因**：
 
-**明确不修改**：
-- 不修改 `.trae/traecli.yaml`。
-- 不修改 `phone_agent/`、`main.py`、`setup.py`、`README.md`、`docs/` 或其他业务代码/产品文档。
+- `phone_agent/graph/trace.py`：扩展 context/outcome/failure 事件字段，统一脱敏入口，确保新增 context 字段默认不 trace 明文。
+- `evals/run_eval.py`：输出 off/observe/inject 可比字段与 failure taxonomy 汇总；dry-run 可稳定生成 baseline。
+- `phone_agent/graph/nodes/reflect.py`：归一化 failure taxonomy 与 reflection verdict/cause/strategy 的映射。
+- `phone_agent/model/client.py`：候选用于暴露或规范模型调用 metadata/usage/错误类型的脱敏摘要，避免 prompt/response 原文进入 trace/eval；若现有接口已足够则不改。
+- `tests/conftest.py`：沉淀 fake model、fake device、trace tempdir、context_mode fixture，降低 graph/eval 测试重复配置。
+- `tests/graph/test_trace.py`、`tests/evals/test_eval_harness.py`、`tests/evals/test_trace_export.py`：验证 trace/eval schema、脱敏、可比字段与 dry-run 输出。
 
-**执行步骤与验收标准**：
+**非目标**：
 
-1. **新增并固化项目级 Autopilot stage agents**
-   - 根因：execution/verification/QA 角色边界不能只依赖 hook prompt 自然语言，需要项目级 agent 文件承载名称、职责和权限契约。
-   - 修改文件候选：`.trae/agents/executor.md`、`.trae/agents/debugger.md`、`.trae/agents/test-engineer.md`、`.trae/agents/designer.md`、`.trae/agents/code-reviewer.md`、`.trae/agents/security-reviewer.md`；复用 `.trae/agents/planner.md`、`.trae/agents/architect.md`、`.trae/agents/critic.md`。
-   - 验收标准：新增 6 个 agent 文件均存在且 frontmatter 合法；所有 `.trae/agents/*.md` agent 名称唯一；`planner` / `architect` / `critic` 保持 RALPLAN 串行链路且不被复制；每个新增 agent 明确读写权限、职责、不得主动 commit、不得清理用户无关改动、不得越过已批准 roadmap。
+- 不新增 Plan context 注入。
+- 不实现长期记忆、向量库、数据库、云同步或跨任务画像。
+- 不承诺完整 checkpoint/resume。
+- 不改变 graph 拓扑、HITL 路由、DeviceFactory/Tool schema 或坐标转换规则。
 
-2. **升级 Autopilot stage prompt 与 allowlist 编排语义**
-   - 根因：`.trae/hooks/autopilot.py` 的 stage prompt 是实际续跑指令，需要显式引用新增 stage agents、保留内置/既有 RALPLAN allowlist，并明确主 Agent 最终责任。
-   - 修改文件候选：`.trae/hooks/autopilot.py`。
-   - 验收标准：RALPLAN stage 明确串行复用 `planner -> architect -> critic`，ITERATE 回 planner，Critic APPROVE 前不得实现；execution stage 明确可调用 `executor`、必要时 `designer` / `debugger`，主 Agent 负责最终编辑合并；RALPH/verification stage 明确可用 `debugger`、`test-engineer`、`code-reviewer`、`security-reviewer` 做诊断/只读审查，主 Agent 修复高置信问题；QA stage 明确使用 `test-engineer` / `code-reviewer` 辅助测试与审查，但主 Agent 负责最终状态汇总、阻塞说明和 `AUTOPILOT_SIGNAL`；hook prompt 引用的 agent 与新增 agent/保留内置 allowlist 一致。
+**可量化验收标准**：
 
-3. **同步 Autopilot rule、skill、command 关键词与边界**
-   - 根因：rule/skill/command 若与 hook prompt 不一致，会导致自然语言触发、slash command、`--use-current-plan`、stage agent 引用和 runtime 行为漂移。
-   - 修改文件候选：`.trae/rules/autopilot.mdc`、`.trae/skills/autopilot/SKILL.md`、`.trae/commands/autopilot.md`。
-   - 验收标准：三处均声明 TraeCLI-native、不迁移 `.omc` runtime；关键词与 hook 使用的 stage 名称和 agent 名称一致；明确新增 6 个 stage agents 与复用 `planner` / `architect` / `critic`；明确 `.trae/traecli.yaml` 不需要修改；明确 mode registry、subagent tracking、completion signal、handoff、无主动 commit、无业务代码变更边界。
+- `context_mode` 或等价字段出现在 run/eval summary 中，默认值为 `observe`；`observe` 模式不向 Plan 新增 context block。
+- failure taxonomy 至少覆盖：元素未找到、错页/导航偏离、无响应/加载、网络、权限/登录/验证码、敏感/HITL、坐标/点击偏移、上下文丢失、重复动作、模型解析失败、未知。
+- eval summary 至少输出 `success`、`steps`、`duration`、`retry_count`、`hitl_count`、`trace_id`、`trace_path`、`failure_cause_histogram`、`context_mode`、`context_block_chars` 或等价可比字段。
+- 隐私策略覆盖可识别 UI 文本：姓名、手机号、邮箱、订单号、地址、聊天内容、验证码、支付/账号信息、API key/token、截图/base64；新增 context 字段不得默认 trace 明文。
+- 测试必须包含 `visible_text='张三 13800138000 订单123456'` 或等价样例，并验证该明文不进入 trace/eval 输出。
 
-4. **补充 hook 与 agent contract 回归测试**
-   - 根因：prompt contract、agent frontmatter 和文档关键词是 Autopilot 编排的主要执行载体，缺少测试会使后续重构 silently 破坏多 subagent 编排。
-   - 修改文件候选：`tests/trae/test_autopilot_hook.py` 或同等 TraeCLI Autopilot hook 测试文件。
-   - 验收标准：测试覆盖 `.trae/agents/*.md` frontmatter 合法性；测试覆盖 agent 名称唯一性；测试覆盖 hook prompt 引用与新增 agent/保留内置 allowlist 一致性；测试覆盖 rule/skill/command/hook 的 stage 关键词和 agent 关键词一致性；测试覆盖 RALPLAN prompt 的 planner/architect/critic 串行顺序和 APPROVE 门禁；测试覆盖 QA prompt 中 test-engineer/code-reviewer 仅辅助、主 Agent 最终汇总；`--use-current-plan`、stage signal、subagent active suppression、mode conflict 等既有测试继续通过。
+**测试命令或范围**：`.venv/bin/pytest tests/graph/test_trace.py tests/evals/test_eval_harness.py tests/evals/test_trace_export.py -v`。
 
-5. **执行前后范围与验证门禁**
-   - 根因：本任务是 TraeCLI 编排迁移，若误改 `phone_agent/` 或 `.trae/traecli.yaml`，会扩大风险并违反用户边界。
-   - 修改文件候选：仅上述新增/更新的 `.trae/agents/`、`.trae/hooks/autopilot.py`、`.trae/rules/autopilot.mdc`、`.trae/skills/autopilot/SKILL.md`、`.trae/commands/autopilot.md`、`tests/trae/test_autopilot_hook.py`。
-   - 验收标准：目标测试命令 `.venv/bin/pytest tests/trae/test_autopilot_hook.py -q` 通过；必要时补充 `python -m py_compile .trae/hooks/autopilot.py` 或等价语法检查；最终 diff 不包含 `.trae/traecli.yaml`、`phone_agent/`、`main.py`、`setup.py`、`README.md`、`docs/` 的变更；若测试环境缺依赖，需记录阻塞与已尝试命令，不伪造通过。
+### Phase 11B: Context State / Outcome / Screen Belief Schema
+
+**目标**：固化短期 context state schema，生成 JSON-serializable 的 `screen_belief`、`action_outcome_summary`、`failure_memory`、`summarized_history` 与预算元数据；默认仍处于 observe-only，不注入 Plan。
+
+**根因**：Plan/Execute/Reflect 之间缺少标准化“当前屏幕信念—动作尝试—设备反馈—反思结果—失败记忆—历史摘要”的中间事实，容易重复错误、丢失局部目标，也难以把失败样本聚合到 eval 指标。
+
+**修改文件候选与原因**：
+
+- `phone_agent/graph/state.py`：定义 context state 字段、默认值、JSON 序列化边界与 reducer 不变量。
+- `phone_agent/graph/context.py`（可选）：集中放置 context schema helper、预算裁剪、脱敏与 summary 构造，避免节点内重复；若实现足够小可内联在现有 graph 模块。
+- `phone_agent/graph/nodes/execute.py`：从 action 执行结果、current_app、step_count 等生成 action outcome 草稿。
+- `phone_agent/graph/nodes/reflect.py`：结合 reflection verdict/failure_cause/suggested_strategy 更新 action outcome、failure memory 与 summarized history。
+- `phone_agent/graph/nodes/plan.py`：读取 schema 但在 `observe` 模式不注入；为 11C 保持单一注入入口。
+- `phone_agent/agent.py`：候选用于向 `run_structured()`/RunResult 暴露 context_mode 与 trace 关联，保持 `run() -> str` 兼容。
+- `tests/graph/test_state.py`、`tests/graph/test_execute.py`、`tests/graph/test_plan_reflect.py`：覆盖默认状态、序列化、outcome/screen belief 更新与 reflection 兼容。
+- `tests/graph/test_edges.py`：确认新增状态不改变 after_plan/after_execute/after_interrupt 路由。
+- `tests/graph/test_hitl.py`：确认 context state 不绕过 confirm/takeover interrupt 与 pending_execute 语义。
+
+**非目标**：
+
+- 不把 context block 注入 Plan；仅准备 schema 与 observe 输出。
+- 不把旧 screen belief 当作事实覆盖当前 screenshot/current_app。
+- 不保存原始截图、可识别 UI 明文、验证码、支付/账号信息或跨任务偏好。
+- 不改变 messages reducer、graph edge 条件、HITL interrupt 或 tool schema。
+
+**可量化验收标准**：
+
+- `AgentState` 或等价状态包含 `context_mode`、`screen_belief`、`action_outcome_summary`、`failure_memory`、`summarized_history`、`context_budget`、`context_truncated` 或等价字段，默认值安全且 JSON-serializable。
+- `screen_belief` 至少表达 `current_app`、`summary`、`loading_or_blocked`、`unsafe_or_sensitive`、`confidence`/`unknown` 等保守字段；允许 unknown/uncertain。
+- `action_outcome_summary` 至少关联 action 类型、执行结果、reflection verdict、failure_cause、suggested_strategy、current_app、step_count。
+- `failure_memory` 仅保留最近 3 条脱敏摘要；`action_outcome_summary` 仅保留最近 1 条；`summarized_history` 最大 800 字符；`screen_belief.summary` 最大 300 字符。
+- 字段缺失、解析失败或模型异常时安全降级为 unknown/empty，不中断主流程；`plan_node` 仍只返回新增 messages，`execute_node` messages 重建语义不变。
+
+**测试命令或范围**：`.venv/bin/pytest tests/graph/test_state.py tests/graph/test_execute.py tests/graph/test_plan_reflect.py tests/graph/test_edges.py tests/graph/test_hitl.py -v`。
+
+### Phase 11C: Context Injection, Budget, and Eval Comparison
+
+**目标**：在 11A/11B 基线和 schema 稳定后，仅当 `context_mode="inject"` 时向 Plan 注入脱敏、裁剪、结构化 context block，并用 eval 对比 `off`、`observe`、`inject` 的收益与回归。
+
+**根因**：直接注入全量历史或 UI 文本会造成 token 膨胀、隐私泄漏和错误旧状态放大；需要显式预算、裁剪优先级、truncated 标记和 eval 可比字段，确保注入可控、可回滚。
+
+**修改文件候选与原因**：
+
+- `phone_agent/graph/nodes/plan.py`：唯一 Plan 注入入口；按 context_mode 决定是否插入 context block。
+- `phone_agent/config/prompts.py`、`phone_agent/config/prompts_zh.py`、`phone_agent/config/prompts_en.py`：定义模型可读的短 context 说明，避免 prompt 自由膨胀。
+- `phone_agent/graph/context.py`（可选）或 `phone_agent/graph/state.py`：实现预算裁剪、truncated 标记、脱敏与 block 构造。
+- `evals/run_eval.py`：支持 off/observe/inject 对比字段，输出 `context_block_chars`、`context_truncated`、`failure_memory_hit_count`、`repeated_failure_count` 等指标。
+- `phone_agent/model/client.py`：候选用于测试/记录模型输入长度或 usage metadata 的脱敏统计，不记录完整 prompt 明文；若现有 client 不适合则仅在 plan/context helper 层统计。
+- `tests/conftest.py`：复用 context_mode、fake VLM response、敏感 visible_text fixture。
+- `tests/graph/test_plan_reflect.py`、`tests/evals/test_eval_harness.py`、`tests/graph/test_trace.py`：覆盖 inject 注入、observe 不注入、预算裁剪、隐私与 eval 可比输出。
+
+**非目标**：
+
+- 不默认开启 inject；默认仍为 observe。
+- 不把 context block 注入 execute/tool schema。
+- 不把上下文用于自动确认支付、登录、验证码或其他敏感操作。
+- 不宣称真实设备大规模收益；本 Phase 只要求 dry-run/fixture 可比字段和最小回归验证。
+
+**可量化验收标准**：
+
+- `context_mode='off|observe|inject'` 或等价配置生效：`off` 不生成/输出新增 context；`observe` 输出 state/trace/eval 可比字段但 Plan 无 context block；`inject` 才向 Plan 注入。
+- context budget 默认值明确：`failure_memory` 最近 3 条；`action_outcome_summary` 最近 1 条；`summarized_history` 最大 800 字符；`screen_belief.summary` 最大 300 字符；context block 默认最多 1500 字符。
+- 裁剪优先级为：当前 `screen_belief` > last `action_outcome_summary` > latest `failure_memory` > `summarized_history`；任何超限输出必须标记 `truncated=true` 或等价字段。
+- 注入内容为脱敏结构化摘要，不含历史图片、API key/token、验证码、支付/账号信息或可识别 UI 明文；`visible_text='张三 13800138000 订单123456'` 不明文进入 trace/eval，也不得明文进入默认 context block。
+- eval 输出 off/observe/inject 可比字段：`context_mode`、`context_block_chars`、`context_truncated`、`failure_memory_hit_count`、`repeated_failure_count`、`failure_cause_histogram`、`success`、`steps`、`retry_count` 或等价字段。
+- `PhoneAgent.run() -> str` 兼容；结构化评测继续使用 `run_structured()` 或等价 API；LangFuse 未配置不影响本地 trace/eval。
+
+**测试命令或范围**：`.venv/bin/pytest tests/graph/test_plan_reflect.py tests/graph/test_trace.py tests/evals/test_eval_harness.py -v`；必要时补充 `.venv/bin/python evals/run_eval.py --dry-run --trace-dir .traces/smoke`。
 
 # 约束 Checklist
 
-修改 `.trae/` Autopilot 编排、`phone_agent/graph/`、评测、trace、checkpoint、grounding、memory 或相关测试前，确认：
+修改 `.trae/` 编排、`phone_agent/graph/`、评测、trace、checkpoint、grounding、memory/context 或相关测试前，确认：
 
-- [ ] **RALPLAN**：当前 Phase 10 已完成，后续新 Phase 仍需 `design_status=critic_approved`、`last_critic_verdict=APPROVE`、`approved_for_execution=true` 三者一致并完成 Final Check 后才能实现；Phase 完成后先更新本文件，再按用户要求决定是否 commit。
-- [ ] **本 Phase 范围**：只允许修改 `.trae/agents/executor.md`、`.trae/agents/debugger.md`、`.trae/agents/test-engineer.md`、`.trae/agents/designer.md`、`.trae/agents/code-reviewer.md`、`.trae/agents/security-reviewer.md`、`.trae/hooks/autopilot.py`、`.trae/rules/autopilot.mdc`、`.trae/skills/autopilot/SKILL.md`、`.trae/commands/autopilot.md`、`tests/trae/test_autopilot_hook.py` 或同等 TraeCLI Autopilot hook 测试文件；不得修改 `phone_agent/`、`main.py`、`setup.py`、`README.md`、`docs/` 或其他业务代码。
-- [ ] **`.trae/traecli.yaml` 边界**：本 Phase 不需要修改 `.trae/traecli.yaml`；若执行时发现 agent 自动发现不可用，记录阻塞并回到 Planner/Critic，不擅自扩大范围。
-- [ ] **Autopilot TraeCLI-native**：不迁移 `.omc`，不引入 TypeScript pipeline runtime，不新增第二套 runtime state；runtime state 仍在 `.trae/autopilot/state.json`，mode registry 仍在 `.trae/modes/state.json`。
-- [ ] **subagent 编排**：RALPLAN stage 复用 `.trae/agents/planner.md` / `.trae/agents/architect.md` / `.trae/agents/critic.md` 且串行；新增项目级 stage agents 为 `executor`、`debugger`、`test-engineer`、`designer`、`code-reviewer`、`security-reviewer`；execution/team 可并行 subagent，但主 Agent 负责最终编辑、合并与一致性；verification/RALPH 优先只读审查，主 Agent 修复高置信问题；QA 使用 test-engineer/code-reviewer 辅助但主 Agent 负责最终状态汇总。
-- [ ] **agent contract 测试**：必须验证 `.trae/agents/*.md` frontmatter 合法性、agent 名称唯一性、hook prompt 引用与新增 agent/保留内置 allowlist 一致性、rule/skill/command/hook 的 stage 与 agent 关键词一致性。
-- [ ] **Completion Signal 与 stop hook**：每个 stage 完成后仍必须单独输出 `AUTOPILOT_SIGNAL: <SIGNAL>`；hook 只从 assistant transcript 识别完成信号；subagent 活跃窗口内不得注入新的 continuation prompt。
-- [ ] **Mode / handoff**：尊重 `.trae/modes/state.json` 互斥锁；`/autopilot --use-current-plan` 只能在 `graph.mdc` 已 approved 或 RALPLAN pending approval 可 handoff 时从 execution 开始。
+- [ ] **RALPLAN 门禁**：当前 Phase 11A/11B/11C 已达到 `design_status=critic_approved`、`last_critic_verdict=APPROVE`、`approved_for_execution=true` 并完成 Final Check；未经用户明确批准仍不得实现业务代码。
+- [ ] **本 Phase 排序**：严格按 11A observe baseline/failure taxonomy → 11B context state schema → 11C injection/budget/eval comparison 推进；不得在 11A/11B 默认向 Plan 注入 context。
+- [ ] **Feature flag**：必须提供 `context_mode='off|observe|inject'` 或等价设计，默认 `observe`；Plan 注入仅在 `inject` 模式发生；eval/trace 输出必须带可比字段。
+- [ ] **Context budget**：默认 `failure_memory` 最近 3 条、`action_outcome_summary` 最近 1 条、`summarized_history` 最大 800 字符、`screen_belief.summary` 最大 300 字符、context block 最多 1500 字符；裁剪优先级为当前 screen belief > last action outcome > latest failure memory > summarized history；超限标记 `truncated=true`。
+- [ ] **隐私与可识别 UI 文本**：姓名、手机号、邮箱、订单号、地址、聊天内容、验证码、支付/账号信息、API key/token、截图/base64 默认脱敏或省略；新增 context 字段不得默认 trace 明文；测试必须覆盖 `visible_text='张三 13800138000 订单123456'` 不明文进入 trace/eval。
+- [ ] **核心 context 产物**：优先 `screen_belief`、`action_outcome_summary`、`failure_memory`、`summarized_history`；所有字段需短期、结构化、JSON-serializable、可裁剪、可测试、可脱敏。
+- [ ] **收益验证**：context/memory 改动必须通过 Evaluation Harness 对比 `off`/`observe`/`inject` 的 success_rate、avg_steps、retry_count、failure_cause_histogram、repeated_failure_count、failure_memory_hit_count 或等价指标；不得用未经验证的 prompt 主观效果宣称收益。
 - [ ] **Graph 不变量**：State schema 先行；不用 while loop 替代 StateGraph；不恢复 `_execute_step` 双轨；Node 不使用 `self._context`，上下文走 State `messages` + config。
-- [ ] **依赖注入**：DeviceFactory / ModelClient 通过 StateGraph config 注入；tool 不直接 `get_device_factory()`；`device_factory` 不得进入 `@tool` 模型可见 schema，需有 fake-device 与 schema 断言测试。
-- [ ] **动作安全**：坐标保持 0-1000 相对值，绝对像素转换只在 execute/tool 内调用 `convert_relative_to_absolute()`；动作解析用 `ast.parse` + `ast.literal_eval`，禁止 `eval()`。
-- [ ] **上下文与 reducer**：每步后剥离历史图片；`plan_node` 只返回新增 messages，`execute_node` 返回完整重建列表；role/content 边界必须有测试。
-- [ ] **HITL / confirm-then-execute**：敏感操作走 `confirm_node`，登录/验证码走 `takeover_node`，均用 `interrupt()`；当前只承诺 interrupt 路由语义，持久 resume 等后续 checkpoint/resume Phase 完成后再对外承诺。
+- [ ] **messages reducer**：每步后剥离历史图片；`plan_node` 只返回新增 messages，`execute_node` 返回完整重建列表；Context summary 不得破坏 role/content 边界和 replace/append 语义。
+- [ ] **依赖注入**：DeviceFactory / ModelClient 通过 StateGraph config 注入；tool 不直接 `get_device_factory()`；`device_factory` 不得进入 `@tool` 模型可见 schema，需保留 fake-device 与 schema 断言测试。
+- [ ] **动作安全与坐标**：坐标保持 0-1000 相对值，绝对像素转换只在 execute/tool 内调用 `convert_relative_to_absolute()`；动作解析用 `ast.parse` + `ast.literal_eval`，禁止 `eval()`。
+- [ ] **HITL / confirm-then-execute**：敏感操作走 `confirm_node`，登录/验证码走 `takeover_node`，均用 `interrupt()`；context/memory 不得自动授权敏感操作或绕过当前设备状态检查。
 - [ ] **pending_execute 约束**：`after_interrupt` 仅在 `pending_execute=True & interrupt_result=True` 时到 `execute`；pending 分支不得 `_strip_and_append`，必须设置 `action_confirmed=True` 并保留 `action_parsed`；`after_execute` 先检查 `action_confirmed`；`plan_node` 每轮重置 `action_confirmed=False`；`confirm_node` 显式返回 `pending_execute`。
+- [ ] **Eval / Trace**：`PhoneAgent.run() -> str` 保持兼容；结构化评测使用 `run_structured()` 或等价参数；Evaluation Harness 至少记录 success/steps/duration/error/HITL count/trace_id/trace_path/failure_cause/retry_count/context_mode/context metrics；Trace 默认本地可用，LangFuse 可选且未配置不影响主流程。
+- [ ] **Reflection 策略**：`reflect_node` 输出/解析结构化 verdict、failure_cause、suggested_strategy；解析失败必须安全降级；Plan 下一轮只能在 inject 模式读取脱敏 context summary；不通过模型动态改图拓扑。
+- [ ] **Screen belief 保守性**：screen belief 是短期信念而非事实真相；必须允许 unknown/uncertain；不得用旧 belief 覆盖当前 screenshot/current_app；每步应以当前屏幕重新校准。
+- [ ] **Failure memory 保守性**：failure memory 只用于避免重复错误和辅助策略选择；不得作为跨任务长期偏好；不得记录可识别隐私文本；不得自动授权敏感操作。
+- [ ] **Checkpoint 边界**：本 Phase 仅准备可序列化短期状态和 trace 关联；不承诺完整持久 resume；任何后续 resume 必须重新验证设备当前屏幕、HITL 状态和敏感动作。
+- [ ] **Long-term memory 边界**：不引入向量库、数据库、跨任务用户画像、云同步或默认长期文件；后续若规划长期记忆，必须先有隐私策略、删除/过期机制、HITL 安全门禁和 eval 收益证据。
+- [ ] **Autopilot TraeCLI-native**：Phase 10 已完成；TraeCLI Autopilot subagent 编排不得被误当作 `phone_agent` 业务多 Agent 架构；本 Phase 不修改 `.trae/agents/`、`.trae/hooks/autopilot.py`、`.trae/rules/autopilot.mdc`、`.trae/skills/autopilot/SKILL.md`、`.trae/commands/autopilot.md`，除非后续用户另行批准。
 - [ ] **Phase 6 门禁**：保留 `setup.py` 并补 runtime deps；`.gitignore` 不得忽略 `tests/`；测试/文档不得声明未经验证的 passing 数；README 拓扑必须与 `builder.py` 一致。
-- [ ] **Eval / Trace**：`PhoneAgent.run() -> str` 保持兼容；结构化评测使用 `run_structured()` 或等价参数；Evaluation Harness 至少记录 success/steps/duration/error/HITL count/trace_id/trace_path；Trace 默认本地可用，LangFuse 可选且未配置不影响主流程。
-- [ ] **Reflection 策略**：`reflect_node` 输出/解析结构化 verdict、failure_cause、suggested_strategy；解析失败必须安全降级；Plan 下一轮必须能看到结构化 reflection；不通过模型动态改图拓扑。
-- [ ] **隐私与收益验证**：Trace/checkpoint/memory 默认不得上传或长期保存敏感截图/API key/隐私文本；Reflection、grounding、memory 的收益必须通过 Evaluation Harness 对比验证。
-- [ ] **后续能力边界**：checkpoint/resume 先于 UI grounding，且不得绕过 HITL；Accessibility/OCR 不破坏 Android 主线和坐标转换约束；Memory 不得绕过 HITL/安全确认/当前设备状态检查；TraeCLI Autopilot subagent 编排不得被误当作 `phone_agent` 业务多 Agent 架构。
-- [ ] **暂不做**：Dreaming、`phone_agent` 业务多 Agent 架构、Command 动态路由、复杂 Prompt 外部化、iOS 主线、早期技能记忆。
+- [ ] **后续能力边界**：Accessibility/OCR 不破坏 Android 主线和坐标转换约束；Command 动态路由、Dreaming、业务多 Agent、复杂 Prompt 外部化、iOS 主线、早期技能记忆仍暂不做。

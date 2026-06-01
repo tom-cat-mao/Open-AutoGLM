@@ -36,7 +36,10 @@ hooks:
       input=$(cat)
       tool=$(echo "$input" | jq -r '.tool_name // empty')
       file=$(echo "$input" | jq -r '.tool_input.file_path // .tool_input.path // empty')
-      workspace="${workspaceFolder}"
+      workspace=$(printf '%s' "$input" | jq -r '.cwd // empty')
+      if [ -z "$workspace" ]; then
+        workspace="${workspaceFolder}"
+      fi
       if [ -z "$workspace" ]; then
         workspace=$(pwd)
       fi
@@ -62,7 +65,10 @@ hooks:
     command: |
       input=$(cat)
       file=$(echo "$input" | jq -r '.tool_input.file_path // .tool_input.path // empty')
-      workspace="${workspaceFolder}"
+      workspace=$(printf '%s' "$input" | jq -r '.cwd // empty')
+      if [ -z "$workspace" ]; then
+        workspace="${workspaceFolder}"
+      fi
       if [ -z "$workspace" ]; then
         workspace=$(pwd)
       fi
@@ -107,7 +113,10 @@ hooks:
   - type: command
     command: |
       input=$(cat)
-      workspace="${workspaceFolder}"
+      workspace=$(printf '%s' "$input" | jq -r '.cwd // empty')
+      if [ -z "$workspace" ]; then
+        workspace="${workspaceFolder}"
+      fi
       if [ -z "$workspace" ]; then
         workspace=$(pwd)
       fi
