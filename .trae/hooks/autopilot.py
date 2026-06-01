@@ -16,6 +16,15 @@ RESUME_TTL_HOURS = 24
 MODE_NAME = "autopilot"
 MODE_EXCLUSIVE_PEERS = {"ralplan", "team", "ralph"}
 COMMAND_PREFIXES = ("/autopilot", "/auto-pilot")
+RALPLAN_AGENT_CHAIN = ("planner", "architect", "critic")
+AUTOPILOT_STAGE_AGENTS = (
+    "executor",
+    "debugger",
+    "test-engineer",
+    "designer",
+    "code-reviewer",
+    "security-reviewer",
+)
 
 
 class PipelineAdapter(NamedTuple):
@@ -583,10 +592,11 @@ def execution_prompt(task: str, state: dict[str, Any]) -> str:
 
 执行：
 1. 读取 `.trae/rules/graph.mdc` 的 approved roadmap 与约束 Checklist。
-2. 使用 TodoWrite 拆分任务，并按风险/文件边界分派多个 subagent：
-   - Explore：快速定位相关文件、调用点、测试入口。
-   - Plan：对复杂实现点给出局部方案和风险。
-   - general-purpose：并行处理相互独立的实现/验证子任务。
+2. 使用 TodoWrite 拆分任务，并按风险/文件边界分派项目级 subagent：
+   - designer：复杂实现前做局部设计与边界确认，只读。
+   - executor：执行已批准 roadmap 内的聚焦实现任务。
+   - debugger：定位失败根因并给出最小修复路径。
+   - test-engineer：补充/调整测试并运行验证。
 3. 主 Agent 负责合并结果、编辑文件、解决冲突、保持整体一致性。
 4. 不主动 commit，不清理用户已有改动。
 5. 完成实现后输出完成信号；测试失败可留给 RALPH stage 继续修复。
@@ -599,7 +609,7 @@ def execution_prompt(task: str, state: dict[str, Any]) -> str:
 执行：
 1. 读取 `.trae/rules/graph.mdc` 的 approved roadmap 与约束 Checklist。
 2. 使用 TodoWrite 跟踪多步骤执行。
-3. 必要时调用 Explore / Plan / general-purpose subagent 辅助查代码或局部设计，但主 Agent 负责最终编辑。
+3. 必要时调用 designer / executor / debugger / test-engineer 辅助局部设计、实现、调试或测试，但主 Agent 负责最终编辑与合并。
 4. 不主动 commit，不清理用户已有改动。
 5. 完成实现后输出完成信号；测试失败可留给 RALPH stage 继续修复。
 """
@@ -625,7 +635,7 @@ def stage_prompt(stage_id: str, state: dict[str, Any]) -> str:
 
 执行：
 1. 读取 `.trae/rules/ralplan.mdc` 与 `.trae/rules/graph.mdc`。
-2. 调用 planner subagent 整体覆写 `.trae/rules/graph.mdc`。
+2. 串行调用 planner subagent 整体覆写 `.trae/rules/graph.mdc`。
 3. 串行调用 architect subagent 只读审查。
 4. 串行调用 critic subagent 输出 APPROVE / ITERATE / REJECT。
 5. 若 ITERATE，最多 5 轮回到 planner 窄修。
@@ -639,22 +649,24 @@ def stage_prompt(stage_id: str, state: dict[str, Any]) -> str:
 ## Stage: RALPH / Verification
 
 执行：
-1. 并行调用只读审查类 subagent：architect（架构一致性）、critic（质量门/遗漏项）、general-purpose 或 issue-validator（具体风险验证）。
-2. 主 Agent 汇总 findings，修复高置信问题。
-3. 运行相关测试；Python/pytest/pip 优先使用 `.venv/bin/*`。
-4. 检查新增配置语法、hook 脚本语法、关键路径行为。
-5. 修复发现的问题并重跑目标测试。
-6. 仅清理本 stage 产生的临时产物，不清理用户已有改动。
+1. 并行调用只读审查类 subagent：code-reviewer（代码质量）、security-reviewer（安全边界）、architect（架构一致性）、critic（质量门/遗漏项）。
+2. 必要时调用 debugger 定位失败根因，调用 test-engineer 设计/运行验证。
+3. 主 Agent 汇总 findings，只修复高置信问题。
+4. 运行相关测试；Python/pytest/pip 优先使用 `.venv/bin/*`。
+5. 检查新增配置语法、hook 脚本语法、关键路径行为。
+6. 修复发现的问题并重跑目标测试。
+7. 仅清理本 stage 产生的临时产物，不清理用户已有改动。
 """
     else:
         body = """
 ## Stage: QA
 
 执行：
-1. 检查 git diff 范围，确认没有过度清理或无关改动。
-2. 确认 `.trae/rules/graph.mdc` 与 Autopilot 状态边界未混淆。
-3. 如本次完成 roadmap phase，按项目规则更新状态；否则不要伪造完成态。
-4. 汇总变更、测试结果、剩余风险。
+1. 调用 test-engineer 辅助确认测试覆盖和验证命令，调用 code-reviewer / security-reviewer 做最终只读抽查。
+2. 主 Agent 检查 git diff 范围，确认没有过度清理或无关改动。
+3. 确认 `.trae/rules/graph.mdc` 与 Autopilot runtime state 边界未混淆。
+4. 如本次完成 roadmap phase，按项目规则更新状态；否则不要伪造完成态。
+5. 主 Agent 汇总变更、测试结果、剩余风险，并输出完成信号。
 """
     return common + body.strip() + "\n</autopilot-pipeline-continuation>"
 
