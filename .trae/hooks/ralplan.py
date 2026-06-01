@@ -476,10 +476,10 @@ def handle_user_prompt_submit(event: dict[str, Any]) -> None:
             return
         if command != "start":
             flags, task = parse_flags(prompt)
-        state = init_state(event, task, flags, source="explicit")
         if prompt.strip().startswith(COMMAND_PREFIXES):
-            print(json.dumps({"systemMessage": "RALPLAN initialized; prompt command will execute."}, ensure_ascii=False))
+            init_state(event, task, flags, source="prompt_command")
             return
+        state = init_state(event, task, flags, source="explicit")
         print(json.dumps({"decision": "block", "reason": continuation_prompt(state, 1)}, ensure_ascii=False))
         return
     if is_underspecified_for_execution(prompt):
@@ -506,7 +506,7 @@ def handle_stop(event: dict[str, Any]) -> None:
         return
     if subagent_active(workspace):
         return
-    if graph_is_critic_approved(workspace):
+    if str(state.get("source") or "") != "prompt_command" and graph_is_critic_approved(workspace):
         state["current_phase"] = "pending_approval"
         state["phase"] = "pending_approval"
         state["status"] = "pending_approval"

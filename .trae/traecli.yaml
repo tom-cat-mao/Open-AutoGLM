@@ -145,14 +145,6 @@ mcp_servers:
     args:
       - "-y"
       - "@upstash/context7-mcp@latest"
-  - name: fast-context
-    type: stdio
-    command: bunx
-    args:
-      - "@sammysnake/fast-context-mcp"
-    env:
-      - key: WINDSURF_API_KEY
-        value: "devin-session-token$eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzZXNzaW9uX2lkIjoid2luZHN1cmYtc2Vzc2lvbi0wOWY3YTQ5ZjRmMGI0ZWMwYTdlZTAxMzY2NmY4NjAyOCJ9.TVYX_ekjd0-FoA7jghTHxuQ2GoagkfjgU_-J71HKuBI"
   - name: python-lsp
     type: stdio
     command: uvx
