@@ -11,8 +11,6 @@ from typing import Any
 
 from langchain_core.runnables import RunnableConfig
 
-from phone_agent.graph.context import sanitize_context_payload
-
 SENSITIVE_KEYS = {
     "api_key",
     "apikey",
@@ -54,9 +52,6 @@ def _redacted_text(value: str) -> dict[str, Any]:
 
 def sanitize_for_trace(value: Any, redact: bool = True, key: str | None = None) -> Any:
     """Return a JSON-safe value with sensitive fields redacted."""
-    if not redact:
-        return value
-
     normalized_key = key.lower() if key else ""
     if normalized_key in SENSITIVE_KEYS:
         return "<redacted>"
@@ -64,13 +59,15 @@ def sanitize_for_trace(value: Any, redact: bool = True, key: str | None = None) 
         return _redacted_text(value)
     if isinstance(value, dict):
         return {
-            str(k): sanitize_context_payload(sanitize_for_trace(v, redact, str(k)), str(k))
+            str(k): sanitize_for_trace(v, redact, str(k))
             for k, v in value.items()
         }
     if isinstance(value, list):
-        return [sanitize_context_payload(sanitize_for_trace(item, redact, key), key) for item in value]
+        return [sanitize_for_trace(item, redact, key) for item in value]
     if isinstance(value, tuple):
-        return [sanitize_context_payload(sanitize_for_trace(item, redact, key), key) for item in value]
+        return [sanitize_for_trace(item, redact, key) for item in value]
+    if not redact:
+        return value
     return value
 
 
@@ -86,7 +83,7 @@ class JsonlTraceWriter:
     ) -> None:
         self.trace_id = trace_id or str(uuid.uuid4())
         self.trace_dir = Path(trace_dir)
-        self.redact = redact
+        self.redact = True
         self.strict = strict
         self.path = self.trace_dir / f"{self.trace_id}.jsonl"
         self.enabled = True

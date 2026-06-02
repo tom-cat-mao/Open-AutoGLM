@@ -7,195 +7,146 @@ globs: ".trae/commands/ralplan.md,.trae/commands/autopilot.md,.trae/hooks/ralpla
 # RALPLAN Status
 
 ```yaml
-status: critic_approved
+status: completed
 design_status: critic_approved
 execution_status: completed
 iteration: 1
 planner_mode: null
 revision_scope: null
-last_planner_update: "已明确 Repair placement、Adapter/Validator contract、Safety Gate contract。"
-last_architect_review: "复审无 Blocking/Major；建议 Critic APPROVE。"
+last_planner_update: "Targeted Phase 14 revision: fixed repository paths, removed context_mode=auto from runtime scope, added request-only compaction, invariant, trace/eval privacy fields, rollback, and concrete tests."
+last_architect_review: "Re-review found previous blockers resolved; remaining selector-shape clarification is non-blocking."
 last_critic_verdict: APPROVE
 approved_for_execution: true
-notes: "Phase 13 parser/IR/validator/repair/safety/trace 已实现并通过 94 项测试；code-reviewer 与 security-reviewer 最终复审无 blocking/major findings。"
+notes: "Phase 14 implementation completed under user-approved Autopilot handoff; RALPH/Critic approved, targeted tests pass, final QA/commit pending in current session."
 ```
 
 # Roadmap
 
 ## 已完成 Phase
 
-| Phase | 摘要 |
-|---|---|
-| ✅ 1-6 | LangGraph `StateGraph` 主循环、HITL interrupt、tool dispatch、DeviceFactory DI、messages reducer 与基础测试/打包已建立。 |
-| ✅ 7-9 | `RunResult`、dry-run eval、本地 JSONL trace、结构化 reflection 与 Plan 反馈闭环已落地。 |
-| ✅ 10 | TraeCLI-native Autopilot 编排已完成；不改变 `phone_agent/` 运行时。 |
-| ✅ 11A-11C | Context & Observability Harness 已完成 observe/schema/inject 分阶段实现与测试。 |
-| ✅ 12A-12C | 多格式 parser/adapter、provider output modes 与 parse observability 已落地，但需要收敛为更清晰的阶梯架构。 |
-| ✅ 13A-13E | Canonical Action IR、独立 Validator、Safety Gate、有限 Repair、Trace/eval/tests 收敛；阶梯架构落地，94 项测试通过。 |
+- ✅ Phase 1-14 summary: LangGraph StateGraph, HITL, trace/eval, context observe/inject, output adapters, Canonical Action IR, Validator, Repair, Safety Gate, Executor pipeline, and LangGraph-native Context Engineering Harness are implemented. Preserve this summary only; do not restore old long roadmap details.
 
 ## RALPLAN-DR 摘要
 
 ### Principles
 
-1. **保留 LangGraph StateGraph**：不删除运行时代码中的 LangGraph；本轮“删除 graph”只指删除/压缩 `.trae/rules/graph.mdc` 中过长历史内容。
-2. **不用 LangChain Agent 替换 StateGraph**：LangChain 仅可作为后续 provider abstraction spike/ADR，不进入当前实现主线。
-3. **Canonical Action IR 单一真相**：所有 text DSL / JSON / tool_calls / provider 差异必须进入强类型 IR，并经过 Validator、Safety Gate 与 Executor。
-4. **Fail-closed 优先**：parse/adapter/validation/repair/safety 任一失败不得伪装成 `finish`，不得执行工具。
-5. **安全策略显式分层**：Adapter/Parser、Validator、Repair、Safety Gate、Executor 各司其职，不允许 provider path 绕过任一必经门。 
+1. Keep the existing LangGraph `StateGraph`; Phase 14 is a harness/refactor, not an Agent framework migration.
+2. Keep runtime modes unambiguous: `context_mode=off|observe|inject`; defer any `context_mode=auto` to a later spike because `output_mode` already owns `auto`.
+3. Context selection/compaction is request-construction only unless explicitly producing sanitized summaries, metrics, or trace identifiers.
+4. Preserve safety: context must never bypass Adapter → Validator → Safety Gate → HITL → Executor.
+5. Default behavior must be rollback-safe: `context_mode=observe` remains unchanged, injection is opt-in, and legacy prompt behavior remains behind `prompt_version`/compat until tests pass.
 
 ### Decision Drivers
 
-1. 现有多格式 parser/adapter 已能处理多类输出，但 parser、adapter、execute、安全策略边界仍偏耦合。
-2. LLM 输出可能包含半截 tool_calls、别名、包裹层、错误字段、越界坐标或隐私文本；需要统一 fail-closed 与可观测错误码。
-3. 后续模型/provider 扩展需要稳定阶梯，确保敏感动作、repair 与 dispatch_tool 不会绕过 Validator/Safety。
+1. Architect/Critic found the earlier roadmap had nonexistent paths and ambiguous `auto` semantics.
+2. Prompt/schema/context duplication risks token bloat, suffix conflicts, and inconsistent provider behavior.
+3. Compaction must reduce request size without breaking `messages_reducer`, current screenshot semantics, auditability, or HITL fields.
 
 ### Viable Options
 
-| 方案 | 优点 | 缺点 |
+| Option | Pros | Cons |
 |---|---|---|
-| A. 继续在现有 parser/adapter 内增量补丁 | 改动小，短期快 | 边界继续模糊；安全、repair、trace 规则分散；难以系统验证 adversarial 输出 |
-| B. 收敛为 IR + Validator + Repair + Safety 阶梯架构 | 分层清晰；可集中白名单/坐标/schema/HITL；便于测试和回滚 | 需要迁移现有 adapter/execute 边界，新增类型与测试矩阵 |
-| C. 改用 LangChain Agent/tool calling | 生态能力强 | 会替换 StateGraph/HITL 假设，风险过高；不符合当前约束 |
+| A. Minimal prompt cleanup only | Smallest implementation surface | Does not make context selection, compaction, trace, or eval measurable |
+| B. LangGraph-native request-context harness | Fits existing graph, measurable, rollback-safe, addresses feedback directly | Requires careful prompt contract and tests across modes |
+| C. Add `context_mode=auto` now | Could optimize automatically later | Ambiguous with `output_mode=auto`; larger test matrix; not needed for Phase 14 |
 
 ### Selected Approach
 
-选择 **B：在保留 LangGraph `StateGraph` 与现有执行语义的前提下，把已落地多格式 parser/adapter 收敛为阶梯架构**。
-
-Runtime pipeline 必须按以下顺序执行：
-
-```text
-provider output
-  -> Parser/Adapter
-  -> draft ActionIR
-  -> Validator
-     -> valid: final validated IR -> Safety Gate
-     -> invalid but repairable: Repair -> Validator again
-     -> invalid unrecoverable / repair failed / second validation failed: fail-closed
-  -> Safety Gate(validated IR only)
-     -> approved: Executor(validated + safety-approved IR only)
-     -> confirm/takeover: LangGraph interrupt node
-     -> rejected: fail-closed
-```
-
-关键边界：
-- Repair 只能发生在 Safety Gate 之前；不得发生在 Safety Gate 之后。
-- Safety Gate 只接收 final validated IR；Executor 只接收 validated + safety-approved IR。
-- Adapter output always passes Validator；任何 provider path 不得绕过 Validator。
-
-### Adapter / Validator Contract
-
-- **Adapter/Parser**：只负责 provider format coercion、text/json/tool_calls 归一、alias normalization、wrapper/code fence/basic JSON coercion；可保留早拒绝作为 defense-in-depth，但早拒绝不能替代 Validator。
-- **Validator**：负责 canonical IR semantic/schema/range validation、action 白名单、必填字段、坐标 0-1000、extra dangerous fields、统一 validation error。
-- **错误元数据**：parse/adapter/validation/repair/safety 错误码统一映射到 metadata，供 trace/eval/reflect 使用；不得把 validation failure 伪装为 finish。
+Choose **B** and explicitly exclude runtime `context_mode=auto` from Phase 14. Implement prompt contract cleanup, request-only context selection/compaction, privacy-safe trace/eval metrics, and rollback-compatible tests using actual repository paths.
 
 ### ADR
 
-- **Decision**：新增/整理 Canonical Action IR、Validator、Repair、Safety Gate 模块；让 Adapter/Parser 只负责格式归一，Validator 负责动作 schema/字段/坐标，Repair 只在 Validator 前后受控修复，Safety Gate 负责 HITL/敏感策略，Executor 只执行已验证且已通过安全门的 IR。
-- **Drivers**：LLM 输出不可控；动作执行高风险；当前多格式兼容已落地但需要可维护分层；测试需覆盖 adversarial parser 与 HITL 不绕过。
-- **Alternatives**：仅修 parser；继续扩大 adapter；用 LangChain Agent 替代；一次性重写 graph。
-- **Why chosen**：最小化运行时拓扑变更，保留已验证 LangGraph/HITL/trace 基础，同时把安全边界变成可测试模块。
-- **Consequences**：会新增 IR/validator/repair/safety 的模块边界与错误码；短期需要兼容旧 dict/action handler，避免大规模迁移风险。
-- **Follow-ups**：待 Phase 13 稳定后，可另起 spike 评估 provider abstraction；不得默认引入 LangChain Agent。
+- **Decision**: Build a LangGraph-native Context Engineering Harness around existing prompt rendering, `plan_node`, `model_client.request`, trace, and eval paths.
+- **Drivers**: Correct repository layout; reduce context budget; maintain current safety/HITL invariants; make impact measurable.
+- **Alternatives**: Manual prompt deletion; adding `context_mode=auto`; LangChain Agent migration.
+- **Why chosen**: It minimizes topology risk and keeps execution behind the existing IR/safety pipeline while adding observability and rollback.
+- **Consequences**: Phase 14 needs prompt-version compatibility, concrete redaction tests, and request-only compaction discipline.
+- **Follow-ups**: Revisit `context_mode=auto` only after off/observe/inject metrics prove stable.
 
-### Pre-mortem
+## 已完成当前规划 Phase
 
-1. **IR 迁移破坏旧 dict 边界**：缓解：默认优先 dataclass + TypedDict，保留 dict 兼容入口/出口与回归测试。
-2. **repair 过度猜测导致误执行**：缓解：repair 只修格式、别名、包裹层；禁止猜动作、坐标、隐私文本；失败 fail-closed。
-3. **Safety Gate 抽取后绕过 interrupt**：缓解：HITL 路由验收必须覆盖 confirm/takeover/manual handoff，不改变 `interrupt()` 语义。
+### Phase 14A: Prompt Context Contract ✅
 
-### Expanded Test Plan
+- **Root cause**: Prompt files mix system contract, action schema, output-mode suffixes, policy, and context instructions, creating duplication and mode conflicts.
+- **Modify candidates**: `phone_agent/config/prompts_zh.py`, `phone_agent/config/prompts_en.py`, `phone_agent/config/prompts.py` (classify current role before deleting or legacy cleanup), `phone_agent/config/__init__.py`, `phone_agent/model/client.py`, `phone_agent/actions/adapter.py`, `phone_agent/actions/validator.py`, `phone_agent/graph/nodes/plan.py`, `tests/model`, `tests/actions`.
+- **Plan**:
+  - Preserve `get_system_prompt(lang, output_mode)` unless call-site migration is explicitly justified.
+  - Make suffix logic executable for `output_mode=text_dsl|json_schema|tool_calls|auto` without conflicting instructions.
+  - Plan Action Schema as a small shared renderer/schema derived from existing adapter/validator/tool specs; provider tool specs remain formatting-only.
+  - Execution remains Adapter → Validator → Safety Gate → Executor; prompt schema cannot authorize actions.
+- **Acceptance**:
+  - Prompt rendering tests cover zh/en and all `output_mode` values.
+  - `prompts.py` is classified as compatibility, wrapper, or legacy before any cleanup.
+  - Text DSL, JSON schema, and tool calls render no contradictory suffixes.
+  - Implemented with `PROMPT_VERSION=context_harness_v1` and `LEGACY_PROMPT_VERSION=legacy_text_dsl` rollback.
 
-| 层级 | 范围 |
-|---|---|
-| Unit | IR 类型转换、adapter alias/coercion、validator 字段白名单/坐标范围/action schema、repair 限定规则、safety 策略。 |
-| Integration | plan/execute/edges 串联：parse failure 不执行 tool，JSON/tool_calls 半截聚合 fail-closed，HITL 不绕过。 |
-| E2E/Eval | dry-run eval 与 trace 覆盖 parser adversarial、安全门、隐私脱敏、错误码统计。 |
-| Regression | 保持 `ast.parse` + `literal_eval`、0-1000 坐标在 tool 层转换、messages image stripping、RunResult/trace 兼容。 |
+### Phase 14B: Context Selector and Hard Invariant ✅
 
-## 当前规划 Phase
+- **Root cause**: `plan_node` needs explicit section selection and observability without changing graph state semantics or safety fields.
+- **Modify candidates**: `phone_agent/graph/context.py`, `phone_agent/graph/state.py`, `phone_agent/graph/nodes/plan.py`, `phone_agent/graph/nodes/execute.py`, `phone_agent/graph/nodes/reflect.py`, `phone_agent/model/client.py`, `tests/graph`, `tests/evals`.
+- **Plan**:
+  - Keep runtime `context_mode=off|observe|inject`; default `observe` unchanged; no Phase 14 `auto` mode.
+  - Selector may produce sanitized context summaries, section IDs, and metrics; only `inject` may add the redacted context block to model request construction.
+  - Context selector/compaction may affect only model request construction plus sanitized summaries/metrics/trace.
+  - Hard invariant: selector/compaction must not mutate `action_parsed`, `action_raw`, `pending_execute`, `interrupt_result`, `action_confirmed`, safety route state, or any Action IR/HITL fields outside existing Plan/Execute/Reflect outputs.
+- **Acceptance**:
+  - off/observe/inject behavior is deterministic and tested.
+  - Sensitive payment/privacy/login/OTP actions still require confirm/takeover exactly as before.
+  - Reducer behavior is preserved: `plan_node` appends new messages; `execute_node` may rebuild as currently designed.
+  - Implemented with `ContextSelectionResult`, `select_plan_context()`, section IDs, and hard invariant tests.
 
-### Phase 13A: Canonical Action IR 强类型化
+### Phase 14C: Request-only Context Window Compaction ✅
 
-**根因**：当前 canonical action 多以 dict/DSL 在 parser、adapter、handler、execute 间流动，缺少统一强类型契约，导致字段含义、坐标范围、finish/do 分支和错误码边界分散。
+- **Root cause**: Historical images, verbose reasoning text, and repeated action context can inflate model requests and distract from the current screenshot.
+- **Modify candidates**: `phone_agent/model/client.py` (`MessageBuilder` lives here unless extraction is explicitly justified), `phone_agent/graph/context.py`, `phone_agent/graph/nodes/plan.py`, `phone_agent/graph/nodes/execute.py`, `phone_agent/graph/state.py`, `tests/model`, `tests/graph`.
+- **Plan**:
+  - Implement request-only compaction first: compact the `full_messages` passed to `model_client.request` without mutating `state["messages"]`.
+  - Preserve the system contract, current screenshot in the latest user request, and historical image stripping via `MessageBuilder.remove_images_from_message()`.
+  - Preserve action line auditability and safety/HITL hard rules.
+  - Record counts and approximate sizes only; do not trace raw prompt text, private text, or image payloads.
+- **Acceptance**:
+  - Tests prove no historical images reach the model request while the latest screenshot remains available.
+  - `messages_reducer` append/replace semantics remain unchanged.
+  - Compaction metrics include `messages_before`, `messages_after`, approximate chars/tokens, `context_block_chars`, and `context_truncated`.
+  - Implemented with `compact_messages_for_request()` before `model_client.request()` without mutating `state["messages"]`.
 
-**修改文件候选**：`phone_agent/actions/ir.py`、`phone_agent/actions/adapter.py`、`phone_agent/actions/handler.py`、`phone_agent/model/client.py`、`phone_agent/graph/nodes/plan.py`、`phone_agent/graph/nodes/execute.py`、`tests/actions`、`tests/model`、`tests/graph`。
+### Phase 14D: Trace and Eval Harness Acceptance ✅
 
-**计划**：默认优先 dataclass + TypedDict，避免 Pydantic 新依赖；仅确需 runtime schema validation 时再考虑 Pydantic。建立 `ActionIR` / `DoActionIR` / `FinishActionIR` / parse-adapter-validation metadata；提供 dict 兼容转换函数，避免一次性改穿所有边界。
+- **Root cause**: Existing trace/eval outputs need concrete, privacy-safe identifiers/counts to compare context strategies without leaking prompts, private text, or screenshots.
+- **Modify candidates**: `phone_agent/agent.py`, `evals/run_eval.py`, `phone_agent/graph/context.py`, `phone_agent/graph/nodes/plan.py`, `phone_agent/graph/trace.py`, `tests/graph/test_trace.py`, `tests/evals/test_eval_harness.py`, `tests/evals/test_trace_export.py`.
+- **Plan**:
+  - Add sanitized identifiers/counts only: `prompt_version`, `context_strategy`, `selected_sections` IDs, `messages_before`, `messages_after`, approximate chars/tokens, `context_block_chars`, `context_truncated`.
+  - Thread summary fields through `agent.py` run results and `evals/run_eval.py` output where appropriate.
+  - Ensure trace redaction applies before persistence/export.
+- **Acceptance**:
+  - Trace/eval tests verify the new fields exist for off/observe/inject runs.
+  - Redaction/privacy tests prove raw prompts, private text, and image payloads are not persisted.
+  - Eval summaries can compare strategies without exposing raw context.
+  - Implemented in `RunResult`, JSONL trace payloads, and `evals/run_eval.py` summary/records.
 
-**验收标准**：
-- IR 能表达 `do`、`finish`、parse/adapter/validation error，不丢失现有 canonical dict 语义。
-- 旧 dict/action handler 边界仍可工作；新增 IR 转换测试覆盖 text DSL、JSON、tool_calls。
-- 不引入 LangChain Agent，不改变 StateGraph 拓扑，不改变坐标转换位置。
+### Phase 14E: Rollback, Cleanup, and Regression Matrix ✅
 
-### Phase 13B: 独立 Validator
-
-**根因**：字段白名单、action schema、坐标范围、adapter 二次校验分散在 parser/adapter/execute 中，parse failure 与 invalid action 可能难以统一 fail-closed。
-
-**修改文件候选**：`phone_agent/actions/validator.py`、`phone_agent/actions/ir.py`、`phone_agent/actions/adapter.py`、`phone_agent/actions/handler.py`、`phone_agent/graph/nodes/plan.py`、`phone_agent/graph/nodes/execute.py`、`phone_agent/graph/edges.py`、`tests/actions`、`tests/graph`。
-
-**计划**：集中校验 action 白名单、必填字段、字段类型、坐标 0-1000、finish message、extra dangerous fields、adapter 输出二次校验；所有 parse/adapter/validation failure 返回结构化错误，禁止伪装 finish。
-
-**验收标准**：
-- 未知 action、缺字段、额外危险字段、坐标越界、非法 tool_calls 参数均 fail-closed，且不 dispatch tool。
-- validator 使用安全 literal/类型校验；`do(...)` / `finish(...)` 仍基于 `ast.parse` + `ast.literal_eval`，禁止 `eval()`。
-- graph/RunResult/trace 能区分 parse、adapter、validation、repair、safety error，且不破坏 reflect 降级路径。
-
-### Phase 13C: 独立 Safety Gate
-
-**根因**：敏感 Tap、Take_over/manual handoff、隐私/支付/账号动作策略与 execute_node 耦合，后续 JSON/tool_calls/IR 路径可能绕过 HITL。
-
-**修改文件候选**：`phone_agent/actions/safety.py`、`phone_agent/graph/nodes/execute.py`、`phone_agent/graph/edges.py`、`phone_agent/graph/trace.py`、`tests/graph/test_execute.py`、`tests/graph/test_plan_reflect.py`、`tests/actions`。
-
-**计划**：抽出纯决策层 Safety Gate：输入 final validated IR，输出 `route` / `interrupt_type` / `reason` / `sanitized_trace_payload`；不 dispatch、不调用设备、不 mutate action payload。LangGraph interrupt 节点继续负责 confirm/takeover；pending_execute 语义保持不变。
-
-**验收标准**：
-- HITL 仍使用 LangGraph `interrupt()`；confirm/takeover/pending_execute 语义不变。
-- JSON/tool_calls/IR 与 text DSL 路径经过同一 Safety Gate，不得自动授权敏感动作。
-- `execute_node` 只执行已 validate 且已通过 safety 的动作；trace 记录脱敏后的 safety 决策。
-
-### Phase 13D: 有限 Repair
-
-**根因**：模型输出常见格式噪声（code fence、包裹层、大小写别名、轻微字段别名）可以安全修复，但过度 repair 会猜测动作/坐标/隐私文本并造成误执行。
-
-**修改文件候选**：`phone_agent/actions/repair.py`、`phone_agent/actions/adapter.py`、`phone_agent/actions/validator.py`、`phone_agent/model/client.py`、`phone_agent/graph/nodes/plan.py`、`phone_agent/graph/trace.py`、`tests/actions`、`tests/model`。
-
-**计划**：Repair 输入为 draft ActionIR + validation error metadata + raw/sanitized provider output 摘要；输出为 repaired draft ActionIR 或 repair failure metadata。repair 只允许处理格式/别名/包裹层：XML/Markdown/code fence、外层 JSON 包裹、`type`/`_metadata` 等安全别名、大小写白名单；禁止补坐标、猜 action、猜隐私文本或修复敏感内容。repair 后必须二次 Validator。
-
-**验收标准**：
-- 可修复样例进入 validator 二次校验后才可继续；repair 失败或二次校验失败必须 fail-closed。
-- adversarial 样例（缺坐标、越界、隐私文本、未知 tool、半截 JSON/tool_calls）不得被 repair 成可执行动作。
-- trace/eval 记录 repair attempted/succeeded/error code，且脱敏。
-
-### Phase 13E: Trace/eval/tests 收敛
-
-**根因**：Phase 13 分层后需要用统一测试与可观测性防止 parser、安全门、隐私脱敏、tool_calls 聚合、HITL 语义回归。
-
-**修改文件候选**：`phone_agent/graph/trace.py`、`phone_agent/model/client.py`、`phone_agent/actions/adapter.py`、`phone_agent/actions/validator.py`、`phone_agent/actions/safety.py`、`tests/actions`、`tests/model`、`tests/graph`、`tests/evals`。
-
-**计划**：收敛测试矩阵与 trace 字段：adapter alias/coercion、validator unknown/extra/bad coords、repair allowed/forbidden、safety confirm/takeover/pending_execute、trace redaction、streaming/half tool_calls fail-closed；补齐 eval harness 统计 parse/adapter/validation/repair/safety 错误码。
-
-**验收标准**：
-- 目标测试覆盖 `tests/actions`、`tests/model`、`tests/graph`、`tests/evals` 中的 parser/IR/validator/safety/repair/trace 场景。
-- 半截 streaming tool_calls 不执行；隐私/API key/base64 图片不进入 trace 明文；messages reducer/image stripping 不破坏。
-- 具体命令：`.venv/bin/pytest tests/actions tests/model tests/graph/test_execute.py tests/graph/test_plan_reflect.py tests/graph/test_trace.py tests/evals -v`；不得声明未经实际验证的 passing 数。
+- **Root cause**: Prompt/context changes are high-impact; cleanup must be staged so legacy behavior remains available until tests validate parity.
+- **Modify candidates**: `phone_agent/config/prompts_zh.py`, `phone_agent/config/prompts_en.py`, `phone_agent/config/prompts.py`, `phone_agent/config/__init__.py`, `phone_agent/model/client.py`, `phone_agent/graph/context.py`, `phone_agent/graph/nodes/plan.py`, `phone_agent/graph/trace.py`, `tests/model`, `tests/actions`, `tests/graph`, `tests/evals`.
+- **Plan**:
+  - Keep default `context_mode=observe`; `inject` remains opt-in.
+  - Preserve legacy prompt behavior behind `prompt_version`, compat flag, or equivalent until regression tests pass.
+  - Cleanup only after classifying `prompts.py`; no deletion based on path assumptions.
+- **Acceptance**:
+  - Regression matrix covers: prompt rendering across output modes; context mode off/observe/inject; no historical images in model request; reducer behavior; trace redaction; sensitive actions still confirm/takeover; eval summary fields.
+  - Run `.venv/bin/pytest tests/model tests/actions tests/graph tests/evals -v` during implementation and report actual results only.
+  - RALPH/Critic result: APPROVE; targeted post-review regression after privacy/rollback fixes: `.venv/bin/pytest tests/model/test_client.py tests/graph/test_plan_reflect.py tests/graph/test_trace.py tests/graph/test_agent_run_result.py -q` → 64 passed.
 
 # 约束 Checklist
 
-- [x] **Planner 边界**：本文件为计划产物；当前状态未批准执行，禁止修改业务代码、测试、文档或其他文件。
-- [x] **Graph 文件压缩**：保留 context-friendly 短文风格；不恢复长历史内容；不删除运行时代码中的 LangGraph。
-- [x] **StateGraph 保留**：保留 LangGraph `StateGraph`；不用 LangChain Agent 替换；LangChain 仅可作为后续 provider abstraction spike/ADR。
-- [x] **Pipeline 顺序**：Parser/Adapter -> draft ActionIR -> Validator -> valid final IR 或 Repair -> second Validator -> Safety Gate -> Executor/HITL；Repair 不得发生在 Safety Gate 之后。
-- [x] **Adapter 必经 Validator**：Adapter output always passes Validator；任何 provider path 不得绕过 Validator；adapter/parser 可早拒绝但不能替代 Validator。
-- [x] **Adapter 边界**：Adapter/Parser 只做 provider format coercion、text/json/tool_calls 归一、alias normalization、wrapper/code fence/basic JSON coercion；不执行工具，不调用设备。
-- [x] **Validator 集中化**：Validator 统一校验 canonical IR semantic/schema/range、action 白名单、必填字段、坐标 0-1000、extra dangerous fields、统一 validation error。
-- [x] **dispatch_tool 前拒绝危险字段**：未知 action、缺字段、额外危险字段、非法 tool_calls 参数、坐标越界必须在 dispatch_tool 前 fail-closed。
-- [x] **Repair 限定**：Repair 只修格式、别名、包裹层；不补坐标、不猜 action、不猜隐私文本；repair 后必须二次 Validator，失败 fail-closed。
-- [x] **Safety Gate 纯决策**：Safety Gate 只接收 final validated IR，只输出 route/interrupt_type/reason/sanitized_trace_payload；不 dispatch、不调用设备、不 mutate action payload。
-- [x] **Executor 输入**：Executor 只接收 validated + safety-approved IR；pending_execute 不得重复 `_strip_and_append`。
-- [x] **解析安全**：`do(...)` / `finish(...)` 必须使用 `ast.parse` + `ast.literal_eval` 或等价安全 literal 解析；禁止 `eval()`。
-- [x] **坐标约束**：模型/IR 坐标保持 0-1000 相对值；绝对像素转换只在 tool 层 `convert_relative_to_absolute()`。
-- [x] **Parse failure**：malformed/empty/unsupported/半截 streaming tool_calls 不得伪装成 `finish`，不得执行 tool，必须 fail-closed。
-- [x] **HITL**：支付/隐私/账号敏感动作走 confirm；登录/验证码/手动接管走 takeover/manual handoff；保持 LangGraph `interrupt()`。
-- [x] **messages reducer**：plan/execute 的 messages reducer 与 image stripping 不得被 output mode/IR 改动破坏。
-- [x] **Trace 脱敏与错误码**：trace/eval 不记录 API key、完整 base64 图片、敏感 UI 明文或隐私文本；parse/adapter/validation/repair/safety 错误码需可观测。
-- [x] **测试门禁**：覆盖 adapter alias/coercion、validator unknown/extra/bad coords、repair allowed/forbidden、safety confirm/takeover/pending_execute、trace redaction、streaming/half tool_calls fail-closed。
+- [x] Planner phase only: do not edit code/tests/docs, commit, push, or execute implementation before Critic APPROVE and user approval.
+- [x] Use only actual repository paths; do not reference `phone_agent/model/prompts.py`, `phone_agent/context/*`, `phone_agent/evals/*`, or `phone_agent/config.py` unless framed as a justified new extraction.
+- [x] Preserve LangGraph `StateGraph`; do not migrate to LangChain Agent.
+- [x] Runtime `context_mode` scope is `off|observe|inject`; `auto` is deferred to a later follow-up/spike.
+- [x] Default `context_mode=observe` remains unchanged; injection is opt-in and rollback-safe.
+- [x] Context selector/compaction may only affect model request construction, sanitized summaries/metrics/trace, and must not mutate Action IR/HITL/safety route fields.
+- [x] Request-only compaction must not mutate `state["messages"]` or break `messages_reducer` append/replace semantics.
+- [x] Preserve system contract, latest screenshot in current user request, historical image stripping, action line auditability, and safety/HITL hard rules.
+- [x] Provider tool specs are formatting-only; execution stays Adapter → Validator → Safety Gate → Executor.
+- [x] Trace/eval fields must be identifiers/counts only; no raw prompt/private text/images.
+- [x] Tests must cover prompt rendering, context modes, no historical images, reducer behavior, trace redaction, sensitive HITL, and eval summary fields.

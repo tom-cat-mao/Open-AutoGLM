@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from dataclasses import asdict, dataclass
 from typing import Any
 
 CONTEXT_MODES = {"off", "observe", "inject"}
@@ -16,6 +17,13 @@ DEFAULT_CONTEXT_BUDGET: dict[str, int] = {
     "action_outcome_items": 1,
     "context_block_chars": 1500,
 }
+DEFAULT_PROMPT_VERSION = "context_harness_v1"
+CONTEXT_SECTION_IDS = (
+    "screen_belief",
+    "last_action_outcome",
+    "failure_memory",
+    "summarized_history",
+)
 FAILURE_TAXONOMY = {
     "none",
     "element_not_found",
@@ -42,25 +50,68 @@ PRIVATE_CONTEXT_TEXT_KEYS = {
     "observed_text",
     "raw_text",
     "chat_content",
+    "text",
+    "label",
+    "value",
+    "title",
+    "subtitle",
     "address",
     "captcha",
     "verification_code",
     "account",
     "payment_info",
-    "summary",
     "message",
     "result_message_summary",
     "final_message",
     "error",
     "reflection",
 }
+SAFE_CONTEXT_TEXT_KEYS = {
+    "summary",
+    "current_app",
+    "confidence",
+    "action",
+    "action_metadata",
+    "reflection_verdict",
+    "failure_cause",
+    "suggested_strategy",
+    "summarized_history",
+}
 SENSITIVE_PATTERN = re.compile(
     r"(1[3-9]\d{9}|[\w.+-]+@[\w-]+(?:\.[\w-]+)+|(?:订单|order)[\s:#：-]*[A-Za-z0-9-]{4,}|"
     r"(?:验证码|code)[\s:#：-]*\d{4,8}|(?:api[_-]?key|token|secret)[\s:=：]+[A-Za-z0-9._-]+|"
     r"sk-[A-Za-z0-9._-]+|Bearer\s+[A-Za-z0-9._-]+|eyJ[A-Za-z0-9._-]+\.[A-Za-z0-9._-]+\.[A-Za-z0-9._-]+|"
-    r"[\u4e00-\u9fff]{2,4}|[A-Za-z0-9+/]{80,}={0,2})",
+    r"[赵钱孙李周吴郑王冯陈褚卫蒋沈韩杨朱秦尤许何吕施张孔曹严华金魏陶姜谢邹喻柏水窦章云苏潘葛奚范彭郎鲁韦昌马苗凤花方俞任袁柳鲍史唐费廉岑薛雷贺倪汤滕殷罗毕郝邬安常乐于时傅皮卞齐康伍余元卜顾孟平黄和穆萧尹][\u4e00-\u9fff]{1,2}|"
+    r"[A-Za-z0-9+/]{80,}={0,2})",
     re.IGNORECASE,
 )
+
+
+@dataclass(frozen=True)
+class ContextSelectionResult:
+    """Trace-safe context selector output for one model request."""
+
+    context_mode: str
+    context_strategy: str
+    prompt_version: str = DEFAULT_PROMPT_VERSION
+    selected_sections: list[str] | None = None
+    context_block: str = ""
+    context_block_chars: int = 0
+    context_truncated: bool = False
+    messages_before: int = 0
+    messages_after: int = 0
+    message_chars_before: int = 0
+    message_chars_after: int = 0
+    approx_tokens_before: int = 0
+    approx_tokens_after: int = 0
+
+    def metrics(self, include_block: bool = False) -> dict[str, Any]:
+        """Return a JSON-friendly, privacy-safe metrics dictionary."""
+        data = asdict(self)
+        if not include_block:
+            data.pop("context_block", None)
+        data["selected_sections"] = list(self.selected_sections or [])
+        return data
 
 
 def normalize_context_mode(value: str | None) -> str:
@@ -135,6 +186,8 @@ def sanitize_context_payload(payload: Any, key: str | None = None) -> Any:
     normalized_key = (key or "").lower()
     if isinstance(payload, str):
         if normalized_key in PRIVATE_CONTEXT_TEXT_KEYS:
+            return _redacted_private_text(payload)
+        if normalized_key and normalized_key not in SAFE_CONTEXT_TEXT_KEYS:
             return _redacted_private_text(payload)
         return redact_context_text(payload)
     if isinstance(payload, dict):
@@ -246,8 +299,17 @@ def build_context_metrics(state: dict[str, Any]) -> dict[str, Any]:
     """Build comparable context metrics for RunResult/eval/trace."""
     return {
         "context_mode": normalize_context_mode(state.get("context_mode")),
+        "context_strategy": state.get("context_strategy") or "unknown",
+        "prompt_version": state.get("prompt_version") or DEFAULT_PROMPT_VERSION,
+        "selected_sections": list(state.get("selected_sections") or []),
         "context_block_chars": int(state.get("context_block_chars") or 0),
         "context_truncated": bool(state.get("context_truncated")),
+        "messages_before": int(state.get("messages_before") or 0),
+        "messages_after": int(state.get("messages_after") or 0),
+        "message_chars_before": int(state.get("message_chars_before") or 0),
+        "message_chars_after": int(state.get("message_chars_after") or 0),
+        "approx_tokens_before": int(state.get("approx_tokens_before") or 0),
+        "approx_tokens_after": int(state.get("approx_tokens_after") or 0),
         "failure_memory_hit_count": int(state.get("failure_memory_hit_count") or 0),
         "repeated_failure_count": int(state.get("repeated_failure_count") or 0),
     }
@@ -281,3 +343,114 @@ def build_plan_context_block(state: dict[str, Any], lang: str = "cn") -> tuple[s
         title + "\n" + "\n".join(parts), budget["context_block_chars"]
     )
     return block, {"context_block_chars": len(block), "context_truncated": truncated or component_truncated}
+
+
+def select_plan_context(
+    state: dict[str, Any], *, mode: str, lang: str = "cn", prompt_version: str | None = None
+) -> ContextSelectionResult:
+    """Select trace-safe context sections without mutating graph state."""
+    normalized_mode = normalize_context_mode(mode)
+    sections = [section for section in CONTEXT_SECTION_IDS if _section_has_value(state, section)]
+    if normalized_mode == "off":
+        return ContextSelectionResult(
+            context_mode=normalized_mode,
+            context_strategy="off",
+            prompt_version=prompt_version or DEFAULT_PROMPT_VERSION,
+            selected_sections=[],
+        )
+    if not should_inject_context(normalized_mode):
+        return ContextSelectionResult(
+            context_mode=normalized_mode,
+            context_strategy="observe_only",
+            prompt_version=prompt_version or DEFAULT_PROMPT_VERSION,
+            selected_sections=sections,
+        )
+    block, metrics = build_plan_context_block(state, lang)
+    return ContextSelectionResult(
+        context_mode=normalized_mode,
+        context_strategy="inject_redacted_block",
+        prompt_version=prompt_version or DEFAULT_PROMPT_VERSION,
+        selected_sections=sections,
+        context_block=block,
+        context_block_chars=int(metrics.get("context_block_chars") or 0),
+        context_truncated=bool(metrics.get("context_truncated")),
+    )
+
+
+def compact_messages_for_request(
+    messages: list[dict[str, Any]], selection: ContextSelectionResult
+) -> tuple[list[dict[str, Any]], ContextSelectionResult]:
+    """Compact request messages without mutating state messages.
+
+    Historical images are stripped from every message except the latest user
+    request. Text is preserved so action auditability remains intact.
+    """
+    before_chars = _messages_approx_chars(messages)
+    compacted = [_compact_message(message, keep_images=False) for message in messages]
+    latest_user_index = _latest_user_message_index(messages)
+    if latest_user_index is not None:
+        compacted[latest_user_index] = _compact_message(messages[latest_user_index], keep_images=True)
+    after_chars = _messages_approx_chars(compacted)
+    updated = ContextSelectionResult(
+        **{
+            **selection.metrics(include_block=True),
+            "messages_before": len(messages),
+            "messages_after": len(compacted),
+            "message_chars_before": before_chars,
+            "message_chars_after": after_chars,
+            "approx_tokens_before": _approx_tokens(before_chars),
+            "approx_tokens_after": _approx_tokens(after_chars),
+        }
+    )
+    return compacted, updated
+
+
+def _section_has_value(state: dict[str, Any], section: str) -> bool:
+    if section == "screen_belief":
+        return bool(state.get("screen_belief"))
+    if section == "last_action_outcome":
+        return bool(state.get("action_outcome_summary"))
+    if section == "failure_memory":
+        return bool(state.get("failure_memory"))
+    if section == "summarized_history":
+        return bool(state.get("summarized_history"))
+    return False
+
+
+def _latest_user_message_index(messages: list[dict[str, Any]]) -> int | None:
+    for index in range(len(messages) - 1, -1, -1):
+        if messages[index].get("role") == "user":
+            return index
+    return None
+
+
+def _compact_message(message: dict[str, Any], *, keep_images: bool) -> dict[str, Any]:
+    copied = dict(message)
+    content = copied.get("content")
+    if isinstance(content, list):
+        copied["content"] = [
+            dict(item)
+            for item in content
+            if keep_images or not (isinstance(item, dict) and item.get("type") == "image_url")
+        ]
+    return copied
+
+
+def _messages_approx_chars(messages: list[dict[str, Any]]) -> int:
+    return sum(_value_approx_chars(message) for message in messages)
+
+
+def _value_approx_chars(value: Any) -> int:
+    if isinstance(value, str):
+        if value.startswith("data:image") or len(value) > 2000:
+            return min(len(value), 2000)
+        return len(value)
+    if isinstance(value, dict):
+        return sum(len(str(key)) + _value_approx_chars(item) for key, item in value.items())
+    if isinstance(value, list):
+        return sum(_value_approx_chars(item) for item in value)
+    return len(str(value))
+
+
+def _approx_tokens(chars: int) -> int:
+    return max(0, (int(chars) + 3) // 4)

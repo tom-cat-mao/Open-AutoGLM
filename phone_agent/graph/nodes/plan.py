@@ -9,13 +9,13 @@ from phone_agent.actions.adapter import ActionAdapterError, adapt_json_action
 from phone_agent.actions.handler import parse_action
 from phone_agent.actions.repair import ActionRepairError, repair_action
 from phone_agent.actions.validator import ActionValidationError, validate_action
-from phone_agent.config import get_system_prompt
+from phone_agent.config import get_prompt_version, get_system_prompt
 from phone_agent.graph.context import (
     build_context_metrics,
-    build_plan_context_block,
+    compact_messages_for_request,
     get_context_mode,
     sanitize_context_payload,
-    should_inject_context,
+    select_plan_context,
 )
 from phone_agent.graph.trace import emit_trace
 from phone_agent.model.client import MessageBuilder
@@ -133,11 +133,15 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
     screenshot = device_factory.get_screenshot(device_id)
     current_app = device_factory.get_current_app(device_id)
     context_mode = get_context_mode(state, config)
-    context_block = ""
-    context_metrics = build_context_metrics({**state, "context_mode": context_mode})
-    if should_inject_context(context_mode):
-        context_block, context_metrics = build_plan_context_block(state, lang)
-        context_metrics = {"context_mode": context_mode, **context_metrics}
+    prompt_version = get_prompt_version(configurable.get("prompt_version"))
+    context_selection = select_plan_context(
+        state,
+        mode=context_mode,
+        lang=lang,
+        prompt_version=prompt_version,
+    )
+    context_block = context_selection.context_block
+    context_metrics = context_selection.metrics()
     emit_trace(
         config,
         state,
@@ -150,7 +154,9 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
     new_messages = []
     if step_count == 0:
         system_prompt = configurable.get("system_prompt") or get_system_prompt(
-            lang, configurable.get("output_mode", "text_dsl")
+            lang,
+            configurable.get("output_mode", "text_dsl"),
+            prompt_version=prompt_version,
         )
         new_messages.append(MessageBuilder.create_system_message(system_prompt))
 
@@ -180,8 +186,12 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
 
     # 3. Model inference (pass full messages for context)
     full_messages = list(state["messages"]) + new_messages
+    request_messages, context_selection = compact_messages_for_request(
+        full_messages, context_selection
+    )
+    context_metrics = context_selection.metrics()
     try:
-        response = model_client.request(full_messages)
+        response = model_client.request(request_messages)
     except Exception as e:
         if configurable.get("verbose", True):
             traceback.print_exc()
@@ -197,6 +207,7 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
                 "failure_cause": "model_parse_failed",
                 "parse_metadata": parse_metadata,
                 "parse_error_code": parse_metadata.get("parse_error_code"),
+                **context_metrics,
             },
         )
         return {

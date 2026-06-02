@@ -30,6 +30,7 @@ AUTOPILOT_SIGNAL: PIPELINE_<STAGE>_COMPLETE
 10. RALPH/verification stage 使用 `code-reviewer`、`security-reviewer`、`architect`、`critic` 只读审查，必要时调用 `debugger` / `test-engineer`。
 11. QA stage 可调用 `test-engineer` / `code-reviewer` / `security-reviewer` 辅助，最终状态汇总和完成信号由主 Agent 负责。
 12. 自然语言触发必须足够明确；过短且无文件/错误/测试/验收锚点的请求不自动进入 Autopilot。
+13. 对 prompt/context harness 类任务，QA 必须覆盖 `context_mode=off|observe|inject`、`prompt_version` 回滚、request-only compaction、不泄露 raw prompt/context/image、以及 Safety/HITL 不变式。
 
 ## 当前 Stage 初始指令
 

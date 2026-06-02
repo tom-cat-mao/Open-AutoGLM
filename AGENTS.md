@@ -21,6 +21,9 @@
 | Trace | 默认本地 JSONL trace；`RunResult.trace_id/trace_path` 与 eval JSON 可关联 `.traces/{trace_id}.jsonl`；敏感截图/API key/隐私文本默认脱敏 |
 | Reflection | `reflect_node` 维护 `reflection_verdict/failure_cause/suggested_strategy`；Plan 下一轮必须能读取结构化失败原因和策略 |
 | Context | `context_mode=off|observe|inject`，默认 observe；仅 inject 注入脱敏裁剪后的 context block；context 不得绕过 HITL |
+| Context Selection | `select_plan_context()` 只产出 section IDs、脱敏 context block 与计数指标；不得修改 Action IR、HITL、pending_execute、interrupt 或 safety route 字段 |
+| Request Compaction | `compact_messages_for_request()` 只能压缩传给 `model_client.request()` 的消息；不得改写 `state["messages"]`；必须保留最新截图并剥离历史图片 |
+| Prompt Version | 默认 `context_harness_v1`；`legacy_text_dsl` 保留旧 text DSL prompt 作为回滚路径；prompt schema 只约束格式，不授权执行 |
 | Output Adapter | `ModelConfig.output_mode=text_dsl|json_schema|tool_calls|auto`；JSON/tool_calls 必须经 adapter 白名单映射到 canonical action，parse failure fail-closed，不得绕过 HITL |
 | Action IR Pipeline | 阶梯架构：Adapter → draft ActionIR → Validator → (Repair → Validator) → Safety Gate → Executor；Repair 不得在 Safety Gate 之后；Executor 只接收 validated + safety-approved IR |
 | Validator | 集中校验 action 白名单、必填字段、坐标 0-1000、Wait duration 正数且 ≤60s、dangerous fields；fail-closed |
@@ -35,4 +38,4 @@
 
 ## Compact Instructions
 
-压缩时保留：当前任务与进度、Non-Negotiable Constraints、Key Paths、Phase 8 trace 现状、Phase 10 Autopilot 现状、Phase 11 context harness 现状、Phase 12 output adapter 现状、必要 roadmap 状态与未完成 TODO。
+压缩时保留：当前任务与进度、Non-Negotiable Constraints、Key Paths、Phase 8 trace 现状、Phase 10 Autopilot 现状、Phase 11 context harness 现状、Phase 12 output adapter 现状、Phase 14 prompt/context harness 现状、必要 roadmap 状态与未完成 TODO。

@@ -75,6 +75,15 @@ def run_dry_task(
         {
             "success": True,
             "context_mode": mode,
+            "context_strategy": "off" if mode == "off" else ("inject_redacted_block" if mode == "inject" else "observe_only"),
+            "prompt_version": "context_harness_v1",
+            "selected_sections": ["screen_belief"] if mode != "off" else [],
+            "messages_before": 2,
+            "messages_after": 2,
+            "message_chars_before": 240 + context_block_chars,
+            "message_chars_after": 240 + context_block_chars,
+            "approx_tokens_before": (240 + context_block_chars + 3) // 4,
+            "approx_tokens_after": (240 + context_block_chars + 3) // 4,
             "context_block_chars": context_block_chars,
         },
     )
@@ -91,8 +100,17 @@ def run_dry_task(
         failure_cause=failure_cause,
         retry_count=retry_count,
         context_mode=mode,
+        context_strategy="off" if mode == "off" else ("inject_redacted_block" if mode == "inject" else "observe_only"),
+        prompt_version="context_harness_v1",
+        selected_sections=["screen_belief"] if mode != "off" else [],
         context_block_chars=context_block_chars,
         context_truncated=False,
+        messages_before=2,
+        messages_after=2,
+        message_chars_before=240 + context_block_chars,
+        message_chars_after=240 + context_block_chars,
+        approx_tokens_before=(240 + context_block_chars + 3) // 4,
+        approx_tokens_after=(240 + context_block_chars + 3) // 4,
         failure_memory_hit_count=1 if failure_cause and mode != "off" else 0,
         repeated_failure_count=1 if task.category == "failed" and mode != "off" else 0,
     )
@@ -156,14 +174,26 @@ def run_eval(args: argparse.Namespace) -> dict[str, Any]:
     total_retries = 0
     total_context_chars = 0
     context_truncated_count = 0
+    total_messages_before = 0
+    total_messages_after = 0
+    total_message_chars_before = 0
+    total_message_chars_after = 0
     total_failure_memory_hits = 0
     total_repeated_failures = 0
+    selected_section_counts: dict[str, int] = {}
     for item in records:
         total_retries += int(item.get("retry_count") or 0)
         total_context_chars += int(item.get("context_block_chars") or 0)
         context_truncated_count += 1 if item.get("context_truncated") else 0
+        total_messages_before += int(item.get("messages_before") or 0)
+        total_messages_after += int(item.get("messages_after") or 0)
+        total_message_chars_before += int(item.get("message_chars_before") or 0)
+        total_message_chars_after += int(item.get("message_chars_after") or 0)
         total_failure_memory_hits += int(item.get("failure_memory_hit_count") or 0)
         total_repeated_failures += int(item.get("repeated_failure_count") or 0)
+        for section in item.get("selected_sections") or []:
+            section_id = str(section)
+            selected_section_counts[section_id] = selected_section_counts.get(section_id, 0) + 1
         cause = item.get("failure_cause")
         if cause:
             failure_cause_histogram[str(cause)] = failure_cause_histogram.get(str(cause), 0) + 1
@@ -179,9 +209,16 @@ def run_eval(args: argparse.Namespace) -> dict[str, Any]:
             "retry_count": total_retries,
             "failure_cause_histogram": failure_cause_histogram,
             "context_mode": args.context_mode,
+            "context_strategy": records[0].get("context_strategy") if records else "unknown",
+            "prompt_version": records[0].get("prompt_version") if records else "context_harness_v1",
+            "selected_section_counts": selected_section_counts,
             "context_block_chars": total_context_chars,
             "avg_context_block_chars": total_context_chars / len(records) if records else 0.0,
             "context_truncated_count": context_truncated_count,
+            "messages_before": total_messages_before,
+            "messages_after": total_messages_after,
+            "message_chars_before": total_message_chars_before,
+            "message_chars_after": total_message_chars_after,
             "failure_memory_hit_count": total_failure_memory_hits,
             "repeated_failure_count": total_repeated_failures,
             "dry_run": args.dry_run,

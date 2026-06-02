@@ -34,14 +34,14 @@ phone_agent/
 ├── adb/                         # Android 设备控制
 ├── config/
 │   ├── apps.py                  # 应用包名映射
-│   ├── prompts.py / prompts_zh.py / prompts_en.py
+│   ├── prompts.py / prompts_zh.py / prompts_en.py  # prompt contract + legacy rollback
 │   └── timing.py
 └── graph/                       # LangGraph 核心
     ├── state.py                 # AgentState TypedDict
     ├── builder.py               # create_agent_graph()
     ├── edges.py                 # 条件边路由
     ├── trace.py                 # 本地 JSONL trace 与脱敏
-    ├── context.py               # 短期 context schema、预算裁剪与脱敏
+    ├── context.py               # context selector、request compaction、预算裁剪与脱敏
     ├── nodes/
     │   ├── plan.py
     │   ├── execute.py
@@ -120,7 +120,8 @@ print(result)
 structured = agent.run_structured("打开淘宝搜索无线耳机")
 print(structured.to_dict())
 # 包含 success / finished / steps / duration / error / hitl_count / trace_id / trace_path
-# failure_cause / retry_count / context_mode / context metrics
+# failure_cause / retry_count / context_mode / context_strategy / prompt_version
+# selected_sections / messages_before/after / approx_tokens_before/after 等 context metrics
 ```
 
 默认启用本地 JSONL trace，文件写入 `.traces/{trace_id}.jsonl`。trace 记录 run id、trace id、step id、node、event、timestamp 与脱敏后的 payload；截图、prompt、API key、任务文本、thinking、reflection、HITL 消息默认不会以原文写入。
@@ -136,6 +137,21 @@ print(structured.to_dict())
 | `inject` | 注入脱敏、裁剪后的短期 context block |
 
 `AgentConfig(context_mode="observe")` 可切换模式。context 字段包括 `screen_belief`、`action_outcome_summary`、`failure_memory`、`summarized_history` 与预算/截断指标；默认预算为 failure memory 最近 3 条、screen belief 摘要 300 字符、history 摘要 800 字符、context block 1500 字符。姓名、手机号、邮箱、订单号、验证码、API key/token、长 base64/JWT 等敏感文本默认脱敏，context 不绕过 HITL/confirm/takeover。
+
+#### LangGraph-native Context Engineering Harness
+
+Phase 14 将 prompt、context selector 与 context-window compaction 收敛为 LangGraph 原生请求构造层，不替换现有 `StateGraph` 拓扑：
+
+| 能力 | 行为 |
+|------|------|
+| Prompt contract | `get_system_prompt(lang, output_mode, prompt_version)` 由 System Contract + Action Schema + Policy + Context Rules + 单一输出契约组成 |
+| Prompt rollback | 默认 `prompt_version="context_harness_v1"`；`legacy_text_dsl` 保留旧 text DSL prompt 作为回滚路径 |
+| Context selector | `select_plan_context()` 输出 `context_strategy`、`selected_sections`、脱敏 context block 与计数指标 |
+| Request compaction | `compact_messages_for_request()` 仅压缩传给 `model_client.request()` 的消息，不改写 `state["messages"]` |
+| 图片预算 | 历史图片从模型请求中剥离，最新用户截图保留；保持 `messages_reducer` append/replace 语义 |
+| 隐私指标 | trace/eval 只持久化 section IDs、消息数、字符数、近似 token、截断状态等，不持久化 raw prompt/context/image |
+
+Context selector 与 compaction 只能影响模型请求构造和脱敏观测指标，不得修改 `action_raw`、`action_parsed`、`pending_execute`、`interrupt_result`、`action_confirmed` 或 Safety/HITL 路由字段。
 
 ### Model Output Adapter
 
@@ -252,11 +268,12 @@ python main.py --device-id 192.168.1.100:5555 --base-url http://localhost:8000/v
 .venv/bin/python evals/run_eval.py --dry-run --trace-dir .traces/smoke
 ```
 
-当前 Evaluation Harness 覆盖结构化结果、基础指标、HITL interrupt routing 计数、trace 文件关联、retry count、failure cause histogram，以及 `context_mode`、`context_block_chars`、`context_truncated`、`failure_memory_hit_count`、`repeated_failure_count` 等 context 指标；不承诺跨进程持久 resume，完整 resume 指标将在 checkpoint/resume 阶段补齐。
+当前 Evaluation Harness 覆盖结构化结果、基础指标、HITL interrupt routing 计数、trace 文件关联、retry count、failure cause histogram，以及 `context_mode`、`context_strategy`、`prompt_version`、`selected_sections`、`messages_before/after`、`message_chars_before/after`、`approx_tokens_before/after`、`context_block_chars`、`context_truncated`、`failure_memory_hit_count`、`repeated_failure_count` 等 context 指标；不承诺跨进程持久 resume，完整 resume 指标将在 checkpoint/resume 阶段补齐。
 
 ```bash
 .venv/bin/python evals/run_eval.py --dry-run --context-mode observe --trace-dir .traces/smoke
 .venv/bin/python evals/run_eval.py --dry-run --context-mode inject --trace-dir .traces/smoke
+.venv/bin/python evals/run_eval.py --dry-run --context-mode off --trace-dir .traces/smoke
 ```
 
 ### TraeCLI 项目配置
@@ -274,7 +291,7 @@ python main.py --device-id 192.168.1.100:5555 --base-url http://localhost:8000/v
 | Project agents | `.trae/agents/*.md` |
 | Hooks | `.trae/hooks/ralplan.py`, `.trae/hooks/autopilot.py` |
 
-Autopilot 已完成 TraeCLI-native 编排：`ralplan -> execution -> ralph -> qa -> complete`。它复用 RALPLAN `planner` / `architect` / `critic`，并新增 `executor`、`debugger`、`test-engineer`、`designer`、`code-reviewer`、`security-reviewer` 六个项目级 stage agents；不迁移 `.omc` runtime，不修改 `.trae/traecli.yaml`，不改变 `phone_agent/` 业务运行时。
+Autopilot 已完成 TraeCLI-native 编排：`ralplan -> execution -> ralph -> qa -> complete`。它复用 RALPLAN `planner` / `architect` / `critic`，并新增 `executor`、`debugger`、`test-engineer`、`designer`、`code-reviewer`、`security-reviewer` 六个项目级 stage agents；不迁移 `.omc` runtime，不修改 `.trae/traecli.yaml`，不改变 `phone_agent/` 业务运行时。涉及 prompt/context harness 的执行计划、验收矩阵与阶段状态以 `.trae/rules/graph.mdc` 为准；TraeCLI 文档和 AGENTS 约束必须同步更新。
 
 ```bash
 .venv/bin/pytest tests/trae/test_autopilot_hook.py -q

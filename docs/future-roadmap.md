@@ -6,17 +6,52 @@
 
 ## 当前状态
 
-- **Phase 1-13**: ✅ 已完成当前 graph roadmap 中已批准的实现范围；Phase 11A/11B/11C 完成 Context & Observability Harness，Phase 12A/12B/12C 完成多格式模型输出适配，Phase 13A-13E 完成 Canonical Action IR & Safety Pipeline 阶梯架构；long-term memory 与 LangChain provider abstraction 仍待另行规划
+- **Phase 1-14**: ✅ 已完成当前 graph roadmap 中已批准的实现范围；Phase 11A/11B/11C 完成 Context & Observability Harness，Phase 12A/12B/12C 完成多格式模型输出适配，Phase 13A-13E 完成 Canonical Action IR & Safety Pipeline 阶梯架构，Phase 14A-14E 完成 LangGraph-native Context Engineering Harness；long-term memory 与 LangChain provider abstraction 仍待另行规划
 - **测试**: 已恢复可执行 graph/actions/evals 回归测试与安装门禁；当前本地门禁为 `.venv/bin/pytest tests -q` 全绿
 - **架构**: LangGraph Plan-Execute-Reflect StateGraph
 - **图拓扑**: `plan → execute → [confirm|takeover|reflect|replan|end]`
 - **结构化 API**: 已提供 `PhoneAgent.run_structured()` / `RunResult`，`run()` 继续保持字符串返回兼容
 - **可观测性**: 已提供默认本地 JSONL trace，`RunResult` / eval JSON 可通过 `trace_id` 与 `trace_path` 关联 trace 文件；默认脱敏敏感截图、prompt/API key 与隐私文本
-- **短期 Context Harness**: 已支持 `context_mode=off|observe|inject`，默认 `observe`；记录 `screen_belief`、`action_outcome_summary`、`failure_memory`、`summarized_history` 与 context 指标，仅 `inject` 模式向 Plan 注入脱敏裁剪后的 context block
+- **短期 Context Harness**: 已支持 `context_mode=off|observe|inject`，默认 `observe`；记录 `screen_belief`、`action_outcome_summary`、`failure_memory`、`summarized_history` 与 context 指标，仅 `inject` 模式向 Plan 注入脱敏裁剪后的 context block；Phase 14 新增 request-only compaction、section selector 与 `prompt_version` 回滚
 - **策略反思**: 已支持结构化 `reflection_verdict`、`failure_cause`、`suggested_strategy`，下一轮 plan 可读取失败原因和建议策略
 - **评测地基**: 已提供 `evals/run_eval.py --dry-run` smoke harness；当前统计结构化结果、HITL interrupt routing、trace 文件关联、retry count 与 failure cause histogram；不承诺跨进程 resume
-- **收益验证**: eval 已输出 `context_mode`、`context_block_chars`、`context_truncated`、`failure_memory_hit_count`、`repeated_failure_count`，支持 off/observe/inject 对比
+- **收益验证**: eval 已输出 `context_mode`、`context_strategy`、`prompt_version`、`selected_sections`、`messages_before/after`、`message_chars_before/after`、`approx_tokens_before/after`、`context_block_chars`、`context_truncated`、`failure_memory_hit_count`、`repeated_failure_count`，支持 off/observe/inject 对比
 - **输出适配**: `ModelConfig.output_mode=text_dsl|json_schema|tool_calls|auto`；XML/text DSL、JSON、已聚合 OpenAI `tool_calls` 统一归一到 canonical action，parse failure fail-closed，不绕过 HITL
+
+---
+
+## 已完成 MVP: LangGraph-native Context Engineering Harness (Phase 14)
+
+**目标**: 在保留现有 LangGraph `StateGraph` 的前提下，将 prompt contract、context selector、request-only compaction、trace/eval 指标收敛为可测试、可回滚、隐私安全的请求构造层。
+
+**当前状态**: Phase 14A-14E 已落地。默认 `context_mode="observe"` 不改变行为；`inject` 仍为显式 opt-in；`prompt_version="legacy_text_dsl"` 可回滚到旧 text DSL prompt。
+
+**已落地方案**:
+- `phone_agent/config/prompts_zh.py` / `prompts_en.py`: 将 prompt 拆为 System Contract、Action Schema、Task Policies、Context Usage Rules 与单一 Output Contract，覆盖 `text_dsl|json_schema|tool_calls|auto`。
+- `phone_agent/config/__init__.py`: 新增 `PROMPT_VERSION="context_harness_v1"`、`LEGACY_PROMPT_VERSION="legacy_text_dsl"`、`get_prompt_version()` 与 `get_system_prompt(..., prompt_version=...)`。
+- `phone_agent/graph/context.py`: 新增 `ContextSelectionResult`、`select_plan_context()`、`compact_messages_for_request()`，输出 section IDs、策略标签和消息/字符/近似 token 计数。
+- `phone_agent/graph/nodes/plan.py`: 在调用 `model_client.request()` 前执行 context selection 与 request-only compaction；不改写 `state["messages"]`。
+- `phone_agent/agent.py` / `evals/run_eval.py`: `RunResult` 与 eval JSON 输出 `context_strategy`、`prompt_version`、`selected_sections`、messages/chars/tokens 指标。
+- `phone_agent/graph/trace.py`: trace 持久化保持脱敏；raw prompt、raw context、截图、任务文本与隐私文本不落盘。
+
+**核心不变量**:
+- 不迁移到 LangChain Agent，不改变 `plan → execute → reflect` 图拓扑。
+- runtime `context_mode` 仅限 `off|observe|inject`；`auto` 仍只属于 `output_mode`。
+- selector/compaction 只影响模型请求构造和脱敏指标，不得修改 Action IR、HITL、pending/interrupt 或 safety route 字段。
+- request compaction 只压缩传给模型的 `request_messages`；历史图片剥离，最新截图保留；`messages_reducer` 语义不变。
+- prompt schema/provider tool specs 仅是格式契约，真实执行仍是 Adapter → Validator → Safety Gate → Executor。
+
+**验证命令**:
+
+```bash
+.venv/bin/pytest tests/model tests/actions tests/graph tests/evals -v
+.venv/bin/pytest tests -q
+.venv/bin/python evals/run_eval.py --dry-run --context-mode off --trace-dir .traces/smoke
+.venv/bin/python evals/run_eval.py --dry-run --context-mode observe --trace-dir .traces/smoke
+.venv/bin/python evals/run_eval.py --dry-run --context-mode inject --trace-dir .traces/smoke
+```
+
+**明确非目标**: 不引入长期记忆、向量库、自动 `context_mode=auto`、跨进程 resume 或 LangChain Agent 迁移。后续若做自动 context selection，必须基于 off/observe/inject 指标收益另行规划。
 
 ---
 

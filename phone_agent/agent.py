@@ -2,18 +2,20 @@
 
 import time
 import uuid
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from typing import Any
 
 from phone_agent.device_factory import get_device_factory
 from phone_agent.model import ModelClient, ModelConfig
 from phone_agent.graph.builder import create_agent_graph
+from phone_agent.config import PROMPT_VERSION, get_prompt_version
 from phone_agent.graph.context import (
     DEFAULT_CONTEXT_MODE,
     build_context_metrics,
     default_context_budget,
     default_screen_belief,
     normalize_context_mode,
+    should_inject_context,
 )
 from phone_agent.graph.state import AgentState
 from phone_agent.graph.trace import JsonlTraceWriter
@@ -33,9 +35,11 @@ class AgentConfig:
     trace_redact: bool = True
     trace_strict: bool = False
     context_mode: str = DEFAULT_CONTEXT_MODE
+    prompt_version: str = PROMPT_VERSION
 
     def __post_init__(self):
         self.context_mode = normalize_context_mode(self.context_mode)
+        self.prompt_version = get_prompt_version(self.prompt_version)
 
 
 @dataclass
@@ -65,8 +69,17 @@ class RunResult:
     failure_cause: str | None = None
     retry_count: int = 0
     context_mode: str = DEFAULT_CONTEXT_MODE
+    context_strategy: str = "unknown"
+    prompt_version: str = PROMPT_VERSION
+    selected_sections: list[str] = field(default_factory=list)
     context_block_chars: int = 0
     context_truncated: bool = False
+    messages_before: int = 0
+    messages_after: int = 0
+    message_chars_before: int = 0
+    message_chars_after: int = 0
+    approx_tokens_before: int = 0
+    approx_tokens_after: int = 0
     failure_memory_hit_count: int = 0
     repeated_failure_count: int = 0
 
@@ -157,6 +170,7 @@ class PhoneAgent:
                 trace_id=trace_id,
                 trace_path=str(trace_writer.path) if trace_writer else None,
                 context_mode=self.agent_config.context_mode,
+                prompt_version=self.agent_config.prompt_version,
             )
 
         run_result = self._state_to_run_result(
@@ -171,6 +185,12 @@ class PhoneAgent:
 
     def _build_initial_state(self, task: str, screenshot: Any) -> AgentState:
         """Build the initial LangGraph state for a task."""
+        if self.agent_config.context_mode == "off":
+            context_strategy = "off"
+        elif should_inject_context(self.agent_config.context_mode):
+            context_strategy = "inject_redacted_block"
+        else:
+            context_strategy = "observe_only"
         return {
             "task": task,
             "messages": [],
@@ -192,6 +212,9 @@ class PhoneAgent:
             "suggested_strategy": None,
             "retry_count": 0,
             "context_mode": self.agent_config.context_mode,
+            "context_strategy": context_strategy,
+            "prompt_version": self.agent_config.prompt_version,
+            "selected_sections": [],
             "screen_belief": default_screen_belief(),
             "action_outcome_summary": None,
             "failure_memory": [],
@@ -199,6 +222,12 @@ class PhoneAgent:
             "context_budget": default_context_budget(),
             "context_truncated": False,
             "context_block_chars": 0,
+            "messages_before": 0,
+            "messages_after": 0,
+            "message_chars_before": 0,
+            "message_chars_after": 0,
+            "approx_tokens_before": 0,
+            "approx_tokens_after": 0,
             "failure_memory_hit_count": 0,
             "repeated_failure_count": 0,
             "pending_interrupt": None,
@@ -240,6 +269,7 @@ class PhoneAgent:
                 "trace_id": trace_id,
                 "trace_writer": trace_writer,
                 "context_mode": self.agent_config.context_mode,
+                "prompt_version": self.agent_config.prompt_version,
             }
         }
 

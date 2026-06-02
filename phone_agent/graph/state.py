@@ -69,6 +69,9 @@ class AgentState(TypedDict):
 
     # === Context & Observability Harness (Phase 11) ===
     context_mode: str  # off / observe / inject
+    context_strategy: str  # off / observe_only / inject_redacted_block
+    prompt_version: str  # prompt renderer version for trace/eval comparison
+    selected_sections: list[str]  # selected context section IDs, not raw text
     screen_belief: dict  # 短期屏幕信念，非事实来源
     action_outcome_summary: Optional[dict]  # 最近一次动作结果摘要
     failure_memory: list[dict]  # 当前 run 内最近失败摘要
@@ -76,6 +79,12 @@ class AgentState(TypedDict):
     context_budget: dict  # context 裁剪预算
     context_truncated: bool  # context 是否被裁剪
     context_block_chars: int  # 注入 context block 字符数
+    messages_before: int  # model request message count before compaction
+    messages_after: int  # model request message count after compaction
+    message_chars_before: int  # approximate request chars before compaction
+    message_chars_after: int  # approximate request chars after compaction
+    approx_tokens_before: int  # rough char/4 token estimate before compaction
+    approx_tokens_after: int  # rough char/4 token estimate after compaction
     failure_memory_hit_count: int  # failure memory 命中次数
     repeated_failure_count: int  # 重复失败计数
 
