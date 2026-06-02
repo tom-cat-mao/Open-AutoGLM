@@ -5,7 +5,8 @@ from typing import TYPE_CHECKING
 
 from langchain_core.runnables import RunnableConfig
 
-from phone_agent.actions.handler import parse_action, finish
+from phone_agent.actions.adapter import ActionAdapterError, adapt_json_action
+from phone_agent.actions.handler import parse_action
 from phone_agent.config import get_system_prompt
 from phone_agent.graph.context import (
     build_context_metrics,
@@ -113,7 +114,20 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
     except Exception as e:
         if configurable.get("verbose", True):
             traceback.print_exc()
-        emit_trace(config, state, "plan", "plan_error", {"message": str(e)})
+        error_message = f"Model error: {e}"
+        parse_metadata = getattr(e, "parse_metadata", {}) or {}
+        emit_trace(
+            config,
+            state,
+            "plan",
+            "plan_error",
+            {
+                "message": str(e),
+                "failure_cause": "model_parse_failed",
+                "parse_metadata": parse_metadata,
+                "parse_error_code": parse_metadata.get("parse_error_code"),
+            },
+        )
         return {
             "messages": new_messages,
             "step_count": step_count + 1,
@@ -123,8 +137,15 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
             "screen_height": screenshot.height,
             "thinking": "",
             "action_raw": "",
-            "action_parsed": finish(message=f"Model error: {e}"),
-            "error": f"Model error: {e}",
+            "action_parsed": None,
+            "action_result": {
+                "success": False,
+                "should_finish": True,
+                "message": error_message,
+            },
+            "error": error_message,
+            "failure_cause": "model_parse_failed",
+            "parse_metadata": parse_metadata,
             "finished": True,
             "action_confirmed": False,
             "context_mode": context_mode,
@@ -132,10 +153,30 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
         }
 
     # 4. Parse action
+    parse_error = None
+    parse_metadata = getattr(response, "parse_metadata", {}) or {}
     try:
-        action_parsed = parse_action(response.action)
-    except ValueError:
-        action_parsed = finish(message=response.action)
+        stripped_action = response.action.strip()
+        if stripped_action.startswith("{"):
+            action_parsed = adapt_json_action(stripped_action)
+        else:
+            action_parsed = parse_action(response.action)
+    except ActionAdapterError as exc:
+        action_parsed = None
+        parse_error = f"Model parse failed: {exc.code}: {exc}"
+        parse_metadata = {
+            **parse_metadata,
+            "parse_success": False,
+            "parse_error_code": exc.code,
+        }
+    except ValueError as exc:
+        action_parsed = None
+        parse_error = f"Model parse failed: {exc}"
+        parse_metadata = {
+            **parse_metadata,
+            "parse_success": False,
+            "parse_error_code": "parse_error",
+        }
 
     emit_trace(
         config,
@@ -148,9 +189,37 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
             "action_raw": response.action,
             "action": action_parsed.get("action") if isinstance(action_parsed, dict) else None,
             "metadata": action_parsed.get("_metadata") if isinstance(action_parsed, dict) else None,
+            "parse_success": parse_error is None,
+            "parse_error": parse_error,
+            "failure_cause": "model_parse_failed" if parse_error else None,
+            "parse_metadata": parse_metadata,
             **context_metrics,
         },
     )
+
+    if parse_error:
+        return {
+            "messages": new_messages,
+            "step_count": step_count + 1,
+            "screenshot_b64": screenshot.base64_data,
+            "current_app": current_app,
+            "screen_width": screenshot.width,
+            "screen_height": screenshot.height,
+            "thinking": response.thinking,
+            "action_raw": response.action,
+            "action_parsed": None,
+            "action_result": {
+                "success": False,
+                "should_finish": True,
+                "message": parse_error,
+            },
+            "error": parse_error,
+            "failure_cause": "model_parse_failed",
+            "finished": True,
+            "action_confirmed": False,
+            "context_mode": context_mode,
+            **context_metrics,
+        }
 
     return {
         "messages": new_messages,

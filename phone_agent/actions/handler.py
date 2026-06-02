@@ -39,64 +39,44 @@ def parse_action(response: str) -> dict[str, Any]:
     print(f"Parsing action: {response}")
     try:
         response = response.strip()
-        if response.startswith('do(action="Type"') or response.startswith(
-            'do(action="Type_Name"'
-        ):
-            action_name = (
-                "Type_Name" if response.startswith('do(action="Type_Name"') else "Type"
-            )
-            text = response.split("text=", 1)[1][1:-2]
-            action = {"_metadata": "do", "action": action_name, "text": text}
-            return action
-        elif response.startswith("do"):
-            # Use AST parsing instead of eval for safety
-            try:
-                # Escape special characters (newlines, tabs, etc.) for valid Python syntax
-                response = response.replace("\n", "\\n")
-                response = response.replace("\r", "\\r")
-                response = response.replace("\t", "\\t")
-
-                tree = ast.parse(response, mode="eval")
-                if not isinstance(tree.body, ast.Call):
-                    raise ValueError("Expected a function call")
-
-                call = tree.body
-                if not isinstance(call.func, ast.Name) or call.func.id != "do":
-                    raise ValueError("Expected do() action")
-                # Extract keyword arguments safely
-                action = {"_metadata": "do"}
-                for keyword in call.keywords:
-                    if keyword.arg is None:
-                        raise ValueError("**kwargs are not supported")
-                    key = keyword.arg
-                    value = ast.literal_eval(keyword.value)
-                    action[key] = value
-
-                return action
-            except (SyntaxError, ValueError) as e:
-                raise ValueError(f"Failed to parse do() action: {e}")
-
+        if response.startswith("do"):
+            action = _parse_call_action(response, "do")
+            action["_metadata"] = "do"
         elif response.startswith("finish"):
-            try:
-                tree = ast.parse(response, mode="eval")
-                if not isinstance(tree.body, ast.Call):
-                    raise ValueError("Expected a function call")
-                call = tree.body
-                if not isinstance(call.func, ast.Name) or call.func.id != "finish":
-                    raise ValueError("Expected finish() action")
-
-                action = {"_metadata": "finish"}
-                for keyword in call.keywords:
-                    if keyword.arg is None:
-                        raise ValueError("**kwargs are not supported")
-                    action[keyword.arg] = ast.literal_eval(keyword.value)
-            except (SyntaxError, ValueError) as e:
-                raise ValueError(f"Failed to parse finish() action: {e}")
+            action = _parse_call_action(response, "finish")
+            action["_metadata"] = "finish"
         else:
             raise ValueError(f"Failed to parse action: {response}")
         return action
     except Exception as e:
         raise ValueError(f"Failed to parse action: {e}")
+
+
+def _parse_call_action(response: str, expected_function: str) -> dict[str, Any]:
+    """Safely parse a do()/finish() call with literal keyword arguments only."""
+    try:
+        tree = ast.parse(response, mode="eval")
+    except SyntaxError as exc:
+        raise ValueError(f"Invalid Python literal call syntax: {exc}") from exc
+
+    if not isinstance(tree.body, ast.Call):
+        raise ValueError("Expected a function call")
+
+    call = tree.body
+    if not isinstance(call.func, ast.Name) or call.func.id != expected_function:
+        raise ValueError(f"Expected {expected_function}() action")
+    if call.args:
+        raise ValueError("Positional arguments are not supported")
+
+    action: dict[str, Any] = {}
+    for keyword in call.keywords:
+        if keyword.arg is None:
+            raise ValueError("**kwargs are not supported")
+        try:
+            action[keyword.arg] = ast.literal_eval(keyword.value)
+        except (ValueError, SyntaxError) as exc:
+            raise ValueError(f"Keyword {keyword.arg} must be a literal value") from exc
+    return action
 
 
 def do(**kwargs) -> dict[str, Any]:

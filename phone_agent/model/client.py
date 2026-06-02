@@ -1,13 +1,26 @@
 """Model client for AI inference using OpenAI-compatible API."""
 
 import json
+import re
 import time
 from dataclasses import dataclass, field
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 from openai import OpenAI
 
+from phone_agent.actions.adapter import ActionAdapterError, adapt_json_action, adapt_tool_calls
+from phone_agent.actions.handler import parse_action
 from phone_agent.config.i18n import get_message
+
+OutputMode = Literal["text_dsl", "json_schema", "tool_calls", "auto"]
+
+
+class ModelParseError(ValueError):
+    """Model response parse error carrying trace-safe parse metadata."""
+
+    def __init__(self, message: str, parse_metadata: dict[str, Any]) -> None:
+        super().__init__(message)
+        self.parse_metadata = parse_metadata
 
 
 @dataclass
@@ -23,6 +36,7 @@ class ModelConfig:
     frequency_penalty: float = 0.2
     extra_body: dict[str, Any] = field(default_factory=dict)
     lang: str = "cn"  # Language for UI messages: 'cn' or 'en'
+    output_mode: OutputMode = "text_dsl"
 
 
 @dataclass
@@ -36,6 +50,7 @@ class ModelResponse:
     time_to_first_token: float | None = None  # Time to first token (seconds)
     time_to_thinking_end: float | None = None  # Time to thinking end (seconds)
     total_time: float | None = None  # Total inference time (seconds)
+    parse_metadata: dict[str, Any] = field(default_factory=dict)
 
 
 class ModelClient:
@@ -68,18 +83,28 @@ class ModelClient:
         time_to_first_token = None
         time_to_thinking_end = None
 
+        request_kwargs: dict[str, Any] = {
+            "messages": cast(Any, messages),
+            "model": self.config.model_name,
+            "max_tokens": self.config.max_tokens,
+            "temperature": self.config.temperature,
+            "top_p": self.config.top_p,
+            "frequency_penalty": self.config.frequency_penalty,
+            "extra_body": self.config.extra_body,
+            "stream": True,
+        }
+        if self.config.output_mode == "tool_calls":
+            request_kwargs["tools"] = self._build_tool_specs()
+            request_kwargs["tool_choice"] = "auto"
+        elif self.config.output_mode == "json_schema":
+            request_kwargs["response_format"] = {"type": "json_object"}
+
         stream: Any = self.client.chat.completions.create(
-            messages=cast(Any, messages),
-            model=self.config.model_name,
-            max_tokens=self.config.max_tokens,
-            temperature=self.config.temperature,
-            top_p=self.config.top_p,
-            frequency_penalty=self.config.frequency_penalty,
-            extra_body=self.config.extra_body,
-            stream=True,
+            **request_kwargs,
         )
 
         raw_content = ""
+        tool_call_deltas: dict[int, dict[str, Any]] = {}
         buffer = ""  # Buffer to hold content that might be part of a marker
         action_markers = ["finish(message=", "do(action="]
         in_action_phase = False  # Track if we've entered the action phase
@@ -88,8 +113,12 @@ class ModelClient:
         for chunk in stream:
             if len(chunk.choices) == 0:
                 continue
-            if chunk.choices[0].delta.content is not None:
-                content = chunk.choices[0].delta.content
+            delta = chunk.choices[0].delta
+            tool_calls = getattr(delta, "tool_calls", None)
+            if tool_calls:
+                self._accumulate_tool_call_deltas(tool_call_deltas, tool_calls)
+            if delta.content is not None:
+                content = delta.content
                 raw_content += content
 
                 # Record time to first token
@@ -143,7 +172,10 @@ class ModelClient:
         total_time = time.time() - start_time
 
         # Parse thinking and action from response
-        thinking, action = self._parse_response(raw_content)
+        thinking, action, parse_metadata = self._parse_response_with_metadata(
+            raw_content,
+            tool_calls=list(tool_call_deltas.values()) if tool_call_deltas else None,
+        )
 
         # Print performance metrics
         lang = self.config.lang
@@ -171,19 +203,76 @@ class ModelClient:
             time_to_first_token=time_to_first_token,
             time_to_thinking_end=time_to_thinking_end,
             total_time=total_time,
+            parse_metadata=parse_metadata,
         )
+
+    def _parse_response_with_metadata(
+        self, content: str, tool_calls: list[dict[str, Any]] | None = None
+    ) -> tuple[str, str, dict[str, Any]]:
+        """Parse response according to configured output mode with observability metadata."""
+        metadata: dict[str, Any] = {
+            "provider": "openai_compatible",
+            "configured_mode": self.config.output_mode,
+            "detected_format": "unknown",
+            "adapter_used": "none",
+            "parse_success": False,
+            "parse_error_code": None,
+        }
+        try:
+            if tool_calls:
+                if self.config.output_mode not in {"tool_calls", "auto"}:
+                    raise ActionAdapterError(
+                        "unsupported_tool_call", "tool_calls received in non-tool_calls mode"
+                    )
+                action = adapt_tool_calls(tool_calls)
+                metadata.update(
+                    {
+                        "detected_format": "tool_calls",
+                        "adapter_used": "tool_calls",
+                        "parse_success": True,
+                    }
+                )
+                return "", json.dumps(action, ensure_ascii=False), metadata
+
+            normalized = self._normalize_response_text(content)
+            if self.config.output_mode in {"json_schema", "auto"} and self._looks_like_json(normalized):
+                action = adapt_json_action(normalized)
+                metadata.update(
+                    {
+                        "detected_format": "json_schema",
+                        "adapter_used": "json_schema",
+                        "parse_success": True,
+                    }
+                )
+                return "", json.dumps(action, ensure_ascii=False), metadata
+
+            thinking, action = self._parse_response(normalized)
+            parse_action(action)
+            metadata.update(
+                {
+                    "detected_format": "text_dsl",
+                    "adapter_used": "text_dsl",
+                    "parse_success": True,
+                }
+            )
+            return thinking, action, metadata
+        except ActionAdapterError as exc:
+            metadata["parse_error_code"] = exc.code
+            raise ModelParseError(f"{exc.code}: {exc}", metadata) from exc
+        except ValueError as exc:
+            metadata["parse_error_code"] = "parse_error"
+            raise ModelParseError(str(exc), metadata) from exc
 
     def _parse_response(self, content: str) -> tuple[str, str]:
         """
         Parse the model response into thinking and action parts.
 
         Parsing rules:
-        1. If content contains 'finish(message=', everything before is thinking,
-           everything from 'finish(message=' onwards is action.
-        2. If rule 1 doesn't apply but content contains 'do(action=',
-           everything before is thinking, everything from 'do(action=' onwards is action.
-        3. Fallback: If content contains '<answer>', use legacy parsing with XML tags.
-        4. Otherwise, return empty thinking and full content as action.
+        1. Strip outer Markdown code fences and surrounding whitespace.
+        2. If content contains '<answer>', parse XML-style thinking/answer first.
+           This prevents '</answer>' from leaking into do()/finish() actions.
+        3. Otherwise, split at the earliest text DSL marker, do(...) or finish(...).
+        4. Empty or malformed XML responses raise ValueError so callers can fail closed.
 
         Args:
             content: Raw response content.
@@ -191,29 +280,123 @@ class ModelClient:
         Returns:
             Tuple of (thinking, action).
         """
-        # Rule 1: Check for finish(message=
-        if "finish(message=" in content:
-            parts = content.split("finish(message=", 1)
-            thinking = parts[0].strip()
-            action = "finish(message=" + parts[1]
+        normalized = self._normalize_response_text(content)
+        if not normalized:
+            raise ValueError("Empty model response")
+
+        if "<answer>" in normalized:
+            return self._parse_xml_answer(normalized)
+        if "</answer>" in normalized:
+            raise ValueError("Malformed XML answer: closing tag without opening tag")
+
+        marker_positions = [
+            (idx, marker)
+            for marker in ("finish(message=", "do(action=")
+            if (idx := normalized.find(marker)) >= 0
+        ]
+        if marker_positions:
+            idx, marker = min(marker_positions, key=lambda item: item[0])
+            thinking = self._strip_thinking_tags(normalized[:idx]).strip()
+            action = (marker + normalized[idx + len(marker) :]).strip()
             return thinking, action
 
-        # Rule 2: Check for do(action=
-        if "do(action=" in content:
-            parts = content.split("do(action=", 1)
-            thinking = parts[0].strip()
-            action = "do(action=" + parts[1]
-            return thinking, action
+        return "", normalized
 
-        # Rule 3: Fallback to legacy XML tag parsing
-        if "<answer>" in content:
-            parts = content.split("<answer>", 1)
-            thinking = parts[0].replace("<think>", "").replace("</think>", "").strip()
-            action = parts[1].replace("</answer>", "").strip()
-            return thinking, action
+    def _looks_like_json(self, content: str) -> bool:
+        """Return whether content looks like a JSON object."""
+        return content.startswith("{") and content.endswith("}")
 
-        # Rule 4: No markers found, return content as action
-        return "", content
+    def _accumulate_tool_call_deltas(
+        self, aggregated: dict[int, dict[str, Any]], tool_calls: list[Any]
+    ) -> None:
+        """Aggregate OpenAI streaming tool_calls deltas into complete objects."""
+        for fallback_index, tool_call in enumerate(tool_calls):
+            index = getattr(tool_call, "index", fallback_index)
+            current = aggregated.setdefault(
+                index, {"id": "", "type": "function", "function": {"name": "", "arguments": ""}}
+            )
+            tool_id = getattr(tool_call, "id", None)
+            if tool_id:
+                current["id"] += tool_id
+            tool_type = getattr(tool_call, "type", None)
+            if tool_type:
+                current["type"] = tool_type
+            function = getattr(tool_call, "function", None)
+            if function:
+                name = getattr(function, "name", None)
+                arguments = getattr(function, "arguments", None)
+                if name:
+                    current["function"]["name"] += name
+                if arguments:
+                    current["function"]["arguments"] += arguments
+
+    def _build_tool_specs(self) -> list[dict[str, Any]]:
+        """Build provider-facing tool specs for output formatting only."""
+        return [
+            {
+                "type": "function",
+                "function": {
+                    "name": "do",
+                    "description": "Emit one phone action. This is parsed by the agent and not executed by the provider.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "type": {"type": "string", "enum": ["do"]},
+                            "action": {"type": "string"},
+                            "x": {"type": "number"},
+                            "y": {"type": "number"},
+                            "element": {"type": "array", "items": {"type": "number"}},
+                            "start": {"type": "array", "items": {"type": "number"}},
+                            "end": {"type": "array", "items": {"type": "number"}},
+                            "text": {"type": "string"},
+                            "message": {"type": "string"},
+                            "app": {"type": "string"},
+                            "duration": {"type": ["string", "number"]},
+                        },
+                        "required": ["type", "action"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "finish",
+                    "description": "Finish the phone automation task.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "type": {"type": "string", "enum": ["finish"]},
+                            "message": {"type": "string"},
+                        },
+                        "required": ["type", "message"],
+                    },
+                },
+            },
+        ]
+
+    def _normalize_response_text(self, content: str) -> str:
+        """Remove outer Markdown code fences and surrounding whitespace."""
+        normalized = content.strip()
+        fence_match = re.fullmatch(r"```(?:[\w+-]+)?\s*(.*?)\s*```", normalized, re.DOTALL)
+        if fence_match:
+            normalized = fence_match.group(1).strip()
+        return normalized
+
+    def _parse_xml_answer(self, content: str) -> tuple[str, str]:
+        """Parse '<think>...</think><answer>...</answer>' style output."""
+        before_answer, answer_and_tail = content.split("<answer>", 1)
+        if "</answer>" not in answer_and_tail:
+            raise ValueError("Malformed XML answer: missing closing tag")
+        answer, _tail = answer_and_tail.split("</answer>", 1)
+        action = self._normalize_response_text(answer)
+        if not action:
+            raise ValueError("Empty XML answer")
+        thinking = self._strip_thinking_tags(before_answer).strip()
+        return thinking, action
+
+    def _strip_thinking_tags(self, content: str) -> str:
+        """Remove simple thinking tags from model-visible reasoning text."""
+        return content.replace("<think>", "").replace("</think>", "")
 
 
 class MessageBuilder:

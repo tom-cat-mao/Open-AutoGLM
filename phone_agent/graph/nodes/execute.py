@@ -68,6 +68,29 @@ def execute_node(state: "AgentState", config: RunnableConfig) -> dict:
             "action_outcome_summary": build_action_outcome_summary(outcome_state),
         }
 
+    # Plan-stage parse/model failures are terminal and must not be converted into
+    # a successful finish or a generic execute error.
+    if state.get("finished") and state.get("error"):
+        result_dict = state.get("action_result") or {
+            "success": False,
+            "should_finish": True,
+            "message": state.get("error"),
+        }
+        emit_trace(
+            config,
+            state,
+            "execute",
+            "execute_error",
+            {"message": state.get("error"), "failure_cause": state.get("failure_cause")},
+        )
+        return {
+            "action_result": result_dict,
+            "finished": True,
+            "error": state.get("error"),
+            "failure_cause": state.get("failure_cause"),
+            **_context_update(result_dict),
+        }
+
     # 1. Check action_parsed
     if action_parsed is None:
         emit_trace(config, state, "execute", "execute_error", {"message": "No action to execute"})

@@ -39,6 +39,7 @@ PRIVATE_TEXT_KEYS = {
     "thinking",
     "visible_text",
     "observed_text",
+    "parse_error",
     "context_block",
 }
 
