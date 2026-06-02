@@ -39,13 +39,52 @@ ACTION_ALIASES = {
 }
 CANONICAL_ACTIONS = set(ACTION_ALIASES.values())
 TOOL_NAME_ALIASES = {"do", "finish", "phone_do", "phone_finish"}
+ALLOWED_TOOL_CALL_FIELDS = {"id", "type", "function", "index"}
+ALLOWED_TOOL_FUNCTION_FIELDS = {"name", "arguments"}
+DANGEROUS_PROVIDER_FIELDS = {
+    "api_key",
+    "apikey",
+    "authorization",
+    "base64_data",
+    "command",
+    "device_factory",
+    "device_id",
+    "env",
+    "image_url",
+    "raw_command",
+    "screen_height",
+    "screen_width",
+    "secret",
+    "shell",
+    "subprocess",
+    "token",
+}
+COMMON_DO_FIELDS = {"type", "_metadata", "action", "message"}
+ALLOWED_PROVIDER_FIELDS_BY_ACTION: dict[str, set[str]] = {
+    "Tap": COMMON_DO_FIELDS | {"element", "x", "y"},
+    "Double Tap": COMMON_DO_FIELDS | {"element", "x", "y"},
+    "Long Press": COMMON_DO_FIELDS | {"element", "x", "y"},
+    "Swipe": COMMON_DO_FIELDS | {"start", "start_element", "end", "end_element"},
+    "Type": COMMON_DO_FIELDS | {"text"},
+    "Type_Name": COMMON_DO_FIELDS | {"text"},
+    "Back": COMMON_DO_FIELDS,
+    "Home": COMMON_DO_FIELDS,
+    "Launch": COMMON_DO_FIELDS | {"app", "app_name"},
+    "Wait": COMMON_DO_FIELDS | {"duration"},
+    "Note": COMMON_DO_FIELDS | {"text"},
+    "Call_API": COMMON_DO_FIELDS | {"text"},
+    "Interact": COMMON_DO_FIELDS | {"text"},
+    "Take_over": COMMON_DO_FIELDS | {"text"},
+}
 
 
 def adapt_json_action(payload: str | dict[str, Any]) -> dict[str, Any]:
     """Adapt provider-facing JSON into an internal canonical action dict."""
     data = _coerce_json_object(payload)
+    _reject_dangerous_provider_fields(data)
     action_type = data.get("type") or data.get("_metadata")
     if action_type == "finish":
+        _reject_unexpected_provider_fields(data, {"type", "_metadata", "message"})
         message = data.get("message")
         if not isinstance(message, str):
             raise ActionAdapterError("missing_field", "finish.message must be a string")
@@ -54,6 +93,7 @@ def adapt_json_action(payload: str | dict[str, Any]) -> dict[str, Any]:
         raise ActionAdapterError("unknown_action", "action type must be do or finish")
 
     action_name = _canonical_action_name(data.get("action"))
+    _reject_unexpected_provider_fields(data, ALLOWED_PROVIDER_FIELDS_BY_ACTION[action_name])
     action: dict[str, Any] = {"_metadata": "do", "action": action_name}
     if "message" in data:
         if not isinstance(data["message"], str):
@@ -83,7 +123,9 @@ def adapt_json_action(payload: str | dict[str, Any]) -> dict[str, Any]:
             raise ActionAdapterError("missing_field", "Launch requires app")
         action["app"] = app
     elif action_name == "Wait":
-        duration = data.get("duration", "1 seconds")
+        if "duration" not in data:
+            raise ActionAdapterError("missing_field", "Wait requires duration")
+        duration = data["duration"]
         if isinstance(duration, (int, float)) and not isinstance(duration, bool):
             duration = f"{duration} seconds"
         if not isinstance(duration, str):
@@ -102,6 +144,16 @@ def adapt_tool_calls(tool_calls: list[dict[str, Any]]) -> dict[str, Any]:
     function = tool_call.get("function")
     if not isinstance(function, dict):
         raise ActionAdapterError("unsupported_tool_call", "tool call missing function")
+    _reject_dangerous_provider_fields(tool_call)
+    _reject_dangerous_provider_fields(function)
+    _reject_unexpected_provider_fields(tool_call, ALLOWED_TOOL_CALL_FIELDS)
+    _reject_unexpected_provider_fields(function, ALLOWED_TOOL_FUNCTION_FIELDS)
+    if "type" in tool_call and tool_call["type"] != "function":
+        raise ActionAdapterError("unsupported_tool_call", "tool call type must be function")
+    if "id" in tool_call and not isinstance(tool_call["id"], str):
+        raise ActionAdapterError("unsupported_tool_call", "tool call id must be a string")
+    if "index" in tool_call and not isinstance(tool_call["index"], int):
+        raise ActionAdapterError("unsupported_tool_call", "tool call index must be an integer")
     name = function.get("name")
     if not isinstance(name, str) or name.lower() not in TOOL_NAME_ALIASES:
         raise ActionAdapterError("unsupported_tool_call", f"unsupported tool: {name}")
@@ -137,6 +189,18 @@ def _canonical_action_name(value: Any) -> str:
     if canonical is None:
         raise ActionAdapterError("unknown_action", f"unknown action: {value}")
     return canonical
+
+
+def _reject_dangerous_provider_fields(data: dict[str, Any]) -> None:
+    dangerous = {key for key in data if key.lower() in DANGEROUS_PROVIDER_FIELDS}
+    if dangerous:
+        raise ActionAdapterError("unsafe_value", f"dangerous fields are not allowed: {sorted(dangerous)}")
+
+
+def _reject_unexpected_provider_fields(data: dict[str, Any], allowed: set[str]) -> None:
+    extras = set(data) - allowed
+    if extras:
+        raise ActionAdapterError("unsafe_value", f"unsupported provider fields: {sorted(extras)}")
 
 
 def _extract_point(data: dict[str, Any]) -> list[int | float]:

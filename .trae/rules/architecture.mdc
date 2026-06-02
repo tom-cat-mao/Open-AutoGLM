@@ -6,7 +6,7 @@ globs: "phone_agent/agent.py,phone_agent/graph/**/*.py,phone_agent/model/client.
 
 # Architecture Guardrails
 
-本文件是轻量架构守门规则，不承载完整设计。完整 State/Node/Edge/Tool/HITL 设计以 `.trae/rules/graph.mdc` 为准。
+本文件是轻量架构守门规则，不承载完整设计。完整 roadmap 与 RALPLAN 规划产物以 `.trae/rules/graph.mdc` 为准（仅在 RALPLAN/Autopilot 阶段加载）。
 
 ## 何时加载
 

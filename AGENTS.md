@@ -22,45 +22,10 @@
 | Reflection | `reflect_node` 维护 `reflection_verdict/failure_cause/suggested_strategy`；Plan 下一轮必须能读取结构化失败原因和策略 |
 | Context | `context_mode=off|observe|inject`，默认 observe；仅 inject 注入脱敏裁剪后的 context block；context 不得绕过 HITL |
 | Output Adapter | `ModelConfig.output_mode=text_dsl|json_schema|tool_calls|auto`；JSON/tool_calls 必须经 adapter 白名单映射到 canonical action，parse failure fail-closed，不得绕过 HITL |
-
-## Key Paths
-
-| 范围 | 路径 |
-|---|---|
-| CLI 入口 | `main.py` |
-| Agent | `phone_agent/agent.py` |
-| Graph | `phone_agent/graph/{state.py,builder.py,edges.py,trace.py,context.py,nodes/,tools/}` |
-| Actions | `phone_agent/actions/{handler.py,adapter.py}` |
-| Model | `phone_agent/model/client.py` |
-| Device | `phone_agent/device_factory.py`, `phone_agent/adb/` |
-| Prompts | `phone_agent/config/prompts.py`, `prompts_zh.py`, `prompts_en.py` |
-| TraeCLI rules | `.trae/rules/{graph,ralplan,autopilot,architecture,style}.mdc` |
-| TraeCLI commands/skills | `.trae/commands/{ralplan,autopilot}.md`, `.trae/skills/{ralplan,autopilot}/SKILL.md` |
-| TraeCLI agents/hooks | `.trae/agents/*.md`, `.trae/hooks/{ralplan,autopilot}.py` |
-
-## Rule Loading Policy
-
-| 任务 | 读取规则 |
-|---|---|
-| LangGraph / Agent loop / HITL / Tool 变更 | `.trae/rules/graph.mdc` + `.trae/rules/architecture.mdc` |
-| roadmap / 实现计划 / 架构审查 | `.trae/rules/ralplan.mdc` |
-| Python 代码风格或测试 | `.trae/rules/style.mdc` |
-| 配置、模型、设备、动作系统 | 对应 `.trae/rules/{config,model,devices,actions}.mdc` |
-| 普通问答或轻量改动 | 不主动加载重型规则 |
-
-## Commands & Validation
-
-| 场景 | 命令 |
-|---|---|
-| 安装开发依赖 | `.venv/bin/pip install -e ".[dev]"` |
-| 全量测试 | `.venv/bin/pytest` |
-| Graph 测试 | `.venv/bin/pytest tests/graph -v` |
-| Eval/Trace 测试 | `.venv/bin/pytest tests/evals tests/graph/test_trace.py -v` |
-| Output Adapter 测试 | `.venv/bin/pytest tests/model tests/actions tests/graph/test_plan_reflect.py tests/graph/test_execute.py -v` |
-| Context dry-run 对比 | `.venv/bin/python evals/run_eval.py --dry-run --context-mode observe --trace-dir .traces/smoke` |
-| TraeCLI Autopilot 测试 | `.venv/bin/pytest tests/trae/test_autopilot_hook.py -q` |
-| Dry-run eval trace | `.venv/bin/python evals/run_eval.py --dry-run --trace-dir .traces/smoke` |
-| 部署检查 | `.venv/bin/python scripts/check_deployment_cn.py` 或 `check_deployment_en.py` |
+| Action IR Pipeline | 阶梯架构：Adapter → draft ActionIR → Validator → (Repair → Validator) → Safety Gate → Executor；Repair 不得在 Safety Gate 之后；Executor 只接收 validated + safety-approved IR |
+| Validator | 集中校验 action 白名单、必填字段、坐标 0-1000、Wait duration 正数且 ≤60s、dangerous fields；fail-closed |
+| Safety Gate | 纯决策层 `decide_safety()`，输出 `approved|confirm|takeover|rejected`；不 dispatch、不调用设备 |
+| Repair | 仅修复 metadata 大小写、action 别名；禁止猜坐标/动作/隐私文本；repair 后必须二次 Validator |
 
 ## Version Management
 

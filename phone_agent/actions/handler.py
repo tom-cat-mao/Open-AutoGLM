@@ -36,7 +36,6 @@ def parse_action(response: str) -> dict[str, Any]:
     Raises:
         ValueError: If the response cannot be parsed.
     """
-    print(f"Parsing action: {response}")
     try:
         response = response.strip()
         if response.startswith("do"):

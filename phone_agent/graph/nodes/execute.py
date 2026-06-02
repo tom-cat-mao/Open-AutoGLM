@@ -6,6 +6,8 @@ from typing import TYPE_CHECKING
 from langchain_core.runnables import RunnableConfig
 
 from phone_agent.actions.handler import ActionResult, finish
+from phone_agent.actions.safety import decide_safety
+from phone_agent.actions.validator import ActionValidationError, validate_action
 from phone_agent.graph.context import (
     build_action_outcome_summary,
     context_enabled,
@@ -103,6 +105,63 @@ def execute_node(state: "AgentState", config: RunnableConfig) -> dict:
             **_context_update({"success": False, "should_finish": True, "message": "No action to execute"}),
         }
 
+    try:
+        action_parsed = validate_action(action_parsed)
+    except ActionValidationError as exc:
+        result = ActionResult(
+            success=False,
+            should_finish=True,
+            message=f"Invalid action: {exc.code}: {exc}",
+        )
+        emit_trace(
+            config,
+            state,
+            "execute",
+            "execute_error",
+            {"message": result.message, "failure_cause": "action_validation_failed", "validation_error_code": exc.code},
+        )
+        return {
+            "action_result": result.__dict__,
+            "messages": messages,
+            "finished": True,
+            "error": result.message,
+            "failure_cause": "action_validation_failed",
+            **_context_update(result.__dict__),
+        }
+
+    pending_execute_confirmed = state.get("pending_execute") and state.get("interrupt_result") is True
+    safety_decision = decide_safety(action_parsed)
+    safety_route = "approved" if pending_execute_confirmed else safety_decision.route
+    safety_reason = "confirmation_accepted" if pending_execute_confirmed else safety_decision.reason
+    emit_trace(
+        config,
+        state,
+        "execute",
+        "safety_decision",
+        {
+            "route": safety_route,
+            "interrupt_type": safety_decision.interrupt_type,
+            "reason": safety_reason,
+            "confirmation_accepted": pending_execute_confirmed,
+            "decision": safety_decision.sanitized_trace_payload or {},
+        },
+    )
+    if safety_route == "rejected":
+        result = ActionResult(
+            success=False,
+            should_finish=True,
+            message=f"Action rejected by safety gate: {safety_decision.reason}",
+        )
+        emit_trace(config, state, "execute", "execute_error", {"message": result.message})
+        return {
+            "action_result": result.__dict__,
+            "messages": messages,
+            "finished": True,
+            "error": result.message,
+            "failure_cause": "action_safety_rejected",
+            **_context_update(result.__dict__),
+        }
+
     if action_parsed.get("_metadata") == "finish":
         result = ActionResult(
             success=True,
@@ -197,18 +256,21 @@ def execute_node(state: "AgentState", config: RunnableConfig) -> dict:
 
     # 3. Human-in-the-Loop checks (Phase 2)
     action_name = action_parsed.get("action")
-    if action_name == "Take_over":
+    if safety_decision.route == "takeover":
         messages = _strip_and_append(messages, thinking, action_raw)
         emit_trace(
             config,
             state,
             "execute",
             "takeover_interrupt",
-            {"interrupt_message": action_parsed.get("message", "User intervention required")},
+            {
+                "interrupt_message": action_parsed.get("message", "User intervention required"),
+                "safety_reason": safety_decision.reason,
+            },
         )
         return {
             "messages": messages,
-            "pending_interrupt": "takeover",
+            "pending_interrupt": safety_decision.interrupt_type or "takeover",
             "interrupt_message": action_parsed.get(
                 "message", "User intervention required"
             ),
@@ -216,18 +278,18 @@ def execute_node(state: "AgentState", config: RunnableConfig) -> dict:
             "context_mode": context_mode,
         }
 
-    if action_name == "Tap" and "message" in action_parsed:
+    if safety_decision.route == "confirm":
         messages = _strip_and_append(messages, thinking, action_raw)
         emit_trace(
             config,
             state,
             "execute",
             "confirm_interrupt",
-            {"interrupt_message": action_parsed["message"]},
+            {"interrupt_message": action_parsed["message"], "safety_reason": safety_decision.reason},
         )
         return {
             "messages": messages,
-            "pending_interrupt": "confirmation",
+            "pending_interrupt": safety_decision.interrupt_type or "confirmation",
             "interrupt_message": action_parsed["message"],
             "pending_execute": True,
             "hitl_count": state.get("hitl_count", 0) + 1,

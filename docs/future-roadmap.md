@@ -6,14 +6,130 @@
 
 ## 当前状态
 
-- **Phase 1-9**: ✅ 全部完成
+- **Phase 1-13**: ✅ 已完成当前 graph roadmap 中已批准的实现范围；Phase 11A/11B/11C 完成 Context & Observability Harness，Phase 12A/12B/12C 完成多格式模型输出适配，Phase 13A-13E 完成 Canonical Action IR & Safety Pipeline 阶梯架构；long-term memory 与 LangChain provider abstraction 仍待另行规划
 - **测试**: 已恢复可执行 graph/actions/evals 回归测试与安装门禁；当前本地门禁为 `.venv/bin/pytest tests -q` 全绿
 - **架构**: LangGraph Plan-Execute-Reflect StateGraph
 - **图拓扑**: `plan → execute → [confirm|takeover|reflect|replan|end]`
 - **结构化 API**: 已提供 `PhoneAgent.run_structured()` / `RunResult`，`run()` 继续保持字符串返回兼容
 - **可观测性**: 已提供默认本地 JSONL trace，`RunResult` / eval JSON 可通过 `trace_id` 与 `trace_path` 关联 trace 文件；默认脱敏敏感截图、prompt/API key 与隐私文本
+- **短期 Context Harness**: 已支持 `context_mode=off|observe|inject`，默认 `observe`；记录 `screen_belief`、`action_outcome_summary`、`failure_memory`、`summarized_history` 与 context 指标，仅 `inject` 模式向 Plan 注入脱敏裁剪后的 context block
 - **策略反思**: 已支持结构化 `reflection_verdict`、`failure_cause`、`suggested_strategy`，下一轮 plan 可读取失败原因和建议策略
 - **评测地基**: 已提供 `evals/run_eval.py --dry-run` smoke harness；当前统计结构化结果、HITL interrupt routing、trace 文件关联、retry count 与 failure cause histogram；不承诺跨进程 resume
+- **收益验证**: eval 已输出 `context_mode`、`context_block_chars`、`context_truncated`、`failure_memory_hit_count`、`repeated_failure_count`，支持 off/observe/inject 对比
+- **输出适配**: `ModelConfig.output_mode=text_dsl|json_schema|tool_calls|auto`；XML/text DSL、JSON、已聚合 OpenAI `tool_calls` 统一归一到 canonical action，parse failure fail-closed，不绕过 HITL
+
+---
+
+## 已完成 MVP: Model Output Adapter
+
+**目标**: 兼容不同 OpenAI-compatible provider 的输出格式，在不替换 LangGraph 状态机、不扩大设备执行面的前提下，将 XML/text DSL、JSON 与 OpenAI `tool_calls` 安全映射到内部 canonical action。
+
+**当前状态**: Phase 12A/12B/12C 已落地。默认 `output_mode="text_dsl"` 保持兼容；可通过 Python API 的 `ModelConfig(output_mode=...)` 选择 `json_schema`、`tool_calls` 或 `auto`。
+
+**已落地方案**:
+- `phone_agent/model/client.py`: response normalizer、`<answer>` 优先解析、Markdown code fence/空白清理、`output_mode`、streaming `tool_calls` delta 聚合、parse metadata。
+- `phone_agent/actions/adapter.py`: provider-facing JSON / 已聚合 `tool_calls` 到 canonical action 的白名单 adapter，提供 `invalid_json`、`unknown_action`、`missing_field`、`unsafe_value`、`unsupported_tool_call` 等稳定错误码。
+- `phone_agent/actions/handler.py`: `do(...)` / `finish(...)` 统一使用 `ast.parse` + `ast.literal_eval`，Type/Type_Name 不再走脆弱字符串切片。
+- `plan_node` / `execute_node`: parse failure 返回 `action_parsed=None`、`failure_cause=model_parse_failed`，不会包装成成功 `finish`，也不会 dispatch tool。
+- `trace`: 记录 configured mode、detected format、adapter used、parse success/error code；`parse_error` 与隐私文本默认脱敏。
+
+**Canonical action schema**:
+- do: `{"_metadata":"do","action":"Tap","element":[500,500]}`
+- finish: `{"_metadata":"finish","message":"done"}`
+
+**安全边界**:
+- adapter 只生成 action dict，不直接执行工具；执行仍统一经过 `execute_node -> dispatch_tool()`。
+- JSON/tool_calls 只允许白名单 action 和字段；坐标保持 0-1000 相对值，绝对像素转换只在 tool 层。
+- 敏感 `Tap` 仍走 confirmation interrupt；`Take_over` 仍走 takeover interrupt；JSON/tool_calls 不自动授权。
+- malformed / empty / unsupported 输出 fail-closed 为 `model_parse_failed`，不会伪装成任务成功。
+
+**验证命令**:
+
+```bash
+.venv/bin/pytest tests/model tests/actions tests/graph/test_plan_reflect.py tests/graph/test_execute.py -v
+.venv/bin/pytest tests -q
+```
+
+**明确非目标**: 本阶段不使用 LangChain Agent 替换 LangGraph `StateGraph`，不强制替换 OpenAI Python SDK；LangChain `init_chat_model` / provider abstraction 仅作为后续 ADR/spike 候选。
+
+---
+
+## 已完成 MVP: Canonical Action IR & Safety Pipeline (Phase 13)
+
+**目标**: 将多格式 parser/adapter 收敛为阶梯架构，建立 Canonical Action IR、独立 Validator、Safety Gate、有限 Repair 与统一 trace/eval 覆盖。
+
+**当前状态**: Phase 13A-13E 已落地。94 项测试通过，code-reviewer 与 security-reviewer 最终复审无 blocking/major findings。
+
+**阶梯架构**:
+
+```text
+provider output
+  -> Parser/Adapter (格式归一、别名、包裹层)
+  -> draft ActionIR
+  -> Validator (schema/字段/坐标/白名单)
+     -> valid: final validated IR -> Safety Gate
+     -> invalid but repairable: Repair -> Validator again
+     -> invalid unrecoverable / repair failed: fail-closed
+  -> Safety Gate (纯决策层，只接收 validated IR)
+     -> approved: Executor (validated + safety-approved IR only)
+     -> confirm/takeover: LangGraph interrupt node
+     -> rejected: fail-closed
+```
+
+**已落地方案**:
+- `phone_agent/actions/ir.py`: `ActionIR` frozen dataclass + `ActionDict` TypedDict，`to_dict()` 确保 `_metadata` 权威。
+- `phone_agent/actions/validator.py`: `validate_action()` 集中校验 action 白名单、必填字段、坐标 0-1000、Wait duration 格式与边界（正数，≤60s）、dangerous fields。
+- `phone_agent/actions/repair.py`: `repair_action()` 仅修复 metadata 大小写、action 别名映射；禁止猜坐标/动作/隐私文本。
+- `phone_agent/actions/safety.py`: `decide_safety()` 纯决策层，输出 `SafetyDecision(route="approved"|"confirm"|"takeover"|"rejected")`。
+- `phone_agent/actions/adapter.py`: 新增 `DANGEROUS_PROVIDER_FIELDS`、`ALLOWED_PROVIDER_FIELDS_BY_ACTION`、tool calls envelope 校验；Wait 不再默认 duration。
+- `phone_agent/graph/nodes/plan.py`: `_validate_with_limited_repair()` helper，adapter 后 validator → repair → second validator，fail-closed。
+- `phone_agent/graph/nodes/execute.py`: 执行前 re-validate + safety gate，处理 `pending_execute_confirmed` 绕过确认。
+
+**安全边界**:
+- Fail-closed: parse/adapter/validation/repair/safety 任一失败不得伪装成 `finish`，不得执行工具。
+- Repair 只能发生在 Safety Gate 之前；Safety Gate 只接收 final validated IR；Executor 只接收 validated + safety-approved IR。
+- Adapter output always passes Validator；任何 provider path 不得绕过 Validator。
+- HITL 仍使用 LangGraph `interrupt()`；confirm/takeover/pending_execute 语义不变。
+
+**验证命令**:
+
+```bash
+.venv/bin/pytest tests/actions tests/model tests/graph/test_execute.py tests/graph/test_plan_reflect.py tests/graph/test_trace.py tests/evals -v
+.venv/bin/pytest tests -q
+```
+
+**明确非目标**: 不引入 LangChain Agent，不改变 StateGraph 拓扑，不改变坐标转换位置。
+
+---
+
+## 已完成 MVP: Context & Observability Harness
+
+**目标**: 在不提前进入长期记忆的前提下，先建立可观测、可评测、可回滚的短期 context 能力。
+
+**当前状态**: Phase 11A/11B/11C 已落地。默认 `context_mode="observe"`，只记录 context state、trace/eval 指标，不向 Plan 注入；仅显式设置 `inject` 时注入脱敏、裁剪后的 context block。
+
+**已落地方案**:
+- `phone_agent/graph/context.py`: context mode、failure taxonomy、脱敏、预算裁剪、context block 构造与 metrics。
+- `AgentState`: `screen_belief`、`action_outcome_summary`、`failure_memory`、`summarized_history`、`context_budget`、`context_truncated`、`context_block_chars`、`failure_memory_hit_count`、`repeated_failure_count`。
+- `plan_node`: observe 不注入，inject 才注入 context block。
+- `execute_node` / `reflect_node`: 生成 action outcome、screen belief、failure memory 与 history summary。
+- `RunResult` / eval: 输出 context 可比指标，支持 `--context-mode off|observe|inject`。
+
+**默认预算与隐私**:
+- failure memory 最近 3 条，action outcome 最近 1 条。
+- screen belief 摘要 300 字符，history 摘要 800 字符，context block 1500 字符。
+- 裁剪优先级：当前 screen belief > 最近 action outcome > latest failure memory > summarized history。
+- 姓名、手机号、邮箱、订单号、验证码、API key/token、长 base64/JWT 等默认脱敏；context/memory 不绕过 HITL/confirm/takeover。
+
+**验证命令**:
+
+```bash
+.venv/bin/pytest tests -q
+.venv/bin/python evals/run_eval.py --dry-run --context-mode observe --trace-dir .traces/smoke
+.venv/bin/python evals/run_eval.py --dry-run --context-mode inject --trace-dir .traces/smoke
+```
+
+**明确非目标**: 本阶段不实现向量库、数据库、跨任务用户画像、云同步、完整 checkpoint/resume 或长期记忆。后续若做 long-term memory，必须基于隐私策略、删除/过期机制、HITL 安全门禁和 eval 收益证据另行规划。
 
 ---
 

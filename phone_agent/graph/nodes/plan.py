@@ -7,6 +7,8 @@ from langchain_core.runnables import RunnableConfig
 
 from phone_agent.actions.adapter import ActionAdapterError, adapt_json_action
 from phone_agent.actions.handler import parse_action
+from phone_agent.actions.repair import ActionRepairError, repair_action
+from phone_agent.actions.validator import ActionValidationError, validate_action
 from phone_agent.config import get_system_prompt
 from phone_agent.graph.context import (
     build_context_metrics,
@@ -41,6 +43,73 @@ def _build_reflection_context(state: "AgentState") -> str:
     if structured:
         parts.append("** Structured Reflection **\n\n" + "\n".join(structured))
     return "\n\n".join(parts)
+
+
+def _validate_with_limited_repair(
+    action: dict,
+    *,
+    raw_action: str,
+    parse_metadata: dict,
+) -> tuple[dict | None, str | None, dict]:
+    """Validate adapter/parser output, with one narrow repair attempt before fail-closed."""
+
+    try:
+        validated = validate_action(action)
+        return validated, None, {**parse_metadata, "validation_success": True}
+    except ActionValidationError as validation_exc:
+        repair_metadata = {
+            **parse_metadata,
+            "validation_success": False,
+            "validation_error_code": validation_exc.code,
+            "repair_attempted": True,
+        }
+        try:
+            repaired = repair_action(
+                action,
+                error_code=validation_exc.code,
+                raw_summary=f"len={len(raw_action)}",
+            )
+            validated = validate_action(repaired)
+        except ActionRepairError as repair_exc:
+            error = f"Model parse failed: validation: {validation_exc.code}: {validation_exc}"
+            return (
+                None,
+                error,
+                {
+                    **repair_metadata,
+                    "repair_success": False,
+                    "repair_error_code": repair_exc.code,
+                    "parse_success": False,
+                    "parse_error_code": validation_exc.code,
+                },
+            )
+        except ActionValidationError as second_validation_exc:
+            error = (
+                "Model parse failed: validation after repair: "
+                f"{second_validation_exc.code}: {second_validation_exc}"
+            )
+            return (
+                None,
+                error,
+                {
+                    **repair_metadata,
+                    "repair_success": True,
+                    "second_validation_success": False,
+                    "second_validation_error_code": second_validation_exc.code,
+                    "parse_success": False,
+                    "parse_error_code": second_validation_exc.code,
+                },
+            )
+        return (
+            validated,
+            None,
+            {
+                **repair_metadata,
+                "repair_success": True,
+                "second_validation_success": True,
+                "validation_success": True,
+            },
+        )
 
 
 def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
@@ -154,7 +223,7 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
             **context_metrics,
         }
 
-    # 4. Parse action
+    # 4. Parse action, then validate canonical IR before safety/execution.
     parse_error = None
     parse_metadata = getattr(response, "parse_metadata", {}) or {}
     try:
@@ -189,6 +258,13 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
             "parse_error_code": "parse_error",
         }
 
+    if action_parsed is not None:
+        action_parsed, parse_error, parse_metadata = _validate_with_limited_repair(
+            action_parsed,
+            raw_action=response.action,
+            parse_metadata=parse_metadata,
+        )
+
     emit_trace(
         config,
         state,
@@ -204,6 +280,11 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
             "parse_error": parse_error,
             "failure_cause": "model_parse_failed" if parse_error else None,
             "parse_metadata": parse_metadata,
+            "validation_success": parse_metadata.get("validation_success"),
+            "validation_error_code": parse_metadata.get("validation_error_code"),
+            "repair_attempted": parse_metadata.get("repair_attempted", False),
+            "repair_success": parse_metadata.get("repair_success"),
+            "repair_error_code": parse_metadata.get("repair_error_code"),
             **context_metrics,
         },
     )
@@ -226,6 +307,7 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
             },
             "error": parse_error,
             "failure_cause": "model_parse_failed",
+            "parse_metadata": parse_metadata,
             "finished": True,
             "action_confirmed": False,
             "context_mode": context_mode,

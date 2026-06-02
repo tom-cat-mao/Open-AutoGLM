@@ -1,23 +1,23 @@
 ---
-description: LangGraph roadmap 与核心执行约束；仅在修改 graph/Agent loop/Tool/HITL 或执行 roadmap 时加载
+description: LangGraph roadmap 与核心执行约束；仅在 RALPLAN/Autopilot 规划阶段加载
 alwaysApply: false
-globs: "phone_agent/graph/**/*.py,phone_agent/agent.py,phone_agent/actions/**/*.py,phone_agent/device_factory.py,phone_agent/adb/**/*.py,tests/**/*.py,setup.py,README.md,docs/**/*.md"
+globs: ".trae/commands/ralplan.md,.trae/commands/autopilot.md,.trae/hooks/ralplan.py,.trae/hooks/autopilot.py,.trae/rules/ralplan.mdc,.trae/rules/autopilot.mdc,.trae/rules/graph.mdc"
 ---
 
 # RALPLAN Status
 
 ```yaml
-status: completed
+status: critic_approved
 design_status: critic_approved
 execution_status: completed
 iteration: 1
 planner_mode: null
 revision_scope: null
-last_planner_update: "按 Architect findings 对 Phase 12A/12B/12C 做 targeted 修订，补齐 parse failure、canonical schema、streaming tool_calls、Type/Type_Name 与可观测性边界。"
-last_architect_review: "Architect 指出需明确 parse failure fail-closed 语义、内部 canonical action schema、12B/12C 可观测性分工、streamed tool_calls 策略与 Type/Type_Name 安全边界。"
+last_planner_update: "已明确 Repair placement、Adapter/Validator contract、Safety Gate contract。"
+last_architect_review: "复审无 Blocking/Major；建议 Critic APPROVE。"
 last_critic_verdict: APPROVE
 approved_for_execution: true
-notes: "Phase 12A/12B/12C 已按 approved roadmap 完成实现并通过目标测试与全量测试；后续 LangChain provider abstraction 仅保留为另行 ADR/spike。"
+notes: "Phase 13 parser/IR/validator/repair/safety/trace 已实现并通过 94 项测试；code-reviewer 与 security-reviewer 最终复审无 blocking/major findings。"
 ```
 
 # Roadmap
@@ -26,217 +26,176 @@ notes: "Phase 12A/12B/12C 已按 approved roadmap 完成实现并通过目标测
 
 | Phase | 摘要 |
 |---|---|
-| ✅ 1 | Plan-Execute-Reflect MVP 已迁移到 LangGraph `StateGraph`。 |
-| ✅ 2 | HITL 已使用 `interrupt()` 接入 confirm/takeover；当前只保证路由语义，不承诺持久 resume。 |
-| ✅ 3 | Action 已封装为 graph tools，`dispatch_tool()` 统一调度，坐标转换集中在 tool 层。 |
-| ✅ 4 | 旧 while loop / `ActionHandler` 类 / `use_graph` / `use_tools` 双轨已清理。 |
-| ✅ 5 | 已修复 messages reducer、confirm-then-execute、reflect i18n、mypy clean 等问题。 |
-| ✅ 6 | 已恢复测试/打包/文档可信地基；Tool DI seam 已通过 config 注入且 schema 隐藏 `device_factory`。 |
-| ✅ 7 | 已新增 `RunResult` / `run_structured()` 结构化 API 与本地 dry-run Evaluation Harness。 |
-| ✅ 8 | 已新增默认本地 JSONL trace，覆盖关键节点/事件并默认脱敏敏感文本、图片与 API key。 |
-| ✅ 9 | 已新增结构化 reflection schema、失败原因分类、建议策略、Plan 反馈闭环与 eval 统计。 |
-| ✅ 10 | 已完成 TraeCLI-native Autopilot 多 subagent 编排移植，未改变 `phone_agent/` 业务运行时。 |
-| ✅ 11A/11B/11C | Context & Observability Harness 已完成 observe/schema/inject 分阶段实现与测试；旧长篇展开已清理，仅保留该摘要。 |
-| ✅ 12A/12B/12C | Response Normalizer、Action Format Adapter、Provider Capability Modes 与 parse observability 已完成；保留 LangGraph 状态机与 OpenAI-compatible SDK 主线。 |
+| ✅ 1-6 | LangGraph `StateGraph` 主循环、HITL interrupt、tool dispatch、DeviceFactory DI、messages reducer 与基础测试/打包已建立。 |
+| ✅ 7-9 | `RunResult`、dry-run eval、本地 JSONL trace、结构化 reflection 与 Plan 反馈闭环已落地。 |
+| ✅ 10 | TraeCLI-native Autopilot 编排已完成；不改变 `phone_agent/` 运行时。 |
+| ✅ 11A-11C | Context & Observability Harness 已完成 observe/schema/inject 分阶段实现与测试。 |
+| ✅ 12A-12C | 多格式 parser/adapter、provider output modes 与 parse observability 已落地，但需要收敛为更清晰的阶梯架构。 |
+| ✅ 13A-13E | Canonical Action IR、独立 Validator、Safety Gate、有限 Repair、Trace/eval/tests 收敛；阶梯架构落地，94 项测试通过。 |
 
 ## RALPLAN-DR 摘要
 
 ### Principles
 
-1. **StateGraph 优先，适配层最小化**：保留现有 LangGraph `StateGraph`、`builder.py` 当前拓扑与节点职责，不用 LangChain Agent 替换状态机。
-2. **Canonical action 单一真相**：XML text DSL、裸 `do/finish`、JSON schema、聚合后的 OpenAI `tool_calls` 都先归一到内部 canonical action，再交给现有执行层。
-3. **Parse failure fail-closed**：malformed / empty / unsupported 输出不得被包装成成功 `finish`，不得执行 tool；必须产生 `parse_error` metadata 或 `action_parsed=None + error` 等价失败信号。
-4. **坐标与 HITL 不变量不变**：模型/adapter 坐标保持 0-1000 相对值，绝对像素转换只在 tool 层；JSON/tool_calls 不绕过 confirm/takeover。
-5. **可观测性分阶段加深**：12B 记录 adapter 单元错误码与最小 parse metadata；12C 再完善 provider mode、detected format、adapter used、parse success/error code 的 trace/eval 观测。
+1. **保留 LangGraph StateGraph**：不删除运行时代码中的 LangGraph；本轮“删除 graph”只指删除/压缩 `.trae/rules/graph.mdc` 中过长历史内容。
+2. **不用 LangChain Agent 替换 StateGraph**：LangChain 仅可作为后续 provider abstraction spike/ADR，不进入当前实现主线。
+3. **Canonical Action IR 单一真相**：所有 text DSL / JSON / tool_calls / provider 差异必须进入强类型 IR，并经过 Validator、Safety Gate 与 Executor。
+4. **Fail-closed 优先**：parse/adapter/validation/repair/safety 任一失败不得伪装成 `finish`，不得执行工具。
+5. **安全策略显式分层**：Adapter/Parser、Validator、Repair、Safety Gate、Executor 各司其职，不允许 provider path 绕过任一必经门。 
 
 ### Decision Drivers
 
-1. **已知解析 bug 影响动作安全**：`_parse_response()` 先匹配 `do(action=` / `finish(message=`，后匹配 `<answer>`，导致 `<answer>do(...)</answer>` 可能被解析成带 `</answer>` 尾巴的 action。
-2. **多模型 OpenAI-compatible 输出不一致**：不同模型可能返回 XML answer、裸 DSL、Markdown code fence、JSON 对象、structured output 或 `tool_calls`，需要统一适配且不能猜测执行。
-3. **执行层安全边界必须稳定**：`phone_agent/actions/handler.py` 已用 AST literal parsing 保护 `do(...)` / `finish(...)`，新格式只能安全映射，不能扩大设备操作面或改变 HITL/坐标转换。
+1. 现有多格式 parser/adapter 已能处理多类输出，但 parser、adapter、execute、安全策略边界仍偏耦合。
+2. LLM 输出可能包含半截 tool_calls、别名、包裹层、错误字段、越界坐标或隐私文本；需要统一 fail-closed 与可观测错误码。
+3. 后续模型/provider 扩展需要稳定阶梯，确保敏感动作、repair 与 dispatch_tool 不会绕过 Validator/Safety。
 
 ### Viable Options
 
 | 方案 | 优点 | 缺点 |
 |---|---|---|
-| A. 仅修 `_parse_response()` 的 `<answer>` 优先级 | 最小改动，快速修复已知 bug；风险低 | 不能系统支持 JSON/tool_calls；多模型兼容仍依赖 prompt 遵循度 |
-| B. 新增 Response Normalizer + Action Format Adapter + Provider Capability Modes | 分层清晰；先修 text DSL，再支持 JSON/tool_calls；保留 graph/tool 安全边界；可按模式回滚 | 需要新增 schema、配置、错误码和测试矩阵；需避免 parse failure 被误当成功 finish |
-| C. 用 LangChain Agent / tool calling 替换现有状态机 | 可直接利用 LangChain 工具调用生态与 structured output | 会重写 LangGraph 控制流、HITL 与 eval/trace 假设；对手机自动化安全风险过高 |
-| D. 完全迁移到 LangChain model abstraction，但不改 Agent | 可统一 OpenAI-compatible provider 初始化，未来支持 structured output / bind_tools | 短期仍需解析适配；若一次性替换 `ModelClient` streaming 会扩大回归面 |
+| A. 继续在现有 parser/adapter 内增量补丁 | 改动小，短期快 | 边界继续模糊；安全、repair、trace 规则分散；难以系统验证 adversarial 输出 |
+| B. 收敛为 IR + Validator + Repair + Safety 阶梯架构 | 分层清晰；可集中白名单/坐标/schema/HITL；便于测试和回滚 | 需要迁移现有 adapter/execute 边界，新增类型与测试矩阵 |
+| C. 改用 LangChain Agent/tool calling | 生态能力强 | 会替换 StateGraph/HITL 假设，风险过高；不符合当前约束 |
 
 ### Selected Approach
 
-选择 **方案 B：优先修输出适配层，保留 LangGraph 与 OpenAI SDK 主线；LangChain 仅作为中期模型层 ADR/spike，非当前必达验收**。
+选择 **B：在保留 LangGraph `StateGraph` 与现有执行语义的前提下，把已落地多格式 parser/adapter 收敛为阶梯架构**。
 
-执行顺序保持 Phase 12A/12B/12C：
+Runtime pipeline 必须按以下顺序执行：
 
-1. **Phase 12A — Response Normalizer & XML/parser fail-closed fix**：修 `_parse_response()` 优先级、XML/code fence/空白清理、Type/Type_Name 特殊解析安全边界，并明确 parse failure 状态机语义。
-2. **Phase 12B — Action Format Adapter**：新增 JSON / 已聚合 `tool_calls` 到内部 canonical dict 的纯 adapter，输出 adapter 错误码与最小 parse metadata，不处理 streaming delta 聚合。
-3. **Phase 12C — Model Provider Capability Modes & Observability**：增加可回滚 output mode，处理 OpenAI streaming tool_calls delta 聚合或 fail-closed/fallback，补齐 trace/eval 可观测性。
+```text
+provider output
+  -> Parser/Adapter
+  -> draft ActionIR
+  -> Validator
+     -> valid: final validated IR -> Safety Gate
+     -> invalid but repairable: Repair -> Validator again
+     -> invalid unrecoverable / repair failed / second validation failed: fail-closed
+  -> Safety Gate(validated IR only)
+     -> approved: Executor(validated + safety-approved IR only)
+     -> confirm/takeover: LangGraph interrupt node
+     -> rejected: fail-closed
+```
 
-明确方向：**不使用 LangChain Agent 替换现有 LangGraph 状态机**。LangChain 仅可作为隔离 ADR/spike 评估 provider abstraction，不作为 12C 必达验收。
+关键边界：
+- Repair 只能发生在 Safety Gate 之前；不得发生在 Safety Gate 之后。
+- Safety Gate 只接收 final validated IR；Executor 只接收 validated + safety-approved IR。
+- Adapter output always passes Validator；任何 provider path 不得绕过 Validator。
+
+### Adapter / Validator Contract
+
+- **Adapter/Parser**：只负责 provider format coercion、text/json/tool_calls 归一、alias normalization、wrapper/code fence/basic JSON coercion；可保留早拒绝作为 defense-in-depth，但早拒绝不能替代 Validator。
+- **Validator**：负责 canonical IR semantic/schema/range validation、action 白名单、必填字段、坐标 0-1000、extra dangerous fields、统一 validation error。
+- **错误元数据**：parse/adapter/validation/repair/safety 错误码统一映射到 metadata，供 trace/eval/reflect 使用；不得把 validation failure 伪装为 finish。
 
 ### ADR
 
-- **Decision**：采用分层输出适配架构：Response Normalizer 先清洗模型文本，Action Format Adapter 将 text DSL / JSON / 聚合后 `tool_calls` 统一为 canonical action，Provider Capability Modes 控制模型输出策略和 streaming delta 处理。
-- **Drivers**：已知 XML parser bug；OpenAI-compatible 多模型输出差异；手机自动化动作安全、HITL 与坐标不变量；可回滚和可观测。
-- **Alternatives**：只修 parser；直接改 prompt；替换成 LangChain Agent；全面替换 `ModelClient` 为 LangChain model abstraction。
-- **Why chosen**：该方案在不改 LangGraph 拓扑、不改 tool 执行层、不扩大设备操作权限的前提下逐步吸收多模型输出格式，并能将 parse failure 明确为失败而非伪成功。
-- **Consequences**：需要维护 canonical schema、错误码、streaming 聚合边界与测试矩阵；`ModelClient` 会承担输出模式协商和观测 metadata；prompt 仍需与默认 text DSL 兼容。
-- **Follow-ups**：若 12C 的 ADR/spike 证明收益明确，可另起 roadmap 评估 LangChain `init_chat_model` 仅替换 provider 初始化/structured output，不替换 StateGraph 和 HITL。
+- **Decision**：新增/整理 Canonical Action IR、Validator、Repair、Safety Gate 模块；让 Adapter/Parser 只负责格式归一，Validator 负责动作 schema/字段/坐标，Repair 只在 Validator 前后受控修复，Safety Gate 负责 HITL/敏感策略，Executor 只执行已验证且已通过安全门的 IR。
+- **Drivers**：LLM 输出不可控；动作执行高风险；当前多格式兼容已落地但需要可维护分层；测试需覆盖 adversarial parser 与 HITL 不绕过。
+- **Alternatives**：仅修 parser；继续扩大 adapter；用 LangChain Agent 替代；一次性重写 graph。
+- **Why chosen**：最小化运行时拓扑变更，保留已验证 LangGraph/HITL/trace 基础，同时把安全边界变成可测试模块。
+- **Consequences**：会新增 IR/validator/repair/safety 的模块边界与错误码；短期需要兼容旧 dict/action handler，避免大规模迁移风险。
+- **Follow-ups**：待 Phase 13 稳定后，可另起 spike 评估 provider abstraction；不得默认引入 LangChain Agent。
 
 ### Pre-mortem
 
-1. **错误动作被误执行**：normalizer 过度清理或 adapter 猜测字段，导致 malformed 输出变成有效 tap/type/swipe；缓解：失败默认 `model_parse_failed`/`parse_error`，禁止猜测必需字段，测试 malformed input 不执行 tool。
-2. **parse failure 被伪装成成功 finish**：为了兼容旧返回值把解析错误包装成 `finish(message=...)`，导致 `RunResult.success=True`；缓解：状态机必须保留失败信号，`RunResult.success=False` 或 `error/failure_cause=model_parse_failed` 等价字段非空。
-3. **HITL 被格式适配绕过**：JSON/tool_calls 映射后直接调用 tool；缓解：adapter 只生成 canonical action，不调用 tool，敏感判断仍由现有 graph/edge/confirm/takeover 路径处理。
-4. **streaming tool_calls delta 处理不完整**：12B 误处理 streaming fragment 导致半截参数被执行；缓解：12B 只接收已聚合 object，12C 再实现 delta 聚合、关闭 streaming fallback 或 fail-closed。
-5. **多模式回退难以定位**：`auto` 模式选择不同解析路径；缓解：12C trace/eval 记录 configured mode、detected format、adapter used、parse success/error code。
+1. **IR 迁移破坏旧 dict 边界**：缓解：默认优先 dataclass + TypedDict，保留 dict 兼容入口/出口与回归测试。
+2. **repair 过度猜测导致误执行**：缓解：repair 只修格式、别名、包裹层；禁止猜动作、坐标、隐私文本；失败 fail-closed。
+3. **Safety Gate 抽取后绕过 interrupt**：缓解：HITL 路由验收必须覆盖 confirm/takeover/manual handoff，不改变 `interrupt()` 语义。
 
 ### Expanded Test Plan
 
-| 层级 | 测试范围 |
+| 层级 | 范围 |
 |---|---|
-| Unit | `_parse_response()` / normalizer 覆盖 XML answer 优先、裸 `do/finish`、Markdown code fence、空白、尾部标签、嵌套 `<think>`、malformed XML、空响应；Type/Type_Name 分支覆盖引号、反斜杠、换行、`)`、恶意嵌套、超长文本；JSON/tool_calls adapter 字段校验与错误码。 |
-| Integration | `ModelClient` fake streaming responses 贯穿 plan/execute；不同 `output_mode` 进入同一 canonical action；解析失败进入结构化错误/reflect/end 或 RunResult 失败信号，不执行 tool；image_url base64 不受影响。 |
-| E2E / Graph | 使用 fake device 与 fake model 覆盖 START→plan→execute→reflect/confirm/takeover/end，保持 `builder.py` 当前拓扑及 replan skip path；敏感 tap 仍走 confirm，登录/验证码仍走 takeover，坐标仍只在 tool 层转换。 |
-| Regression | 保持当前 prompt 的 `<think>...</think><answer>do(...)</answer>` 样例可解析；`PhoneAgent.run() -> str`、`run_structured()`、trace/eval 字段兼容。 |
-| Observability | 12B 至少断言 adapter 错误码；12C 断言 trace/eval 输出 provider mode、detected format、adapter used、parse success/error code；不得记录 API key、完整 base64 图片或敏感 UI 明文。 |
+| Unit | IR 类型转换、adapter alias/coercion、validator 字段白名单/坐标范围/action schema、repair 限定规则、safety 策略。 |
+| Integration | plan/execute/edges 串联：parse failure 不执行 tool，JSON/tool_calls 半截聚合 fail-closed，HITL 不绕过。 |
+| E2E/Eval | dry-run eval 与 trace 覆盖 parser adversarial、安全门、隐私脱敏、错误码统计。 |
+| Regression | 保持 `ast.parse` + `literal_eval`、0-1000 坐标在 tool 层转换、messages image stripping、RunResult/trace 兼容。 |
 
-## 当前规划 Phase（已执行）
+## 当前规划 Phase
 
-执行状态：Phase 12A/12B/12C 已完成实现，目标测试与全量测试通过；后续新模型 provider abstraction、LangChain spike 或更完整 eval 对比需另起 roadmap。
+### Phase 13A: Canonical Action IR 强类型化
 
-### Phase 12A: Response Normalizer & XML/parser fail-closed fix
+**根因**：当前 canonical action 多以 dict/DSL 在 parser、adapter、handler、execute 间流动，缺少统一强类型契约，导致字段含义、坐标范围、finish/do 分支和错误码边界分散。
 
-**目标**：修复 `_parse_response()` 对 `<answer>` 包裹动作的解析优先级问题，新增轻量 response normalizer，并明确 parse failure 在 graph/RunResult 中必须 fail-closed。
+**修改文件候选**：`phone_agent/actions/ir.py`、`phone_agent/actions/adapter.py`、`phone_agent/actions/handler.py`、`phone_agent/model/client.py`、`phone_agent/graph/nodes/plan.py`、`phone_agent/graph/nodes/execute.py`、`tests/actions`、`tests/model`、`tests/graph`。
 
-**根因**：当前 `phone_agent/model/client.py` 手写 OpenAI SDK streaming 后在 `_parse_response()` 中先匹配 `do(action=` / `finish(message=`，再匹配 `<answer>`，因此 `<answer>do(...)</answer>` 会被错误截取；多模型还可能添加 Markdown code fence、额外空白、尾部标签，且 Type/Type_Name 特殊解析分支可能对引号/换行/括号/恶意嵌套不够稳健。
+**计划**：默认优先 dataclass + TypedDict，避免 Pydantic 新依赖；仅确需 runtime schema validation 时再考虑 Pydantic。建立 `ActionIR` / `DoActionIR` / `FinishActionIR` / parse-adapter-validation metadata；提供 dict 兼容转换函数，避免一次性改穿所有边界。
 
-**修改文件候选与原因**：
+**验收标准**：
+- IR 能表达 `do`、`finish`、parse/adapter/validation error，不丢失现有 canonical dict 语义。
+- 旧 dict/action handler 边界仍可工作；新增 IR 转换测试覆盖 text DSL、JSON、tool_calls。
+- 不引入 LangChain Agent，不改变 StateGraph 拓扑，不改变坐标转换位置。
 
-- `phone_agent/model/client.py`：调整 `_parse_response()` 优先级，新增/内联 normalizer，输出干净 DSL 或结构化 parse failure；不得把 parse failure 包装成成功 `finish`。
-- `phone_agent/graph/nodes/plan.py`：候选用于将模型 parse failure 转为 plan 阶段失败 metadata / state 字段，避免继续到可执行动作。
-- `phone_agent/graph/nodes/execute.py`：候选用于消费 `parse_error` / `action_parsed=None + error` 并进入 reflect/end 安全路径，保证不会 dispatch tool。
-- `phone_agent/graph/state.py`：候选用于增加或复用 `parse_error`、`failure_cause=model_parse_failed`、`action_parsed` 等状态字段。
-- `phone_agent/graph/trace.py`：候选用于记录最小 parse failure metadata，注意 12A/12B 只做必要观测，完整 provider 观测留给 12C。
-- `phone_agent/actions/handler.py`：候选用于统一 Type/Type_Name 到 AST literal parsing，或保留兼容分支但补齐安全测试；禁止 `eval()`。
-- `phone_agent/config/prompts.py`、`phone_agent/config/prompts_zh.py`、`phone_agent/config/prompts_en.py`：候选用于补充默认 XML answer/text DSL 输出约束；若现有 prompt 已足够则只加测试不改 prompt。
-- `tests/model/test_client.py` 或相邻 model 测试文件：覆盖 XML answer、裸 DSL、code fence、空白、尾部标签、malformed/empty/unsupported 输出和 streaming 聚合。
-- `tests/graph/test_plan_reflect.py`、`tests/graph/test_agent.py` 或相邻 graph 测试：覆盖 parse failure 不执行 tool，且 `RunResult.success is False` 或 `error/failure_cause=model_parse_failed` 等价失败信号非空。
-- `tests/actions/test_handler.py` 或相邻 actions 测试：覆盖 Type/Type_Name 分支的引号、反斜杠、换行、`)`、恶意嵌套与超长文本输入。
+### Phase 13B: 独立 Validator
 
-**非目标**：
+**根因**：字段白名单、action schema、坐标范围、adapter 二次校验分散在 parser/adapter/execute 中，parse failure 与 invalid action 可能难以统一 fail-closed。
 
-- 不新增 JSON schema 或 `tool_calls` adapter。
-- 不改变 LangGraph 拓扑、HITL 路由、DeviceFactory 注入、坐标转换或 tool schema。
-- 不替换 OpenAI SDK streaming，也不引入 LangChain Agent。
-- 不把 parse error 当作业务成功 finish；如需用户可读消息，只能附着在失败 metadata/error 中。
+**修改文件候选**：`phone_agent/actions/validator.py`、`phone_agent/actions/ir.py`、`phone_agent/actions/adapter.py`、`phone_agent/actions/handler.py`、`phone_agent/graph/nodes/plan.py`、`phone_agent/graph/nodes/execute.py`、`phone_agent/graph/edges.py`、`tests/actions`、`tests/graph`。
 
-**可量化验收标准**：
+**计划**：集中校验 action 白名单、必填字段、字段类型、坐标 0-1000、finish message、extra dangerous fields、adapter 输出二次校验；所有 parse/adapter/validation failure 返回结构化错误，禁止伪装 finish。
 
-- `<answer>do(action="tap", x=1, y=2)</answer>` 解析结果不包含 `</answer>`，并能被现有 AST action parser 接受。
-- `<think>...</think><answer>finish(message="done")</answer>`、裸 `do(...)`、裸 `finish(...)`、Markdown code fence 包裹输出、前后空白均能得到一致 canonical text DSL。
-- malformed / empty / unsupported 输出不会执行 tool，且 `RunResult.success is False` 或 `error/failure_cause=model_parse_failed` 等价失败信号非空。
-- parse failure 可采用 canonical `parse_error` metadata，或 `action_parsed=None + error` 的 fail-closed 设计；两者都不得被包装成成功 `finish`。
-- Type/Type_Name 特殊解析分支统一到 AST literal parsing，或保留兼容分支但测试覆盖引号、反斜杠、换行、`)`、恶意嵌套、超长文本。
-- 现有 OpenAI SDK streaming、`base_url=http://localhost:8000/v1`、`model_name=autoglm-phone-9b`、`extra_body`、image_url base64 行为保持兼容。
+**验收标准**：
+- 未知 action、缺字段、额外危险字段、坐标越界、非法 tool_calls 参数均 fail-closed，且不 dispatch tool。
+- validator 使用安全 literal/类型校验；`do(...)` / `finish(...)` 仍基于 `ast.parse` + `ast.literal_eval`，禁止 `eval()`。
+- graph/RunResult/trace 能区分 parse、adapter、validation、repair、safety error，且不破坏 reflect 降级路径。
 
-**测试命令或范围**：`.venv/bin/pytest tests/model tests/graph/test_plan_reflect.py tests/actions -v`；若 `tests/model/` 不存在，执行新增/相邻 `tests/graph` 和 `tests/actions` parser 相关测试。
+### Phase 13C: 独立 Safety Gate
 
-### Phase 12B: Action Format Adapter
+**根因**：敏感 Tap、Take_over/manual handoff、隐私/支付/账号动作策略与 execute_node 耦合，后续 JSON/tool_calls/IR 路径可能绕过 HITL。
 
-**目标**：新增纯 Action Format Adapter，将 provider-facing JSON 或已聚合 OpenAI `tool_calls` object 安全映射为内部 canonical action dict，再交给现有 AST DSL / action handler / graph 执行路径。
+**修改文件候选**：`phone_agent/actions/safety.py`、`phone_agent/graph/nodes/execute.py`、`phone_agent/graph/edges.py`、`phone_agent/graph/trace.py`、`tests/graph/test_execute.py`、`tests/graph/test_plan_reflect.py`、`tests/actions`。
 
-**根因**：仅靠 prompt 要求 `<answer>do(...)</answer>` 难以覆盖所有 OpenAI-compatible 模型；部分模型更可靠地产生 JSON 或 `tool_calls`。当前执行层只稳定支持内部动作语义，缺少 provider 输出到内部 canonical dict 的显式白名单映射。
+**计划**：抽出纯决策层 Safety Gate：输入 final validated IR，输出 `route` / `interrupt_type` / `reason` / `sanitized_trace_payload`；不 dispatch、不调用设备、不 mutate action payload。LangGraph interrupt 节点继续负责 confirm/takeover；pending_execute 语义保持不变。
 
-**内部 canonical action schema**：
+**验收标准**：
+- HITL 仍使用 LangGraph `interrupt()`；confirm/takeover/pending_execute 语义不变。
+- JSON/tool_calls/IR 与 text DSL 路径经过同一 Safety Gate，不得自动授权敏感动作。
+- `execute_node` 只执行已 validate 且已通过 safety 的动作；trace 记录脱敏后的 safety 决策。
 
-- do：`{"_metadata":"do","action":"Tap","element":[500,500]}`
-- finish：`{"_metadata":"finish","message":"done"}`
+### Phase 13D: 有限 Repair
 
-provider-facing JSON 可以使用 lowercase action 与 `x/y` 字段，例如 `{"type":"do","action":"tap","x":500,"y":500}`；adapter 必须显式映射到 existing canonical dict：lowercase `tap` → `Tap`，`x/y` → `element=[x,y]`。坐标仍为 0-1000 相对值，绝对像素转换只在 tool 层。
+**根因**：模型输出常见格式噪声（code fence、包裹层、大小写别名、轻微字段别名）可以安全修复，但过度 repair 会猜测动作/坐标/隐私文本并造成误执行。
 
-**修改文件候选与原因**：
+**修改文件候选**：`phone_agent/actions/repair.py`、`phone_agent/actions/adapter.py`、`phone_agent/actions/validator.py`、`phone_agent/model/client.py`、`phone_agent/graph/nodes/plan.py`、`phone_agent/graph/trace.py`、`tests/actions`、`tests/model`。
 
-- `phone_agent/model/client.py`：接收/识别 JSON 或已聚合 `tool_calls` 响应，调用 adapter 输出 canonical action 或 parse error；保留 text DSL 默认路径。
-- `phone_agent/actions/handler.py`：候选用于定义 canonical action 到现有 action 解析的边界；优先不改执行分发，只在需要安全入口/类型定义时修改。
-- `phone_agent/actions/` 下新增或相邻模块（如 `adapter.py`，执行时再决定）：集中 JSON schema、已聚合 `tool_calls` 映射、字段白名单、错误码，避免 provider 细节散落到 handler。
-- `phone_agent/graph/nodes/execute.py`：候选用于消费 adapter parse failure 并进入 reflect/end；不得让 adapter 直接执行 tool。
-- `phone_agent/graph/state.py`、`phone_agent/graph/trace.py`：候选用于最小 parse metadata；12B 至少包含 adapter 单元错误码，完整 provider mode/detected format 观测留给 12C。
-- `tests/actions/test_adapter.py`、`tests/actions/test_handler.py`：覆盖 canonical schema、lowercase 到 canonical 映射、字段缺失、未知 action、坐标范围、恶意字符串、`eval` 注入样例。
-- `tests/graph/test_hitl.py`、`tests/graph/test_edges.py`：确认 JSON/tool_calls 映射后的敏感动作仍走 confirm/takeover，pending_execute 语义不变。
+**计划**：Repair 输入为 draft ActionIR + validation error metadata + raw/sanitized provider output 摘要；输出为 repaired draft ActionIR 或 repair failure metadata。repair 只允许处理格式/别名/包裹层：XML/Markdown/code fence、外层 JSON 包裹、`type`/`_metadata` 等安全别名、大小写白名单；禁止补坐标、猜 action、猜隐私文本或修复敏感内容。repair 后必须二次 Validator。
 
-**非目标**：
+**验收标准**：
+- 可修复样例进入 validator 二次校验后才可继续；repair 失败或二次校验失败必须 fail-closed。
+- adversarial 样例（缺坐标、越界、隐私文本、未知 tool、半截 JSON/tool_calls）不得被 repair 成可执行动作。
+- trace/eval 记录 repair attempted/succeeded/error code，且脱敏。
 
-- 不改变 tool 执行层、`dispatch_tool()`、坐标 0-1000 相对值约定或绝对像素转换位置。
-- 不让 OpenAI `tool_calls` 直接调用 Python tool；`tool_calls` 仅作为模型输出格式，被映射为内部 canonical action。
-- 不处理 OpenAI streaming `tool_calls` delta 聚合；12B 只接收已聚合 `tool_calls` object 并安全映射。
-- 不支持任意 JSON 字段透传到设备操作；只允许白名单 action 和 literal 参数。
-- 不实现 provider 自动选择、streaming fallback 或 LangChain model abstraction（留给 12C/后续 ADR）。
+### Phase 13E: Trace/eval/tests 收敛
 
-**可量化验收标准**：
+**根因**：Phase 13 分层后需要用统一测试与可观测性防止 parser、安全门、隐私脱敏、tool_calls 聚合、HITL 语义回归。
 
-- adapter 产出的内部 canonical action 至少覆盖 `{"_metadata":"do","action":"Tap","element":[500,500]}` 与 `{"_metadata":"finish","message":"done"}`。
-- provider-facing JSON 的 lowercase `tap`、`x/y` 能显式映射为 canonical `Tap`、`element=[x,y]`；坐标保持 0-1000 相对值。
-- 已聚合 `tool_calls` adapter 只接受白名单函数名/参数，未知 tool、缺必填字段、坐标越界、非 literal/嵌套危险结构均返回 parse error，不执行动作。
-- canonical action 能复用或等价进入现有 `ActionHandler` 安全解析与 graph 执行路径；仍禁止 `eval()`。
-- JSON/tool_calls 表达的敏感 tap/type 不绕过 confirm/takeover；adapter 不改变 `pending_execute` 与 `action_confirmed` 语义。
-- 12B 至少在 adapter 单元层输出并测试 `invalid_json`、`unknown_action`、`missing_field`、`unsafe_value`、`unsupported_tool_call` 或等价错误码；若进入 graph/trace，仅记录最小 parse metadata。
+**修改文件候选**：`phone_agent/graph/trace.py`、`phone_agent/model/client.py`、`phone_agent/actions/adapter.py`、`phone_agent/actions/validator.py`、`phone_agent/actions/safety.py`、`tests/actions`、`tests/model`、`tests/graph`、`tests/evals`。
 
-**测试命令或范围**：`.venv/bin/pytest tests/actions tests/graph/test_hitl.py tests/graph/test_edges.py -v`。
+**计划**：收敛测试矩阵与 trace 字段：adapter alias/coercion、validator unknown/extra/bad coords、repair allowed/forbidden、safety confirm/takeover/pending_execute、trace redaction、streaming/half tool_calls fail-closed；补齐 eval harness 统计 parse/adapter/validation/repair/safety 错误码。
 
-### Phase 12C: Model Provider Capability Modes & Observability
-
-**目标**：为 `ModelConfig` / `ModelClient` 增加可回滚输出模式配置，支持 `text_dsl|json_schema|tool_calls|auto` 或等价能力模式；处理 OpenAI streaming tool_calls delta 聚合、fallback/fail-closed 策略，并完善 trace/eval 可观测性。
-
-**根因**：不同 OpenAI-compatible provider 对 streaming、structured output、tool_calls、多模态 image/base64 的支持不一致；若没有显式 capability mode 与观测字段，`ModelClient` 会在 prompt、parse 与 provider 行为之间形成隐性耦合，难以回滚和定位故障。
-
-**修改文件候选与原因**：
-
-- `phone_agent/model/client.py`：增加 output mode 配置读取、request 参数选择、response format/tool_calls 处理、OpenAI streaming `tool_calls` delta 聚合、fallback/fail-closed 策略与解析观测字段。
-- `phone_agent/config/` 相关配置文件或 `ModelConfig` 定义位置：新增 `output_mode`、可选 capability flags、默认值 `text_dsl` 或兼容现状的等价值。
-- `phone_agent/agent.py`：候选用于通过 `PhoneAgent` 注入 `ModelClient`/config，保持 `DeviceFactory` 与 graph config 注入边界不变。
-- `phone_agent/config/prompts.py`、`prompts_zh.py`、`prompts_en.py`：按输出模式选择 text DSL / JSON schema / tool_calls 指令，避免多个格式混在同一 prompt。
-- `phone_agent/graph/trace.py`、`tests/evals/test_eval_harness.py`、`tests/graph/test_trace.py`：覆盖完整 provider mode、detected format、adapter used、parse success/error code 的 trace/eval 记录。
-- `tests/model/test_client.py`、`tests/config/test_model_config.py` 或相邻测试目录：覆盖模式默认值、显式配置、fallback、extra_body 兼容、streaming delta 聚合与 fail-closed 行为。
-
-**非目标**：
-
-- 不用 LangChain Agent 替换现有 LangGraph `StateGraph`。
-- 不在本 Phase 强制替换 OpenAI Python SDK；LangChain `init_chat_model` 仅允许作为 ADR/spike 或隔离的 provider abstraction 候选，非必达验收。
-- 不改变设备自动化、HITL、ActionHandler 执行语义或坐标转换。
-- 不承诺所有 provider 都支持 structured output / tool_calls；不支持时必须显式 fallback 或 fail-closed。
-
-**可量化验收标准**：
-
-- `output_mode` 或等价配置至少表达 `text_dsl`、`json_schema`、`tool_calls`、`auto`；默认行为与当前 text DSL 兼容。
-- 每次模型解析输出完整可观测元数据：provider/configured mode、detected format、adapter used、parse success/error code；不得记录 API key、完整图片 base64 或敏感 UI 明文。
-- OpenAI streaming `tool_calls` delta 要么正确聚合为 12B adapter 可消费的 object，要么关闭 streaming fallback 或 fail-closed；不得执行半截参数。
-- `auto` 模式选择失败时 fail closed 或回退到 `text_dsl`，不得猜测执行未知格式。
-- OpenAI SDK streaming 主线继续支持当前 `base_url`、`model_name`、`extra_body`、image_url base64。
-- LangChain spike 若执行，只产出 ADR/spike 结论，不作为通过本 Phase 的必达验收；不得改变 graph topology、HITL 或 tool 执行。
-
-**测试命令或范围**：`.venv/bin/pytest tests/model tests/config tests/graph/test_trace.py tests/evals/test_eval_harness.py -v`；若 `tests/model/` 或 `tests/config/` 不存在，fallback 到相邻 `tests/graph`、`tests/actions`、`tests/evals` 目录中新增/现有相关测试；必要时补充 `.venv/bin/python evals/run_eval.py --dry-run --trace-dir .traces/smoke` 验证 trace/eval 兼容。
+**验收标准**：
+- 目标测试覆盖 `tests/actions`、`tests/model`、`tests/graph`、`tests/evals` 中的 parser/IR/validator/safety/repair/trace 场景。
+- 半截 streaming tool_calls 不执行；隐私/API key/base64 图片不进入 trace 明文；messages reducer/image stripping 不破坏。
+- 具体命令：`.venv/bin/pytest tests/actions tests/model tests/graph/test_execute.py tests/graph/test_plan_reflect.py tests/graph/test_trace.py tests/evals -v`；不得声明未经实际验证的 passing 数。
 
 # 约束 Checklist
 
-修改 `.trae/` 编排、`phone_agent/model/`、`phone_agent/actions/`、`phone_agent/graph/`、prompts、评测、trace 或相关测试前，确认：
-
-- [ ] **RALPLAN 门禁**：当前 roadmap 已 `design_status=critic_approved`、`last_critic_verdict=APPROVE`、`approved_for_execution=true`；但未经用户明确批准，不得实现业务代码。
-- [ ] **推荐方向**：保留 LangGraph `StateGraph`；不用 LangChain Agent 替换现有状态机；优先修输出适配层，LangChain 仅作为中期模型层 ADR/spike。
-- [ ] **Phase 顺序**：先 12A 修 XML/text normalizer 与 parse failure 状态机，再 12B 加 JSON/已聚合 tool_calls adapter，最后 12C 加 provider capability modes、streaming delta 聚合与完整观测；不得跳过 parser bug 回归测试。
-- [ ] **解析安全**：`do(...)` / `finish(...)` 继续使用 `ast.parse` + `ast.literal_eval` 或等价安全 literal 解析；禁止 `eval()`；JSON/tool_calls 必须白名单字段与 fail-closed。
-- [ ] **Parse failure**：malformed / empty / unsupported 输出不得被包装成成功 `finish`，不得执行 tool；必须使 `RunResult.success=False` 或 `error/failure_cause=model_parse_failed` 等价失败信号非空。
-- [ ] **Type/Type_Name**：特殊解析分支必须统一到 AST literal parsing，或保留兼容分支并覆盖引号、反斜杠、换行、`)`、恶意嵌套、超长文本测试。
-- [ ] **Canonical action**：内部 canonical dict 使用 `{"_metadata":"do","action":"Tap","element":[x,y]}` 与 `{"_metadata":"finish","message":"..."}` 等价 schema；provider lowercase/x-y 必须显式映射，不得透传任意字段。
-- [ ] **动作与坐标**：模型输出坐标保持 0-1000 相对值；绝对像素转换只在 execute/tool 内调用 `convert_relative_to_absolute()`。
-- [ ] **HITL 安全**：支付/隐私等敏感操作走 `confirm_node`；登录/验证码走 `takeover_node`；JSON/tool_calls 不得自动授权或绕过 `interrupt()`。
-- [ ] **Graph 不变量**：保持 `phone_agent/graph/builder.py` 当前拓扑，包括 replan skip path；不恢复 while loop，不恢复 `_execute_step` 双轨，Node 不使用 `self._context`。
-- [ ] **messages reducer**：每步后剥离历史图片；`plan_node` 只返回新增 messages，`execute_node` 返回完整重建列表；输出模式改动不得破坏 role/content 边界。
-- [ ] **依赖注入**：`ModelClient` 与 `DeviceFactory` 通过 `PhoneAgent` / StateGraph config 注入；`device_factory` 不进入模型可见 tool schema。
-- [ ] **OpenAI-compatible 主线**：保留 OpenAI Python SDK streaming、`base_url`、`model_name`、`extra_body`、image_url base64；12B 不处理 streaming delta，12C 才处理 delta 聚合、关闭 streaming fallback 或 fail-closed。
-- [ ] **可观测性边界**：12B 至少有 adapter 单元错误码，若进入 graph/trace 只做最小 parse metadata；12C 负责完整 provider mode、detected format、adapter used、parse success/error code 的 trace/eval 观测。
-- [ ] **Reflection 降级**：动作解析失败必须安全进入结构化错误/反思/结束路径；`reflect_node` 自身 `reflection(...)` AST literal parsing 不得被 JSON/tool_calls 改动破坏。
-- [ ] **兼容 API**：`PhoneAgent.run() -> str` 保持兼容；结构化评测继续使用 `run_structured()` 或等价 API；LangFuse 未配置不影响本地 trace/eval。
-- [ ] **测试门禁**：每个 Phase 必须包含 parser/unit、graph/HITL、trace/eval 或 dry-run 覆盖；`tests/model/` 不存在时 fallback 到相邻测试目录；不得声明未经验证的 passing 数。
+- [x] **Planner 边界**：本文件为计划产物；当前状态未批准执行，禁止修改业务代码、测试、文档或其他文件。
+- [x] **Graph 文件压缩**：保留 context-friendly 短文风格；不恢复长历史内容；不删除运行时代码中的 LangGraph。
+- [x] **StateGraph 保留**：保留 LangGraph `StateGraph`；不用 LangChain Agent 替换；LangChain 仅可作为后续 provider abstraction spike/ADR。
+- [x] **Pipeline 顺序**：Parser/Adapter -> draft ActionIR -> Validator -> valid final IR 或 Repair -> second Validator -> Safety Gate -> Executor/HITL；Repair 不得发生在 Safety Gate 之后。
+- [x] **Adapter 必经 Validator**：Adapter output always passes Validator；任何 provider path 不得绕过 Validator；adapter/parser 可早拒绝但不能替代 Validator。
+- [x] **Adapter 边界**：Adapter/Parser 只做 provider format coercion、text/json/tool_calls 归一、alias normalization、wrapper/code fence/basic JSON coercion；不执行工具，不调用设备。
+- [x] **Validator 集中化**：Validator 统一校验 canonical IR semantic/schema/range、action 白名单、必填字段、坐标 0-1000、extra dangerous fields、统一 validation error。
+- [x] **dispatch_tool 前拒绝危险字段**：未知 action、缺字段、额外危险字段、非法 tool_calls 参数、坐标越界必须在 dispatch_tool 前 fail-closed。
+- [x] **Repair 限定**：Repair 只修格式、别名、包裹层；不补坐标、不猜 action、不猜隐私文本；repair 后必须二次 Validator，失败 fail-closed。
+- [x] **Safety Gate 纯决策**：Safety Gate 只接收 final validated IR，只输出 route/interrupt_type/reason/sanitized_trace_payload；不 dispatch、不调用设备、不 mutate action payload。
+- [x] **Executor 输入**：Executor 只接收 validated + safety-approved IR；pending_execute 不得重复 `_strip_and_append`。
+- [x] **解析安全**：`do(...)` / `finish(...)` 必须使用 `ast.parse` + `ast.literal_eval` 或等价安全 literal 解析；禁止 `eval()`。
+- [x] **坐标约束**：模型/IR 坐标保持 0-1000 相对值；绝对像素转换只在 tool 层 `convert_relative_to_absolute()`。
+- [x] **Parse failure**：malformed/empty/unsupported/半截 streaming tool_calls 不得伪装成 `finish`，不得执行 tool，必须 fail-closed。
+- [x] **HITL**：支付/隐私/账号敏感动作走 confirm；登录/验证码/手动接管走 takeover/manual handoff；保持 LangGraph `interrupt()`。
+- [x] **messages reducer**：plan/execute 的 messages reducer 与 image stripping 不得被 output mode/IR 改动破坏。
+- [x] **Trace 脱敏与错误码**：trace/eval 不记录 API key、完整 base64 图片、敏感 UI 明文或隐私文本；parse/adapter/validation/repair/safety 错误码需可观测。
+- [x] **测试门禁**：覆盖 adapter alias/coercion、validator unknown/extra/bad coords、repair allowed/forbidden、safety confirm/takeover/pending_execute、trace redaction、streaming/half tool_calls fail-closed。

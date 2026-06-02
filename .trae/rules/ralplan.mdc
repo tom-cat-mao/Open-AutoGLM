@@ -37,9 +37,9 @@ RALPLAN 是 TraeCLI-native 的纯规划模式：Planner → Architect → Critic
 
 ```yaml
 ---
-description: LangGraph roadmap 与核心执行约束；仅在修改 graph/Agent loop/Tool/HITL 或执行 roadmap 时加载
+description: LangGraph roadmap 与核心执行约束；仅在 RALPLAN/Autopilot 规划阶段加载
 alwaysApply: false
-globs: "phone_agent/graph/**/*.py,phone_agent/agent.py,phone_agent/actions/**/*.py,phone_agent/device_factory.py,phone_agent/adb/**/*.py,tests/**/*.py,setup.py,README.md,docs/**/*.md"
+globs: ".trae/commands/ralplan.md,.trae/commands/autopilot.md,.trae/hooks/ralplan.py,.trae/hooks/autopilot.py,.trae/rules/ralplan.mdc,.trae/rules/autopilot.mdc,.trae/rules/graph.mdc"
 ---
 ```
 
