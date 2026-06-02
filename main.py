@@ -9,6 +9,7 @@ Environment Variables:
     PHONE_AGENT_BASE_URL: Model API base URL (default: http://localhost:8000/v1)
     PHONE_AGENT_MODEL: Model name (default: autoglm-phone-9b)
     PHONE_AGENT_API_KEY: API key for model authentication (default: EMPTY)
+    PHONE_AGENT_OUTPUT_MODE: Model output mode (text_dsl/json_schema/tool_calls/auto)
     PHONE_AGENT_MAX_STEPS: Maximum steps per task (default: 100)
     PHONE_AGENT_DEVICE_ID: ADB device ID for multi-device setups
 """
@@ -298,6 +299,14 @@ Examples:
     )
 
     parser.add_argument(
+        "--output-mode",
+        type=str,
+        choices=["text_dsl", "json_schema", "tool_calls", "auto"],
+        default=os.getenv("PHONE_AGENT_OUTPUT_MODE", "text_dsl"),
+        help="Model output mode: text_dsl, json_schema, tool_calls, or auto",
+    )
+
+    parser.add_argument(
         "--max-steps",
         type=int,
         default=int(os.getenv("PHONE_AGENT_MAX_STEPS", "100")),
@@ -367,7 +376,10 @@ Examples:
         help="Task to execute (interactive mode if not provided)",
     )
 
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.output_mode not in {"text_dsl", "json_schema", "tool_calls", "auto"}:
+        parser.error("--output-mode must be one of: text_dsl, json_schema, tool_calls, auto")
+    return args
 
 
 def handle_device_commands(args) -> bool:
@@ -471,6 +483,7 @@ def main():
         model_name=args.model,
         api_key=args.apikey,
         lang=args.lang,
+        output_mode=args.output_mode,
     )
 
     agent_config = AgentConfig(

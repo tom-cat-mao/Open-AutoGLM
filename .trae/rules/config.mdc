@@ -25,6 +25,18 @@ Higher priority overrides lower. All dataclass defaults can be overridden by env
 | temperature | 0.0 | - |
 | top_p | 0.85 | - |
 | frequency_penalty | 0.2 | - |
+| output_mode | `text_dsl` | - |
+
+`output_mode` controls provider output adaptation:
+
+| Value | Meaning |
+|---|---|
+| `text_dsl` | Default AutoGLM-compatible `<answer>do(...)</answer>` / `finish(...)` text DSL |
+| `json_schema` | Provider returns JSON object, adapted through `adapt_json_action()` |
+| `tool_calls` | Provider returns OpenAI-compatible tool calls, aggregated then adapted through `adapt_tool_calls()` |
+| `auto` | Detect tool_calls / JSON / text DSL and record parse metadata |
+
+Changing `output_mode` is an architectural/runtime compatibility change: ensure prompts/provider behavior match, preserve canonical action schema, and keep parse failure fail-closed.
 
 ## AgentConfig (agent.py)
 

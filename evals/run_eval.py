@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import time
 import uuid
 from dataclasses import dataclass
@@ -105,6 +106,7 @@ def run_agent_task(task: EvalTask, args: argparse.Namespace) -> RunResult:
             model_name=args.model,
             api_key=args.apikey,
             lang=args.lang,
+            output_mode=args.output_mode,
         ),
         agent_config=AgentConfig(
             max_steps=task.max_steps,
@@ -184,6 +186,7 @@ def run_eval(args: argparse.Namespace) -> dict[str, Any]:
             "repeated_failure_count": total_repeated_failures,
             "dry_run": args.dry_run,
             "trace_dir": args.trace_dir,
+            "output_mode": args.output_mode,
         },
         "results": records,
     }
@@ -203,6 +206,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--model", default="autoglm-phone-9b", help="Model name")
     parser.add_argument("--apikey", default="EMPTY", help="Model API key")
+    parser.add_argument(
+        "--output-mode",
+        choices=["text_dsl", "json_schema", "tool_calls", "auto"],
+        default=os.getenv("PHONE_AGENT_OUTPUT_MODE", "text_dsl"),
+        help="Model output mode",
+    )
     parser.add_argument("--device-id", default=None, help="ADB device id")
     parser.add_argument(
         "--lang", choices=["cn", "en"], default="cn", help="Prompt language"
@@ -218,7 +227,10 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--trace-dir", default=".traces", help="Local JSONL trace dir")
     parser.add_argument("--no-trace", action="store_true", help="Disable agent tracing")
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.output_mode not in {"text_dsl", "json_schema", "tool_calls", "auto"}:
+        parser.error("--output-mode must be one of: text_dsl, json_schema, tool_calls, auto")
+    return args
 
 
 def main() -> None:

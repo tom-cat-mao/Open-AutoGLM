@@ -21,6 +21,7 @@
 | Trace | 默认本地 JSONL trace；`RunResult.trace_id/trace_path` 与 eval JSON 可关联 `.traces/{trace_id}.jsonl`；敏感截图/API key/隐私文本默认脱敏 |
 | Reflection | `reflect_node` 维护 `reflection_verdict/failure_cause/suggested_strategy`；Plan 下一轮必须能读取结构化失败原因和策略 |
 | Context | `context_mode=off|observe|inject`，默认 observe；仅 inject 注入脱敏裁剪后的 context block；context 不得绕过 HITL |
+| Output Adapter | `ModelConfig.output_mode=text_dsl|json_schema|tool_calls|auto`；JSON/tool_calls 必须经 adapter 白名单映射到 canonical action，parse failure fail-closed，不得绕过 HITL |
 
 ## Key Paths
 
@@ -29,7 +30,7 @@
 | CLI 入口 | `main.py` |
 | Agent | `phone_agent/agent.py` |
 | Graph | `phone_agent/graph/{state.py,builder.py,edges.py,trace.py,context.py,nodes/,tools/}` |
-| Actions | `phone_agent/actions/handler.py` |
+| Actions | `phone_agent/actions/{handler.py,adapter.py}` |
 | Model | `phone_agent/model/client.py` |
 | Device | `phone_agent/device_factory.py`, `phone_agent/adb/` |
 | Prompts | `phone_agent/config/prompts.py`, `prompts_zh.py`, `prompts_en.py` |
@@ -55,6 +56,7 @@
 | 全量测试 | `.venv/bin/pytest` |
 | Graph 测试 | `.venv/bin/pytest tests/graph -v` |
 | Eval/Trace 测试 | `.venv/bin/pytest tests/evals tests/graph/test_trace.py -v` |
+| Output Adapter 测试 | `.venv/bin/pytest tests/model tests/actions tests/graph/test_plan_reflect.py tests/graph/test_execute.py -v` |
 | Context dry-run 对比 | `.venv/bin/python evals/run_eval.py --dry-run --context-mode observe --trace-dir .traces/smoke` |
 | TraeCLI Autopilot 测试 | `.venv/bin/pytest tests/trae/test_autopilot_hook.py -q` |
 | Dry-run eval trace | `.venv/bin/python evals/run_eval.py --dry-run --trace-dir .traces/smoke` |
@@ -68,4 +70,4 @@
 
 ## Compact Instructions
 
-压缩时保留：当前任务与进度、Non-Negotiable Constraints、Key Paths、Phase 8 trace 现状、Phase 10 Autopilot 现状、Phase 11 context harness 现状、必要 roadmap 状态与未完成 TODO。
+压缩时保留：当前任务与进度、Non-Negotiable Constraints、Key Paths、Phase 8 trace 现状、Phase 10 Autopilot 现状、Phase 11 context harness 现状、Phase 12 output adapter 现状、必要 roadmap 状态与未完成 TODO。

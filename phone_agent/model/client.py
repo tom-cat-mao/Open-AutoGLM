@@ -13,6 +13,7 @@ from phone_agent.actions.handler import parse_action
 from phone_agent.config.i18n import get_message
 
 OutputMode = Literal["text_dsl", "json_schema", "tool_calls", "auto"]
+VALID_OUTPUT_MODES = {"text_dsl", "json_schema", "tool_calls", "auto"}
 
 
 class ModelParseError(ValueError):
@@ -37,6 +38,13 @@ class ModelConfig:
     extra_body: dict[str, Any] = field(default_factory=dict)
     lang: str = "cn"  # Language for UI messages: 'cn' or 'en'
     output_mode: OutputMode = "text_dsl"
+
+    def __post_init__(self) -> None:
+        """Validate runtime configuration values not enforced by type hints."""
+        if self.output_mode not in VALID_OUTPUT_MODES:
+            raise ValueError(
+                "output_mode must be one of: text_dsl, json_schema, tool_calls, auto"
+            )
 
 
 @dataclass
@@ -219,8 +227,23 @@ class ModelClient:
             "parse_error_code": None,
         }
         try:
+            if self.config.output_mode == "tool_calls":
+                if not tool_calls:
+                    raise ActionAdapterError(
+                        "unsupported_tool_call", "tool_calls mode requires a provider tool call"
+                    )
+                action = adapt_tool_calls(tool_calls)
+                metadata.update(
+                    {
+                        "detected_format": "tool_calls",
+                        "adapter_used": "tool_calls",
+                        "parse_success": True,
+                    }
+                )
+                return "", json.dumps(action, ensure_ascii=False), metadata
+
             if tool_calls:
-                if self.config.output_mode not in {"tool_calls", "auto"}:
+                if self.config.output_mode != "auto":
                     raise ActionAdapterError(
                         "unsupported_tool_call", "tool_calls received in non-tool_calls mode"
                     )
@@ -235,7 +258,22 @@ class ModelClient:
                 return "", json.dumps(action, ensure_ascii=False), metadata
 
             normalized = self._normalize_response_text(content)
-            if self.config.output_mode in {"json_schema", "auto"} and self._looks_like_json(normalized):
+            if self.config.output_mode == "json_schema":
+                if not self._looks_like_json(normalized):
+                    raise ActionAdapterError(
+                        "invalid_json", "json_schema mode requires a JSON object response"
+                    )
+                action = adapt_json_action(normalized)
+                metadata.update(
+                    {
+                        "detected_format": "json_schema",
+                        "adapter_used": "json_schema",
+                        "parse_success": True,
+                    }
+                )
+                return "", json.dumps(action, ensure_ascii=False), metadata
+
+            if self.config.output_mode == "auto" and self._looks_like_json(normalized):
                 action = adapt_json_action(normalized)
                 metadata.update(
                     {

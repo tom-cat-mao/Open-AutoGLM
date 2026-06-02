@@ -15,6 +15,7 @@ append_system_prompt:
 
 disallowed_tools:
   - "WebSearch"
+  - "WebFetch"
 
 hooks:
   - type: command

@@ -80,7 +80,9 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
     # 2. Build new messages (only the new ones, reducer will append)
     new_messages = []
     if step_count == 0:
-        system_prompt = configurable.get("system_prompt") or get_system_prompt(lang)
+        system_prompt = configurable.get("system_prompt") or get_system_prompt(
+            lang, configurable.get("output_mode", "text_dsl")
+        )
         new_messages.append(MessageBuilder.create_system_message(system_prompt))
 
         screen_info = MessageBuilder.build_screen_info(current_app)
@@ -158,6 +160,15 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
     try:
         stripped_action = response.action.strip()
         if stripped_action.startswith("{"):
+            adapter_used = parse_metadata.get("adapter_used")
+            configured_output_mode = configurable.get("output_mode", "text_dsl")
+            if configured_output_mode == "text_dsl" and adapter_used not in {
+                "json_schema",
+                "tool_calls",
+            }:
+                raise ActionAdapterError(
+                    "invalid_json", "JSON action response is not enabled in text_dsl mode"
+                )
             action_parsed = adapt_json_action(stripped_action)
         else:
             action_parsed = parse_action(response.action)

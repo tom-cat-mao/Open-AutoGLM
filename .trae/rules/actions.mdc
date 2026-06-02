@@ -8,9 +8,10 @@ globs: "phone_agent/actions/**/*.py,phone_agent/graph/tools/**/*.py,phone_agent/
 
 ## Action System Overview
 
-The action system has two layers:
-1. **Parsing**: `parse_action()` converts raw model text -> `dict` with `_metadata` key
-2. **Execution**: `execute_node` calls `dispatch_tool()` to route actions to `@tool` functions in `phone_agent/graph/tools/`
+The action system has three layers:
+1. **Text parsing**: `parse_action()` converts safe DSL text -> canonical `dict` with `_metadata` key
+2. **Format adapter**: `adapt_json_action()` / `adapt_tool_calls()` convert JSON or aggregated provider tool calls -> the same canonical dict
+3. **Execution**: `execute_node` calls `dispatch_tool()` to route canonical actions to `@tool` functions in `phone_agent/graph/tools/`
 
 ## Action Dictionary Format
 
@@ -28,15 +29,38 @@ Helper functions:
 - `do(**kwargs)` -> adds `_metadata="do"`
 - `finish(**kwargs)` -> adds `_metadata="finish"`
 
-## parse_action() (handler.py:332-387)
+## parse_action() / Safe DSL Parser (handler.py)
 
-Parsing priority:
-1. **Type/Type_Name shortcut**: If response starts with `do(action="Type"` or `do(action="Type_Name"`, special-cased to handle text with special characters
-2. **AST parsing**: If response starts with `do`, parse with `ast.parse()` + `ast.literal_eval()` for safety
-3. **Finish**: If response starts with `finish`, extract message via string replacement
-4. **Fallback**: Raise `ValueError`
+Parsing rules:
+1. `do(...)` and `finish(...)` are parsed as Python expression AST calls.
+2. Keyword values must be `ast.literal_eval()` compatible literals.
+3. Positional arguments and non-literal expressions are rejected.
+4. `Type` / `Type_Name` text is no longer sliced by fragile string offsets; it follows the same literal-safe parser path.
+5. Fallback: raise `ValueError` and let graph/model layers fail closed.
 
 **Critical**: Never use `eval()`. Always use `ast.parse()` for new parsing logic.
+
+## Action Format Adapter (adapter.py)
+
+The adapter accepts provider-facing structured output and returns canonical action dicts only; it must not call tools or devices.
+
+Supported entry points:
+- `adapt_json_action(payload: str | dict[str, Any])`
+- `adapt_tool_calls(tool_calls: list[dict[str, Any]])`
+
+Stable `ActionAdapterError.code` values:
+- `invalid_json`
+- `unknown_action`
+- `missing_field`
+- `unsafe_value`
+- `unsupported_tool_call`
+
+Adapter invariants:
+- Only whitelisted actions / aliases / fields are accepted.
+- Coordinates remain model-relative 0-1000 values; absolute conversion stays in tool layer.
+- Numeric `Wait` durations may be normalized to duration strings (for example `2` -> `"2 seconds"`).
+- Function name aliases such as do/finish/tool-call names may infer `_metadata`, but required fields are never guessed.
+- JSON/tool_calls actions do not bypass sensitive Tap confirmation or Take_over interrupts.
 
 ## Tool Registry (graph/tools/__init__.py)
 
@@ -100,10 +124,11 @@ def get_tool_map() -> dict[str, Any]:
 2. [ ] Register the action name in `get_tool_map()` in `phone_agent/graph/tools/__init__.py`
 3. [ ] Return `ActionResult.__dict__` from the tool function
 4. [ ] Update system prompt in `prompts.py` (CN) and `prompts_en.py` (EN) if the model needs to emit the new action
-5. [ ] If action uses coordinates, call `convert_relative_to_absolute()` from `phone_agent/graph/tools/coords.py`
-6. [ ] If action is sensitive, route through `execute_node` to `confirm_node` / `takeover_node` using `interrupt()`, not callbacks
-7. [ ] If action needs new device-level commands, add them to `adb/` module
-8. [ ] Add tests for the tool function and `dispatch_tool()` routing
+5. [ ] Update `phone_agent/actions/adapter.py` whitelists, aliases, field validation, and canonical mapping if JSON/tool_calls should support it
+6. [ ] If action uses coordinates, call `convert_relative_to_absolute()` from `phone_agent/graph/tools/coords.py`
+7. [ ] If action is sensitive, route through `execute_node` to `confirm_node` / `takeover_node` using `interrupt()`, not callbacks
+8. [ ] If action needs new device-level commands, add them to `adb/` module
+9. [ ] Add tests for parser/adapter, tool function, and `dispatch_tool()` routing
 
 ## Action Details by Platform
 

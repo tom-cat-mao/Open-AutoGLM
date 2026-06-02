@@ -36,10 +36,6 @@ class AgentConfig:
 
     def __post_init__(self):
         self.context_mode = normalize_context_mode(self.context_mode)
-        if self.system_prompt is None:
-            from phone_agent.config import get_system_prompt
-
-            self.system_prompt = get_system_prompt(self.lang)
 
 
 @dataclass
@@ -239,6 +235,7 @@ class PhoneAgent:
                 "model_client": self.model_client,
                 "device_factory": device_factory,
                 "system_prompt": self.agent_config.system_prompt,
+                "output_mode": self.model_config.output_mode,
                 "verbose": self.agent_config.verbose,
                 "trace_id": trace_id,
                 "trace_writer": trace_writer,

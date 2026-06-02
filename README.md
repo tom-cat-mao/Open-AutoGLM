@@ -27,9 +27,10 @@ phone_agent/
 ├── agent.py                     # PhoneAgent 入口，使用 StateGraph
 ├── device_factory.py            # 设备工厂
 ├── model/
-│   └── client.py                # ModelClient (OpenAI 兼容)
+│   └── client.py                # ModelClient (OpenAI 兼容；text/json/tool_calls 输出适配)
 ├── actions/
-│   └── handler.py               # parse_action(), ActionResult, do(), finish()
+│   ├── handler.py               # parse_action(), ActionResult, do(), finish()
+│   └── adapter.py               # JSON/tool_calls → canonical action 适配与校验
 ├── adb/                         # Android 设备控制
 ├── config/
 │   ├── apps.py                  # 应用包名映射
@@ -106,6 +107,7 @@ from phone_agent.model import ModelConfig
 agent = PhoneAgent(model_config=ModelConfig(
     base_url="http://localhost:8000/v1",
     model_name="autoglm-phone-9b",
+    output_mode="text_dsl",  # text_dsl | json_schema | tool_calls | auto
 ))
 
 result = agent.run("打开淘宝搜索无线耳机")
@@ -134,6 +136,21 @@ print(structured.to_dict())
 | `inject` | 注入脱敏、裁剪后的短期 context block |
 
 `AgentConfig(context_mode="observe")` 可切换模式。context 字段包括 `screen_belief`、`action_outcome_summary`、`failure_memory`、`summarized_history` 与预算/截断指标；默认预算为 failure memory 最近 3 条、screen belief 摘要 300 字符、history 摘要 800 字符、context block 1500 字符。姓名、手机号、邮箱、订单号、验证码、API key/token、长 base64/JWT 等敏感文本默认脱敏，context 不绕过 HITL/confirm/takeover。
+
+### Model Output Adapter
+
+默认保持原有 text DSL 输出兼容，同时支持 provider-facing JSON 与已聚合 OpenAI `tool_calls`：
+
+| 模式 | 行为 |
+|------|------|
+| `text_dsl` | 默认模式；解析 `do(...)` / `finish(...)` 与 `<answer>...</answer>` 包裹输出 |
+| `json_schema` | 模型输出 JSON，经 adapter 映射为内部 canonical action |
+| `tool_calls` | 聚合 streaming tool_calls delta 后，经 adapter 映射为内部 canonical action |
+| `auto` | 自动识别 JSON，否则回退 text DSL |
+
+所有格式最终都进入统一执行路径：adapter 只生成 canonical action，不直接调用工具；真实执行仍由 `execute_node -> dispatch_tool()` 完成。JSON/tool_calls 仅允许白名单 action 与字段，坐标保持 0-1000 相对值并在 tool 层转换为绝对像素；未知 action、缺字段、越界坐标、非 literal/危险结构均 fail-closed 为 `model_parse_failed`，不会伪装成成功 `finish`，也不会绕过 confirm/takeover HITL。
+
+解析观测字段会进入 trace/eval 相关链路，包括 configured mode、detected format、adapter used、parse success/error code；`parse_error`、截图、API key、任务文本与隐私文本默认脱敏。
 
 ## 模型部署
 

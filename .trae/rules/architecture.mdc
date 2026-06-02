@@ -1,7 +1,7 @@
 ---
-description: Agent 核心架构守门规则：仅在修改 PhoneAgent / LangGraph / ModelClient context / DeviceFactory 时加载
+description: Agent 核心架构守门规则：仅在修改 PhoneAgent / LangGraph / ModelClient / Action Adapter / DeviceFactory 时加载
 alwaysApply: false
-globs: "phone_agent/agent.py,phone_agent/graph/**/*.py,phone_agent/model/client.py,phone_agent/device_factory.py,main.py"
+globs: "phone_agent/agent.py,phone_agent/graph/**/*.py,phone_agent/model/client.py,phone_agent/actions/**/*.py,phone_agent/device_factory.py,main.py"
 ---
 
 # Architecture Guardrails
@@ -10,8 +10,8 @@ globs: "phone_agent/agent.py,phone_agent/graph/**/*.py,phone_agent/model/client.
 
 ## 何时加载
 
-- 修改 `phone_agent/agent.py`、`phone_agent/graph/**/*.py`、`phone_agent/model/client.py`、`phone_agent/device_factory.py`、`main.py` 时加载。
-- 用户要求分析 Agent loop、LangGraph 拓扑、上下文管理、设备/模型注入边界时加载。
+- 修改 `phone_agent/agent.py`、`phone_agent/graph/**/*.py`、`phone_agent/model/client.py`、`phone_agent/actions/**/*.py`、`phone_agent/device_factory.py`、`main.py` 时加载。
+- 用户要求分析 Agent loop、LangGraph 拓扑、上下文管理、模型输出适配、设备/模型注入边界时加载。
 - 需要 roadmap、架构审查或 Plan-Architect-Critic 流程时，再读取 `.trae/rules/ralplan.mdc`。
 
 ## 核心不变量
@@ -25,9 +25,14 @@ globs: "phone_agent/agent.py,phone_agent/graph/**/*.py,phone_agent/model/client.
 7. **Explicit dependencies**：`ModelClient` / `DeviceFactory` 等副作用依赖应通过 StateGraph config 或明确边界注入，避免新增隐式全局依赖。
 8. **messages_reducer semantics**：`plan_node` 只返回新增消息（触发 append），`execute_node` 返回完整列表（触发 replace）；违反此语义会导致消息重复追加和 token 爆炸。
 9. **Confirm-then-execute**：敏感 Tap 经 confirm 接受后，`after_interrupt` 路由到 `execute`（`pending_execute=True`），execute_node 的 pending_execute 分支禁止再次调用 `_strip_and_append`，且必须设置 `action_confirmed=True`。
+10. **Canonical action boundary**：XML text DSL、裸 `do/finish`、JSON schema、聚合后的 OpenAI `tool_calls` 必须先归一到内部 canonical action dict（`_metadata=do|finish`），再交给执行层。
+11. **Adapter is not executor**：`phone_agent/actions/adapter.py` 只能做白名单字段校验与格式映射，不得调用设备、tool 或绕过 `execute_node -> dispatch_tool()`。
+12. **Provider output modes fail-closed**：`ModelConfig.output_mode=text_dsl|json_schema|tool_calls|auto` 的 parse failure 必须保留为 `model_parse_failed` / `parse_error`，不得伪装成成功 `finish` 或继续 dispatch tool。
+13. **Parse observability is sanitized**：trace/eval 可记录 configured mode、detected format、adapter used、parse success/error code；`parse_error` 与隐私文本必须走脱敏路径。
 
 ## 修改前检查
 
 - 如果新增或改变 State 字段、Node 职责、Edge 路由、Tool 行为或 HITL 流程，先读取 `.trae/rules/graph.mdc`。
+- 如果新增或改变模型输出格式、Action Adapter、canonical action schema、parse metadata，先读取 `.trae/rules/model.mdc` 与 `.trae/rules/actions.mdc`。
 - 如果需要先设计 roadmap 或引入 Planner/Architect/Critic 审查，先读取 `.trae/rules/ralplan.mdc`。
 - 修改后保持旧入口兼容：`PhoneAgent.run()` 仍应可调用。
