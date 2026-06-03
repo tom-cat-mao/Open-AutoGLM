@@ -73,6 +73,8 @@ APP_PACKAGES: dict[str, str] = {
     "Android  System Settings": "com.android.settings",
     "Android-System-Settings": "com.android.settings",
     "Settings": "com.android.settings",
+    "设置": "com.android.settings",
+    "系统设置": "com.android.settings",
     "AudioRecorder": "com.android.soundrecorder",
     "audiorecorder": "com.android.soundrecorder",
     "Bluecoins": "com.rammigsoftware.bluecoins",
@@ -225,3 +227,139 @@ def list_supported_apps() -> list[str]:
         List of app names.
     """
     return list(APP_PACKAGES.keys())
+
+
+APP_ALIASES: dict[str, str] = {
+    "设置": "Settings",
+    "系统设置": "Settings",
+    "AndroidSystemSettings": "Settings",
+    "Android System Settings": "Settings",
+    "Android  System Settings": "Settings",
+    "Android-System-Settings": "Settings",
+    "chrome": "Chrome",
+    "Google Chrome": "Chrome",
+    "gmail": "Gmail",
+    "GoogleMail": "Gmail",
+    "Google Mail": "Gmail",
+    "wechat": "WeChat",
+    "微信": "WeChat",
+    "WeChat(微信)": "WeChat",
+    "Whatsapp": "WhatsApp",
+    "twitter": "Twitter",
+    "X": "Twitter",
+    "Twitter(X)": "Twitter",
+    "tiktok": "Tiktok",
+    "temu": "Temu",
+    "reddit": "Reddit",
+    "quora": "Quora",
+    "duolingo": "Duolingo",
+    "expedia": "Expedia",
+    "joplin": "Joplin",
+    "osmand": "Osmand",
+    "clock": "Clock",
+    "contacts": "Contacts",
+    "files": "Files",
+    "File Manager": "Files",
+    "file manager": "Files",
+    "audiorecorder": "AudioRecorder",
+    "bluecoins": "Bluecoins",
+    "broccoli": "Broccoli",
+    "booking": "Booking.com",
+    "booking.com": "Booking.com",
+    "BOOKING.COM": "Booking.com",
+    "mcdonald": "McDonald",
+    "pimusicplayer": "PiMusicPlayer",
+    "retromusic": "RetroMusic",
+}
+
+CANONICAL_APP_DISPLAY: dict[str, str] = {
+    "Settings": "Settings",
+    "WeChat": "WeChat(微信)",
+    "QQ": "QQ",
+    "Chrome": "Chrome",
+    "Gmail": "Gmail",
+    "WhatsApp": "WhatsApp",
+    "Twitter": "Twitter(X)",
+    "Tiktok": "Tiktok",
+    "Telegram": "Telegram",
+    "淘宝": "淘宝",
+    "京东": "京东",
+    "拼多多": "拼多多",
+    "小红书": "小红书",
+    "微博": "微博",
+    "抖音": "抖音",
+    "美团": "美团",
+    "大众点评": "大众点评",
+    "饿了么": "饿了么",
+    "高德地图": "高德地图",
+    "百度地图": "百度地图",
+    "携程": "携程",
+    "滴滴出行": "滴滴出行",
+    "知乎": "知乎",
+    "豆瓣": "豆瓣",
+    "bilibili": "bilibili",
+    "飞书": "飞书",
+    "腾讯视频": "腾讯视频",
+    "爱奇艺": "爱奇艺",
+    "网易云音乐": "网易云音乐",
+    "QQ音乐": "QQ音乐",
+    "今日头条": "今日头条",
+    "快手": "快手",
+    "豆包": "豆包",
+    "Google Maps": "Google Maps",
+    "Google Calendar": "Google Calendar",
+    "Google Drive": "Google Drive",
+    "Google Play Store": "Google Play Store",
+    "Booking.com": "Booking.com",
+    "Temu": "Temu",
+    "Contacts": "Contacts",
+    "Clock": "Clock",
+    "Files": "Files",
+    "AudioRecorder": "AudioRecorder",
+}
+
+
+def normalize_app_name(name: str) -> str | None:
+    """Normalize app name to canonical key in APP_PACKAGES.
+
+    Tries alias lookup first, then exact match, then case-insensitive match
+    preferring CANONICAL_APP_DISPLAY keys over lowercase variants.
+    Returns canonical name or None if no match found.
+    """
+    stripped = name.strip()
+    if stripped in APP_ALIASES:
+        return APP_ALIASES[stripped]
+    if stripped in APP_PACKAGES:
+        return stripped
+    lowered = stripped.lower()
+    for key in CANONICAL_APP_DISPLAY:
+        if key.lower() == lowered and key in APP_PACKAGES:
+            return key
+    for key in APP_PACKAGES:
+        if key.lower() == lowered:
+            return key
+    return None
+
+
+def get_app_registry_summary(lang: str = "cn", max_chars: int = 2400) -> str:
+    """Build a compact app name list for prompt injection.
+
+    Returns a section that can be appended to the system prompt to tell
+    the model which app names are valid for the Launch action.
+    """
+    app_list = ", ".join(APP_PACKAGES)
+
+    if lang == "en":
+        header = "# Available Apps (Launch action must use one of these names)"
+    else:
+        header = "# 可用应用（Launch 动作必须使用以下名称之一）"
+
+    result = f"{header}\n{app_list}"
+    if len(result) > max_chars:
+        truncated = app_list[: max_chars - len(header) - 10]
+        last_comma = truncated.rfind(", ")
+        if last_comma > 0:
+            truncated = truncated[:last_comma]
+        result = f"{header}\n{truncated}, ..."
+
+    return result

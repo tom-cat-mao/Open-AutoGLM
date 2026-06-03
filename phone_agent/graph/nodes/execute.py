@@ -35,6 +35,19 @@ def _strip_and_append(
     return messages
 
 
+def _clear_stale_reflection_for_skip_action(action_name: str | None) -> dict:
+    """Clear reflection advice after actions that replan without reflect."""
+    if action_name not in {"Wait", "Note", "Call_API", "Interact"}:
+        return {}
+    return {
+        "reflection": None,
+        "action_succeeded": True,
+        "reflection_verdict": None,
+        "failure_cause": None,
+        "suggested_strategy": None,
+    }
+
+
 def execute_node(state: "AgentState", config: RunnableConfig) -> dict:
     """
     Execute node: run action, strip images, append assistant message.
@@ -56,11 +69,12 @@ def execute_node(state: "AgentState", config: RunnableConfig) -> dict:
     device_id = state.get("device_id")
     context_mode = get_context_mode(state, config)
 
-    def _context_update(result_dict: dict) -> dict:
+    def _context_update(result_dict: dict, state_overrides: dict | None = None) -> dict:
         if not context_enabled(context_mode):
             return {"context_mode": context_mode}
         outcome_state = {
             **state,
+            **(state_overrides or {}),
             "action_result": result_dict,
             "current_app": state.get("current_app") or "unknown",
             "context_mode": context_mode,
@@ -324,10 +338,12 @@ def execute_node(state: "AgentState", config: RunnableConfig) -> dict:
 
     # 6. Check should_finish
     finished = result.should_finish
+    skip_reflection_updates = _clear_stale_reflection_for_skip_action(action_name)
 
     return {
         "action_result": result.__dict__,
         "messages": messages,
         "finished": finished,
-        **_context_update(result.__dict__),
+        **skip_reflection_updates,
+        **_context_update(result.__dict__, skip_reflection_updates),
     }

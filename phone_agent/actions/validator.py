@@ -103,6 +103,11 @@ def validate_action(action: dict[str, Any] | ActionIR) -> dict[str, Any]:
         _require_str(action_dict, "message")
     elif action_name == "Launch":
         _require_str(action_dict, "app")
+        from phone_agent.config.apps import normalize_app_name
+        canonical_app = normalize_app_name(action_dict["app"])
+        if canonical_app is None:
+            raise ActionValidationError("unknown_app", f"unknown app: {action_dict['app']}")
+        action_dict["app"] = canonical_app
     elif action_name == "Wait":
         _require_str(action_dict, "duration")
         _validate_wait_duration(action_dict["duration"])

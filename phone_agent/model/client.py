@@ -31,19 +31,36 @@ class ModelConfig:
     base_url: str = "http://localhost:8000/v1"
     api_key: str = "EMPTY"
     model_name: str = "autoglm-phone-9b"
+    timeout: float = 60.0
+    max_retries: int = 2
+    default_headers: dict[str, str] = field(default_factory=dict)
+    stream: bool = False
     max_tokens: int = 3000
     temperature: float = 0.0
     top_p: float = 0.85
     frequency_penalty: float = 0.2
     extra_body: dict[str, Any] = field(default_factory=dict)
+    thinking_mode: Literal["auto", "on", "off"] = "auto"
+    thinking_param: Literal["enable_thinking", "chat_template_kwargs"] = "enable_thinking"
     lang: str = "cn"  # Language for UI messages: 'cn' or 'en'
     output_mode: OutputMode = "text_dsl"
+    stream_stdout: bool = False
 
     def __post_init__(self) -> None:
         """Validate runtime configuration values not enforced by type hints."""
         if self.output_mode not in VALID_OUTPUT_MODES:
             raise ValueError(
                 "output_mode must be one of: text_dsl, json_schema, tool_calls, auto"
+            )
+        if self.timeout <= 0:
+            raise ValueError("timeout must be a positive number")
+        if self.max_retries < 0:
+            raise ValueError("max_retries must be non-negative")
+        if self.thinking_mode not in {"auto", "on", "off"}:
+            raise ValueError("thinking_mode must be one of: auto, on, off")
+        if self.thinking_param not in {"enable_thinking", "chat_template_kwargs"}:
+            raise ValueError(
+                "thinking_param must be one of: enable_thinking, chat_template_kwargs"
             )
 
 
@@ -71,9 +88,20 @@ class ModelClient:
 
     def __init__(self, config: ModelConfig | None = None):
         self.config = config or ModelConfig()
-        self.client = OpenAI(base_url=self.config.base_url, api_key=self.config.api_key)
+        self.client = OpenAI(
+            base_url=self.config.base_url,
+            api_key=self.config.api_key,
+            timeout=self.config.timeout,
+            max_retries=self.config.max_retries,
+            default_headers=self.config.default_headers or None,
+        )
 
-    def request(self, messages: list[dict[str, Any]]) -> ModelResponse:
+    def request(
+        self,
+        messages: list[dict[str, Any]],
+        output_mode: OutputMode | None = None,
+        validate_action: bool = True,
+    ) -> ModelResponse:
         """
         Send a request to the model.
 
@@ -91,6 +119,13 @@ class ModelClient:
         time_to_first_token = None
         time_to_thinking_end = None
 
+        effective_output_mode = output_mode or self.config.output_mode
+        if effective_output_mode not in VALID_OUTPUT_MODES:
+            raise ValueError(
+                "output_mode must be one of: text_dsl, json_schema, tool_calls, auto"
+            )
+
+        extra_body = self._build_extra_body()
         request_kwargs: dict[str, Any] = {
             "messages": cast(Any, messages),
             "model": self.config.model_name,
@@ -98,83 +133,37 @@ class ModelClient:
             "temperature": self.config.temperature,
             "top_p": self.config.top_p,
             "frequency_penalty": self.config.frequency_penalty,
-            "extra_body": self.config.extra_body,
-            "stream": True,
+            "extra_body": extra_body,
+            "stream": self.config.stream,
         }
-        if self.config.output_mode == "tool_calls":
+        if effective_output_mode == "tool_calls":
             request_kwargs["tools"] = self._build_tool_specs()
             request_kwargs["tool_choice"] = "auto"
-        elif self.config.output_mode == "json_schema":
+        elif effective_output_mode == "json_schema":
             request_kwargs["response_format"] = {"type": "json_object"}
-
-        stream: Any = self.client.chat.completions.create(
-            **request_kwargs,
-        )
 
         raw_content = ""
         tool_call_deltas: dict[int, dict[str, Any]] = {}
-        buffer = ""  # Buffer to hold content that might be part of a marker
-        action_markers = ["finish(message=", "do(action="]
-        in_action_phase = False  # Track if we've entered the action phase
-        first_token_received = False
-
-        for chunk in stream:
-            if len(chunk.choices) == 0:
-                continue
-            delta = chunk.choices[0].delta
-            tool_calls = getattr(delta, "tool_calls", None)
-            if tool_calls:
-                self._accumulate_tool_call_deltas(tool_call_deltas, tool_calls)
-            if delta.content is not None:
-                content = delta.content
-                raw_content += content
-
-                # Record time to first token
-                if not first_token_received:
-                    time_to_first_token = time.time() - start_time
-                    first_token_received = True
-
-                if in_action_phase:
-                    # Already in action phase, just accumulate content without printing
-                    continue
-
-                buffer += content
-
-                # Check if any marker is fully present in buffer
-                marker_found = False
-                for marker in action_markers:
-                    if marker in buffer:
-                        # Marker found, print everything before it
-                        thinking_part = buffer.split(marker, 1)[0]
-                        print(thinking_part, end="", flush=True)
-                        print()  # Print newline after thinking is complete
-                        in_action_phase = True
-                        marker_found = True
-
-                        # Record time to thinking end
-                        if time_to_thinking_end is None:
-                            time_to_thinking_end = time.time() - start_time
-
-                        break
-
-                if marker_found:
-                    continue  # Continue to collect remaining content
-
-                # Check if buffer ends with a prefix of any marker
-                # If so, don't print yet (wait for more content)
-                is_potential_marker = False
-                for marker in action_markers:
-                    for i in range(1, len(marker)):
-                        if buffer.endswith(marker[:i]):
-                            is_potential_marker = True
-                            break
-                    if is_potential_marker:
-                        break
-
-                if not is_potential_marker:
-                    # Safe to print the buffer
-                    print(buffer, end="", flush=True)
-                    buffer = ""
+        if self.config.stream:
+            stream: Any = self.client.chat.completions.create(
+                **request_kwargs,
+            )
+            raw_content, tool_call_deltas, time_to_first_token, time_to_thinking_end = (
+                self._consume_stream(stream, start_time)
+            )
+        else:
+            response: Any = self.client.chat.completions.create(
+                **request_kwargs,
+            )
+            if response.choices:
+                message = response.choices[0].message
+                raw_content = message.content or ""
+                tool_calls = getattr(message, "tool_calls", None)
+                if tool_calls:
+                    tool_call_deltas = {
+                        index: self._tool_call_to_dict(tool_call)
+                        for index, tool_call in enumerate(tool_calls)
+                    }
 
         # Calculate total time
         total_time = time.time() - start_time
@@ -183,6 +172,8 @@ class ModelClient:
         thinking, action, parse_metadata = self._parse_response_with_metadata(
             raw_content,
             tool_calls=list(tool_call_deltas.values()) if tool_call_deltas else None,
+            output_mode=effective_output_mode,
+            validate_action=validate_action,
         )
 
         # Print performance metrics
@@ -214,20 +205,136 @@ class ModelClient:
             parse_metadata=parse_metadata,
         )
 
+    def _build_extra_body(self) -> dict[str, Any]:
+        """Build provider-specific request body extensions."""
+        extra_body = dict(self.config.extra_body)
+        if self.config.thinking_mode == "auto":
+            return extra_body
+
+        enable_thinking = self.config.thinking_mode == "on"
+        if self.config.thinking_param == "chat_template_kwargs":
+            chat_template_kwargs = dict(extra_body.get("chat_template_kwargs") or {})
+            chat_template_kwargs["enable_thinking"] = enable_thinking
+            extra_body["chat_template_kwargs"] = chat_template_kwargs
+        else:
+            extra_body["enable_thinking"] = enable_thinking
+        return extra_body
+
+    def _consume_stream(
+        self, stream: Any, start_time: float
+    ) -> tuple[str, dict[int, dict[str, Any]], float | None, float | None]:
+        """Consume a streaming OpenAI-compatible response."""
+        raw_content = ""
+        tool_call_deltas: dict[int, dict[str, Any]] = {}
+        time_to_first_token = None
+        time_to_thinking_end = None
+        buffer = ""  # Buffer to hold content that might be part of a marker
+        action_markers = ["finish(message=", "do(action="]
+        in_action_phase = False  # Track if we've entered the action phase
+        first_token_received = False
+        saw_reasoning_content = False
+
+        for chunk in stream:
+            if len(chunk.choices) == 0:
+                continue
+            delta = chunk.choices[0].delta
+            tool_calls = getattr(delta, "tool_calls", None)
+            if tool_calls:
+                self._accumulate_tool_call_deltas(tool_call_deltas, tool_calls)
+                if not first_token_received:
+                    time_to_first_token = time.time() - start_time
+                    first_token_received = True
+
+            reasoning_content = getattr(delta, "reasoning_content", None)
+            if reasoning_content:
+                saw_reasoning_content = True
+                if not first_token_received:
+                    time_to_first_token = time.time() - start_time
+                    first_token_received = True
+                if self.config.stream_stdout and not in_action_phase:
+                    print(reasoning_content, end="", flush=True)
+
+            if delta.content is not None:
+                content = delta.content
+                raw_content += content
+
+                # Record time to first token
+                if not first_token_received:
+                    time_to_first_token = time.time() - start_time
+                    first_token_received = True
+
+                if saw_reasoning_content and time_to_thinking_end is None:
+                    # Providers such as Qwen stream reasoning in `reasoning_content`
+                    # and final answer in `content`. Seeing content after a reasoning
+                    # phase marks the end of thinking even if the final answer has no
+                    # do()/finish() marker yet.
+                    time_to_thinking_end = time.time() - start_time
+
+                if in_action_phase:
+                    # Already in action phase, just accumulate content without printing
+                    continue
+
+                buffer += content
+
+                # Check if any marker is fully present in buffer
+                marker_found = False
+                for marker in action_markers:
+                    if marker in buffer:
+                        # Marker found, print everything before it
+                        thinking_part = buffer.split(marker, 1)[0]
+                        if self.config.stream_stdout:
+                            print(thinking_part, end="", flush=True)
+                            print()  # Print newline after thinking is complete
+                        in_action_phase = True
+                        marker_found = True
+
+                        # Record time to thinking end
+                        if time_to_thinking_end is None:
+                            time_to_thinking_end = time.time() - start_time
+
+                        break
+
+                if marker_found:
+                    continue  # Continue to collect remaining content
+
+                # Check if buffer ends with a prefix of any marker
+                # If so, don't print yet (wait for more content)
+                is_potential_marker = False
+                for marker in action_markers:
+                    for i in range(1, len(marker)):
+                        if buffer.endswith(marker[:i]):
+                            is_potential_marker = True
+                            break
+                    if is_potential_marker:
+                        break
+
+                if not is_potential_marker:
+                    # Safe to print the buffer
+                    if self.config.stream_stdout:
+                        print(buffer, end="", flush=True)
+                    buffer = ""
+
+        return raw_content, tool_call_deltas, time_to_first_token, time_to_thinking_end
+
     def _parse_response_with_metadata(
-        self, content: str, tool_calls: list[dict[str, Any]] | None = None
+        self,
+        content: str,
+        tool_calls: list[dict[str, Any]] | None = None,
+        output_mode: OutputMode | None = None,
+        validate_action: bool = True,
     ) -> tuple[str, str, dict[str, Any]]:
         """Parse response according to configured output mode with observability metadata."""
+        effective_output_mode = output_mode or self.config.output_mode
         metadata: dict[str, Any] = {
             "provider": "openai_compatible",
-            "configured_mode": self.config.output_mode,
+            "configured_mode": effective_output_mode,
             "detected_format": "unknown",
             "adapter_used": "none",
             "parse_success": False,
             "parse_error_code": None,
         }
         try:
-            if self.config.output_mode == "tool_calls":
+            if effective_output_mode == "tool_calls":
                 if not tool_calls:
                     raise ActionAdapterError(
                         "unsupported_tool_call", "tool_calls mode requires a provider tool call"
@@ -243,7 +350,7 @@ class ModelClient:
                 return "", json.dumps(action, ensure_ascii=False), metadata
 
             if tool_calls:
-                if self.config.output_mode != "auto":
+                if effective_output_mode != "auto":
                     raise ActionAdapterError(
                         "unsupported_tool_call", "tool_calls received in non-tool_calls mode"
                     )
@@ -258,7 +365,7 @@ class ModelClient:
                 return "", json.dumps(action, ensure_ascii=False), metadata
 
             normalized = self._normalize_response_text(content)
-            if self.config.output_mode == "json_schema":
+            if effective_output_mode == "json_schema":
                 if not self._looks_like_json(normalized):
                     raise ActionAdapterError(
                         "invalid_json", "json_schema mode requires a JSON object response"
@@ -273,7 +380,7 @@ class ModelClient:
                 )
                 return "", json.dumps(action, ensure_ascii=False), metadata
 
-            if self.config.output_mode == "auto" and self._looks_like_json(normalized):
+            if effective_output_mode == "auto" and self._looks_like_json(normalized):
                 action = adapt_json_action(normalized)
                 metadata.update(
                     {
@@ -285,7 +392,8 @@ class ModelClient:
                 return "", json.dumps(action, ensure_ascii=False), metadata
 
             thinking, action = self._parse_response(normalized)
-            parse_action(action)
+            if validate_action:
+                parse_action(action)
             metadata.update(
                 {
                     "detected_format": "text_dsl",
@@ -368,6 +476,18 @@ class ModelClient:
                 if arguments:
                     current["function"]["arguments"] += arguments
 
+    def _tool_call_to_dict(self, tool_call: Any) -> dict[str, Any]:
+        """Convert a non-streaming OpenAI tool call object into adapter input."""
+        function = getattr(tool_call, "function", None)
+        return {
+            "id": getattr(tool_call, "id", ""),
+            "type": getattr(tool_call, "type", "function"),
+            "function": {
+                "name": getattr(function, "name", "") if function else "",
+                "arguments": getattr(function, "arguments", "") if function else "",
+            },
+        }
+
     def _build_tool_specs(self) -> list[dict[str, Any]]:
         """Build provider-facing tool specs for output formatting only."""
         return [
@@ -380,16 +500,42 @@ class ModelClient:
                         "type": "object",
                         "properties": {
                             "type": {"type": "string", "enum": ["do"]},
-                            "action": {"type": "string"},
+                            "action": {
+                                "type": "string",
+                                "enum": [
+                                    "Tap", "Double Tap", "Long Press", "Swipe",
+                                    "Type", "Type_Name", "Back", "Home",
+                                    "Launch", "Wait", "Note", "Call_API",
+                                    "Interact", "Take_over",
+                                ],
+                            },
                             "x": {"type": "number"},
                             "y": {"type": "number"},
-                            "element": {"type": "array", "items": {"type": "number"}},
-                            "start": {"type": "array", "items": {"type": "number"}},
-                            "end": {"type": "array", "items": {"type": "number"}},
+                            "element": {
+                                "type": "array",
+                                "items": {"type": "number"},
+                                "description": "[x, y] in 0-1000 relative coordinates",
+                            },
+                            "start": {
+                                "type": "array",
+                                "items": {"type": "number"},
+                                "description": "[x, y] swipe start in 0-1000",
+                            },
+                            "end": {
+                                "type": "array",
+                                "items": {"type": "number"},
+                                "description": "[x, y] swipe end in 0-1000",
+                            },
                             "text": {"type": "string"},
                             "message": {"type": "string"},
-                            "app": {"type": "string"},
-                            "duration": {"type": ["string", "number"]},
+                            "app": {
+                                "type": "string",
+                                "description": "Must use a name from the available apps list in the system prompt",
+                            },
+                            "duration": {
+                                "type": "string",
+                                "description": "Format: 'N seconds', max 60 seconds",
+                            },
                         },
                         "required": ["type", "action"],
                     },
@@ -447,7 +593,7 @@ class MessageBuilder:
 
     @staticmethod
     def create_user_message(
-        text: str, image_base64: str | None = None
+        text: str, image_base64: str | None = None, image_mime_type: str = "image/png"
     ) -> dict[str, Any]:
         """
         Create a user message with optional image.
@@ -465,7 +611,7 @@ class MessageBuilder:
             content.append(
                 {
                     "type": "image_url",
-                    "image_url": {"url": f"data:image/png;base64,{image_base64}"},
+                    "image_url": {"url": f"data:{image_mime_type};base64,{image_base64}"},
                 }
             )
 

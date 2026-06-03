@@ -113,6 +113,20 @@ CONTEXT_USAGE_RULES = """# Context 使用规则
 - `avoid_repeating` 表示应避免重复失败动作；`next_hint` 只是建议，不是强制命令。
 """
 
+FAILURE_RECOVERY_MAP = """# 失败恢复策略
+当 Structured Reflection 显示失败时，按以下映射行动：
+- failure_cause="element_not_found" → Swipe 查找或 Back 返回上级重新搜索
+- failure_cause="wrong_page" → Back 返回正确页面
+- failure_cause="app_not_responding" → Wait 短等待后重试，3 次无效后 Back
+- failure_cause="network_or_loading" → Wait 短等待，最多 3 次后尝试重新加载
+- failure_cause="permission_or_login_or_captcha" → Take_over
+- failure_cause="coordinate_or_tap_offset" → 调整 element 坐标重试
+- failure_cause="repeated_action" → 换一种策略，不要重复同一操作
+- suggested_strategy="swipe_to_find" → Swipe 查找目标
+- suggested_strategy="go_back" → Back 返回
+- suggested_strategy="finish" → finish(message="...")
+"""
+
 TEXT_DSL_OUTPUT_CONTRACT = """# 输出格式：text_dsl
 严格输出：
 <think>简短说明为什么选择这一步</think>
@@ -120,7 +134,7 @@ TEXT_DSL_OUTPUT_CONTRACT = """# 输出格式：text_dsl
 
 示例：
 <think>当前不在目标应用，先启动应用。</think>
-<answer>do(action="Launch", app="设置")</answer>
+<answer>do(action="Launch", app="Settings")</answer>
 """
 
 JSON_OUTPUT_CONTRACT = """# 输出格式：JSON schema
@@ -130,7 +144,7 @@ JSON_OUTPUT_CONTRACT = """# 输出格式：JSON schema
 - {"type":"do","action":"tap","x":500,"y":500,"message":"敏感操作说明"}
 - {"type":"do","action":"swipe","start":[500,800],"end":[500,200]}
 - {"type":"do","action":"type","text":"你好"}
-- {"type":"do","action":"launch","app":"设置"}
+- {"type":"do","action":"launch","app":"Settings"}
 - {"type":"do","action":"wait","duration":"1 seconds"}
 - {"type":"do","action":"back"}
 - {"type":"do","action":"home"}
@@ -151,9 +165,9 @@ AUTO_OUTPUT_CONTRACT = """# 输出格式：auto
 """
 
 SYSTEM_PROMPT = "\n\n".join(
-    [SYSTEM_CONTRACT, ACTION_SCHEMA, TASK_POLICIES, CONTEXT_USAGE_RULES, TEXT_DSL_OUTPUT_CONTRACT]
+    [SYSTEM_CONTRACT, ACTION_SCHEMA, TASK_POLICIES, CONTEXT_USAGE_RULES, FAILURE_RECOVERY_MAP, TEXT_DSL_OUTPUT_CONTRACT]
 )
 
 BASE_SYSTEM_PROMPT = "\n\n".join(
-    [SYSTEM_CONTRACT, ACTION_SCHEMA, TASK_POLICIES, CONTEXT_USAGE_RULES]
+    [SYSTEM_CONTRACT, ACTION_SCHEMA, TASK_POLICIES, CONTEXT_USAGE_RULES, FAILURE_RECOVERY_MAP]
 )

@@ -115,6 +115,20 @@ CONTEXT_USAGE_RULES = """# Context usage rules
 - `avoid_repeating` means avoid repeating known failures; `next_hint` is guidance, not a command.
 """
 
+FAILURE_RECOVERY_MAP = """# Failure recovery strategies
+When Structured Reflection indicates failure, follow this mapping:
+- failure_cause="element_not_found" → Swipe to find or Back to return and re-search
+- failure_cause="wrong_page" → Back to the correct page
+- failure_cause="app_not_responding" → short Wait then retry; Back after 3 failures
+- failure_cause="network_or_loading" → short Wait, max 3 times, then try reloading
+- failure_cause="permission_or_login_or_captcha" → Take_over
+- failure_cause="coordinate_or_tap_offset" → adjust element coordinates and retry
+- failure_cause="repeated_action" → try a different strategy, do not repeat the same action
+- suggested_strategy="swipe_to_find" → Swipe to find the target
+- suggested_strategy="go_back" → Back
+- suggested_strategy="finish" → finish(message="...")
+"""
+
 TEXT_DSL_OUTPUT_CONTRACT = """# Output format: text_dsl
 Strictly output:
 <think>brief reason for this step</think>
@@ -153,6 +167,6 @@ Prefer text_dsl. If the provider is explicitly configured for JSON or tool calls
 """
 
 BASE_SYSTEM_PROMPT = "\n\n".join(
-    [SYSTEM_CONTRACT, ACTION_SCHEMA, TASK_POLICIES, CONTEXT_USAGE_RULES]
+    [SYSTEM_CONTRACT, ACTION_SCHEMA, TASK_POLICIES, CONTEXT_USAGE_RULES, FAILURE_RECOVERY_MAP]
 )
 SYSTEM_PROMPT = "\n\n".join([BASE_SYSTEM_PROMPT, TEXT_DSL_OUTPUT_CONTRACT])

@@ -41,6 +41,11 @@ REFLECT_SYSTEM_PROMPT_CN = """你是一个手机自动化任务的反思专家�
 2. 动作未生效：页面没有变化，或变化与预期不符
 3. 部分成功：页面有变化但任务尚未完全进入预期状态
 4. 任务完成：如果当前页面显示任务已经完成，输出 reflection(verdict="succeeded", failure_cause="none", suggested_strategy="finish", message="任务已完成")
+
+重要约束：
+- 只有在截图明确显示加载中、空白页、网络错误、进度条/转圈、或执行结果表示应用无响应时，才使用 failure_cause="network_or_loading" 和 suggested_strategy="wait"。
+- 如果刚执行的是 Launch/启动应用，且当前屏幕信息或截图已显示目标应用/设置页/目标页面已打开，即使任务还没完成，也应判定为 succeeded + continue，而不是 partial + wait。
+- 不要因为页面内容很多、设置项列表尚需下一步操作，就误判为加载中；可继续操作的稳定页面应输出 continue。
 """
 
 REFLECT_SYSTEM_PROMPT_EN = """You are a mobile automation reflection expert. Your job is to observe the screenshot after an action and judge whether the action succeeded, then give next-step advice.
@@ -59,6 +64,11 @@ Judgment criteria:
 2. Action failed: the page did not change, or the change was unexpected
 3. Partial success: the page changed but is not yet in the expected state
 4. Task completed: if the current page shows the task is done, output reflection(verdict="succeeded", failure_cause="none", suggested_strategy="finish", message="Task completed")
+
+Important constraints:
+- Use failure_cause="network_or_loading" and suggested_strategy="wait" only when the screenshot clearly shows loading, a blank page, a network error, a spinner/progress indicator, or the execution result indicates the app is not responding.
+- If the action just executed is Launch and the current screen info or screenshot already shows the target app/settings/target page is open, judge it as succeeded + continue even if the overall task still needs more steps; do not return partial + wait.
+- Do not treat a stable page with many settings/list items as loading. If the page is actionable, return continue.
 """
 
 VALID_VERDICTS = {"succeeded", "failed", "partial"}
@@ -189,13 +199,22 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
     reflect_messages = [
         MessageBuilder.create_system_message(system_prompt),
         MessageBuilder.create_user_message(
-            text=reflect_text, image_base64=screenshot.base64_data
+            text=reflect_text,
+            image_base64=screenshot.base64_data,
+            image_mime_type=getattr(screenshot, "mime_type", "image/png"),
         ),
     ]
 
     # 3. Model inference for reflection
     try:
-        response = model_client.request(reflect_messages)
+        try:
+            response = model_client.request(
+                reflect_messages, output_mode="text_dsl", validate_action=False
+            )
+        except TypeError as type_error:
+            if "output_mode" not in str(type_error) and "validate_action" not in str(type_error):
+                raise
+            response = model_client.request(reflect_messages)
     except Exception as e:
         if verbose:
             traceback.print_exc()
@@ -239,10 +258,25 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
 
     context_updates = {"context_mode": context_mode}
     if context_enabled(context_mode):
+        loading = parsed_reflection.failure_cause in {
+            "network_or_loading", "app_not_responding",
+        }
+        sensitive = parsed_reflection.failure_cause in {
+            "unsafe_or_sensitive", "permission_or_login_or_captcha",
+        }
+        if parsed_reflection.verdict == "succeeded":
+            confidence = "high"
+        elif parsed_reflection.verdict == "partial":
+            confidence = "medium"
+        else:
+            confidence = "low"
         belief = build_screen_belief(
             current_app=current_app,
             step_count=step_count,
             summary=parsed_reflection.message,
+            loading_or_blocked=loading,
+            unsafe_or_sensitive=sensitive,
+            confidence=confidence,
         )
         outcome_state = {
             **state,

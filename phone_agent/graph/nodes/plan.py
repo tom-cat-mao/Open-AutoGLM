@@ -10,6 +10,7 @@ from phone_agent.actions.handler import parse_action
 from phone_agent.actions.repair import ActionRepairError, repair_action
 from phone_agent.actions.validator import ActionValidationError, validate_action
 from phone_agent.config import get_prompt_version, get_system_prompt
+from phone_agent.config.apps import get_app_registry_summary
 from phone_agent.graph.context import (
     build_context_metrics,
     compact_messages_for_request,
@@ -153,11 +154,15 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
     # 2. Build new messages (only the new ones, reducer will append)
     new_messages = []
     if step_count == 0:
-        system_prompt = configurable.get("system_prompt") or get_system_prompt(
+        custom_prompt = configurable.get("system_prompt")
+        system_prompt = custom_prompt or get_system_prompt(
             lang,
             configurable.get("output_mode", "text_dsl"),
             prompt_version=prompt_version,
         )
+        if not custom_prompt:
+            app_registry = get_app_registry_summary(lang=lang)
+            system_prompt = f"{system_prompt}\n\n{app_registry}"
         new_messages.append(MessageBuilder.create_system_message(system_prompt))
 
         screen_info = MessageBuilder.build_screen_info(current_app)
@@ -166,7 +171,9 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
             text_content = f"{text_content}\n\n{context_block}"
         new_messages.append(
             MessageBuilder.create_user_message(
-                text=text_content, image_base64=screenshot.base64_data
+                text=text_content,
+                image_base64=screenshot.base64_data,
+                image_mime_type=getattr(screenshot, "mime_type", "image/png"),
             )
         )
     else:
@@ -180,7 +187,9 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
             text_content = f"{text_content}\n\n{context_block}"
         new_messages.append(
             MessageBuilder.create_user_message(
-                text=text_content, image_base64=screenshot.base64_data
+                text=text_content,
+                image_base64=screenshot.base64_data,
+                image_mime_type=getattr(screenshot, "mime_type", "image/png"),
             )
         )
 

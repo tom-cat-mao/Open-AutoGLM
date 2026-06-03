@@ -207,17 +207,24 @@ def trim_text(text: str, max_chars: int) -> tuple[str, bool]:
 
 
 def build_screen_belief(
-    *, current_app: str, step_count: int = 0, summary: str | None = None
+    *, current_app: str, step_count: int = 0, summary: str | None = None,
+    loading_or_blocked: bool = False,
+    unsafe_or_sensitive: bool = False,
+    confidence: str = "medium",
 ) -> dict[str, Any]:
     """Build a conservative short-term screen belief."""
-    safe_summary = "unknown" if not summary else redact_context_text(summary)
-    safe_summary, _ = trim_text(safe_summary, DEFAULT_CONTEXT_BUDGET["screen_belief_summary_chars"])
+    safe_summary: Any = "unknown"
+    if summary:
+        summary_text, _ = trim_text(str(summary), DEFAULT_CONTEXT_BUDGET["screen_belief_summary_chars"])
+        # Reflection messages are model-generated free text derived from screenshots.
+        # Treat them as private by default so inject mode cannot recycle arbitrary UI text.
+        safe_summary = sanitize_context_payload(summary_text, "message")
     return {
         "current_app": current_app or "unknown",
         "summary": safe_summary or "unknown",
-        "loading_or_blocked": False,
-        "unsafe_or_sensitive": False,
-        "confidence": "unknown",
+        "loading_or_blocked": loading_or_blocked,
+        "unsafe_or_sensitive": unsafe_or_sensitive,
+        "confidence": confidence,
         "updated_step": step_count,
     }
 

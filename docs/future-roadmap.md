@@ -523,6 +523,154 @@ CREATE TABLE skills (
 
 ---
 
+## P2: 结构化 Screen State (Accessibility Tree)
+
+**问题**: Agent 对屏幕的理解完全依赖原始截图（像素），没有结构化的 UI 元素信息。模型必须从截图推断按钮位置、文本内容、可滚动区域等，导致坐标精度有限且无法获取不可见元素信息。
+
+**方案设计**:
+
+使用 `uiautomator dump` 或 Android Accessibility Service 获取当前页面的结构化 UI 状态：
+
+```python
+screen_state = {
+    "current_app": "Settings",
+    "current_page": "WiFi设置",
+    "elements": [
+        {"type": "switch", "text": "WiFi", "bounds": [0, 200, 1000, 280], "checked": True},
+        {"type": "list_item", "text": "HomeNetwork_5G", "bounds": [0, 300, 1000, 380]},
+        {"type": "button", "text": "添加网络", "bounds": [400, 900, 600, 960]},
+    ],
+    "scrollable": True,
+    "has_input": False,
+}
+```
+
+在 `plan_node` 中将结构化状态注入 prompt，模型同时看到截图和元素树，可直接输出"点击 WiFi 开关"而非猜测坐标。
+
+**依赖条件**:
+- Android 设备需启用 USB debugging + Accessibility
+- 不同 Android 版本 `uiautomator` 行为不一致
+- 需要处理敏感信息过滤（密码输入框等）
+
+**预估复杂度**: 🔴 高 (5-7 天)
+
+---
+
+## P2: UI 状态机 (App 内页面层级跟踪)
+
+**问题**: Agent 只知道 `current_app="淘宝"`，不知道当前在 app 内的哪个子页面（首页 / 搜索页 / 商品详情页 / 购物车 / 结算页）。每次都要从截图重新推断。
+
+**方案设计**:
+
+为每个高频 app 维护一个简化的页面状态机：
+
+```python
+TAOBAO_PAGES = {
+    "home": {"indicators": ["搜索", "首页"], "actions": {"search": "search_page"}},
+    "search_page": {"indicators": ["搜索框", "搜索"], "actions": {"result": "search_results"}},
+    "search_results": {"indicators": ["筛选", "排序"], "actions": {"item": "item_detail"}},
+    "item_detail": {"indicators": ["加入购物车", "立即购买"]},
+    "cart": {"indicators": ["全选", "结算"]},
+    "checkout": {"indicators": ["提交订单"]},
+}
+```
+
+在 `reflect_node` 中根据截图 + current_app + 上一步操作推断当前页面层级，写入 `state["current_page"]`，供 `plan_node` 使用。
+
+**依赖条件**:
+- 需要为每个目标 app 定义页面状态机（工作量大）
+- 页面判断依赖 VLM 或结构化 UI 状态（P2-1）
+
+**预估复杂度**: 🟡 中等 (3-5 天，不含 app 定义工作量)
+
+---
+
+## P2: 动态 Prompt 注入 (已安装 App / 当前页面元素)
+
+**问题**: 当前 system prompt 是静态的，不包含设备特定信息。模型不知道设备上安装了哪些 app，也不知道当前页面有哪些可交互元素。
+
+**方案设计**:
+
+分两层动态注入：
+
+1. **App 列表注入** (已在 P0-1 部分实现): 当前使用静态 APP_PACKAGES 作为 registry。后续可调用 `pm list packages` 获取设备已安装 app，与 APP_PACKAGES 取交集，只注入实际可用的 app。
+
+2. **页面元素注入**: 结合 P2-1 的结构化 Screen State，将当前页面的可交互元素列表注入 user message。
+
+```
+** 当前页面可交互元素 **
+- [Switch] WiFi (已开启)
+- [ListItem] HomeNetwork_5G
+- [Button] 添加网络
+- [Scrollable] 列表 (可下滑查看更多)
+```
+
+**依赖条件**: P2-1 结构化 Screen State
+
+**预估复杂度**: 🟡 中等 (2-3 天，依赖 P2-1)
+
+---
+
+## P3: Multi-model Pipeline
+
+**问题**: Plan 和 Reflect 都使用同一个大模型，但两者的任务复杂度不同。Plan 需要理解任务 + 截图 + 历史来决策，Reflect 只需要判断截图变化。用小模型做 Reflect 可以降低成本和延迟。
+
+**方案设计**:
+
+```
+Plan:    大模型 (7B+) — 复杂推理 + 动作决策
+Reflect: 小模型 (1-3B) — 截图对比 + 成败判断
+Grounding: 专用模型 — UI 元素定位 (可选)
+```
+
+在 `ModelConfig` 中支持多模型配置，`plan_node` 和 `reflect_node` 使用不同的 `model_client`。
+
+**依赖条件**: 需要部署多个模型端点
+
+**预估复杂度**: 🟡 中等 (2-3 天代码 + 部署)
+
+---
+
+## P3: Persistent Memory (文件系统方案)
+
+**问题**: 每次 `agent.run()` 都是全新开始，Agent 不记住之前的任务执行结果。长上下文中历史信息被 compact 丢失。
+
+**方案设计**:
+
+参考 Manus 的文件系统方案，将关键信息持久化到本地文件：
+
+```
+.agent_memory/
+├── task_history.jsonl      # 历史任务 + 结果
+├── app_navigation.json     # 已学到的 app 导航路径
+└── failure_patterns.json   # 已知的失败模式 + 修复策略
+```
+
+在 `plan_node` 的 step 0 中读取相关记忆并注入 prompt。在 `agent.run()` 结束后写入新学到的信息。
+
+**依赖条件**: 需要足够的任务执行数据积累
+
+**预估复杂度**: 🟡 中等 (3-4 天)
+
+---
+
+## P3: KV-cache Aware Prompt 管理
+
+**问题**: 修改 prompt 前缀（如时间戳、动态 app 列表）会导致 provider 端 KV-cache 失效，增加推理延迟和成本。Manus 的经验表明"Keep your prompt prefix stable"是关键优化。
+
+**方案设计**:
+
+1. 将 prompt 分为稳定前缀和动态后缀
+2. 稳定前缀：System Contract + Action Schema + Task Policies（不变）
+3. 动态后缀：App Registry + 日期 + Context Block（每 run 变化）
+4. 确保动态部分只出现在 prompt 尾部
+
+**当前状态**: P0-1 已将 App Registry 放在 system prompt 末尾，符合此原则。日期仍在 `SYSTEM_CONTRACT` 开头，但每日只变一次，影响可控。
+
+**预估复杂度**: 🟢 低 (1 天，主要是审计和调整)
+
+---
+
 ## 优先级总览
 
 | 优先级 | 功能 | 时间 | 简历价值 | 理由 |

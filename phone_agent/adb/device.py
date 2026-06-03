@@ -202,9 +202,24 @@ def home(device_id: str | None = None, delay: float | None = None) -> None:
 
     adb_prefix = _get_adb_prefix(device_id)
 
-    subprocess.run(
+    result = subprocess.run(
         adb_prefix + ["shell", "input", "keyevent", "KEYCODE_HOME"], capture_output=True
     )
+    if result.returncode != 0 or _has_inject_events_error(result):
+        subprocess.run(
+            adb_prefix
+            + [
+                "shell",
+                "am",
+                "start",
+                "-a",
+                "android.intent.action.MAIN",
+                "-c",
+                "android.intent.category.HOME",
+            ],
+            capture_output=True,
+            text=True,
+        )
     time.sleep(delay)
 
 
@@ -231,21 +246,76 @@ def launch_app(
     adb_prefix = _get_adb_prefix(device_id)
     package = APP_PACKAGES[app_name]
 
-    subprocess.run(
+    component = _resolve_launcher_component(adb_prefix, package)
+    if component:
+        result = subprocess.run(
+            adb_prefix + ["shell", "am", "start", "-n", component],
+            capture_output=True,
+            text=True,
+        )
+    else:
+        result = subprocess.run(
+            adb_prefix
+            + [
+                "shell",
+                "am",
+                "start",
+                "-a",
+                "android.intent.action.MAIN",
+                "-c",
+                "android.intent.category.LAUNCHER",
+                "-p",
+                package,
+            ],
+            capture_output=True,
+            text=True,
+        )
+
+    time.sleep(delay)
+    return result.returncode == 0 and "Error:" not in (result.stdout + result.stderr)
+
+
+def _resolve_launcher_component(adb_prefix: list[str], package: str) -> str | None:
+    """Resolve a package's launcher activity component via package manager."""
+    result = subprocess.run(
         adb_prefix
         + [
             "shell",
-            "monkey",
-            "-p",
-            package,
+            "cmd",
+            "package",
+            "resolve-activity",
+            "--brief",
+            "-a",
+            "android.intent.action.MAIN",
             "-c",
             "android.intent.category.LAUNCHER",
-            "1",
+            package,
         ],
         capture_output=True,
+        text=True,
     )
-    time.sleep(delay)
-    return True
+    if result.returncode != 0:
+        return None
+
+    for line in reversed(result.stdout.splitlines()):
+        component = line.strip()
+        if not component or component.startswith("No activity found"):
+            continue
+        if "/" in component:
+            return component
+    return None
+
+
+def _has_inject_events_error(result: subprocess.CompletedProcess) -> bool:
+    """Return True if an adb command failed due to INJECT_EVENTS restrictions."""
+    output = b""
+    for stream in (result.stdout, result.stderr):
+        if isinstance(stream, bytes):
+            output += stream
+        elif isinstance(stream, str):
+            output += stream.encode("utf-8", errors="ignore")
+    normalized = output.lower()
+    return b"inject_events" in normalized or b"inject events" in normalized
 
 
 def _get_adb_prefix(device_id: str | None) -> list:

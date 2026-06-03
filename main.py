@@ -9,16 +9,121 @@ Environment Variables:
     PHONE_AGENT_BASE_URL: Model API base URL (default: http://localhost:8000/v1)
     PHONE_AGENT_MODEL: Model name (default: autoglm-phone-9b)
     PHONE_AGENT_API_KEY: API key for model authentication (default: EMPTY)
+    PHONE_AGENT_HTTP_HEADERS: Extra model API headers as JSON or Header=Value entries
+    PHONE_AGENT_USER_AGENT: Optional User-Agent header for model API requests
+    PHONE_AGENT_CF_ACCESS_CLIENT_ID: Cloudflare Access service token client id
+    PHONE_AGENT_CF_ACCESS_CLIENT_SECRET: Cloudflare Access service token client secret
+    PHONE_AGENT_MODEL_TIMEOUT: Model API timeout in seconds (default: 60)
+    PHONE_AGENT_MODEL_MAX_RETRIES: Model API max retries (default: 2)
+    PHONE_AGENT_STREAM: Enable streaming model responses when true (default: false)
+    PHONE_AGENT_MODEL_EXTRA_BODY: Extra JSON fields for model request body
+    PHONE_AGENT_THINKING_MODE: Thinking mode control: auto, on, off (default: auto)
+    PHONE_AGENT_THINKING_PARAM: Thinking parameter style: enable_thinking or chat_template_kwargs
+    PHONE_AGENT_SCREENSHOT_FORMAT: Screenshot payload format, jpeg or png (default: jpeg)
+    PHONE_AGENT_SCREENSHOT_JPEG_QUALITY: JPEG quality for model screenshot payload (default: 80)
+    PHONE_AGENT_SKIP_MODEL_CHECK: Skip startup model API check when true
     PHONE_AGENT_OUTPUT_MODE: Model output mode (text_dsl/json_schema/tool_calls/auto)
     PHONE_AGENT_MAX_STEPS: Maximum steps per task (default: 100)
     PHONE_AGENT_DEVICE_ID: ADB device ID for multi-device setups
 """
 
 import argparse
+import json
 import os
 import shutil
 import subprocess
 import sys
+from collections.abc import Iterable
+from typing import Any
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+
+DEFAULT_MODEL_USER_AGENT = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/125.0.0.0 Safari/537.36 Open-AutoGLM/0.1"
+)
+SENSITIVE_HEADER_NAMES = {
+    "authorization",
+    "api-key",
+    "cookie",
+    "proxy-authorization",
+    "set-cookie",
+    "x-api-key",
+    "cf-access-client-secret",
+}
+SENSITIVE_HEADER_MARKERS = (
+    "auth",
+    "credential",
+    "cookie",
+    "key",
+    "password",
+    "secret",
+    "token",
+)
+SENSITIVE_URL_QUERY_MARKERS = ("api_key", "apikey", "auth", "key", "password", "secret", "token")
+BLOCKED_HEADER_NAMES = {
+    "connection",
+    "content-length",
+    "host",
+    "te",
+    "trailer",
+    "transfer-encoding",
+    "upgrade",
+}
+
+
+def redact_url_for_display(url: str) -> str:
+    """Redact URL credentials and sensitive query parameters before logging."""
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return "<redacted-url>"
+
+    netloc = parts.hostname or ""
+    if parts.port:
+        netloc = f"{netloc}:{parts.port}"
+    if parts.username or parts.password:
+        netloc = f"<redacted>@{netloc}"
+
+    query_items = []
+    for key, value in parse_qsl(parts.query, keep_blank_values=True):
+        lowered = key.lower()
+        if any(marker in lowered for marker in SENSITIVE_URL_QUERY_MARKERS):
+            query_items.append((key, "<redacted>"))
+        else:
+            query_items.append((key, value))
+    return urlunsplit((parts.scheme, netloc, parts.path, urlencode(query_items, safe="<>"), parts.fragment))
+
+
+def load_dotenv(
+    path: str | None = None,
+    allowed_prefixes: Iterable[str] = ("PHONE_AGENT_",),
+) -> None:
+    """Load simple project .env KEY=VALUE pairs without overriding the shell."""
+    path = path or os.path.join(os.path.dirname(__file__), ".env")
+    if not os.path.exists(path):
+        return
+
+    with open(path, "r", encoding="utf-8") as env_file:
+        for raw_line in env_file:
+            line = raw_line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            if line.startswith("export "):
+                line = line[len("export ") :].strip()
+            key, value = line.split("=", 1)
+            key = key.strip()
+            if (
+                not key
+                or key in os.environ
+                or not any(key.startswith(prefix) for prefix in allowed_prefixes)
+            ):
+                continue
+            value = value.strip()
+            if len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'"}:
+                value = value[1:-1]
+            os.environ[key] = value
+
 
 from openai import OpenAI
 
@@ -27,6 +132,142 @@ from phone_agent.agent import AgentConfig
 from phone_agent.config.apps import list_supported_apps
 from phone_agent.device_factory import DeviceType, get_device_factory, set_device_type
 from phone_agent.model import ModelConfig
+
+
+def validate_header(name: str, value: str) -> tuple[str, str]:
+    """Validate user-provided HTTP header name/value before passing to httpx."""
+    name = name.strip()
+    value = value.strip()
+    if not name:
+        raise ValueError("HTTP header name must not be empty")
+    if name.lower() in BLOCKED_HEADER_NAMES:
+        raise ValueError(f"HTTP header is not allowed: {name}")
+    if any(ord(ch) < 32 or ord(ch) == 127 for ch in name + value):
+        raise ValueError(f"HTTP header contains control characters: {name}")
+    return name, value
+
+
+def redact_sensitive_text(text: str, headers: dict[str, str] | None = None) -> str:
+    """Redact configured secrets from user-visible diagnostic errors."""
+    redacted = text
+    for secret in (os.getenv("PHONE_AGENT_API_KEY"), os.getenv("PHONE_AGENT_CF_ACCESS_CLIENT_SECRET")):
+        if secret:
+            redacted = redacted.replace(secret, "[REDACTED]")
+    for name, value in (headers or {}).items():
+        lowered = name.lower()
+        if value:
+            redacted = redacted.replace(value, "[REDACTED]")
+    return redacted
+
+
+def redact_api_error(
+    text: str,
+    api_key: str | None = None,
+    headers: dict[str, str] | None = None,
+) -> str:
+    """Redact API key and sensitive headers from diagnostic exceptions."""
+    redacted = redact_sensitive_text(text, headers)
+    if api_key and api_key != "EMPTY":
+        redacted = redacted.replace(api_key, "[REDACTED]")
+    return redacted
+
+
+def parse_env_headers(value: str | None) -> dict[str, str]:
+    """Parse HTTP headers from JSON or newline/comma separated KEY=VALUE env text."""
+    if not value:
+        return {}
+
+    stripped = value.strip()
+    if not stripped:
+        return {}
+
+    if stripped.startswith("{"):
+        parsed = json.loads(stripped)
+        if not isinstance(parsed, dict):
+            raise ValueError("PHONE_AGENT_HTTP_HEADERS JSON must be an object")
+        return dict(validate_header(str(k), str(v)) for k, v in parsed.items())
+
+    headers: dict[str, str] = {}
+    for item in stripped.replace("\n", ",").split(","):
+        item = item.strip()
+        if not item:
+            continue
+        if ":" in item:
+            key, header_value = item.split(":", 1)
+        elif "=" in item:
+            key, header_value = item.split("=", 1)
+        else:
+            raise ValueError(
+                "PHONE_AGENT_HTTP_HEADERS entries must use Header=Value or Header:Value"
+            )
+        key, header_value = validate_header(key, header_value)
+        headers[key] = header_value
+    return headers
+
+
+def parse_env_bool(name: str, default: bool = False) -> bool:
+    """Parse boolean environment variables used by CLI flags."""
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.lower() in {"1", "true", "yes", "on"}
+
+
+def parse_json_object(value: str | None, name: str) -> dict[str, Any]:
+    """Parse a JSON object option from CLI/env text."""
+    if not value:
+        return {}
+    parsed = json.loads(value)
+    if not isinstance(parsed, dict):
+        raise ValueError(f"{name} must be a JSON object")
+    return parsed
+
+
+def build_model_extra_body(
+    extra_body: dict[str, Any],
+    thinking_mode: str = "auto",
+    thinking_param: str = "enable_thinking",
+) -> dict[str, Any]:
+    """Merge provider-specific model request body options for diagnosis output."""
+    merged = dict(extra_body)
+    if thinking_mode == "auto":
+        return merged
+
+    enable_thinking = thinking_mode == "on"
+    if thinking_param == "chat_template_kwargs":
+        chat_template_kwargs = dict(merged.get("chat_template_kwargs") or {})
+        chat_template_kwargs["enable_thinking"] = enable_thinking
+        merged["chat_template_kwargs"] = chat_template_kwargs
+    else:
+        merged["enable_thinking"] = enable_thinking
+    return merged
+
+
+def build_model_headers(args: argparse.Namespace) -> dict[str, str]:
+    """Build OpenAI-compatible client headers from CLI/env configuration."""
+    headers = parse_env_headers(os.getenv("PHONE_AGENT_HTTP_HEADERS"))
+
+    user_agent = (
+        args.user_agent or os.getenv("PHONE_AGENT_USER_AGENT") or DEFAULT_MODEL_USER_AGENT
+    )
+    if user_agent:
+        key, value = validate_header("User-Agent", user_agent)
+        headers[key] = value
+
+    cf_client_id = os.getenv("PHONE_AGENT_CF_ACCESS_CLIENT_ID")
+    cf_client_secret = os.getenv("PHONE_AGENT_CF_ACCESS_CLIENT_SECRET")
+    if bool(cf_client_id) != bool(cf_client_secret):
+        raise ValueError(
+            "PHONE_AGENT_CF_ACCESS_CLIENT_ID and PHONE_AGENT_CF_ACCESS_CLIENT_SECRET "
+            "must be configured together"
+        )
+    if cf_client_id and cf_client_secret:
+        key, value = validate_header("CF-Access-Client-Id", cf_client_id)
+        headers[key] = value
+        key, value = validate_header("CF-Access-Client-Secret", cf_client_secret)
+        headers[key] = value
+
+    return headers
 
 
 def check_system_requirements() -> bool:
@@ -183,10 +424,11 @@ def check_model_api(base_url: str, model_name: str, api_key: str = "EMPTY") -> b
     """
     print("🔍 Checking model API...")
     print("-" * 50)
+    display_base_url = redact_url_for_display(base_url)
 
     all_passed = True
 
-    print(f"1. Checking API connectivity ({base_url})...", end=" ")
+    print(f"1. Checking API connectivity ({display_base_url})...", end=" ")
     try:
         client = OpenAI(base_url=base_url, api_key=api_key, timeout=30.0)
 
@@ -207,16 +449,18 @@ def check_model_api(base_url: str, model_name: str, api_key: str = "EMPTY") -> b
 
     except Exception as e:
         print("❌ FAILED")
-        error_msg = str(e)
+        error_msg = redact_api_error(str(e), api_key=api_key)
+        if base_url != display_base_url:
+            error_msg = error_msg.replace(base_url, display_base_url)
 
         if "Connection refused" in error_msg or "Connection error" in error_msg:
-            print(f"   Error: Cannot connect to {base_url}")
+            print(f"   Error: Cannot connect to {display_base_url}")
             print("   Solution:")
             print("     1. Check if the model server is running")
             print("     2. Verify the base URL is correct")
-            print(f"     3. Try: curl {base_url}/chat/completions")
+            print(f"     3. Try: curl {display_base_url}/chat/completions")
         elif "timed out" in error_msg.lower() or "timeout" in error_msg.lower():
-            print(f"   Error: Connection to {base_url} timed out")
+            print(f"   Error: Connection to {display_base_url} timed out")
             print("   Solution:")
             print("     1. Check your network connection")
             print("     2. Verify the server is responding")
@@ -241,6 +485,83 @@ def check_model_api(base_url: str, model_name: str, api_key: str = "EMPTY") -> b
         print("❌ Model API check failed. Please fix the issues above.")
 
     return all_passed
+
+
+def diagnose_model_api(
+    base_url: str,
+    model_name: str,
+    api_key: str = "EMPTY",
+    headers: dict[str, str] | None = None,
+    timeout: float = 30.0,
+    max_retries: int = 2,
+    stream: bool = False,
+    extra_body: dict[str, Any] | None = None,
+) -> bool:
+    """Check model API with the same headers used by runtime requests."""
+    print("🔍 Diagnosing model API...")
+    print("-" * 50)
+    print(f"Base URL: {redact_url_for_display(base_url)}")
+    print(f"Model: {model_name}")
+    if headers:
+        print(f"Custom headers: {', '.join(sorted(headers))}")
+    print(f"Stream: {'enabled' if stream else 'disabled'}")
+    if extra_body:
+        print(f"Extra body keys: {', '.join(sorted(extra_body))}")
+
+    try:
+        client = OpenAI(
+            base_url=base_url,
+            api_key=api_key,
+            timeout=timeout,
+            max_retries=max_retries,
+            default_headers=headers or None,
+        )
+        request_kwargs = {
+            "model": model_name,
+            "messages": [{"role": "user", "content": "Hi"}],
+            "max_tokens": 5,
+            "temperature": 0.0,
+            "stream": stream,
+            "extra_body": extra_body or {},
+        }
+        response = client.chat.completions.create(**request_kwargs)
+        if stream:
+            has_content = False
+            for chunk in response:
+                if not getattr(chunk, "choices", None):
+                    continue
+                delta = chunk.choices[0].delta
+                if getattr(delta, "content", None) or getattr(delta, "reasoning_content", None):
+                    has_content = True
+                    break
+            if has_content:
+                print("✅ Model API diagnosis passed")
+                return True
+            print("❌ Model API diagnosis failed: empty stream")
+            return False
+
+        if response.choices:
+            print("✅ Model API diagnosis passed")
+            return True
+        print("❌ Model API diagnosis failed: empty response")
+        return False
+    except Exception as e:
+        error_msg = redact_api_error(str(e), api_key=api_key, headers=headers)
+        print(f"❌ Model API diagnosis failed: {error_msg}")
+        lowered = error_msg.lower()
+        if (
+            "cloudflare" in lowered
+            or "cf-" in lowered
+            or "blocked" in lowered
+            or "403" in error_msg
+            or "1020" in error_msg
+        ):
+            print("   可能被 Cloudflare/WAF 拦截。可选方案：")
+            print("     1. 如果使用 Cloudflare Access，配置 PHONE_AGENT_CF_ACCESS_CLIENT_ID/SECRET")
+            print("     2. 配置 PHONE_AGENT_HTTP_HEADERS 添加中转站要求的鉴权/白名单 Header")
+            print("     3. 在 Cloudflare 为 /v1/chat/completions 创建 Skip/BYPASS WAF 规则或服务 Token")
+            print("     4. 将当前出口 IP 加入允许列表，避免依赖浏览器挑战页")
+        return False
 
 
 def parse_args() -> argparse.Namespace:
@@ -296,6 +617,70 @@ Examples:
         type=str,
         default=os.getenv("PHONE_AGENT_API_KEY", "EMPTY"),
         help="API key for model authentication",
+    )
+
+    parser.add_argument(
+        "--user-agent",
+        type=str,
+        default=os.getenv("PHONE_AGENT_USER_AGENT"),
+        help="Optional User-Agent header for model API requests",
+    )
+
+    parser.add_argument(
+        "--model-timeout",
+        type=float,
+        default=float(os.getenv("PHONE_AGENT_MODEL_TIMEOUT", "60")),
+        help="Model API timeout in seconds",
+    )
+
+    parser.add_argument(
+        "--model-max-retries",
+        type=int,
+        default=int(os.getenv("PHONE_AGENT_MODEL_MAX_RETRIES", "2")),
+        help="Model API max retries",
+    )
+
+    parser.add_argument(
+        "--stream",
+        action="store_true",
+        default=parse_env_bool("PHONE_AGENT_STREAM", False),
+        help="Enable streaming model responses",
+    )
+
+    parser.add_argument(
+        "--model-extra-body",
+        type=str,
+        default=os.getenv("PHONE_AGENT_MODEL_EXTRA_BODY"),
+        help='Extra JSON object merged into model API request body, e.g. \'{"enable_thinking":false}\'',
+    )
+
+    parser.add_argument(
+        "--thinking-mode",
+        type=str,
+        choices=["auto", "on", "off"],
+        default=os.getenv("PHONE_AGENT_THINKING_MODE", "auto"),
+        help="Provider thinking mode control: auto, on, or off",
+    )
+
+    parser.add_argument(
+        "--thinking-param",
+        type=str,
+        choices=["enable_thinking", "chat_template_kwargs"],
+        default=os.getenv("PHONE_AGENT_THINKING_PARAM", "enable_thinking"),
+        help="How to pass thinking mode: enable_thinking for DashScope/Qwen API, chat_template_kwargs for vLLM/SGLang",
+    )
+
+    parser.add_argument(
+        "--skip-model-check",
+        action="store_true",
+        default=parse_env_bool("PHONE_AGENT_SKIP_MODEL_CHECK", False),
+        help="Skip startup model API check",
+    )
+
+    parser.add_argument(
+        "--diagnose-model-api",
+        action="store_true",
+        help="Run model API diagnosis with configured headers and exit",
     )
 
     parser.add_argument(
@@ -379,6 +764,16 @@ Examples:
     args = parser.parse_args()
     if args.output_mode not in {"text_dsl", "json_schema", "tool_calls", "auto"}:
         parser.error("--output-mode must be one of: text_dsl, json_schema, tool_calls, auto")
+    if args.model_timeout <= 0:
+        parser.error("--model-timeout must be positive")
+    if args.model_max_retries < 0:
+        parser.error("--model-max-retries must be non-negative")
+    try:
+        args.model_extra_body_dict = parse_json_object(
+            args.model_extra_body, "--model-extra-body / PHONE_AGENT_MODEL_EXTRA_BODY"
+        )
+    except ValueError as exc:
+        parser.error(str(exc))
     return args
 
 
@@ -454,9 +849,34 @@ def handle_device_commands(args) -> bool:
 
 def main():
     """Main entry point."""
+    load_dotenv()
     args = parse_args()
+    try:
+        model_headers = build_model_headers(args)
+    except ValueError as e:
+        print(f"Invalid model API header configuration: {e}")
+        sys.exit(2)
 
     set_device_type(DeviceType.ADB)
+
+    if args.diagnose_model_api:
+        effective_extra_body = build_model_extra_body(
+            args.model_extra_body_dict,
+            args.thinking_mode,
+            args.thinking_param,
+        )
+        if diagnose_model_api(
+            args.base_url,
+            args.model,
+            args.apikey,
+            headers=model_headers,
+            timeout=args.model_timeout,
+            max_retries=args.model_max_retries,
+            stream=args.stream,
+            extra_body=effective_extra_body,
+        ):
+            return
+        sys.exit(1)
 
     # Handle --list-apps
     if args.list_apps:
@@ -474,14 +894,39 @@ def main():
         sys.exit(1)
 
     # Check model API
-    if not check_model_api(args.base_url, args.model, args.apikey):
-        sys.exit(1)
+    if not args.skip_model_check:
+        if model_headers:
+            effective_extra_body = build_model_extra_body(
+                args.model_extra_body_dict,
+                args.thinking_mode,
+                args.thinking_param,
+            )
+            if not diagnose_model_api(
+                args.base_url,
+                args.model,
+                args.apikey,
+                headers=model_headers,
+                timeout=args.model_timeout,
+                max_retries=args.model_max_retries,
+                stream=args.stream,
+                extra_body=effective_extra_body,
+            ):
+                sys.exit(1)
+        elif not check_model_api(args.base_url, args.model, args.apikey):
+            sys.exit(1)
 
     # Create configurations
     model_config = ModelConfig(
         base_url=args.base_url,
         model_name=args.model,
         api_key=args.apikey,
+        timeout=args.model_timeout,
+        max_retries=args.model_max_retries,
+        default_headers=model_headers,
+        stream=args.stream,
+        extra_body=args.model_extra_body_dict,
+        thinking_mode=args.thinking_mode,
+        thinking_param=args.thinking_param,
         lang=args.lang,
         output_mode=args.output_mode,
     )
@@ -503,10 +948,12 @@ def main():
     print("Phone Agent - AI-powered Android phone automation")
     print("=" * 50)
     print(f"Model: {model_config.model_name}")
-    print(f"Base URL: {model_config.base_url}")
+    print(f"Base URL: {redact_url_for_display(model_config.base_url)}")
     print(f"Max Steps: {agent_config.max_steps}")
     print(f"Language: {agent_config.lang}")
     print(f"Device Type: ADB")
+    print(f"Stream: {'enabled' if model_config.stream else 'disabled'}")
+    print(f"Thinking mode: {model_config.thinking_mode}")
 
     # Show device info
     device_factory = get_device_factory()
