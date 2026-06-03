@@ -29,6 +29,10 @@
 | Validator | 集中校验 action 白名单、必填字段、坐标 0-1000、Wait duration 正数且 ≤60s、dangerous fields；fail-closed |
 | Safety Gate | 纯决策层 `decide_safety()`，输出 `approved|confirm|takeover|rejected`；不 dispatch、不调用设备 |
 | Repair | 仅修复 metadata 大小写、action 别名；禁止猜坐标/动作/隐私文本；repair 后必须二次 Validator |
+| Launch Registry | `get_app_registry_summary()` 以 `APP_PACKAGES` 为单一来源；Validator 对未知 Launch app fail-closed；registry 中每个名称必须可被 `normalize_app_name()` 归一化 |
+| Context Privacy | `screen_belief.summary` 默认按 private text 处理（redacted metadata），防止 reflection 自由文本回注入 prompt；`build_plan_context_block()` 注入前二次 sanitize |
+| Streaming Stdout | `ModelConfig.stream_stdout=False` 默认关闭；reasoning/content 不打印到 stdout；仅显式 opt-in 才输出 |
+| URL Redaction | `redact_url_for_display()` 隐藏 URL userinfo 和敏感 query 参数（api_key/token/secret 等）；所有 stdout 路径使用脱敏 URL |
 
 ## Version Management
 

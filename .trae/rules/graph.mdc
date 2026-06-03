@@ -17,7 +17,7 @@ last_planner_update: "Targeted Phase 14 revision: fixed repository paths, remove
 last_architect_review: "Re-review found previous blockers resolved; remaining selector-shape clarification is non-blocking."
 last_critic_verdict: APPROVE
 approved_for_execution: true
-notes: "Phase 14 implementation completed under user-approved Autopilot handoff; RALPH/Critic approved, targeted tests pass, final QA/commit pending in current session."
+notes: "Phase 14 implementation completed and hardened: Launch registry/validator contract unified, screen_belief.summary default private, stream_stdout=False by default, URL credentials/query secrets redacted before stdout, check_model_api fully redacted. RALPH/Critic approved, 212 tests pass."
 ```
 
 # Roadmap
