@@ -95,15 +95,24 @@ def parse_box_response(
     candidates = _extract_boxes(text)
     if not candidates:
         raise GroundingParseError("invalid_format", "missing <box>x1 y1 x2 y2</box>")
-    if len(candidates) != 1:
-        raise GroundingParseError("ambiguous", "grounding output contains multiple boxes")
 
-    return _validate_box(
-        candidates[0],
-        min_area=min_area,
-        max_area_ratio=max_area_ratio,
-        normalize_order=normalize_order,
-    )
+    # Take the first valid candidate (model may emit junk after the real box).
+    last_error: GroundingParseError | None = None
+    for coords in candidates:
+        try:
+            return _validate_box(
+                coords,
+                min_area=min_area,
+                max_area_ratio=max_area_ratio,
+                normalize_order=normalize_order,
+            )
+        except GroundingParseError as exc:
+            last_error = exc
+            continue
+
+    if last_error is not None and len(candidates) == 1:
+        raise last_error
+    raise GroundingParseError("invalid_format", "no valid bbox in grounding output")
 
 
 def calibrate_bbox_from_resized_input(

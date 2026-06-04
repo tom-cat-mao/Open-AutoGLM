@@ -5,7 +5,6 @@ from __future__ import annotations
 import base64
 import hashlib
 import platform
-import tempfile
 import time
 from io import BytesIO
 from pathlib import Path
@@ -84,13 +83,59 @@ class LocateAnythingMLXProvider:
 
         if self._model is None or self._processor is None:
             self._model, self._processor = load(str(self.model_path))
-        prompt = (
-            f"Find the UI element: {description}. "
-            "Return its bounding box as <box><x1><y1><x2><y2></box>"
+        prompt = self._build_prompt(description)
+
+        pbd_generate = getattr(self._model, "pbd_generate", None)
+        if callable(pbd_generate):
+            return self._run_pbd_generate(image, prompt)
+
+        result = generate(
+            self._model,
+            self._processor,
+            prompt=prompt,
+            image=image,
+            max_tokens=2048,
+            temperature=0.0,
+            generation_mode="hybrid",
         )
-        with tempfile.NamedTemporaryFile(suffix=".png", delete=True) as tmp:
-            image.save(tmp.name, format="PNG")
-            return str(generate(self._model, self._processor, prompt=prompt, image=tmp.name, verbose=False))
+        return str(getattr(result, "text", result))
+
+    def _run_pbd_generate(self, image: Image.Image, prompt: str) -> str:
+        """Run LocateAnything through its model-specific Parallel Box Decoding path."""
+        from mlx_vlm.utils import prepare_inputs  # type: ignore
+
+        inputs = prepare_inputs(
+            self._processor,
+            images=[image],
+            prompts=prompt,
+        )
+        input_ids = inputs.pop("input_ids")
+        inputs.pop("attention_mask", None)
+        tokens = self._model.pbd_generate(
+            input_ids,
+            generation_mode="hybrid",
+            max_tokens=2048,
+            **inputs,
+        )
+        return str(self._processor.decode(tokens, skip_special_tokens=False))
+
+    def _build_prompt(self, description: str) -> str:
+        instruction = f"Locate the region that matches the following description: {description}."
+        try:
+            from mlx_vlm.prompt_utils import apply_chat_template  # type: ignore
+
+            return str(
+                apply_chat_template(
+                    self._processor,
+                    getattr(self._model, "config", {"model_type": "locateanything"}),
+                    instruction,
+                    num_images=1,
+                )
+            )
+        except Exception:
+            # LocateAnything processors expand any <image-N> placeholder in order.
+            # Keep a conservative fallback for older mlx-vlm branches without prompt_utils.
+            return f"<image-0>{instruction}"
 
     def _failure(
         self,

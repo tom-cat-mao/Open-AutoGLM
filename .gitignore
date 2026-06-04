@@ -69,3 +69,4 @@ app_package_name.py
 .omc/
 .qoder/
 .env
+models/
