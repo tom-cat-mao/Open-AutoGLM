@@ -45,12 +45,14 @@ DANGEROUS_PROVIDER_FIELDS = {
     "api_key",
     "apikey",
     "authorization",
+    "backend",
     "base64_data",
     "command",
     "device_factory",
     "device_id",
     "env",
     "image_url",
+    "model_path",
     "raw_command",
     "screen_height",
     "screen_width",
@@ -67,7 +69,9 @@ INTENT_FIELDS = {
     "target_mark_id",
     "target_role",
     "target_text_hint",
+    "target_text",
     "target_intent",
+    "requires_grounding",
     "text",
     "message",
     "app",
@@ -96,17 +100,35 @@ def adapt_json_action(payload: str | dict[str, Any]) -> dict[str, Any]:
     data = _coerce_json_object(payload)
     _reject_dangerous_provider_fields(data)
     action_type = data.get("type") or data.get("_metadata")
-    if action_type == "intent" or "target_mark_id" in data:
+    intent_keys = {
+        "target_mark_id",
+        "target_text_hint",
+        "target_text",
+        "target_role",
+        "target_intent",
+        "requires_grounding",
+    }
+    if action_type == "intent" or bool(intent_keys & set(data)):
         _reject_unexpected_provider_fields(data, INTENT_FIELDS)
         intent: dict[str, Any] = {"_metadata": "intent"}
         for key in INTENT_FIELDS - {"type", "_metadata"}:
             if key in data:
                 value = data[key]
-                if key in {"action", "target_mark_id", "target_role", "target_text_hint", "target_intent", "text", "message", "app", "duration"} and not isinstance(value, str):
+                if key == "target_text":
+                    key = "target_text_hint"
+                if key == "requires_grounding":
+                    if not isinstance(value, bool):
+                        raise ActionAdapterError("unsafe_value", "requires_grounding must be a boolean")
+                elif (
+                    key in {"action", "target_mark_id", "target_role", "target_text_hint", "target_intent", "text", "message", "app", "duration"}
+                    and not isinstance(value, str)
+                ):
                     raise ActionAdapterError("unsafe_value", f"{key} must be a string")
                 intent[key] = value
-        if "target_mark_id" not in intent:
-            raise ActionAdapterError("missing_field", "intent requires target_mark_id")
+        if "target_mark_id" not in intent and not any(
+            intent.get(key) for key in ("target_text_hint", "target_role", "target_intent")
+        ):
+            raise ActionAdapterError("missing_field", "intent requires target_mark_id or target description")
         if "action" not in intent and "target_intent" not in intent:
             raise ActionAdapterError("missing_field", "intent requires action or target_intent")
         if "action" in intent:

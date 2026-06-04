@@ -12,6 +12,7 @@ append_system_prompt:
     - Omit greetings, pleasantries, and concluding offers for further help.
 
     联网搜索：默认使用项目级 skill `smart-search-cli`，通过本机 `smart-search` CLI 执行搜索、抓取和证据收集；不要使用 TraeCLI 内置 WebSearch。需要打开具体 URL 时，优先使用 `smart-search fetch`，必要时才使用 WebFetch。
+    Shell 命令：文件搜索优先用内置 Grep（基于 ripgrep）/ Glob / LS 专用工具，避免在 Bash 中调用 `grep`、`find`、`cat`、`ls` 等命令。若确需在 Bash 中做搜索，使用 `rg` 代替 `grep`，`fd` 代替 `find`。
 
 disallowed_tools:
   - "WebSearch"

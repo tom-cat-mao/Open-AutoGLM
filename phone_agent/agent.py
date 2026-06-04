@@ -85,6 +85,10 @@ class RunResult:
     repeated_failure_count: int = 0
     verifier_status: str | None = None
     verifier_failure_cause: str | None = None
+    grounding_provider: str | None = None
+    grounding_latency_ms: int | None = None
+    grounding_failure_code: str | None = None
+    grounding_screen_hash: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize the result to a JSON-friendly dictionary."""
@@ -213,6 +217,12 @@ class PhoneAgent:
             "action_parsed": None,
             "intent_raw": None,
             "grounding_error": None,
+            "grounding_result": None,
+            "grounding_provider": None,
+            "grounding_latency_ms": None,
+            "grounding_failure_code": None,
+            "grounding_screen_hash": None,
+            "grounding_observation": None,
             "action_result": None,
             "reflection": None,
             "action_succeeded": True,
@@ -320,6 +330,10 @@ class PhoneAgent:
             retry_count=int(state.get("retry_count") or 0),
             verifier_status=state.get("verifier_status"),
             verifier_failure_cause=state.get("verifier_failure_cause"),
+            grounding_provider=state.get("grounding_provider"),
+            grounding_latency_ms=state.get("grounding_latency_ms"),
+            grounding_failure_code=state.get("grounding_failure_code"),
+            grounding_screen_hash=state.get("grounding_screen_hash"),
             **context_metrics,
         )
 

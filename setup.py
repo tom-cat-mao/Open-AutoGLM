@@ -37,6 +37,12 @@ setup(
         "requests>=2.31.0",
     ],
     extras_require={
+        "locateanything": [
+            # Visual grounding (LocateAnything on Apple Silicon MLX).
+            # mlx-vlm is installed from a PR branch until LocateAnything support is merged upstream.
+            "mlx-vlm @ git+https://github.com/beshkenadze/mlx-vlm@feat/locateanything-3b",
+            "modelscope>=1.37.0",
+        ],
         "dev": [
             "pytest>=7.0.0",
             "black>=23.0.0",

@@ -7,185 +7,140 @@ globs: ".trae/commands/ralplan.md,.trae/commands/autopilot.md,.trae/hooks/ralpla
 # RALPLAN Status
 
 ```yaml
-status: completed
+status: execution_complete
 design_status: critic_approved
 execution_status: completed
 iteration: 1
 planner_mode: null
 revision_scope: null
-last_planner_update: "addressed IntentIR/Grounding/Verifier/Gesture/Memory boundaries"
-last_architect_review: "Architect re-review found no Critical/Major blockers and recommended final Critic gate."
+last_planner_update: "targeted revision for LocateAnything grounding fallback, DI, state/context, hash, MLX and parser acceptance"
+last_architect_review: "Architect review received; revise fallback semantics, provider DI boundary, mark-vs-description routing, schema/hash/privacy, optional MLX, and parser/test coverage."
 last_critic_verdict: APPROVE
 approved_for_execution: true
-notes: "Phase 15A-15F execution completed via Autopilot; focused tests passed: .venv/bin/pytest tests/model tests/actions tests/graph tests/evals -q (199 passed)."
+notes: "LocateAnything grounding roadmap implemented with provider DI, optional MLX extra, screen-bound IntentIR grounding, trace/eval/context privacy, docs, and tests."
 ```
 
 # Roadmap
 
 ## 已完成 Phase
 
-- ✅ Phase 1-14：已具备 LangGraph `Plan -> Execute -> Reflect` 主循环、trace/eval、context observe/inject、canonical Action IR、Adapter/Validator/Repair/Safety Gate/Executor、HITL、`output_mode=text_dsl|json_schema|tool_calls|auto` 与基础 prompt/context harness。
+- ✅ Phase 1-14：已建立 LangGraph `Plan -> Execute -> Reflect` 主循环、设备抽象、HITL、trace/eval、context harness、canonical ActionIR、Adapter/Validator/Repair/Safety/Executor 与 prompt/output 兼容路径。
+- ✅ Phase 15：已完成 IntentIR/Grounding/Gesture/Verifier/Memory 方向基础流水线与约束沉淀；本轮仅保留有效不变量，当前方向收敛为 LocateAnything 本地 grounding provider 集成。
+- ✅ Phase LAG-1~LAG-4：已完成 LocateAnything/Fake `GroundingProvider` contract、optional MLX packaging、IntentIR target routing、screen/hash-bound grounding、canonical ActionIR integration、`<box>` parser、trace/eval/context privacy hardening、文档与测试。
 
 ## RALPLAN-DR 摘要
 
 ### Principles
 
-1. 保留现有 LangGraph `StateGraph` 拓扑，只升级 harness，不迁移 Agent 框架。
-2. 模型只表达观察、意图与目标，不直接授权执行动作、包名或绝对像素。
-3. Harness 负责 grounding、ActionIR 编译、验证、安全、执行与可观测性闭环。
-4. 所有新增能力默认可灰度/回滚，并保持 text DSL 兼容路径直到结构化路径稳定。
-5. 评估以确定性 verifier、trace 与 AndroidWorld 风格 reward 为准，减少模型自评依赖。
+1. **语义、定位、执行分层**：主 VLM/Planner 表达任务意图和目标描述；LocateAnything 只做屏幕绑定 target-to-bbox；Executor 只执行 validated + safety-approved canonical ActionIR。
+2. **精确 fail-closed**：target-required grounding 失败不得回退为主 VLM 直接坐标 Tap；只能 reobserve、fail-closed、Take_over、Wait，或仅在显式 `legacy_grounding_mode` 开关允许时走旧路径。
+3. **现有 mark path 与 description path 并列**：`target_mark_id` 优先走现有 MarkRegistry；`target_text_hint` / `target_role` / `target_intent` 走 LocateAnything；冲突、歧义或低置信度 fail-closed。
+4. **Provider DI 边界清晰**：`GroundingProvider.ground(screenshot, target, screen_binding, timeout) -> GroundingResult`；provider 从 graph config/runtime factory 注入，MLX lazy import，executor/tool schema 不暴露 provider。
+5. **观测可审计且默认脱敏**：只记录 run-local `screen_id`、raw screenshot hash、provider input image hash、bbox/center、latency、failure code 与脱敏 target hints；不记录 raw screenshot。
 
 ### Decision Drivers
 
-1. 当前痛点是 vLLM/VLM 直接读截图并输出具体动作/包名/坐标，导致“假 harness/ReAct”、grounding 不稳、安全边界模糊。
-2. 非特化模型的 text DSL 输出不稳定，需要默认结构化输出、parse-fail retry 与 harness-side 编译。
-3. 缺少 SoM/mark grounding、GUI 短期记忆和确定性验证，导致坐标、反思、手势执行和 eval 难以工程化迭代。
+1. 现有主 VLM 直接承担视觉定位和动作细节会混淆语义、grounding 与执行责任，增加误点和越权风险。
+2. LocateAnything 本地 MLX provider 可把定位工程化为独立能力，但必须绑定屏幕、验证 hash、接入 canonical safety pipeline。
+3. 该任务核心是 context engineering：grounding 结果、失败分类、延迟、hash 与隐私约束必须进入 trace/eval/context，而不能临时绕过 executor。
 
 ### Viable Options
 
 | Option | Pros | Cons |
 |---|---|---|
-| A. 继续强化 text DSL 和 prompt 约束 | 改动最小，兼容当前路径 | 仍让模型承担动作/坐标细节；非特化 VLM 不稳；难以形成真实 harness |
-| B. Harness Engineering：VLM 输出意图，Harness 编译动作 | 安全边界清晰；可引入 SoM、Mark Registry、Gesture Compiler、确定性 verifier；更适合 trace/eval | 改动跨 plan/execute/context/actions/adb/eval，需要分阶段灰度 |
-| C. 直接换用特化 GUI agent/model | 可能短期提升 grounding | 依赖模型能力与供应商；无法解决本项目工程抽象、验证和安全责任归属 |
+| A. 主 VLM 继续直接输出坐标/命令，仅加强 prompt | 改动最小；短期回归风险低 | 安全边界模糊；target-required grounding 失败易误回退；定位不可审计 |
+| B. LocateAnything 作为独立 GroundingProvider，description path 接入现有 IntentIR/ActionIR/Safety | 责任清晰；可 DI/灰度；可绑定 hash；可观测、可测试；保留 mark path | 需要新增 provider/config/state/context/parser/eval 与测试矩阵 |
+| C. 全量 UI marks/overlay 后让模型选 mark | 候选可解释；可与 OCR/UIAutomator 结合 | 用户方向要求 LocateAnything description path；隐私文本与上下文体积风险更高 |
 
 ### Selected Approach
 
-选择 **B. Harness Engineering**：先把默认输出稳定到结构化意图，再构建 SoM Observation、Mark Registry、mark-based Action IR、GUI 短期记忆、Gesture Compiler 与确定性 verifier。LangGraph 仍负责任务循环；模型负责语义判断；Harness 负责从屏幕实体到可执行手势的受控编译与审计。
+选择 **B. 独立 LocateAnything GroundingProvider + 并列 mark/description routing**。主 VLM 输出 IntentIR target hints：优先字段 `target_text_hint`，兼容别名 `target_text` 只在 adapter 内归一化；若存在 `target_mark_id` 则走现有 MarkRegistry，若存在 description hints 则调用 LocateAnything。Grounding 输出绑定 `screen_id`、raw screenshot hash、provider input image hash，经 `<box>` parser 得到 0-1000 bbox/center，再编译为 canonical Tap/LongPress 等 ActionIR，并严格经过 Validator、limited Repair、二次 Validator、Safety/HITL 与 Executor。
 
-**分层 pipeline（边界固定）**：
-
-`Provider output -> Adapter -> IntentIR -> IntentValidator -> Grounder(mark/screen binding) -> canonical ActionIR -> validate_action() -> limited Repair -> validate_action() -> Safety Gate -> HITL/Executor`
-
-| 层 | 责任边界 |
-|---|---|
-| Provider/Adapter | 只把结构化输出解析成 IntentIR；不 dispatch、不绕过 validator。 |
-| IntentIR/IntentValidator | 可含 `target_mark_id`、role、hint、intent；只校验意图字段与格式，不生成可执行坐标。 |
-| Grounder | 唯一负责 mark/screen binding，将当前 mark 编译为 canonical executable ActionIR。 |
-| canonical `validate_action()` | 只接收现有 canonical ActionIR 字段；`target_mark_id` 等意图字段不得进入该校验入口。 |
-| Repair | 仅修格式/别名/大小写等有限问题；repair 后必须二次 `validate_action()`。 |
-| Safety/HITL/Executor | Executor 只接收 canonical executable ActionIR；安全、confirm、takeover 路由不可被 memory/rule/provider 改写。 |
-
-**最小闭环顺序**：`15A -> 15B-lite mark schema/mock -> 15C-lite known mark to Tap -> 15D/15E/15F`。先证明结构化格式、mark 绑定与单一 Tap 编译闭环，再扩展 memory、gesture backend、verifier。
+目标流水线：`VLM intent -> Adapter/IntentValidator -> mark path 或 LocateAnything description path -> canonical ActionIR -> Validator -> Repair -> Validator -> Safety/HITL -> Executor -> Trace/Eval`。非屏幕定位动作（Launch/Back/Home/Wait/Type）继续 canonical pipeline，不强制 LocateAnything。
 
 ### ADR
 
-- **Decision**: 将执行架构从“VLM 直接输出动作”转为“VLM 输出意图/target mark，Harness 编译 canonical ActionIR/GestureIR 并执行”。
-- **Drivers**: 降低 text DSL 依赖；防止 stale coordinate/action；提升 grounding、可验证性、安全审计和 eval 可信度。
-- **Alternatives**: 继续 prompt hardening；直接更换 GUI 特化模型；重写为其他 Agent 框架。
-- **Why chosen**: 复用现有 LangGraph、Adapter/Validator/Repair/Safety/HITL/Executor 与 trace/eval 基础，同时把高风险坐标和设备执行责任收回到可测试 harness。
-- **Consequences**: 需要新增 SoM/mark 数据结构、ActionIR 字段、GestureIR/backend 抽象和 verifier；短期会增加测试矩阵与兼容层。
-- **Follow-ups**: 在结构化路径稳定后逐步弱化 text DSL；用 eval 数据决定是否引入 OCR/SoM provider、minitouch 或更强 verifier。
+- **Decision**: 引入 `GroundingProvider` 接口与 LocateAnything-3B-4bit (MLX) optional provider，作为 description target-to-bbox 的受控能力；保留现有 MarkRegistry mark path。
+- **Drivers**: 分离语义与定位；避免 target-required 失败回退成直接坐标 Tap；确保 screen/hash 绑定、DI、脱敏、灰度和测试可控。
+- **Alternatives**: prompt hardening；全量 marks/overlay；直接替换主 VLM 为 GUI agent。
+- **Why chosen**: 最小化架构迁移，最大化复用现有 Validator/Repair/Safety/HITL/Executor，同时把定位变成可审计的 context-harness 资产。
+- **Consequences**: 需要新增 provider interface、runtime factory、MLX optional extra/lazy import、state/context schema、hash 校验、parser 与 fake/integration 测试；短期配置复杂度上升。
+- **Follow-ups**: 基于 eval 决定是否加入 OCR/UIAutomator hints、bbox calibration、多目标 disambiguation 与 gesture compiler 扩展。
 
-## 当前规划 Phase
+## 已完成 LocateAnything Grounding Phase
 
-### Phase 15A Structured Output Default
+### Phase LAG-1 Provider Contract / Config / MLX Packaging
 
-- **目标/根因**: 仅解决结构化格式稳定与 parse-fail retry，降低非特化模型 text DSL 漂移；不解决 grounding、不补猜语义。根因是当前模型仍可能输出不完整/不可解析字段。
-- **修改文件候选**: `phone_agent/model/client.py`, `phone_agent/graph/nodes/plan.py`, `phone_agent/actions/adapter.py`, `phone_agent/actions/validator.py`, `phone_agent/actions/repair.py`, `phone_agent/config/prompts_zh.py`, `phone_agent/config/prompts_en.py`, `tests/model/*`, `tests/actions/*`, `tests/graph/*`。
+- **目标/根因**: 定义稳定 provider interface 与 DI 边界，封装 LocateAnything-3B-4bit (MLX) 为可选本地 provider。根因是 grounding 能力必须从 executor/tool schema 与主 VLM 输出中隔离，且默认 CI 不能依赖真实 MLX 模型。
+- **修改文件候选**: `phone_agent/grounding/*`, `phone_agent/config/*`, `phone_agent/graph/state.py`, `requirements.txt`, `setup.py`, `scripts/download_locateanything.py`, `tests/model/*`, `tests/graph/*`。
 - **执行步骤**:
-  1. 将 `json_schema`/`tool_calls` 结构化输出设为可灰度默认，保留 `text_dsl` 回滚配置。
-  2. 为 parse failure 增加一次受控 retry，候选实现点为 `plan_node` 或 `ModelClient.request(..., parse_retry=1)`。
-  3. Adapter 只把结构化模型输出转成 IntentIR/draft 表达，保持 fail-closed；grounding 留到 15B/15C。
+  1. 定义 `GroundingProvider.ground(screenshot, target, screen_binding, timeout) -> GroundingResult`、错误码、timeout 与 provider registry/factory；provider 从 graph config/runtime factory 注入。
+  2. 实现 fake provider 作为默认单测 provider；LocateAnything MLX provider 使用 optional extra、darwin/arm64 + 模型存在时才启用，MLX lazy import，真实模型测试标记为 integration/slow。
+  3. 明确 executor/tool schema 不暴露 provider、backend 或模型参数；关闭 provider 时仅影响 target-required description grounding，不影响 Launch/Back/Home/Wait/Type canonical pipeline。
 - **验收标准**:
-  - `.venv/bin/pytest tests/model tests/actions tests/graph -v` 通过相关新增/回归用例。
-  - text DSL 仍可显式启用；默认结构化路径失败时不会绕过 Validator/Safety/HITL。
-  - parse-fail retry 有 trace 字段记录次数和最终失败原因，且不记录敏感 raw prompt。
-  - golden trace 证明 retry 只修格式，不新增坐标、mark、动作语义或隐私文本。
+  - 默认 `.venv/bin/pytest` 不需要 MLX/模型即可通过 fake provider 单测。
+  - `requirements.txt` / `setup.py` 将 MLX/LocateAnything 依赖放入 optional extra；非 darwin/arm64 或无模型时不阻塞默认 CI。
+  - provider 只能经 graph config/runtime factory 注入；executor/tool schema、Action tool 参数中看不到 provider 字段。
+  - provider 缺失、disabled、timeout、MLX import/model load failure 均返回结构化 failure code，不直接执行设备动作。
 
-### Phase 15B SoM Observation & Mark Registry
+### Phase LAG-2 Intent Target Routing / Context Schema
 
-- **目标/根因**: 构建 UIAutomator/OCR/SoM 标注与 `mark_id -> bbox/center` 注册表；根因是模型直接看截图无法稳定引用 GUI 元素，且坐标缺少 screen binding。
-- **数据模型**: `Observation`, `ScreenSnapshot`, `Mark`, `MarkRegistry`。
-- **修改文件候选**: `phone_agent/device_factory.py`, `phone_agent/graph/observation.py`（新候选）, `phone_agent/graph/marks.py`（新候选）, `phone_agent/graph/state.py`, `phone_agent/graph/nodes/plan.py`, `phone_agent/graph/context.py`, `phone_agent/model/client.py`, `tests/graph/*`, `tests/adb/*`。
+- **目标/根因**: 扩展 IntentIR 与 context，使 mark path 和 LocateAnything description path 并列建模。根因是现有 `target_mark_id` 已有 MarkRegistry 语义，不能被 description grounding 覆盖；target hints 又需要脱敏进入 context/trace。
+- **修改文件候选**: `phone_agent/actions/ir.py`, `phone_agent/actions/adapter.py`, `phone_agent/actions/validator.py`, `phone_agent/graph/nodes/plan.py`, `phone_agent/graph/observation.py`, `phone_agent/graph/context.py`, `phone_agent/model/client.py`, `tests/actions/*`, `tests/graph/*`, `tests/model/*`。
 - **执行步骤**:
-  1. 在 observation 中生成 `screen_id`、截图 hash、UI tree/OCR/SoM 候选元素与轻量 mark overlay 元数据。
-  2. 建立 Mark Registry：每个 `mark_id` 绑定 `screen_id`、bbox、center、source、confidence、可显示文本摘要。
-  3. 给 plan 请求注入脱敏 mark 列表/overlay 描述，避免注入隐私 raw text；15B-lite 可先用 mock/fixture mark schema。
-  4. provider fallback：无 UIAutomator/OCR/SoM 时只生成 screenshot hash / `screen_id`；mark action 不可用或要求 reobserve，不能绕过安全。
+  1. 字段优先使用 `target_text_hint`，`target_text` 仅作为 adapter 兼容别名归一化；保留 `target_role`、`target_intent`、`target_mark_id`、`requires_grounding`。
+  2. 路由规则：`target_mark_id` 优先走现有 MarkRegistry；无 mark id 但有 description hints 时走 LocateAnything；mark id 与 description 语义冲突、歧义、多候选或低置信度 fail-closed。
+  3. 增加 state/context schema：`grounding_result`, `grounding_provider`, `grounding_latency_ms`, `grounding_failure_code`, `grounding_screen_hash`, `grounding_observation` context section；target hints 默认 private 并在 trace/context 中 redaction。
 - **验收标准**:
-  - 同一屏幕内 mark 可稳定解析到 bbox/center；跨 `screen_id` 使用 mark 必须 fail-closed。
-  - trace 只记录 mark id、bbox、source、confidence 和脱敏摘要，不持久化隐私 raw text。
-  - SoM/OCR/UIAutomator provider 缺失时系统可回退到现有截图路径，但 mark action 不可执行或必须 reobserve。
-  - golden trace contract 覆盖 stale mark fail-closed、no raw OCR/UI text in trace/context。
+  - Adapter/validator 单测覆盖 `target_text_hint`、`target_text` alias、mark-id 优先、description provider 其次、冲突/歧义 fail-closed。
+  - Plan context 只注入脱敏且有界的 `grounding_observation`，不注入 raw screenshot、raw OCR/UI text 或隐私 target hint。
+  - 主 VLM 输出绝对像素、backend、ADB/shell 命令、provider 选择字段时 fail-closed；parse retry 只修格式，不猜目标或坐标。
+  - 非屏幕定位动作继续 canonical pipeline，且不要求 grounding 字段存在。
 
-### Phase 15C Mark-based Action IR & Grounding
+### Phase LAG-3 Screen-Bound Grounding / ActionIR Integration
 
-- **目标/根因**: 让模型输出 `mark_id`/target intent，由 Harness 转 canonical action；根因是模型输出绝对像素或具体包名会破坏安全边界和可验证性。
-- **修改文件候选**: `phone_agent/actions/ir.py`, `phone_agent/actions/adapter.py`, `phone_agent/actions/grounding.py`（新候选）, `phone_agent/actions/validator.py`, `phone_agent/actions/repair.py`, `phone_agent/actions/safety.py`, `phone_agent/graph/nodes/execute.py`, `phone_agent/graph/state.py`, `phone_agent/config/apps.py`, `tests/actions/*`, `tests/graph/test_execute.py`。
+- **目标/根因**: 将 LocateAnything provider 输出绑定当前屏幕并编译为 canonical ActionIR。根因是 grounding 只有验证 screen/hash 后进入 Validator/Safety/HITL，才可避免 stale screen、误回退和 double conversion。
+- **修改文件候选**: `phone_agent/actions/grounding.py`, `phone_agent/actions/ir.py`, `phone_agent/actions/validator.py`, `phone_agent/actions/repair.py`, `phone_agent/actions/safety.py`, `phone_agent/graph/nodes/execute.py`, `phone_agent/graph/nodes/plan.py`, `phone_agent/graph/state.py`, `phone_agent/graph/observation.py`, `phone_agent/model/client.py`, `phone_agent/graph/tools/*`, `requirements.txt`, `setup.py`, `scripts/download_locateanything.py`, 相关 `tests/actions/*`, `tests/graph/*`, `tests/model/*`, `tests/evals/*`。
 - **执行步骤**:
-  1. 定义 IntentIR 字段 `target_mark_id`、`target_role`、`target_text_hint`、`target_intent`，禁止模型输出绝对像素。
-  2. Grounding 层根据当前 Mark Registry 将 mark/intent 编译为 canonical ActionIR 的 0-1000 相对坐标或结构化 UI selector。
-  3. 15C-lite 先支持 known mark -> Tap；再扩展长按、输入、滚动和 selector。
-  4. canonical `validate_action()` 只校验 canonical ActionIR；mark/intent 字段不得泄漏进 Executor。
+  1. 区分并传递 run-local `screen_id`、raw screenshot hash、provider input image hash；provider request/response 必须携带并验证这些 hash，只记录 hash 不记录 raw screenshot。
+  2. 调用 `GroundingProvider.ground(...)` 后将 bbox center 编译为 canonical Tap/LongPress 等 ActionIR，坐标保持 0-1000；relative-to-absolute 仍只允许 tool/backend 转换。
+  3. 精确失败策略：target-required grounding 出现 stale screen/hash mismatch/unknown target/ambiguous/low confidence/bad bbox/provider failure 时，只能 reobserve、fail-closed、Take_over、Wait；仅显式 `legacy_grounding_mode` 允许旧路径，且必须可观测。
+  4. 保持 Repair 只做有限格式/别名修复并二次 Validator；Safety/HITL/Executor 不接收 provider object 或 raw target text。
 - **验收标准**:
-  - stale mark、未知 mark、跨屏 mark、绝对像素输入均 fail-closed 或要求重新 observe。
-  - 所有执行符合 Provider output -> Adapter -> IntentIR -> IntentValidator -> Grounder -> canonical ActionIR -> validate_action() -> limited Repair -> validate_action() -> Safety Gate -> HITL/Executor。
-  - 结构化 mark action 与旧 canonical ActionIR 兼容，旧回归测试不被破坏。
-  - rule guardrail 不能直接生成 ActionIR 或 dispatch，只能拒绝/提示/reobserve。
+  - 单测覆盖 success target-to-tap、mark path、description path、hash mismatch、stale screen、unknown/ambiguous target、provider unavailable、legacy mode gated fallback。
+  - `validate_action()` 前后无 provider/raw screenshot 泄漏；Executor 只接收 validated + safety-approved canonical ActionIR。
+  - tool/backend 是唯一 relative-to-absolute 转换点，无 double conversion；模型不能选择 backend/命令。
+  - target-required 失败路径不会回退为主 VLM 直接坐标 Tap；非定位动作仍可执行 canonical pipeline。
 
-### Phase 15D GUI Short-term Memory
+### Phase LAG-4 Parser / Trace / Eval / Privacy Hardening
 
-- **目标/根因**: 增加 GUI 化短期记忆：`visited_screens`、`tried_actions`、`scroll_memory`、`task_progress`；根因是当前记忆不够 GUI 化，容易重复点击、重复滚动或忽略已验证进度。
-- **schema 边界**: GUI memory 是现有 `context.py` harness 的子模块，不是并行系统；section IDs 为 `gui_memory.visited_screens`, `gui_memory.tried_actions`, `gui_memory.scroll_memory`, `gui_memory.task_progress`。
-- **修改文件候选**: `phone_agent/graph/context.py`, `phone_agent/graph/state.py`, `phone_agent/graph/nodes/plan.py`, `phone_agent/graph/nodes/execute.py`, `phone_agent/graph/nodes/reflect.py`, `phone_agent/agent.py`, `tests/graph/*`, `tests/evals/*`。
+- **目标/根因**: 完成 `<box>` parser、trace/eval 与隐私观测闭环。根因是本地 grounding provider 需要可度量、可回归、可灰度，且 parser 与 hash/隐私契约必须可测试。
+- **修改文件候选**: `phone_agent/grounding/*`, `phone_agent/graph/trace.py`, `phone_agent/graph/context.py`, `phone_agent/graph/verifier.py`, `evals/*`, `tests/evals/*`, `tests/graph/*`, `tests/actions/*`, `tests/model/*`。
 - **执行步骤**:
-  1. 在 Reflect/Execute 后维护屏幕访问、动作尝试、滚动方向/边界、任务阶段进展的脱敏结构化摘要。
-  2. 设置 bounded budget：仅保留有限条目、计数、hash/mark id/结果摘要；不注入 raw text。
-  3. 默认向 Plan 轻量注入高价值 memory section IDs，支持 `off|observe|inject` 或等价灰度开关。
-  4. 为重复动作、循环滚动和退路策略提供 rule guardrail，但不让 rule 接管主语义理解。
+  1. `<box>` parser 校验 bbox ordering、0-1000 range、min/max area、center deterministic、resize calibration 与 parse failure code。
+  2. trace/eval 记录脱敏 metadata：provider name/version、latency、bbox/center、screen_id、raw screenshot hash、provider input image hash、failure code、redacted target summary；不记录 raw screenshot/raw target text。
+  3. eval 增加定位精度、bbox sanity、失败分类、reobserve/Take_over/Wait/fail-closed 次数、provider latency 与 end-to-end success 指标。
+  4. 用 golden trace/schema contract 验证 target hints 默认 private、URL/API key/token/raw OCR/UI text 不落盘。
 - **验收标准**:
-  - memory 不包含隐私 raw text，不改变 ActionIR/HITL/safety route，不直接改写 ActionIR。
-  - Plan 可读取最近屏幕/动作/进度摘要，重复点击与无效滚动在测试场景中可被抑制或提示。
-  - trace/eval 可统计 visited screen、tried action、loop break 等指标。
-  - golden trace/context 证明 section ID 有界、无 raw OCR/UI text、无安全路由改写。
-
-### Phase 15E Gesture Compiler & Execution Backend
-
-- **目标/根因**: 建立 `ActionIR -> GestureIR -> ADB/minitouch/uiautomator backend`，并提供更人类式 tap/swipe/type verify；根因是当前 ADB 手势偏机械，缺少统一编译与后置校验。
-- **坐标所有权**: 初期 `GestureIR` 保持 0-1000 relative coords；现有 tools/backend 继续作为唯一 relative -> absolute 转换点，防止 double conversion。
-- **修改文件候选**: `phone_agent/actions/ir.py`, `phone_agent/actions/gesture.py`（新候选）, `phone_agent/actions/validator.py`, `phone_agent/graph/nodes/execute.py`, `phone_agent/adb/*`, `phone_agent/graph/tools/*`, `tests/actions/*`, `tests/adb/*`, `tests/graph/test_tools.py`。
-- **执行步骤**:
-  1. 定义 GestureIR：tap、long_press、swipe、type、key、wait、launch 等后端无关手势。
-  2. 编译器将 canonical ActionIR/grounded target 转为 relative GestureIR，处理抖动、人类式 duration、输入清理与重试策略，但不做 absolute 像素转换。
-  3. 后端适配 ADB，预留 minitouch/uiautomator；现有 tools/backend 负责唯一 relative->absolute 转换；执行后进行轻量 observe/verify。
-- **验收标准**:
-  - 模型无法直接选择 backend 或注入设备命令；Executor 只接收 validated + safety-approved IR/GestureIR。
-  - tap/swipe/type 的 relative 坐标、duration 边界、文本脱敏和失败回传均有测试。
-  - golden trace/单测证明没有 double coordinate conversion；absolute 像素只在现有 tools/backend 出现一次。
-  - 现有 `phone_agent/adb/*` 路径兼容，新增 backend 可选灰度。
-
-### Phase 15F Deterministic Verification & Eval
-
-- **目标/根因**: 引入 app/activity/hash/text/screenshot diff verifier 与 AndroidWorld 风格 reward/eval；根因是当前 Reflect 验证依赖模型，trace/eval 难以客观判断动作成败。
-- **数据模型与 precedence**: `VerifierResult(status=success|failure|unknown, confidence, signals, hard_failure, failure_cause, evidence)`；state 字段 `verifier_result`, `verifier_status`, `verifier_failure_cause`。优先级：hard failure > model reflection；unknown 才完全依赖模型；hard success 可跳过或降低模型反思优先级。
-- **修改文件候选**: `phone_agent/graph/verifier.py`（新候选）, `phone_agent/graph/nodes/reflect.py`, `phone_agent/graph/context.py`, `phone_agent/graph/state.py`, `phone_agent/agent.py`, `phone_agent/adb/*`, `evals/run_eval.py`, `tests/graph/*`, `tests/evals/*`, 必要时 `phone_agent/graph/builder.py`, `phone_agent/graph/edges.py`。
-- **执行步骤**:
-  1. 在每步执行后采集 package/activity、screen hash、UI text 摘要、截图 diff、可选 target mark 状态。
-  2. Reflect 先消费 deterministic verifier 结果，再决定是否需要模型反思；模型反思不得覆盖硬 verifier 失败。
-  3. Eval 输出 step reward、task success、loop/retry 指标、grounding failure 分类与 trace 链接。
-- **验收标准**:
-  - verifier 可在不调用模型时判断 launch、tap navigation、text entry、scroll progress 等基础结果。
-  - AndroidWorld 风格 eval summary 可比较结构化输出、SoM、memory、gesture backend 的效果。
-  - `.venv/bin/pytest tests/graph tests/evals -v` 覆盖 verifier 成功/失败/不确定分支。
-  - verifier trace contract 记录 status、confidence、signals、hard_failure、failure_cause、evidence 摘要；无 raw UI/OCR 隐私文本。
+  - parser 单测覆盖 bbox 顺序修正或拒绝、越界、过小/过大面积、center deterministic、resize calibration、坏格式和空输出。
+  - `.venv/bin/pytest tests/actions tests/graph tests/evals -v` 覆盖 trace/eval contract、失败分类、hash 验证与脱敏。
+  - trace/eval 可关联每次 grounding 与最终 ActionIR/安全决策，但只保存 hash、bbox、计数、错误码和脱敏 metadata。
+  - integration/slow 真实 MLX 测试仅在 darwin/arm64 且模型存在时运行；默认 CI 不阻塞。
 
 # 约束 Checklist
 
-- [ ] 当前仅规划；不得修改代码、测试、README、docs、提交或推送；唯一计划产物是 `.trae/rules/graph.mdc`。
-- [ ] 不迁移 LangGraph `StateGraph`，继续使用现有 `Plan -> Execute -> Reflect` 主路径。
-- [ ] 模型不直接授权执行；执行必须经过 Provider output -> Adapter -> IntentIR -> IntentValidator -> Grounder -> canonical ActionIR -> validate_action() -> limited Repair -> validate_action() -> Safety Gate -> HITL/Executor。
-- [ ] `target_mark_id` 等 IntentIR 字段不得进入 canonical `validate_action()`；Executor 只接收 canonical executable ActionIR。
-- [ ] SoM mark 必须绑定 `screen_id`，stale/cross-screen mark 必须 fail-closed 或重新 observe。
-- [ ] Provider fallback 无 UIAutomator/OCR/SoM 时只生成 screenshot hash / `screen_id`；mark action 不可用或要求 reobserve，不能绕过安全。
-- [ ] Mark/grounding 在 Harness 内完成，模型不能输出绝对像素或直接设备坐标。
-- [ ] 初期 GestureIR 保持 0-1000 relative coords；现有 tools/backend 是唯一 relative->absolute 转换点，必须防 double conversion。
-- [ ] 短期记忆是 `context.py` harness 子模块；不得绕过 HITL，不注入隐私 raw text，不直接改写 ActionIR/safety route。
-- [ ] Rule 只做 guardrail、validation、recovery，不做主语义理解、直接生成 ActionIR 或最终执行授权/dispatch。
-- [ ] Verifier precedence 固定：hard failure > model reflection；unknown 才完全依赖模型；hard success 可跳过或降低模型反思优先级。
-- [ ] 默认行为可回滚；新增结构化输出、SoM、memory、backend、verifier 均先可选/灰度。
-- [ ] Launch app 仍以 `phone_agent/config/apps.py` registry 为准，未知 app/package fail-closed。
-- [ ] schema/golden trace 必须覆盖 stale mark fail-closed、no raw OCR/UI text in trace/context、no double coordinate conversion、parse retry only fixes format、verifier trace contract、rule guardrail cannot generate ActionIR/dispatch。
-- [ ] trace/eval 只记录脱敏摘要、标识符、计数、hash、bbox/mark metadata，不持久化敏感截图/API key/隐私 raw text。
-- [ ] 测试命令使用项目虚拟环境 `.venv/bin/pytest`。
+- [x] RALPLAN 规划阶段已完成并获 Critic APPROVE；本轮 execution 已按用户显式 autopilot/handoff 执行。
+- [x] 保持 LocateAnything LAG 方向：主 VLM 负责语义/目标描述，LocateAnything 只做 `screenshot + target description -> bbox/center`，不做规划、安全或执行决策。
+- [x] target-required grounding 失败不得回退为主 VLM 直接坐标 Tap；只允许 fail-closed/Take_over/Wait/reobserve 语义，当前实现 fail-closed 为 `model_parse_failed`。
+- [x] 非屏幕定位动作（Launch/Back/Home/Wait/Type）继续 canonical pipeline，不强制 grounding。
+- [x] `GroundingProvider.ground(screenshot, target, screen_binding, timeout) -> GroundingResult` 是唯一 provider contract；provider 由 graph config/runtime factory/env 注入；MLX lazy import；executor/tool schema 不暴露 provider。
+- [x] `target_mark_id` 优先走现有 MarkRegistry；`target_text_hint` / `target_role` / `target_intent` 走 LocateAnything/Fake provider；`target_text` 仅作为兼容别名；危险 provider/backend 字段 fail-closed。
+- [x] grounding state/context 包含 `grounding_result`, `grounding_provider`, `grounding_latency_ms`, `grounding_failure_code`, `grounding_screen_hash` 与 `grounding_observation` section。
+- [x] target hints 默认 private；trace/context/eval 只记录脱敏摘要、hash、bbox、计数、错误码和必要 metadata，不记录 raw screenshot、raw OCR/UI text、API key、token 或隐私 raw text。
+- [x] 区分 run-local `screen_id`、raw screenshot hash、provider input image hash；provider request/response 携带并验证 hash，落盘只保存 hash。
+- [x] bbox/center 坐标统一为 0-1000；tool/backend 是唯一 relative-to-absolute 转换点，防止 double conversion。
+- [x] 所有 grounding 输出进入 canonical `ActionIR -> Validator -> Repair -> Validator -> Safety/HITL -> Executor`；Repair 只修有限格式/别名且二次 Validator。
+- [x] `<box>` parser 校验 bbox ordering、range、min/max area、center deterministic、resize calibration。
+- [x] MLX/LocateAnything 依赖是 optional extra；fake provider 覆盖默认单测；真实模型路径不会阻塞默认 CI。
+- [x] Launch app 仍以现有 registry 为准；未知 app/package/action fail-closed。
+- [x] 测试命令使用项目虚拟环境 `.venv/bin/pytest`；默认测试不依赖真实模型或外部服务。

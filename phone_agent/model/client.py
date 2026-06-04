@@ -536,6 +536,7 @@ class ModelClient:
                             "target_role": {"type": "string"},
                             "target_text_hint": {"type": "string"},
                             "target_intent": {"type": "string"},
+                            "requires_grounding": {"type": "boolean"},
                         },
                         "required": ["type", "action"],
                     },

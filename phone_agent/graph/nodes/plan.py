@@ -21,6 +21,8 @@ from phone_agent.graph.context import (
 )
 from phone_agent.graph.observation import build_observation
 from phone_agent.graph.trace import emit_trace
+from phone_agent.grounding.factory import build_grounding_provider
+from phone_agent.grounding.provider import ScreenBinding
 from phone_agent.model.client import MessageBuilder
 from phone_agent.model.client import ModelParseError
 
@@ -140,13 +142,20 @@ def _build_parse_retry_messages(messages: list[dict], parse_error: str) -> list[
     return list(messages) + [MessageBuilder.create_user_message(text=retry_text)]
 
 
-def _parse_and_ground_response(response, configurable: dict, mark_registry, screen_id: str | None):
+def _parse_and_ground_response(
+    response,
+    configurable: dict,
+    mark_registry,
+    screen_binding: ScreenBinding,
+    screenshot,
+):
     """Parse provider response, optionally ground IntentIR, then validate canonical ActionIR."""
 
     parse_error = None
     parse_metadata = getattr(response, "parse_metadata", {}) or {}
     intent_raw = None
     grounding_error = None
+    grounding_observation: dict = {}
     structured_json_response = False
     try:
         stripped_action = response.action.strip()
@@ -187,13 +196,21 @@ def _parse_and_ground_response(response, configurable: dict, mark_registry, scre
             action_parsed = ground_intent_to_action(
                 action_parsed,
                 mark_registry=mark_registry,
-                screen_id=screen_id,
+                screen_id=screen_binding.screen_id,
+                grounding_provider=build_grounding_provider(configurable),
+                screenshot=screenshot,
+                screen_binding=screen_binding,
+                timeout=float(configurable.get("grounding_timeout", 10.0) or 10.0),
+                grounding_metadata=grounding_observation,
             )
             parse_metadata = {
                 **parse_metadata,
                 "intent_detected": True,
                 "grounding_success": True,
                 "target_mark_id": intent_raw.get("target_mark_id"),
+                "grounding_provider": grounding_observation.get("provider"),
+                "grounding_latency_ms": grounding_observation.get("latency_ms"),
+                "grounding_screen_hash": grounding_observation.get("raw_screenshot_hash"),
             }
         except GroundingError as exc:
             action_parsed = None
@@ -204,6 +221,7 @@ def _parse_and_ground_response(response, configurable: dict, mark_registry, scre
                 "intent_detected": True,
                 "grounding_success": False,
                 "grounding_error_code": exc.code,
+                "grounding_observation": grounding_observation,
                 "parse_success": False,
                 "parse_error_code": exc.code,
             }
@@ -236,7 +254,7 @@ def _parse_and_ground_response(response, configurable: dict, mark_registry, scre
             raw_action=response.action,
             parse_metadata=parse_metadata,
         )
-    return action_parsed, parse_error, parse_metadata, intent_raw, grounding_error
+    return action_parsed, parse_error, parse_metadata, intent_raw, grounding_error, grounding_observation
 
 
 def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
@@ -266,6 +284,13 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
         screenshot=screenshot,
         current_app=current_app,
         marks=screen_marks,
+    )
+    screen_binding = ScreenBinding(
+        screen_id=observation.snapshot.screen_id,
+        raw_screenshot_hash=observation.snapshot.screen_hash,
+        width=screenshot.width,
+        height=screenshot.height,
+        current_app=current_app,
     )
     mark_registry = observation.mark_registry
     context_mode = get_context_mode(state, config)
@@ -502,11 +527,12 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
         }
 
     # 4. Parse action, optionally ground IntentIR, then validate canonical IR before safety/execution.
-    action_parsed, parse_error, parse_metadata, intent_raw, grounding_error = _parse_and_ground_response(
+    action_parsed, parse_error, parse_metadata, intent_raw, grounding_error, grounding_observation = _parse_and_ground_response(
         response,
         configurable,
         mark_registry,
-        observation.snapshot.screen_id,
+        screen_binding,
+        screenshot,
     )
     retry_count = request_retry_count
     if parse_error and retry_count < parse_retry_limit:
@@ -525,11 +551,12 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
         retry_messages = _build_parse_retry_messages(request_messages, parse_error)
         try:
             retry_response = _safe_request(model_client, retry_messages)
-            retry_parsed, retry_error, retry_metadata, retry_intent, retry_grounding_error = _parse_and_ground_response(
+            retry_parsed, retry_error, retry_metadata, retry_intent, retry_grounding_error, retry_grounding_observation = _parse_and_ground_response(
                 retry_response,
                 configurable,
                 mark_registry,
-                observation.snapshot.screen_id,
+                screen_binding,
+                screenshot,
             )
             parse_metadata = {**retry_metadata, "parse_retry_count": retry_count, "parse_retry_success": retry_error is None}
             response = retry_response
@@ -537,6 +564,7 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
             parse_error = retry_error
             intent_raw = retry_intent
             grounding_error = retry_grounding_error
+            grounding_observation = retry_grounding_observation
         except Exception as exc:
             parse_metadata = {
                 **parse_metadata,
@@ -567,6 +595,7 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
             "parse_retry_count": retry_count,
             "parse_retry_success": parse_metadata.get("parse_retry_success"),
             "grounding_error_code": parse_metadata.get("grounding_error_code"),
+            "grounding_observation": grounding_observation,
             "mark_registry": mark_registry.trace_summary(),
             "repair_attempted": parse_metadata.get("repair_attempted", False),
             "repair_success": parse_metadata.get("repair_success"),
@@ -592,6 +621,12 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
             "action_parsed": None,
             "intent_raw": intent_raw,
             "grounding_error": grounding_error,
+            "grounding_result": grounding_observation or None,
+            "grounding_provider": grounding_observation.get("provider"),
+            "grounding_latency_ms": grounding_observation.get("latency_ms"),
+            "grounding_failure_code": grounding_error,
+            "grounding_screen_hash": grounding_observation.get("raw_screenshot_hash") or observation.snapshot.screen_hash,
+            "grounding_observation": grounding_observation or None,
             "action_result": {
                 "success": False,
                 "should_finish": True,
@@ -622,6 +657,12 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
         "action_parsed": action_parsed,
         "intent_raw": intent_raw,
         "grounding_error": grounding_error,
+        "grounding_result": grounding_observation or None,
+        "grounding_provider": grounding_observation.get("provider"),
+        "grounding_latency_ms": grounding_observation.get("latency_ms"),
+        "grounding_failure_code": grounding_error,
+        "grounding_screen_hash": grounding_observation.get("raw_screenshot_hash") or observation.snapshot.screen_hash,
+        "grounding_observation": grounding_observation or None,
         "action_confirmed": False,
         "context_mode": context_mode,
         **context_metrics,

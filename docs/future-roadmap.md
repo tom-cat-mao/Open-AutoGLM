@@ -17,6 +17,45 @@
 - **评测地基**: 已提供 `evals/run_eval.py --dry-run` smoke harness；当前统计结构化结果、HITL interrupt routing、trace 文件关联、retry count 与 failure cause histogram；不承诺跨进程 resume
 - **收益验证**: eval 已输出 `context_mode`、`context_strategy`、`prompt_version`、`selected_sections`、`messages_before/after`、`message_chars_before/after`、`approx_tokens_before/after`、`context_block_chars`、`context_truncated`、`failure_memory_hit_count`、`repeated_failure_count`，支持 off/observe/inject 对比
 - **输出适配**: `ModelConfig.output_mode=text_dsl|json_schema|tool_calls|auto`；XML/text DSL、JSON、已聚合 OpenAI `tool_calls` 统一归一到 canonical action，parse failure fail-closed，不绕过 HITL
+- **本地 Grounding**: LocateAnything-3B-4bit (MLX) 已作为 optional `GroundingProvider` 接入 description target-to-bbox 路径；主 VLM 负责语义/目标描述，MarkRegistry/LocateAnything 负责屏幕绑定定位，所有结果仍进入 canonical ActionIR/Safety/HITL/Executor
+
+---
+
+## 已完成 MVP: LocateAnything Local Grounding Provider
+
+**目标**: 将主 VLM 的语义规划与 GUI 元素定位分层，使用 LocateAnything-3B-4bit (MLX) 在本地执行 `screenshot + target_description -> bbox/center`，并保持现有 harness engineering 安全边界。
+
+**当前状态**: LAG-1 至 LAG-4 已落地。默认 CI 和单测使用 fake provider，不依赖 MLX 或真实模型；真实 LocateAnything 通过 optional extra 启用。
+
+**已落地方案**:
+- `phone_agent/grounding/`: 新增 `GroundingProvider` contract、`ScreenBinding`、`GroundingResult`、fake provider、LocateAnything MLX lazy provider、`<box>` parser 与 provider factory。
+- `phone_agent/actions/adapter.py`: `IntentIR` 支持 `target_text_hint`、兼容别名 `target_text`、`target_role`、`target_intent`、`requires_grounding`；拒绝 provider/backend/命令类危险字段。
+- `phone_agent/actions/grounding.py`: `target_mark_id` 优先走 MarkRegistry；description hints 走 provider；screen/hash/provider-input hash 校验后编译为 canonical Tap/Double Tap/Long Press ActionIR。
+- `phone_agent/graph/nodes/plan.py`: 在 Plan parse 后执行 screen-bound grounding，失败 fail-closed，不回退为主 VLM 直接坐标；成功/失败 metadata 写入 state/trace/eval。
+- `phone_agent/graph/context.py` / `trace.py` / `evals/run_eval.py`: 新增 `grounding_observation` section、grounding latency/failure histogram 与 target hint 默认脱敏。
+- `setup.py`: MLX/LocateAnything 依赖迁移到 `.[locateanything]` optional extra。
+
+**安全边界**:
+- 主 VLM 不选择 provider/backend，不输出 ADB/shell/绝对像素；adapter/validator 对危险字段 fail-closed。
+- target-required description grounding 的 provider unavailable、timeout、bad bbox、low confidence、stale screen、hash mismatch 等不会执行设备动作。
+- bbox/center 保持 0-1000 相对坐标；绝对像素转换仍只在 tool/backend 层。
+- trace/eval 只记录 screen_id、raw screenshot hash、provider input hash、bbox/center、latency、failure code 与脱敏 target summary；不记录 raw screenshot/raw target text。
+
+**验证命令**:
+
+```bash
+.venv/bin/pytest tests/actions tests/graph tests/evals -q
+.venv/bin/pytest tests -q
+```
+
+**启用真实 provider**:
+
+```bash
+.venv/bin/pip install -e ".[locateanything]"
+PHONE_AGENT_GROUNDING_PROVIDER=locateanything \
+PHONE_AGENT_LOCATEANYTHING_MODEL=models/LocateAnything-3B-4bit \
+.venv/bin/python main.py --output-mode json_schema "打开设置"
+```
 
 ---
 

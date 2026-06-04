@@ -171,7 +171,10 @@ def run_eval(args: argparse.Namespace) -> dict[str, Any]:
     total_duration = sum(float(item["duration"]) for item in records)
     total_hitl = sum(int(item["hitl_count"]) for item in records)
     failure_cause_histogram: dict[str, int] = {}
+    grounding_failure_histogram: dict[str, int] = {}
     total_retries = 0
+    total_grounding_latency_ms = 0
+    grounding_count = 0
     total_context_chars = 0
     context_truncated_count = 0
     total_messages_before = 0
@@ -201,6 +204,12 @@ def run_eval(args: argparse.Namespace) -> dict[str, Any]:
         cause = item.get("failure_cause")
         if cause:
             failure_cause_histogram[str(cause)] = failure_cause_histogram.get(str(cause), 0) + 1
+        grounding_failure = item.get("grounding_failure_code")
+        if grounding_failure:
+            grounding_failure_histogram[str(grounding_failure)] = grounding_failure_histogram.get(str(grounding_failure), 0) + 1
+        if item.get("grounding_latency_ms") is not None:
+            grounding_count += 1
+            total_grounding_latency_ms += int(item.get("grounding_latency_ms") or 0)
 
     return {
         "summary": {
@@ -212,6 +221,9 @@ def run_eval(args: argparse.Namespace) -> dict[str, Any]:
             "hitl_count": total_hitl,
             "retry_count": total_retries,
             "failure_cause_histogram": failure_cause_histogram,
+            "grounding_failure_histogram": grounding_failure_histogram,
+            "grounding_count": grounding_count,
+            "avg_grounding_latency_ms": total_grounding_latency_ms / grounding_count if grounding_count else 0.0,
             "context_mode": args.context_mode,
             "context_strategy": records[0].get("context_strategy") if records else "unknown",
             "prompt_version": records[0].get("prompt_version") if records else "context_harness_v1",

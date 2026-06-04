@@ -143,6 +143,7 @@ JSON_OUTPUT_CONTRACT = """# Output format: JSON schema
 Return exactly one JSON object. Do not output Markdown, code fences, XML, or thinking/answer tags.
 Examples:
 - {"type":"intent","action":"tap","target_mark_id":"m1"}
+- {"type":"intent","action":"tap","target_text_hint":"Settings button","target_role":"button"}
 - {"type":"intent","action":"tap","target_mark_id":"m2","target_intent":"confirm payment"}
 - {"type":"do","action":"swipe","start":[500,800],"end":[500,200]}
 - {"type":"do","action":"type","text":"hello"}

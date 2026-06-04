@@ -25,6 +25,8 @@
 | Request Compaction | `compact_messages_for_request()` 只能压缩传给 `model_client.request()` 的消息；不得改写 `state["messages"]`；必须保留最新截图并剥离历史图片 |
 | Prompt Version | 默认 `context_harness_v1`；`legacy_text_dsl` 保留旧 text DSL prompt 作为回滚路径；prompt schema 只约束格式，不授权执行 |
 | Output Adapter | `ModelConfig.output_mode=text_dsl|json_schema|tool_calls|auto`；JSON/tool_calls 必须经 adapter 白名单映射到 canonical action，parse failure fail-closed，不得绕过 HITL |
+| Grounding | 主 VLM 只输出 IntentIR target hints；`target_mark_id` 优先走 MarkRegistry，`target_text_hint` 走 LocateAnything/Fake GroundingProvider；provider 由 graph config/env 注入，不暴露给 tool schema |
+| Grounding Fail-Closed | target-required grounding 失败（provider 缺失、低置信、bad bbox、stale/hash mismatch 等）不得回退为主 VLM 坐标 Tap；只能 fail-closed/等待/接管/重新观测 |
 | Action IR Pipeline | 阶梯架构：Adapter → draft ActionIR → Validator → (Repair → Validator) → Safety Gate → Executor；Repair 不得在 Safety Gate 之后；Executor 只接收 validated + safety-approved IR |
 | Validator | 集中校验 action 白名单、必填字段、坐标 0-1000、Wait duration 正数且 ≤60s、dangerous fields；fail-closed |
 | Safety Gate | 纯决策层 `decide_safety()`，输出 `approved|confirm|takeover|rejected`；不 dispatch、不调用设备 |

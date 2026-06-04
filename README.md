@@ -31,6 +31,7 @@ phone_agent/
 ├── actions/
 │   ├── handler.py               # parse_action(), ActionResult, do(), finish()
 │   └── adapter.py               # JSON/tool_calls → canonical action 适配与校验
+├── grounding/                   # GroundingProvider、LocateAnything MLX、fake provider、bbox parser
 ├── adb/                         # Android 设备控制
 ├── config/
 │   ├── apps.py                  # 应用包名映射
@@ -168,6 +169,21 @@ Context selector 与 compaction 只能影响模型请求构造和脱敏观测指
 
 解析观测字段会进入 trace/eval 相关链路，包括 configured mode、detected format、adapter used、parse success/error code；`parse_error`、截图、API key、任务文本与隐私文本默认脱敏。
 
+### LocateAnything 本地 Grounding（可选）
+
+Open-AutoGLM 支持把主 VLM 的语义/意图与本地视觉定位拆开：主 VLM 在 JSON/tool_calls 模式输出 `IntentIR`（例如 `target_text_hint` / `target_role` / `target_intent` 或 `target_mark_id`），本地 `GroundingProvider` 将当前截图 + 目标描述定位为 0-1000 bbox/center，再进入 canonical `ActionIR -> Validator -> Repair -> Validator -> Safety/HITL -> Executor`。
+
+```bash
+# 默认测试不需要 MLX；真实 LocateAnything 仅作为可选 extra
+.venv/bin/pip install -e ".[locateanything]"
+
+# 可选：启用本地 LocateAnything provider
+export PHONE_AGENT_GROUNDING_PROVIDER=locateanything
+export PHONE_AGENT_LOCATEANYTHING_MODEL=models/LocateAnything-3B-4bit
+```
+
+安全边界：`target_mark_id` 优先走 MarkRegistry；`target_text_hint` 描述路径才调用 LocateAnything。target-required grounding 失败（provider 缺失、超时、hash mismatch、stale screen、低置信、bad bbox 等）会 fail-closed 为 `model_parse_failed`，不会回退为主 VLM 直接坐标 Tap。trace/eval 只记录 provider、bbox/center、screen/hash、latency、failure code 与脱敏 target summary，不记录原始截图或 raw target text。
+
 ## 模型部署
 
 ### 选项 A：第三方 API
@@ -248,6 +264,8 @@ python main.py --device-id 192.168.1.100:5555 --base-url http://localhost:8000/v
 | `PHONE_AGENT_MAX_STEPS` | 最大步数 | `100` |
 | `PHONE_AGENT_DEVICE_ID` | 设备 ID | 自动检测 |
 | `PHONE_AGENT_LANG` | 语言 | `cn` |
+| `PHONE_AGENT_GROUNDING_PROVIDER` | 可选 grounding provider：`locateanything` / `fake` / `off` | `off` |
+| `PHONE_AGENT_LOCATEANYTHING_MODEL` | LocateAnything-3B-4bit 模型路径 | `models/LocateAnything-3B-4bit` |
 
 ## 开发
 
@@ -291,7 +309,7 @@ python main.py --device-id 192.168.1.100:5555 --base-url http://localhost:8000/v
 | Project agents | `.trae/agents/*.md` |
 | Hooks | `.trae/hooks/ralplan.py`, `.trae/hooks/autopilot.py` |
 
-Autopilot 已完成 TraeCLI-native 编排：`ralplan -> execution -> ralph -> qa -> complete`。它复用 RALPLAN `planner` / `architect` / `critic`，并新增 `executor`、`debugger`、`test-engineer`、`designer`、`code-reviewer`、`security-reviewer` 六个项目级 stage agents；不迁移 `.omc` runtime，不修改 `.trae/traecli.yaml`，不改变 `phone_agent/` 业务运行时。涉及 prompt/context harness 的执行计划、验收矩阵与阶段状态以 `.trae/rules/graph.mdc` 为准；TraeCLI 文档和 AGENTS 约束必须同步更新。
+Autopilot 已完成 TraeCLI-native 编排：`ralplan -> execution -> ralph -> qa -> complete`。它复用 RALPLAN `planner` / `architect` / `critic`，并新增 `executor`、`debugger`、`test-engineer`、`designer`、`code-reviewer`、`security-reviewer` 六个项目级 stage agents；不迁移 `.omc` runtime，不修改 `.trae/traecli.yaml`，不改变 `phone_agent/` 业务运行时。涉及 prompt/context/grounding harness 的执行计划、验收矩阵与阶段状态以 `.trae/rules/graph.mdc` 为准；TraeCLI 文档和 AGENTS 约束必须同步更新。项目命令必须优先使用 `.venv/bin/python`、`.venv/bin/pytest`、`.venv/bin/pip`。
 
 ```bash
 .venv/bin/pytest tests/trae/test_autopilot_hook.py -q

@@ -61,6 +61,12 @@ class AgentState(TypedDict):
     action_parsed: Optional[dict]  # parse_action() 解析结果
     intent_raw: Optional[dict]  # grounding 前的 IntentIR，仅供 trace/debug，不能进入 executor
     grounding_error: Optional[str]  # IntentIR grounding 失败原因
+    grounding_result: Optional[dict]  # provider/mark grounding result, trace-safe metadata only
+    grounding_provider: Optional[str]  # grounding provider name
+    grounding_latency_ms: Optional[int]  # grounding latency in milliseconds
+    grounding_failure_code: Optional[str]  # structured grounding failure code
+    grounding_screen_hash: Optional[str]  # raw screenshot hash bound to grounding request/result
+    grounding_observation: Optional[dict]  # bounded grounding context section payload
 
     # === Execute 节点输出 ===
     action_result: Optional[dict]  # ActionResult 序列化为 dict

@@ -17,8 +17,12 @@ requests>=2.31.0
 # vllm>=0.12.0
 # transformers>=5.0.0rc0
 
-# Optional: for development
-# pytest>=7.0.0
-# pre-commit>=4.5.0
-# black>=23.0.0
-# mypy>=1.0.0
+# Optional Visual Grounding (LocateAnything on Apple Silicon MLX)
+# Install with: pip install -e ".[locateanything]"
+# mlx-vlm is kept out of default requirements so CI and non-MLX hosts do not need it.
+
+# Development & Testing
+pytest>=7.0.0
+black>=23.0.0
+mypy>=1.0.0
+ruff>=0.1.0

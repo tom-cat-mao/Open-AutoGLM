@@ -141,6 +141,7 @@ JSON_OUTPUT_CONTRACT = """# 输出格式：JSON schema
 只返回一个 JSON 对象，不要 Markdown、代码块、XML 或思考/答案标签。
 示例：
 - {"type":"intent","action":"tap","target_mark_id":"m1"}
+- {"type":"intent","action":"tap","target_text_hint":"设置按钮","target_role":"button"}
 - {"type":"intent","action":"tap","target_mark_id":"m2","target_intent":"confirm payment"}
 - {"type":"do","action":"swipe","start":[500,800],"end":[500,200]}
 - {"type":"do","action":"type","text":"你好"}

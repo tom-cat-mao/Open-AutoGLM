@@ -39,6 +39,8 @@ PRIVATE_TEXT_KEYS = {
     "observed_text",
     "parse_error",
     "context_block",
+    "target_text_hint",
+    "text_hint",
 }
 
 

@@ -27,6 +27,7 @@ CONTEXT_SECTION_IDS = (
     "gui_memory.tried_actions",
     "gui_memory.scroll_memory",
     "gui_memory.task_progress",
+    "grounding_observation",
 )
 FAILURE_TAXONOMY = {
     "none",
@@ -65,6 +66,8 @@ PRIVATE_CONTEXT_TEXT_KEYS = {
     "account",
     "payment_info",
     "message",
+    "text_hint",
+    "target_text_hint",
     "result_message_summary",
     "final_message",
     "error",
@@ -82,6 +85,10 @@ SAFE_CONTEXT_TEXT_KEYS = {
     "summarized_history",
     "screen_id",
     "mark_id",
+    "provider",
+    "provider_input_hash",
+    "raw_screenshot_hash",
+    "failure_code",
     "last_verdict",
 }
 SENSITIVE_PATTERN = re.compile(
@@ -417,6 +424,7 @@ def build_plan_context_block(state: dict[str, Any], lang: str = "cn") -> tuple[s
         ("latest_failure_memory", (state.get("failure_memory") or [])[-1:]),
         ("summarized_history", state.get("summarized_history")),
         ("gui_memory", state.get("gui_memory")),
+        ("grounding_observation", state.get("grounding_observation")),
     ):
         if value:
             if label == "summarized_history" and len(str(value)) > budget["summarized_history_chars"]:
@@ -506,6 +514,8 @@ def _section_has_value(state: dict[str, Any], section: str) -> bool:
     if section.startswith("gui_memory."):
         key = section.split(".", 1)[1]
         return bool((state.get("gui_memory") or {}).get(key))
+    if section == "grounding_observation":
+        return bool(state.get("grounding_observation"))
     return False
 
 
