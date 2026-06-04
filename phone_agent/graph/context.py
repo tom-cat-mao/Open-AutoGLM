@@ -23,6 +23,10 @@ CONTEXT_SECTION_IDS = (
     "last_action_outcome",
     "failure_memory",
     "summarized_history",
+    "gui_memory.visited_screens",
+    "gui_memory.tried_actions",
+    "gui_memory.scroll_memory",
+    "gui_memory.task_progress",
 )
 FAILURE_TAXONOMY = {
     "none",
@@ -76,6 +80,9 @@ SAFE_CONTEXT_TEXT_KEYS = {
     "failure_cause",
     "suggested_strategy",
     "summarized_history",
+    "screen_id",
+    "mark_id",
+    "last_verdict",
 }
 SENSITIVE_PATTERN = re.compile(
     r"(1[3-9]\d{9}|[\w.+-]+@[\w-]+(?:\.[\w-]+)+|(?:订单|order)[\s:#：-]*[A-Za-z0-9-]{4,}|"
@@ -322,6 +329,80 @@ def build_context_metrics(state: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def default_gui_memory() -> dict[str, Any]:
+    """Build bounded GUI short-term memory defaults."""
+
+    return {
+        "visited_screens": [],
+        "tried_actions": [],
+        "scroll_memory": {},
+        "task_progress": {},
+    }
+
+
+def update_gui_memory(state: dict[str, Any], *, current_app: str, screen_id: str | None) -> dict[str, Any]:
+    """Update GUI memory using only bounded identifiers and sanitized summaries."""
+
+    memory = {**default_gui_memory(), **(state.get("gui_memory") or {})}
+    step = int(state.get("step_count") or 0)
+    if screen_id:
+        visited = list(memory.get("visited_screens") or [])
+        item = {"screen_id": screen_id, "current_app": current_app or "unknown", "step_count": step}
+        if not visited or visited[-1].get("screen_id") != screen_id:
+            visited.append(item)
+        memory["visited_screens"] = visited[-10:]
+
+    action = state.get("action_parsed") or {}
+    if isinstance(action, dict) and action.get("_metadata") == "do":
+        tried = list(memory.get("tried_actions") or [])
+        tried.append(
+            sanitize_context_payload(
+                {
+                    "step_count": step,
+                    "screen_id": screen_id,
+                    "action": action.get("action"),
+                    "mark_id": (state.get("intent_raw") or {}).get("target_mark_id")
+                    if isinstance(state.get("intent_raw"), dict)
+                    else None,
+                    "result_success": (state.get("action_result") or {}).get("success")
+                    if isinstance(state.get("action_result"), dict)
+                    else None,
+                    "failure_cause": state.get("failure_cause"),
+                }
+            )
+        )
+        memory["tried_actions"] = tried[-10:]
+        if action.get("action") == "Swipe":
+            scroll_memory = dict(memory.get("scroll_memory") or {})
+            screen_key = screen_id or "unknown"
+            scroll_memory[screen_key] = {
+                "last_direction": _swipe_direction(action),
+                "count": int((scroll_memory.get(screen_key) or {}).get("count") or 0) + 1,
+            }
+            memory["scroll_memory"] = scroll_memory
+
+    progress = dict(memory.get("task_progress") or {})
+    if state.get("reflection_verdict"):
+        progress["last_verdict"] = state.get("reflection_verdict")
+    if state.get("suggested_strategy"):
+        progress["suggested_strategy"] = state.get("suggested_strategy")
+    memory["task_progress"] = sanitize_context_payload(progress)
+    return sanitize_context_payload(memory)
+
+
+def _swipe_direction(action: dict[str, Any]) -> str:
+    start = action.get("start") or [0, 0]
+    end = action.get("end") or [0, 0]
+    try:
+        dx = float(end[0]) - float(start[0])
+        dy = float(end[1]) - float(start[1])
+    except Exception:
+        return "unknown"
+    if abs(dx) > abs(dy):
+        return "right" if dx > 0 else "left"
+    return "down" if dy > 0 else "up"
+
+
 def build_plan_context_block(state: dict[str, Any], lang: str = "cn") -> tuple[str, dict[str, Any]]:
     """Build a bounded, sanitized context block for plan injection."""
     budget = state.get("context_budget") or DEFAULT_CONTEXT_BUDGET
@@ -335,6 +416,7 @@ def build_plan_context_block(state: dict[str, Any], lang: str = "cn") -> tuple[s
         ("last_action_outcome", state.get("action_outcome_summary")),
         ("latest_failure_memory", (state.get("failure_memory") or [])[-1:]),
         ("summarized_history", state.get("summarized_history")),
+        ("gui_memory", state.get("gui_memory")),
     ):
         if value:
             if label == "summarized_history" and len(str(value)) > budget["summarized_history_chars"]:
@@ -421,6 +503,9 @@ def _section_has_value(state: dict[str, Any], section: str) -> bool:
         return bool(state.get("failure_memory"))
     if section == "summarized_history":
         return bool(state.get("summarized_history"))
+    if section.startswith("gui_memory."):
+        key = section.split(".", 1)[1]
+        return bool((state.get("gui_memory") or {}).get(key))
     return False
 
 

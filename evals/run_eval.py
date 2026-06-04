@@ -180,6 +180,7 @@ def run_eval(args: argparse.Namespace) -> dict[str, Any]:
     total_message_chars_after = 0
     total_failure_memory_hits = 0
     total_repeated_failures = 0
+    verifier_status_counts: dict[str, int] = {}
     selected_section_counts: dict[str, int] = {}
     for item in records:
         total_retries += int(item.get("retry_count") or 0)
@@ -194,6 +195,9 @@ def run_eval(args: argparse.Namespace) -> dict[str, Any]:
         for section in item.get("selected_sections") or []:
             section_id = str(section)
             selected_section_counts[section_id] = selected_section_counts.get(section_id, 0) + 1
+        verifier_status = item.get("verifier_status")
+        if verifier_status:
+            verifier_status_counts[str(verifier_status)] = verifier_status_counts.get(str(verifier_status), 0) + 1
         cause = item.get("failure_cause")
         if cause:
             failure_cause_histogram[str(cause)] = failure_cause_histogram.get(str(cause), 0) + 1
@@ -221,6 +225,7 @@ def run_eval(args: argparse.Namespace) -> dict[str, Any]:
             "message_chars_after": total_message_chars_after,
             "failure_memory_hit_count": total_failure_memory_hits,
             "repeated_failure_count": total_repeated_failures,
+            "verifier_status_counts": verifier_status_counts,
             "dry_run": args.dry_run,
             "trace_dir": args.trace_dir,
             "output_mode": args.output_mode,
@@ -246,7 +251,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--output-mode",
         choices=["text_dsl", "json_schema", "tool_calls", "auto"],
-        default=os.getenv("PHONE_AGENT_OUTPUT_MODE", "text_dsl"),
+        default=os.getenv("PHONE_AGENT_OUTPUT_MODE", "json_schema"),
         help="Model output mode",
     )
     parser.add_argument("--device-id", default=None, help="ADB device id")

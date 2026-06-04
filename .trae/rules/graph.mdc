@@ -13,140 +13,179 @@ execution_status: completed
 iteration: 1
 planner_mode: null
 revision_scope: null
-last_planner_update: "Targeted Phase 14 revision: fixed repository paths, removed context_mode=auto from runtime scope, added request-only compaction, invariant, trace/eval privacy fields, rollback, and concrete tests."
-last_architect_review: "Re-review found previous blockers resolved; remaining selector-shape clarification is non-blocking."
+last_planner_update: "addressed IntentIR/Grounding/Verifier/Gesture/Memory boundaries"
+last_architect_review: "Architect re-review found no Critical/Major blockers and recommended final Critic gate."
 last_critic_verdict: APPROVE
 approved_for_execution: true
-notes: "Phase 14 implementation completed and hardened: Launch registry/validator contract unified, screen_belief.summary default private, stream_stdout=False by default, URL credentials/query secrets redacted before stdout, check_model_api fully redacted. RALPH/Critic approved, 212 tests pass."
+notes: "Phase 15A-15F execution completed via Autopilot; focused tests passed: .venv/bin/pytest tests/model tests/actions tests/graph tests/evals -q (199 passed)."
 ```
 
 # Roadmap
 
 ## 已完成 Phase
 
-- ✅ Phase 1-14 summary: LangGraph StateGraph, HITL, trace/eval, context observe/inject, output adapters, Canonical Action IR, Validator, Repair, Safety Gate, Executor pipeline, and LangGraph-native Context Engineering Harness are implemented. Preserve this summary only; do not restore old long roadmap details.
+- ✅ Phase 1-14：已具备 LangGraph `Plan -> Execute -> Reflect` 主循环、trace/eval、context observe/inject、canonical Action IR、Adapter/Validator/Repair/Safety Gate/Executor、HITL、`output_mode=text_dsl|json_schema|tool_calls|auto` 与基础 prompt/context harness。
 
 ## RALPLAN-DR 摘要
 
 ### Principles
 
-1. Keep the existing LangGraph `StateGraph`; Phase 14 is a harness/refactor, not an Agent framework migration.
-2. Keep runtime modes unambiguous: `context_mode=off|observe|inject`; defer any `context_mode=auto` to a later spike because `output_mode` already owns `auto`.
-3. Context selection/compaction is request-construction only unless explicitly producing sanitized summaries, metrics, or trace identifiers.
-4. Preserve safety: context must never bypass Adapter → Validator → Safety Gate → HITL → Executor.
-5. Default behavior must be rollback-safe: `context_mode=observe` remains unchanged, injection is opt-in, and legacy prompt behavior remains behind `prompt_version`/compat until tests pass.
+1. 保留现有 LangGraph `StateGraph` 拓扑，只升级 harness，不迁移 Agent 框架。
+2. 模型只表达观察、意图与目标，不直接授权执行动作、包名或绝对像素。
+3. Harness 负责 grounding、ActionIR 编译、验证、安全、执行与可观测性闭环。
+4. 所有新增能力默认可灰度/回滚，并保持 text DSL 兼容路径直到结构化路径稳定。
+5. 评估以确定性 verifier、trace 与 AndroidWorld 风格 reward 为准，减少模型自评依赖。
 
 ### Decision Drivers
 
-1. Architect/Critic found the earlier roadmap had nonexistent paths and ambiguous `auto` semantics.
-2. Prompt/schema/context duplication risks token bloat, suffix conflicts, and inconsistent provider behavior.
-3. Compaction must reduce request size without breaking `messages_reducer`, current screenshot semantics, auditability, or HITL fields.
+1. 当前痛点是 vLLM/VLM 直接读截图并输出具体动作/包名/坐标，导致“假 harness/ReAct”、grounding 不稳、安全边界模糊。
+2. 非特化模型的 text DSL 输出不稳定，需要默认结构化输出、parse-fail retry 与 harness-side 编译。
+3. 缺少 SoM/mark grounding、GUI 短期记忆和确定性验证，导致坐标、反思、手势执行和 eval 难以工程化迭代。
 
 ### Viable Options
 
 | Option | Pros | Cons |
 |---|---|---|
-| A. Minimal prompt cleanup only | Smallest implementation surface | Does not make context selection, compaction, trace, or eval measurable |
-| B. LangGraph-native request-context harness | Fits existing graph, measurable, rollback-safe, addresses feedback directly | Requires careful prompt contract and tests across modes |
-| C. Add `context_mode=auto` now | Could optimize automatically later | Ambiguous with `output_mode=auto`; larger test matrix; not needed for Phase 14 |
+| A. 继续强化 text DSL 和 prompt 约束 | 改动最小，兼容当前路径 | 仍让模型承担动作/坐标细节；非特化 VLM 不稳；难以形成真实 harness |
+| B. Harness Engineering：VLM 输出意图，Harness 编译动作 | 安全边界清晰；可引入 SoM、Mark Registry、Gesture Compiler、确定性 verifier；更适合 trace/eval | 改动跨 plan/execute/context/actions/adb/eval，需要分阶段灰度 |
+| C. 直接换用特化 GUI agent/model | 可能短期提升 grounding | 依赖模型能力与供应商；无法解决本项目工程抽象、验证和安全责任归属 |
 
 ### Selected Approach
 
-Choose **B** and explicitly exclude runtime `context_mode=auto` from Phase 14. Implement prompt contract cleanup, request-only context selection/compaction, privacy-safe trace/eval metrics, and rollback-compatible tests using actual repository paths.
+选择 **B. Harness Engineering**：先把默认输出稳定到结构化意图，再构建 SoM Observation、Mark Registry、mark-based Action IR、GUI 短期记忆、Gesture Compiler 与确定性 verifier。LangGraph 仍负责任务循环；模型负责语义判断；Harness 负责从屏幕实体到可执行手势的受控编译与审计。
+
+**分层 pipeline（边界固定）**：
+
+`Provider output -> Adapter -> IntentIR -> IntentValidator -> Grounder(mark/screen binding) -> canonical ActionIR -> validate_action() -> limited Repair -> validate_action() -> Safety Gate -> HITL/Executor`
+
+| 层 | 责任边界 |
+|---|---|
+| Provider/Adapter | 只把结构化输出解析成 IntentIR；不 dispatch、不绕过 validator。 |
+| IntentIR/IntentValidator | 可含 `target_mark_id`、role、hint、intent；只校验意图字段与格式，不生成可执行坐标。 |
+| Grounder | 唯一负责 mark/screen binding，将当前 mark 编译为 canonical executable ActionIR。 |
+| canonical `validate_action()` | 只接收现有 canonical ActionIR 字段；`target_mark_id` 等意图字段不得进入该校验入口。 |
+| Repair | 仅修格式/别名/大小写等有限问题；repair 后必须二次 `validate_action()`。 |
+| Safety/HITL/Executor | Executor 只接收 canonical executable ActionIR；安全、confirm、takeover 路由不可被 memory/rule/provider 改写。 |
+
+**最小闭环顺序**：`15A -> 15B-lite mark schema/mock -> 15C-lite known mark to Tap -> 15D/15E/15F`。先证明结构化格式、mark 绑定与单一 Tap 编译闭环，再扩展 memory、gesture backend、verifier。
 
 ### ADR
 
-- **Decision**: Build a LangGraph-native Context Engineering Harness around existing prompt rendering, `plan_node`, `model_client.request`, trace, and eval paths.
-- **Drivers**: Correct repository layout; reduce context budget; maintain current safety/HITL invariants; make impact measurable.
-- **Alternatives**: Manual prompt deletion; adding `context_mode=auto`; LangChain Agent migration.
-- **Why chosen**: It minimizes topology risk and keeps execution behind the existing IR/safety pipeline while adding observability and rollback.
-- **Consequences**: Phase 14 needs prompt-version compatibility, concrete redaction tests, and request-only compaction discipline.
-- **Follow-ups**: Revisit `context_mode=auto` only after off/observe/inject metrics prove stable.
+- **Decision**: 将执行架构从“VLM 直接输出动作”转为“VLM 输出意图/target mark，Harness 编译 canonical ActionIR/GestureIR 并执行”。
+- **Drivers**: 降低 text DSL 依赖；防止 stale coordinate/action；提升 grounding、可验证性、安全审计和 eval 可信度。
+- **Alternatives**: 继续 prompt hardening；直接更换 GUI 特化模型；重写为其他 Agent 框架。
+- **Why chosen**: 复用现有 LangGraph、Adapter/Validator/Repair/Safety/HITL/Executor 与 trace/eval 基础，同时把高风险坐标和设备执行责任收回到可测试 harness。
+- **Consequences**: 需要新增 SoM/mark 数据结构、ActionIR 字段、GestureIR/backend 抽象和 verifier；短期会增加测试矩阵与兼容层。
+- **Follow-ups**: 在结构化路径稳定后逐步弱化 text DSL；用 eval 数据决定是否引入 OCR/SoM provider、minitouch 或更强 verifier。
 
-## 已完成当前规划 Phase
+## 当前规划 Phase
 
-### Phase 14A: Prompt Context Contract ✅
+### Phase 15A Structured Output Default
 
-- **Root cause**: Prompt files mix system contract, action schema, output-mode suffixes, policy, and context instructions, creating duplication and mode conflicts.
-- **Modify candidates**: `phone_agent/config/prompts_zh.py`, `phone_agent/config/prompts_en.py`, `phone_agent/config/prompts.py` (classify current role before deleting or legacy cleanup), `phone_agent/config/__init__.py`, `phone_agent/model/client.py`, `phone_agent/actions/adapter.py`, `phone_agent/actions/validator.py`, `phone_agent/graph/nodes/plan.py`, `tests/model`, `tests/actions`.
-- **Plan**:
-  - Preserve `get_system_prompt(lang, output_mode)` unless call-site migration is explicitly justified.
-  - Make suffix logic executable for `output_mode=text_dsl|json_schema|tool_calls|auto` without conflicting instructions.
-  - Plan Action Schema as a small shared renderer/schema derived from existing adapter/validator/tool specs; provider tool specs remain formatting-only.
-  - Execution remains Adapter → Validator → Safety Gate → Executor; prompt schema cannot authorize actions.
-- **Acceptance**:
-  - Prompt rendering tests cover zh/en and all `output_mode` values.
-  - `prompts.py` is classified as compatibility, wrapper, or legacy before any cleanup.
-  - Text DSL, JSON schema, and tool calls render no contradictory suffixes.
-  - Implemented with `PROMPT_VERSION=context_harness_v1` and `LEGACY_PROMPT_VERSION=legacy_text_dsl` rollback.
+- **目标/根因**: 仅解决结构化格式稳定与 parse-fail retry，降低非特化模型 text DSL 漂移；不解决 grounding、不补猜语义。根因是当前模型仍可能输出不完整/不可解析字段。
+- **修改文件候选**: `phone_agent/model/client.py`, `phone_agent/graph/nodes/plan.py`, `phone_agent/actions/adapter.py`, `phone_agent/actions/validator.py`, `phone_agent/actions/repair.py`, `phone_agent/config/prompts_zh.py`, `phone_agent/config/prompts_en.py`, `tests/model/*`, `tests/actions/*`, `tests/graph/*`。
+- **执行步骤**:
+  1. 将 `json_schema`/`tool_calls` 结构化输出设为可灰度默认，保留 `text_dsl` 回滚配置。
+  2. 为 parse failure 增加一次受控 retry，候选实现点为 `plan_node` 或 `ModelClient.request(..., parse_retry=1)`。
+  3. Adapter 只把结构化模型输出转成 IntentIR/draft 表达，保持 fail-closed；grounding 留到 15B/15C。
+- **验收标准**:
+  - `.venv/bin/pytest tests/model tests/actions tests/graph -v` 通过相关新增/回归用例。
+  - text DSL 仍可显式启用；默认结构化路径失败时不会绕过 Validator/Safety/HITL。
+  - parse-fail retry 有 trace 字段记录次数和最终失败原因，且不记录敏感 raw prompt。
+  - golden trace 证明 retry 只修格式，不新增坐标、mark、动作语义或隐私文本。
 
-### Phase 14B: Context Selector and Hard Invariant ✅
+### Phase 15B SoM Observation & Mark Registry
 
-- **Root cause**: `plan_node` needs explicit section selection and observability without changing graph state semantics or safety fields.
-- **Modify candidates**: `phone_agent/graph/context.py`, `phone_agent/graph/state.py`, `phone_agent/graph/nodes/plan.py`, `phone_agent/graph/nodes/execute.py`, `phone_agent/graph/nodes/reflect.py`, `phone_agent/model/client.py`, `tests/graph`, `tests/evals`.
-- **Plan**:
-  - Keep runtime `context_mode=off|observe|inject`; default `observe` unchanged; no Phase 14 `auto` mode.
-  - Selector may produce sanitized context summaries, section IDs, and metrics; only `inject` may add the redacted context block to model request construction.
-  - Context selector/compaction may affect only model request construction plus sanitized summaries/metrics/trace.
-  - Hard invariant: selector/compaction must not mutate `action_parsed`, `action_raw`, `pending_execute`, `interrupt_result`, `action_confirmed`, safety route state, or any Action IR/HITL fields outside existing Plan/Execute/Reflect outputs.
-- **Acceptance**:
-  - off/observe/inject behavior is deterministic and tested.
-  - Sensitive payment/privacy/login/OTP actions still require confirm/takeover exactly as before.
-  - Reducer behavior is preserved: `plan_node` appends new messages; `execute_node` may rebuild as currently designed.
-  - Implemented with `ContextSelectionResult`, `select_plan_context()`, section IDs, and hard invariant tests.
+- **目标/根因**: 构建 UIAutomator/OCR/SoM 标注与 `mark_id -> bbox/center` 注册表；根因是模型直接看截图无法稳定引用 GUI 元素，且坐标缺少 screen binding。
+- **数据模型**: `Observation`, `ScreenSnapshot`, `Mark`, `MarkRegistry`。
+- **修改文件候选**: `phone_agent/device_factory.py`, `phone_agent/graph/observation.py`（新候选）, `phone_agent/graph/marks.py`（新候选）, `phone_agent/graph/state.py`, `phone_agent/graph/nodes/plan.py`, `phone_agent/graph/context.py`, `phone_agent/model/client.py`, `tests/graph/*`, `tests/adb/*`。
+- **执行步骤**:
+  1. 在 observation 中生成 `screen_id`、截图 hash、UI tree/OCR/SoM 候选元素与轻量 mark overlay 元数据。
+  2. 建立 Mark Registry：每个 `mark_id` 绑定 `screen_id`、bbox、center、source、confidence、可显示文本摘要。
+  3. 给 plan 请求注入脱敏 mark 列表/overlay 描述，避免注入隐私 raw text；15B-lite 可先用 mock/fixture mark schema。
+  4. provider fallback：无 UIAutomator/OCR/SoM 时只生成 screenshot hash / `screen_id`；mark action 不可用或要求 reobserve，不能绕过安全。
+- **验收标准**:
+  - 同一屏幕内 mark 可稳定解析到 bbox/center；跨 `screen_id` 使用 mark 必须 fail-closed。
+  - trace 只记录 mark id、bbox、source、confidence 和脱敏摘要，不持久化隐私 raw text。
+  - SoM/OCR/UIAutomator provider 缺失时系统可回退到现有截图路径，但 mark action 不可执行或必须 reobserve。
+  - golden trace contract 覆盖 stale mark fail-closed、no raw OCR/UI text in trace/context。
 
-### Phase 14C: Request-only Context Window Compaction ✅
+### Phase 15C Mark-based Action IR & Grounding
 
-- **Root cause**: Historical images, verbose reasoning text, and repeated action context can inflate model requests and distract from the current screenshot.
-- **Modify candidates**: `phone_agent/model/client.py` (`MessageBuilder` lives here unless extraction is explicitly justified), `phone_agent/graph/context.py`, `phone_agent/graph/nodes/plan.py`, `phone_agent/graph/nodes/execute.py`, `phone_agent/graph/state.py`, `tests/model`, `tests/graph`.
-- **Plan**:
-  - Implement request-only compaction first: compact the `full_messages` passed to `model_client.request` without mutating `state["messages"]`.
-  - Preserve the system contract, current screenshot in the latest user request, and historical image stripping via `MessageBuilder.remove_images_from_message()`.
-  - Preserve action line auditability and safety/HITL hard rules.
-  - Record counts and approximate sizes only; do not trace raw prompt text, private text, or image payloads.
-- **Acceptance**:
-  - Tests prove no historical images reach the model request while the latest screenshot remains available.
-  - `messages_reducer` append/replace semantics remain unchanged.
-  - Compaction metrics include `messages_before`, `messages_after`, approximate chars/tokens, `context_block_chars`, and `context_truncated`.
-  - Implemented with `compact_messages_for_request()` before `model_client.request()` without mutating `state["messages"]`.
+- **目标/根因**: 让模型输出 `mark_id`/target intent，由 Harness 转 canonical action；根因是模型输出绝对像素或具体包名会破坏安全边界和可验证性。
+- **修改文件候选**: `phone_agent/actions/ir.py`, `phone_agent/actions/adapter.py`, `phone_agent/actions/grounding.py`（新候选）, `phone_agent/actions/validator.py`, `phone_agent/actions/repair.py`, `phone_agent/actions/safety.py`, `phone_agent/graph/nodes/execute.py`, `phone_agent/graph/state.py`, `phone_agent/config/apps.py`, `tests/actions/*`, `tests/graph/test_execute.py`。
+- **执行步骤**:
+  1. 定义 IntentIR 字段 `target_mark_id`、`target_role`、`target_text_hint`、`target_intent`，禁止模型输出绝对像素。
+  2. Grounding 层根据当前 Mark Registry 将 mark/intent 编译为 canonical ActionIR 的 0-1000 相对坐标或结构化 UI selector。
+  3. 15C-lite 先支持 known mark -> Tap；再扩展长按、输入、滚动和 selector。
+  4. canonical `validate_action()` 只校验 canonical ActionIR；mark/intent 字段不得泄漏进 Executor。
+- **验收标准**:
+  - stale mark、未知 mark、跨屏 mark、绝对像素输入均 fail-closed 或要求重新 observe。
+  - 所有执行符合 Provider output -> Adapter -> IntentIR -> IntentValidator -> Grounder -> canonical ActionIR -> validate_action() -> limited Repair -> validate_action() -> Safety Gate -> HITL/Executor。
+  - 结构化 mark action 与旧 canonical ActionIR 兼容，旧回归测试不被破坏。
+  - rule guardrail 不能直接生成 ActionIR 或 dispatch，只能拒绝/提示/reobserve。
 
-### Phase 14D: Trace and Eval Harness Acceptance ✅
+### Phase 15D GUI Short-term Memory
 
-- **Root cause**: Existing trace/eval outputs need concrete, privacy-safe identifiers/counts to compare context strategies without leaking prompts, private text, or screenshots.
-- **Modify candidates**: `phone_agent/agent.py`, `evals/run_eval.py`, `phone_agent/graph/context.py`, `phone_agent/graph/nodes/plan.py`, `phone_agent/graph/trace.py`, `tests/graph/test_trace.py`, `tests/evals/test_eval_harness.py`, `tests/evals/test_trace_export.py`.
-- **Plan**:
-  - Add sanitized identifiers/counts only: `prompt_version`, `context_strategy`, `selected_sections` IDs, `messages_before`, `messages_after`, approximate chars/tokens, `context_block_chars`, `context_truncated`.
-  - Thread summary fields through `agent.py` run results and `evals/run_eval.py` output where appropriate.
-  - Ensure trace redaction applies before persistence/export.
-- **Acceptance**:
-  - Trace/eval tests verify the new fields exist for off/observe/inject runs.
-  - Redaction/privacy tests prove raw prompts, private text, and image payloads are not persisted.
-  - Eval summaries can compare strategies without exposing raw context.
-  - Implemented in `RunResult`, JSONL trace payloads, and `evals/run_eval.py` summary/records.
+- **目标/根因**: 增加 GUI 化短期记忆：`visited_screens`、`tried_actions`、`scroll_memory`、`task_progress`；根因是当前记忆不够 GUI 化，容易重复点击、重复滚动或忽略已验证进度。
+- **schema 边界**: GUI memory 是现有 `context.py` harness 的子模块，不是并行系统；section IDs 为 `gui_memory.visited_screens`, `gui_memory.tried_actions`, `gui_memory.scroll_memory`, `gui_memory.task_progress`。
+- **修改文件候选**: `phone_agent/graph/context.py`, `phone_agent/graph/state.py`, `phone_agent/graph/nodes/plan.py`, `phone_agent/graph/nodes/execute.py`, `phone_agent/graph/nodes/reflect.py`, `phone_agent/agent.py`, `tests/graph/*`, `tests/evals/*`。
+- **执行步骤**:
+  1. 在 Reflect/Execute 后维护屏幕访问、动作尝试、滚动方向/边界、任务阶段进展的脱敏结构化摘要。
+  2. 设置 bounded budget：仅保留有限条目、计数、hash/mark id/结果摘要；不注入 raw text。
+  3. 默认向 Plan 轻量注入高价值 memory section IDs，支持 `off|observe|inject` 或等价灰度开关。
+  4. 为重复动作、循环滚动和退路策略提供 rule guardrail，但不让 rule 接管主语义理解。
+- **验收标准**:
+  - memory 不包含隐私 raw text，不改变 ActionIR/HITL/safety route，不直接改写 ActionIR。
+  - Plan 可读取最近屏幕/动作/进度摘要，重复点击与无效滚动在测试场景中可被抑制或提示。
+  - trace/eval 可统计 visited screen、tried action、loop break 等指标。
+  - golden trace/context 证明 section ID 有界、无 raw OCR/UI text、无安全路由改写。
 
-### Phase 14E: Rollback, Cleanup, and Regression Matrix ✅
+### Phase 15E Gesture Compiler & Execution Backend
 
-- **Root cause**: Prompt/context changes are high-impact; cleanup must be staged so legacy behavior remains available until tests validate parity.
-- **Modify candidates**: `phone_agent/config/prompts_zh.py`, `phone_agent/config/prompts_en.py`, `phone_agent/config/prompts.py`, `phone_agent/config/__init__.py`, `phone_agent/model/client.py`, `phone_agent/graph/context.py`, `phone_agent/graph/nodes/plan.py`, `phone_agent/graph/trace.py`, `tests/model`, `tests/actions`, `tests/graph`, `tests/evals`.
-- **Plan**:
-  - Keep default `context_mode=observe`; `inject` remains opt-in.
-  - Preserve legacy prompt behavior behind `prompt_version`, compat flag, or equivalent until regression tests pass.
-  - Cleanup only after classifying `prompts.py`; no deletion based on path assumptions.
-- **Acceptance**:
-  - Regression matrix covers: prompt rendering across output modes; context mode off/observe/inject; no historical images in model request; reducer behavior; trace redaction; sensitive actions still confirm/takeover; eval summary fields.
-  - Run `.venv/bin/pytest tests/model tests/actions tests/graph tests/evals -v` during implementation and report actual results only.
-  - RALPH/Critic result: APPROVE; targeted post-review regression after privacy/rollback fixes: `.venv/bin/pytest tests/model/test_client.py tests/graph/test_plan_reflect.py tests/graph/test_trace.py tests/graph/test_agent_run_result.py -q` → 64 passed.
+- **目标/根因**: 建立 `ActionIR -> GestureIR -> ADB/minitouch/uiautomator backend`，并提供更人类式 tap/swipe/type verify；根因是当前 ADB 手势偏机械，缺少统一编译与后置校验。
+- **坐标所有权**: 初期 `GestureIR` 保持 0-1000 relative coords；现有 tools/backend 继续作为唯一 relative -> absolute 转换点，防止 double conversion。
+- **修改文件候选**: `phone_agent/actions/ir.py`, `phone_agent/actions/gesture.py`（新候选）, `phone_agent/actions/validator.py`, `phone_agent/graph/nodes/execute.py`, `phone_agent/adb/*`, `phone_agent/graph/tools/*`, `tests/actions/*`, `tests/adb/*`, `tests/graph/test_tools.py`。
+- **执行步骤**:
+  1. 定义 GestureIR：tap、long_press、swipe、type、key、wait、launch 等后端无关手势。
+  2. 编译器将 canonical ActionIR/grounded target 转为 relative GestureIR，处理抖动、人类式 duration、输入清理与重试策略，但不做 absolute 像素转换。
+  3. 后端适配 ADB，预留 minitouch/uiautomator；现有 tools/backend 负责唯一 relative->absolute 转换；执行后进行轻量 observe/verify。
+- **验收标准**:
+  - 模型无法直接选择 backend 或注入设备命令；Executor 只接收 validated + safety-approved IR/GestureIR。
+  - tap/swipe/type 的 relative 坐标、duration 边界、文本脱敏和失败回传均有测试。
+  - golden trace/单测证明没有 double coordinate conversion；absolute 像素只在现有 tools/backend 出现一次。
+  - 现有 `phone_agent/adb/*` 路径兼容，新增 backend 可选灰度。
+
+### Phase 15F Deterministic Verification & Eval
+
+- **目标/根因**: 引入 app/activity/hash/text/screenshot diff verifier 与 AndroidWorld 风格 reward/eval；根因是当前 Reflect 验证依赖模型，trace/eval 难以客观判断动作成败。
+- **数据模型与 precedence**: `VerifierResult(status=success|failure|unknown, confidence, signals, hard_failure, failure_cause, evidence)`；state 字段 `verifier_result`, `verifier_status`, `verifier_failure_cause`。优先级：hard failure > model reflection；unknown 才完全依赖模型；hard success 可跳过或降低模型反思优先级。
+- **修改文件候选**: `phone_agent/graph/verifier.py`（新候选）, `phone_agent/graph/nodes/reflect.py`, `phone_agent/graph/context.py`, `phone_agent/graph/state.py`, `phone_agent/agent.py`, `phone_agent/adb/*`, `evals/run_eval.py`, `tests/graph/*`, `tests/evals/*`, 必要时 `phone_agent/graph/builder.py`, `phone_agent/graph/edges.py`。
+- **执行步骤**:
+  1. 在每步执行后采集 package/activity、screen hash、UI text 摘要、截图 diff、可选 target mark 状态。
+  2. Reflect 先消费 deterministic verifier 结果，再决定是否需要模型反思；模型反思不得覆盖硬 verifier 失败。
+  3. Eval 输出 step reward、task success、loop/retry 指标、grounding failure 分类与 trace 链接。
+- **验收标准**:
+  - verifier 可在不调用模型时判断 launch、tap navigation、text entry、scroll progress 等基础结果。
+  - AndroidWorld 风格 eval summary 可比较结构化输出、SoM、memory、gesture backend 的效果。
+  - `.venv/bin/pytest tests/graph tests/evals -v` 覆盖 verifier 成功/失败/不确定分支。
+  - verifier trace contract 记录 status、confidence、signals、hard_failure、failure_cause、evidence 摘要；无 raw UI/OCR 隐私文本。
 
 # 约束 Checklist
 
-- [x] Planner phase only: do not edit code/tests/docs, commit, push, or execute implementation before Critic APPROVE and user approval.
-- [x] Use only actual repository paths; do not reference `phone_agent/model/prompts.py`, `phone_agent/context/*`, `phone_agent/evals/*`, or `phone_agent/config.py` unless framed as a justified new extraction.
-- [x] Preserve LangGraph `StateGraph`; do not migrate to LangChain Agent.
-- [x] Runtime `context_mode` scope is `off|observe|inject`; `auto` is deferred to a later follow-up/spike.
-- [x] Default `context_mode=observe` remains unchanged; injection is opt-in and rollback-safe.
-- [x] Context selector/compaction may only affect model request construction, sanitized summaries/metrics/trace, and must not mutate Action IR/HITL/safety route fields.
-- [x] Request-only compaction must not mutate `state["messages"]` or break `messages_reducer` append/replace semantics.
-- [x] Preserve system contract, latest screenshot in current user request, historical image stripping, action line auditability, and safety/HITL hard rules.
-- [x] Provider tool specs are formatting-only; execution stays Adapter → Validator → Safety Gate → Executor.
-- [x] Trace/eval fields must be identifiers/counts only; no raw prompt/private text/images.
-- [x] Tests must cover prompt rendering, context modes, no historical images, reducer behavior, trace redaction, sensitive HITL, and eval summary fields.
+- [ ] 当前仅规划；不得修改代码、测试、README、docs、提交或推送；唯一计划产物是 `.trae/rules/graph.mdc`。
+- [ ] 不迁移 LangGraph `StateGraph`，继续使用现有 `Plan -> Execute -> Reflect` 主路径。
+- [ ] 模型不直接授权执行；执行必须经过 Provider output -> Adapter -> IntentIR -> IntentValidator -> Grounder -> canonical ActionIR -> validate_action() -> limited Repair -> validate_action() -> Safety Gate -> HITL/Executor。
+- [ ] `target_mark_id` 等 IntentIR 字段不得进入 canonical `validate_action()`；Executor 只接收 canonical executable ActionIR。
+- [ ] SoM mark 必须绑定 `screen_id`，stale/cross-screen mark 必须 fail-closed 或重新 observe。
+- [ ] Provider fallback 无 UIAutomator/OCR/SoM 时只生成 screenshot hash / `screen_id`；mark action 不可用或要求 reobserve，不能绕过安全。
+- [ ] Mark/grounding 在 Harness 内完成，模型不能输出绝对像素或直接设备坐标。
+- [ ] 初期 GestureIR 保持 0-1000 relative coords；现有 tools/backend 是唯一 relative->absolute 转换点，必须防 double conversion。
+- [ ] 短期记忆是 `context.py` harness 子模块；不得绕过 HITL，不注入隐私 raw text，不直接改写 ActionIR/safety route。
+- [ ] Rule 只做 guardrail、validation、recovery，不做主语义理解、直接生成 ActionIR 或最终执行授权/dispatch。
+- [ ] Verifier precedence 固定：hard failure > model reflection；unknown 才完全依赖模型；hard success 可跳过或降低模型反思优先级。
+- [ ] 默认行为可回滚；新增结构化输出、SoM、memory、backend、verifier 均先可选/灰度。
+- [ ] Launch app 仍以 `phone_agent/config/apps.py` registry 为准，未知 app/package fail-closed。
+- [ ] schema/golden trace 必须覆盖 stale mark fail-closed、no raw OCR/UI text in trace/context、no double coordinate conversion、parse retry only fixes format、verifier trace contract、rule guardrail cannot generate ActionIR/dispatch。
+- [ ] trace/eval 只记录脱敏摘要、标识符、计数、hash、bbox/mark metadata，不持久化敏感截图/API key/隐私 raw text。
+- [ ] 测试命令使用项目虚拟环境 `.venv/bin/pytest`。

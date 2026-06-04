@@ -687,7 +687,7 @@ Examples:
         "--output-mode",
         type=str,
         choices=["text_dsl", "json_schema", "tool_calls", "auto"],
-        default=os.getenv("PHONE_AGENT_OUTPUT_MODE", "text_dsl"),
+        default=os.getenv("PHONE_AGENT_OUTPUT_MODE", "json_schema"),
         help="Model output mode: text_dsl, json_schema, tool_calls, or auto",
     )
 

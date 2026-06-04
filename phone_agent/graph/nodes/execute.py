@@ -6,12 +6,14 @@ from typing import TYPE_CHECKING
 from langchain_core.runnables import RunnableConfig
 
 from phone_agent.actions.handler import ActionResult, finish
+from phone_agent.actions.gesture import compile_action_to_gesture
 from phone_agent.actions.safety import decide_safety
 from phone_agent.actions.validator import ActionValidationError, validate_action
 from phone_agent.graph.context import (
     build_action_outcome_summary,
     context_enabled,
     get_context_mode,
+    sanitize_context_payload,
 )
 from phone_agent.graph.tools import dispatch_tool
 from phone_agent.graph.trace import emit_trace
@@ -311,6 +313,18 @@ def execute_node(state: "AgentState", config: RunnableConfig) -> dict:
         }
 
     # 4. Execute action via tool dispatch
+    gesture_trace = None
+    try:
+        gesture_trace = compile_action_to_gesture(action_parsed).to_dict()
+    except Exception:
+        gesture_trace = None
+    emit_trace(
+        config,
+        state,
+        "execute",
+        "gesture_compiled",
+        {"gesture": sanitize_context_payload(gesture_trace), "coordinate_space": "relative_0_1000"},
+    )
     try:
         result = dispatch_tool(
             action_parsed,

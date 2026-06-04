@@ -140,8 +140,8 @@ TEXT_DSL_OUTPUT_CONTRACT = """# 输出格式：text_dsl
 JSON_OUTPUT_CONTRACT = """# 输出格式：JSON schema
 只返回一个 JSON 对象，不要 Markdown、代码块、XML 或思考/答案标签。
 示例：
-- {"type":"do","action":"tap","x":500,"y":500}
-- {"type":"do","action":"tap","x":500,"y":500,"message":"敏感操作说明"}
+- {"type":"intent","action":"tap","target_mark_id":"m1"}
+- {"type":"intent","action":"tap","target_mark_id":"m2","target_intent":"confirm payment"}
 - {"type":"do","action":"swipe","start":[500,800],"end":[500,200]}
 - {"type":"do","action":"type","text":"你好"}
 - {"type":"do","action":"launch","app":"Settings"}
@@ -149,8 +149,8 @@ JSON_OUTPUT_CONTRACT = """# 输出格式：JSON schema
 - {"type":"do","action":"back"}
 - {"type":"do","action":"home"}
 - {"type":"do","action":"take_over","message":"需要登录或验证码"}
-- {"type":"do","action":"double_tap","x":500,"y":500}
-- {"type":"do","action":"long_press","x":500,"y":500}
+- {"type":"intent","action":"double_tap","target_mark_id":"m3"}
+- {"type":"intent","action":"long_press","target_mark_id":"m4"}
 - {"type":"do","action":"call_api","message":"总结当前页面"}
 - {"type":"finish","message":"任务已完成"}
 """

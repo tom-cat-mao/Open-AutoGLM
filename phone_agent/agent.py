@@ -13,6 +13,7 @@ from phone_agent.graph.context import (
     DEFAULT_CONTEXT_MODE,
     build_context_metrics,
     default_context_budget,
+    default_gui_memory,
     default_screen_belief,
     normalize_context_mode,
     should_inject_context,
@@ -82,6 +83,8 @@ class RunResult:
     approx_tokens_after: int = 0
     failure_memory_hit_count: int = 0
     repeated_failure_count: int = 0
+    verifier_status: str | None = None
+    verifier_failure_cause: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize the result to a JSON-friendly dictionary."""
@@ -201,9 +204,15 @@ class PhoneAgent:
             "screen_height": screenshot.height,
             "screenshot_b64": None,
             "current_app": "",
+            "screen_id": None,
+            "screen_hash": None,
+            "observation": None,
+            "mark_registry": None,
             "thinking": "",
             "action_raw": "",
             "action_parsed": None,
+            "intent_raw": None,
+            "grounding_error": None,
             "action_result": None,
             "reflection": None,
             "action_succeeded": True,
@@ -230,6 +239,10 @@ class PhoneAgent:
             "approx_tokens_after": 0,
             "failure_memory_hit_count": 0,
             "repeated_failure_count": 0,
+            "gui_memory": default_gui_memory(),
+            "verifier_result": None,
+            "verifier_status": None,
+            "verifier_failure_cause": None,
             "pending_interrupt": None,
             "interrupt_message": None,
             "interrupt_result": None,
@@ -305,6 +318,8 @@ class PhoneAgent:
             trace_path=trace_path,
             failure_cause=state.get("failure_cause"),
             retry_count=int(state.get("retry_count") or 0),
+            verifier_status=state.get("verifier_status"),
+            verifier_failure_cause=state.get("verifier_failure_cause"),
             **context_metrics,
         )
 

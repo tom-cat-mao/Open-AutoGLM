@@ -31,6 +31,19 @@ class FinishActionDict(TypedDict):
 ActionDict = Union[DoActionDict, FinishActionDict]
 
 
+class IntentDict(TypedDict, total=False):
+    _metadata: Literal["intent"]
+    action: str
+    target_mark_id: str
+    target_role: str
+    target_text_hint: str
+    target_intent: str
+    text: str
+    message: str
+    app: str
+    duration: str
+
+
 @dataclass(frozen=True)
 class ActionIR:
     """Typed representation of the canonical action dict."""
@@ -64,3 +77,29 @@ def to_action_dict(action: dict[str, Any] | ActionIR) -> dict[str, Any]:
     if isinstance(action, ActionIR):
         return action.to_dict()
     return dict(action)
+
+
+@dataclass(frozen=True)
+class IntentIR:
+    """Provider intent IR that must be grounded before canonical validation.
+
+    IntentIR may reference screen marks and semantic hints. It is intentionally
+    not accepted by ``validate_action()`` or the executor boundary.
+    """
+
+    fields: dict[str, Any] = field(default_factory=dict)
+
+    @classmethod
+    def from_dict(cls, intent: dict[str, Any]) -> "IntentIR":
+        if intent.get("_metadata") != "intent":
+            raise ValueError("IntentIR metadata must be intent")
+        return cls(fields={key: value for key, value in intent.items() if key != "_metadata"})
+
+    def to_dict(self) -> IntentDict:
+        return {"_metadata": "intent", **self.fields}
+
+
+def is_intent_dict(value: Any) -> bool:
+    """Return whether a plain value is an IntentIR-compatible dict."""
+
+    return isinstance(value, dict) and value.get("_metadata") == "intent"

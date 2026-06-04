@@ -142,8 +142,8 @@ Example:
 JSON_OUTPUT_CONTRACT = """# Output format: JSON schema
 Return exactly one JSON object. Do not output Markdown, code fences, XML, or thinking/answer tags.
 Examples:
-- {"type":"do","action":"tap","x":500,"y":500}
-- {"type":"do","action":"tap","x":500,"y":500,"message":"sensitive operation"}
+- {"type":"intent","action":"tap","target_mark_id":"m1"}
+- {"type":"intent","action":"tap","target_mark_id":"m2","target_intent":"confirm payment"}
 - {"type":"do","action":"swipe","start":[500,800],"end":[500,200]}
 - {"type":"do","action":"type","text":"hello"}
 - {"type":"do","action":"launch","app":"Settings"}
@@ -151,8 +151,8 @@ Examples:
 - {"type":"do","action":"back"}
 - {"type":"do","action":"home"}
 - {"type":"do","action":"take_over","message":"login or OTP required"}
-- {"type":"do","action":"double_tap","x":500,"y":500}
-- {"type":"do","action":"long_press","x":500,"y":500}
+- {"type":"intent","action":"double_tap","target_mark_id":"m3"}
+- {"type":"intent","action":"long_press","target_mark_id":"m4"}
 - {"type":"do","action":"call_api","message":"summarize current page"}
 - {"type":"finish","message":"Task completed"}
 """

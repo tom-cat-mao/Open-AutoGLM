@@ -60,6 +60,19 @@ DANGEROUS_PROVIDER_FIELDS = {
     "token",
 }
 COMMON_DO_FIELDS = {"type", "_metadata", "action", "message"}
+INTENT_FIELDS = {
+    "type",
+    "_metadata",
+    "action",
+    "target_mark_id",
+    "target_role",
+    "target_text_hint",
+    "target_intent",
+    "text",
+    "message",
+    "app",
+    "duration",
+}
 ALLOWED_PROVIDER_FIELDS_BY_ACTION: dict[str, set[str]] = {
     "Tap": COMMON_DO_FIELDS | {"element", "x", "y"},
     "Double Tap": COMMON_DO_FIELDS | {"element", "x", "y"},
@@ -83,6 +96,22 @@ def adapt_json_action(payload: str | dict[str, Any]) -> dict[str, Any]:
     data = _coerce_json_object(payload)
     _reject_dangerous_provider_fields(data)
     action_type = data.get("type") or data.get("_metadata")
+    if action_type == "intent" or "target_mark_id" in data:
+        _reject_unexpected_provider_fields(data, INTENT_FIELDS)
+        intent: dict[str, Any] = {"_metadata": "intent"}
+        for key in INTENT_FIELDS - {"type", "_metadata"}:
+            if key in data:
+                value = data[key]
+                if key in {"action", "target_mark_id", "target_role", "target_text_hint", "target_intent", "text", "message", "app", "duration"} and not isinstance(value, str):
+                    raise ActionAdapterError("unsafe_value", f"{key} must be a string")
+                intent[key] = value
+        if "target_mark_id" not in intent:
+            raise ActionAdapterError("missing_field", "intent requires target_mark_id")
+        if "action" not in intent and "target_intent" not in intent:
+            raise ActionAdapterError("missing_field", "intent requires action or target_intent")
+        if "action" in intent:
+            intent["action"] = _canonical_action_name(intent["action"])
+        return intent
     if action_type == "finish":
         _reject_unexpected_provider_fields(data, {"type", "_metadata", "message"})
         message = data.get("message")

@@ -50,11 +50,17 @@ class AgentState(TypedDict):
     screen_height: int  # 设备屏幕高度（像素）
     screenshot_b64: Optional[str]  # 当前截图 base64
     current_app: str  # 当前前台 app 名
+    screen_id: Optional[str]  # 当前屏幕快照 ID
+    screen_hash: Optional[str]  # 当前屏幕 hash 摘要
+    observation: Optional[dict]  # 当前 observation 脱敏元数据
+    mark_registry: Optional[dict]  # 当前 screen_id 绑定的 Mark Registry
 
     # === Plan 节点输出 ===
     thinking: str  # 模型思考过程
     action_raw: str  # 模型原始 action 文本
     action_parsed: Optional[dict]  # parse_action() 解析结果
+    intent_raw: Optional[dict]  # grounding 前的 IntentIR，仅供 trace/debug，不能进入 executor
+    grounding_error: Optional[str]  # IntentIR grounding 失败原因
 
     # === Execute 节点输出 ===
     action_result: Optional[dict]  # ActionResult 序列化为 dict
@@ -87,6 +93,12 @@ class AgentState(TypedDict):
     approx_tokens_after: int  # rough char/4 token estimate after compaction
     failure_memory_hit_count: int  # failure memory 命中次数
     repeated_failure_count: int  # 重复失败计数
+    gui_memory: dict  # GUI 短期记忆：visited_screens/tried_actions/scroll_memory/task_progress
+
+    # === Deterministic verifier ===
+    verifier_result: Optional[dict]
+    verifier_status: Optional[str]
+    verifier_failure_cause: Optional[str]
 
     # === Human-in-the-Loop (Phase 2) ===
     pending_interrupt: Optional[str]  # 待处理的中断类型: "confirmation" / "takeover"

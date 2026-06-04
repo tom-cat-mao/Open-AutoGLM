@@ -43,7 +43,7 @@ class ModelConfig:
     thinking_mode: Literal["auto", "on", "off"] = "auto"
     thinking_param: Literal["enable_thinking", "chat_template_kwargs"] = "enable_thinking"
     lang: str = "cn"  # Language for UI messages: 'cn' or 'en'
-    output_mode: OutputMode = "text_dsl"
+    output_mode: OutputMode = "json_schema"
     stream_stdout: bool = False
 
     def __post_init__(self) -> None:
@@ -509,13 +509,6 @@ class ModelClient:
                                     "Interact", "Take_over",
                                 ],
                             },
-                            "x": {"type": "number"},
-                            "y": {"type": "number"},
-                            "element": {
-                                "type": "array",
-                                "items": {"type": "number"},
-                                "description": "[x, y] in 0-1000 relative coordinates",
-                            },
                             "start": {
                                 "type": "array",
                                 "items": {"type": "number"},
@@ -536,6 +529,13 @@ class ModelClient:
                                 "type": "string",
                                 "description": "Format: 'N seconds', max 60 seconds",
                             },
+                            "target_mark_id": {
+                                "type": "string",
+                                "description": "Required for tap-like screen targeting in structured modes; harness grounds it before execution",
+                            },
+                            "target_role": {"type": "string"},
+                            "target_text_hint": {"type": "string"},
+                            "target_intent": {"type": "string"},
                         },
                         "required": ["type", "action"],
                     },

@@ -1,7 +1,6 @@
 """Reflect node: screenshot → structured action outcome reflection."""
 
 import ast
-import traceback
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -15,10 +14,13 @@ from phone_agent.graph.context import (
     detect_repeated_failure,
     get_context_mode,
     normalize_failure_cause,
+    sanitize_context_payload,
+    update_gui_memory,
     update_failure_memory,
     update_summarized_history,
 )
 from phone_agent.graph.trace import emit_trace
+from phone_agent.graph.verifier import merge_verifier_with_reflection, verify_action_outcome
 from phone_agent.model.client import MessageBuilder
 
 if TYPE_CHECKING:
@@ -159,12 +161,23 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
     # 1. Capture screen again
     screenshot = device_factory.get_screenshot(device_id)
     current_app = device_factory.get_current_app(device_id)
+    verifier_result = verify_action_outcome(
+        before_state=state,
+        after_screenshot=screenshot,
+        after_app=current_app,
+        action_result=action_result,
+    )
     emit_trace(
         config,
         state,
         "reflect",
         "reflect_start",
-        {"current_app": current_app, "action": action_parsed, "action_result": action_result},
+        {
+            "current_app": current_app,
+            "action": action_parsed,
+            "action_result": action_result,
+            "verifier_result": verifier_result.to_dict(),
+        },
     )
 
     # 2. Build reflection prompt with language selection
@@ -173,8 +186,8 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
     else:
         system_prompt = REFLECT_SYSTEM_PROMPT_CN
 
-    action_str = str(action_parsed) if action_parsed else "None"
-    result_str = str(action_result) if action_result else "None"
+    action_str = str(sanitize_context_payload(action_parsed)) if action_parsed else "None"
+    result_str = str(sanitize_context_payload(action_result)) if action_result else "None"
 
     screen_info = MessageBuilder.build_screen_info(current_app)
     if lang == "en":
@@ -216,17 +229,35 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
                 raise
             response = model_client.request(reflect_messages)
     except Exception as e:
+        error_message = f"Reflection failed: {type(e).__name__}"
         if verbose:
-            traceback.print_exc()
-        emit_trace(config, state, "reflect", "reflect_error", {"message": str(e)})
+            print(error_message)
+        if verifier_result.hard_failure:
+            fallback_succeeded = False
+            fallback_verdict = "failed"
+            fallback_failure_cause = verifier_result.failure_cause or "unknown"
+        elif verifier_result.status == "success" and verifier_result.confidence >= 0.9:
+            fallback_succeeded = True
+            fallback_verdict = "succeeded"
+            fallback_failure_cause = None
+        else:
+            fallback_succeeded = False
+            fallback_verdict = "failed"
+            fallback_failure_cause = "model_reflection_failed"
+        emit_trace(config, state, "reflect", "reflect_error", {"message": error_message})
         return {
             "screenshot_b64": screenshot.base64_data,
             "current_app": current_app,
-            "reflection": f"Reflection failed: {e}",
-            "action_succeeded": True,  # Assume succeeded on error to avoid deadlock
-            "reflection_verdict": "succeeded",
-            "failure_cause": None,
+            "verifier_result": verifier_result.to_dict(),
+            "verifier_status": verifier_result.status,
+            "verifier_failure_cause": verifier_result.failure_cause,
+            "reflection": error_message,
+            "action_succeeded": fallback_succeeded,
+            "reflection_verdict": fallback_verdict,
+            "failure_cause": fallback_failure_cause,
             "suggested_strategy": "continue",
+            "retry_count": int(state.get("retry_count") or 0) + (0 if fallback_succeeded else 1),
+            "finished": False,
             "context_mode": context_mode,
         }
 
@@ -252,9 +283,22 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
     reflection = response.thinking.strip()
     if not reflection:
         reflection = parsed_reflection.message
+    reflection_fields = merge_verifier_with_reflection(
+        verifier_result,
+        {
+            "action_succeeded": action_succeeded,
+            "reflection_verdict": parsed_reflection.verdict,
+            "failure_cause": parsed_reflection.failure_cause,
+        },
+    )
+    action_succeeded = bool(reflection_fields["action_succeeded"])
+    final_verdict = reflection_fields["reflection_verdict"]
+    final_failure_cause = reflection_fields.get("failure_cause")
     retry_count = int(state.get("retry_count") or 0)
-    if parsed_reflection.verdict in {"failed", "partial"}:
+    if final_verdict in {"failed", "partial"}:
         retry_count += 1
+    if verifier_result.hard_failure or final_verdict != "succeeded":
+        task_finished = False
 
     context_updates = {"context_mode": context_mode}
     if context_enabled(context_mode):
@@ -281,8 +325,8 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
         outcome_state = {
             **state,
             "current_app": current_app,
-            "reflection_verdict": parsed_reflection.verdict,
-            "failure_cause": parsed_reflection.failure_cause,
+            "reflection_verdict": final_verdict,
+            "failure_cause": final_failure_cause,
             "suggested_strategy": parsed_reflection.suggested_strategy,
         }
         outcome = build_action_outcome_summary(outcome_state)
@@ -308,6 +352,11 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
             "repeated_failure_count": int(state.get("repeated_failure_count") or 0)
             + (1 if repeated else 0),
         }
+        context_updates["gui_memory"] = update_gui_memory(
+            {**state, **context_updates, "action_result": action_result},
+            current_app=current_app,
+            screen_id=state.get("screen_id"),
+        )
 
     emit_trace(
         config,
@@ -317,11 +366,14 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
         {
             "reflection": reflection,
             "action_raw": raw_action,
-            "reflection_verdict": parsed_reflection.verdict,
-            "failure_cause": parsed_reflection.failure_cause,
+            "reflection_verdict": final_verdict,
+            "failure_cause": final_failure_cause,
             "suggested_strategy": parsed_reflection.suggested_strategy,
             "action_succeeded": action_succeeded,
             "finished": task_finished,
+            "verifier_result": verifier_result.to_dict(),
+            "verifier_status": verifier_result.status,
+            "verifier_failure_cause": verifier_result.failure_cause,
             "context_mode": context_mode,
             "context_truncated": context_updates.get("context_truncated", False),
             "failure_memory_hit_count": context_updates.get("failure_memory_hit_count", 0),
@@ -334,9 +386,12 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
         "current_app": current_app,
         "reflection": reflection,
         "action_succeeded": action_succeeded,
-        "reflection_verdict": parsed_reflection.verdict,
-        "failure_cause": parsed_reflection.failure_cause,
+        "reflection_verdict": final_verdict,
+        "failure_cause": final_failure_cause,
         "suggested_strategy": parsed_reflection.suggested_strategy,
+        "verifier_result": verifier_result.to_dict(),
+        "verifier_status": verifier_result.status,
+        "verifier_failure_cause": verifier_result.failure_cause,
         "retry_count": retry_count,
         "finished": task_finished,
         **context_updates,
