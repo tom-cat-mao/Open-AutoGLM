@@ -24,8 +24,10 @@ class GroundingTarget:
         return {
             "has_text_hint": bool(self.text_hint),
             "text_hint_length": len(self.text_hint or ""),
-            "role": self.role,
-            "intent": self.intent,
+            "has_role": bool(self.role),
+            "role_length": len(self.role or ""),
+            "has_intent": bool(self.intent),
+            "intent_length": len(self.intent or ""),
             "action": self.action,
             "requires_grounding": self.requires_grounding,
         }
@@ -40,6 +42,25 @@ class ScreenBinding:
     width: int
     height: int
     current_app: str | None = None
+    semantic_screen_id: str | None = None
+    observation_epoch: int = 0
+    mark_set_version: str | None = None
+    perceptual_hash: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class GroundingCandidate:
+    """One provider bbox candidate in normalized 0-1000 coordinates."""
+
+    bbox: list[int]
+    center: list[int]
+    confidence: float | None = None
+    source: str | None = None
+    valid: bool = True
+    reason: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -60,6 +81,10 @@ class GroundingResult:
     raw_screenshot_hash: str | None = None
     provider_input_hash: str | None = None
     latency_ms: int | None = None
+    candidates: list[GroundingCandidate] = field(default_factory=list)
+    candidate_count: int = 0
+    grounding_status: str | None = None
+    selected_candidate_id: int | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -80,4 +105,3 @@ class GroundingProvider(Protocol):
         timeout: float | None = None,
     ) -> GroundingResult:
         """Locate target on screenshot and return a screen-bound result."""
-

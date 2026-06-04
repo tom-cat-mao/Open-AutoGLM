@@ -9,11 +9,10 @@ from typing import Any, Literal, cast
 from openai import OpenAI
 
 from phone_agent.actions.adapter import ActionAdapterError, adapt_json_action, adapt_tool_calls
-from phone_agent.actions.handler import parse_action
 from phone_agent.config.i18n import get_message
 
-OutputMode = Literal["text_dsl", "json_schema", "tool_calls", "auto"]
-VALID_OUTPUT_MODES = {"text_dsl", "json_schema", "tool_calls", "auto"}
+OutputMode = Literal["json_schema", "tool_calls", "auto"]
+VALID_OUTPUT_MODES = {"json_schema", "tool_calls", "auto"}
 
 
 class ModelParseError(ValueError):
@@ -50,7 +49,7 @@ class ModelConfig:
         """Validate runtime configuration values not enforced by type hints."""
         if self.output_mode not in VALID_OUTPUT_MODES:
             raise ValueError(
-                "output_mode must be one of: text_dsl, json_schema, tool_calls, auto"
+                "output_mode must be one of: json_schema, tool_calls, auto"
             )
         if self.timeout <= 0:
             raise ValueError("timeout must be a positive number")
@@ -122,7 +121,7 @@ class ModelClient:
         effective_output_mode = output_mode or self.config.output_mode
         if effective_output_mode not in VALID_OUTPUT_MODES:
             raise ValueError(
-                "output_mode must be one of: text_dsl, json_schema, tool_calls, auto"
+                "output_mode must be one of: json_schema, tool_calls, auto"
             )
 
         extra_body = self._build_extra_body()
@@ -229,7 +228,7 @@ class ModelClient:
         time_to_first_token = None
         time_to_thinking_end = None
         buffer = ""  # Buffer to hold content that might be part of a marker
-        action_markers = ["finish(message=", "do(action="]
+        action_markers = ['"type"', '"action"', '"message"']
         in_action_phase = False  # Track if we've entered the action phase
         first_token_received = False
         saw_reasoning_content = False
@@ -370,6 +369,15 @@ class ModelClient:
                     raise ActionAdapterError(
                         "invalid_json", "json_schema mode requires a JSON object response"
                     )
+                if not validate_action:
+                    metadata.update(
+                        {
+                            "detected_format": "json_schema",
+                            "adapter_used": "raw_json",
+                            "parse_success": True,
+                        }
+                    )
+                    return "", normalized, metadata
                 action = adapt_json_action(normalized)
                 metadata.update(
                     {
@@ -381,6 +389,15 @@ class ModelClient:
                 return "", json.dumps(action, ensure_ascii=False), metadata
 
             if effective_output_mode == "auto" and self._looks_like_json(normalized):
+                if not validate_action:
+                    metadata.update(
+                        {
+                            "detected_format": "json_schema",
+                            "adapter_used": "raw_json",
+                            "parse_success": True,
+                        }
+                    )
+                    return "", normalized, metadata
                 action = adapt_json_action(normalized)
                 metadata.update(
                     {
@@ -391,17 +408,10 @@ class ModelClient:
                 )
                 return "", json.dumps(action, ensure_ascii=False), metadata
 
-            thinking, action = self._parse_response(normalized)
-            if validate_action:
-                parse_action(action)
-            metadata.update(
-                {
-                    "detected_format": "text_dsl",
-                    "adapter_used": "text_dsl",
-                    "parse_success": True,
-                }
+            raise ActionAdapterError(
+                "invalid_json",
+                "structured output mode requires a JSON object or provider tool call",
             )
-            return thinking, action, metadata
         except ActionAdapterError as exc:
             metadata["parse_error_code"] = exc.code
             raise ModelParseError(f"{exc.code}: {exc}", metadata) from exc
@@ -417,7 +427,7 @@ class ModelClient:
         1. Strip outer Markdown code fences and surrounding whitespace.
         2. If content contains '<answer>', parse XML-style thinking/answer first.
            This prevents '</answer>' from leaking into do()/finish() actions.
-        3. Otherwise, split at the earliest text DSL marker, do(...) or finish(...).
+        3. Otherwise, return the normalized content for internal compatibility.
         4. Empty or malformed XML responses raise ValueError so callers can fail closed.
 
         Args:
@@ -434,17 +444,6 @@ class ModelClient:
             return self._parse_xml_answer(normalized)
         if "</answer>" in normalized:
             raise ValueError("Malformed XML answer: closing tag without opening tag")
-
-        marker_positions = [
-            (idx, marker)
-            for marker in ("finish(message=", "do(action=")
-            if (idx := normalized.find(marker)) >= 0
-        ]
-        if marker_positions:
-            idx, marker = min(marker_positions, key=lambda item: item[0])
-            thinking = self._strip_thinking_tags(normalized[:idx]).strip()
-            action = (marker + normalized[idx + len(marker) :]).strip()
-            return thinking, action
 
         return "", normalized
 

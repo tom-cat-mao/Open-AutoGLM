@@ -7,7 +7,13 @@ from typing import Any
 from phone_agent.actions.adapter import ActionAdapterError, _canonical_action_name
 from phone_agent.actions.ir import is_intent_dict
 from phone_agent.actions.validator import ActionValidationError, validate_action
-from phone_agent.graph.marks import MarkRegistry, SAFE_MARK_ID_RE
+from phone_agent.graph.marks import (
+    MARK_CONFIDENCE_THRESHOLD,
+    PERCEPTUAL_HASH_THRESHOLD,
+    SAFE_MARK_ID_RE,
+    MarkRegistry,
+    hash_hamming_distance,
+)
 from phone_agent.grounding.provider import GroundingProvider, GroundingResult, GroundingTarget, ScreenBinding
 
 
@@ -114,13 +120,14 @@ def ground_intent_to_action(
     if mark_id:
         if registry is None or not registry.marks:
             raise GroundingError("mark_unavailable", "no MarkRegistry available for mark intent")
-        if screen_id and registry.screen_id != screen_id:
-            raise GroundingError("stale_mark", "MarkRegistry screen_id does not match current screen")
+        _validate_mark_binding(registry, screen_id=screen_id, screen_binding=screen_binding, grounding_metadata=grounding_metadata)
         mark = registry.get(mark_id)
         if mark is None:
             raise GroundingError("unknown_mark", f"unknown mark: {mark_id}")
-        if screen_id and mark.screen_id != screen_id:
+        if screen_id and mark.screen_id != registry.screen_id:
             raise GroundingError("stale_mark", "mark belongs to another screen")
+        if mark.confidence < MARK_CONFIDENCE_THRESHOLD:
+            raise GroundingError("low_confidence", "mark confidence is below threshold")
         sensitivity = _mark_sensitivity(intent, mark)
         if sensitivity == "takeover":
             try:
@@ -175,6 +182,52 @@ def ground_intent_to_action(
 
 def _has_description_target(intent: dict[str, Any]) -> bool:
     return any(bool(intent.get(key)) for key in ("target_text_hint", "target_role", "target_intent"))
+
+
+def _validate_mark_binding(
+    registry: MarkRegistry,
+    *,
+    screen_id: str | None,
+    screen_binding: ScreenBinding | None,
+    grounding_metadata: dict[str, Any] | None,
+) -> None:
+    if screen_id and registry.screen_id == screen_id:
+        return
+    binding_summary: dict[str, Any] = {
+        "registry_screen_id": registry.screen_id,
+        "current_screen_id": screen_id,
+        "semantic_screen_id": registry.semantic_screen_id,
+        "mark_set_version": registry.mark_set_version,
+        "perceptual_hash": registry.perceptual_hash,
+    }
+    if screen_binding is None:
+        if grounding_metadata is not None:
+            grounding_metadata["binding"] = binding_summary
+        raise GroundingError("screen_binding_missing", "screen binding is required for stale mark validation")
+    semantic_match = bool(registry.semantic_screen_id and registry.semantic_screen_id == screen_binding.semantic_screen_id)
+    topology_match = bool(registry.mark_set_version and registry.mark_set_version == screen_binding.mark_set_version)
+    distance = hash_hamming_distance(registry.perceptual_hash, screen_binding.perceptual_hash)
+    hash_match = distance is not None and distance <= PERCEPTUAL_HASH_THRESHOLD
+    binding_summary.update(
+        {
+            "current_semantic_screen_id": screen_binding.semantic_screen_id,
+            "current_mark_set_version": screen_binding.mark_set_version,
+            "current_perceptual_hash": screen_binding.perceptual_hash,
+            "perceptual_distance": distance,
+            "perceptual_threshold": PERCEPTUAL_HASH_THRESHOLD,
+            "semantic_match": semantic_match,
+            "topology_match": topology_match,
+            "hash_match": hash_match,
+        }
+    )
+    if grounding_metadata is not None:
+        grounding_metadata["binding"] = binding_summary
+    if not semantic_match:
+        raise GroundingError("stale_mark", "MarkRegistry semantic screen does not match current screen")
+    if not topology_match:
+        raise GroundingError("mark_topology_mismatch", "MarkRegistry topology changed")
+    if not hash_match:
+        raise GroundingError("hash_mismatch", "MarkRegistry perceptual hash does not match current screen")
 
 
 def _ground_description_intent(
@@ -239,9 +292,29 @@ def _validate_grounding_result(result: GroundingResult, binding: ScreenBinding) 
         raise GroundingError("missing_provider_hash", "grounding result missing provider input image hash")
     if not result.center or len(result.center) != 2:
         raise GroundingError("bad_bbox", "grounding result missing center")
+    candidates = list(result.candidates or [])
+    valid_candidates = [
+        candidate
+        for candidate in candidates
+        if (candidate.get("valid") if isinstance(candidate, dict) else candidate.valid)
+    ]
+    if len(valid_candidates) == 0:
+        raise GroundingError("grounding_no_candidate", "grounding result has no valid candidate")
+    if len(valid_candidates) > 1:
+        raise GroundingError("grounding_ambiguous", "grounding result has multiple valid candidates")
+    selected = valid_candidates[0]
+    selected_bbox = selected.get("bbox") if isinstance(selected, dict) else selected.bbox
+    selected_center = selected.get("center") if isinstance(selected, dict) else selected.center
+    selected_confidence = selected.get("confidence") if isinstance(selected, dict) else selected.confidence
+    if result.bbox is not None and list(result.bbox) != list(selected_bbox):
+        raise GroundingError("bad_bbox", "grounding bbox does not match selected candidate")
+    if list(result.center or []) != list(selected_center):
+        raise GroundingError("bad_bbox", "grounding center does not match selected candidate")
     if result.bbox is not None and len(result.bbox) != 4:
         raise GroundingError("bad_bbox", "grounding result bbox must have four values")
-    if result.confidence is not None and result.confidence < 0.3:
+    if selected_confidence is not None and selected_confidence < MARK_CONFIDENCE_THRESHOLD:
+        raise GroundingError("low_confidence", "selected grounding candidate confidence is below threshold")
+    if result.confidence is not None and result.confidence < MARK_CONFIDENCE_THRESHOLD:
         raise GroundingError("low_confidence", "grounding confidence is below threshold")
 
 

@@ -89,6 +89,12 @@ class RunResult:
     grounding_latency_ms: int | None = None
     grounding_failure_code: str | None = None
     grounding_screen_hash: str | None = None
+    grounding_candidate_count: int = 0
+    selected_grounding_candidate_id: int | None = None
+    error_layer: str | None = None
+    error_code: str | None = None
+    recoverable: bool | None = None
+    retry_policy: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize the result to a JSON-friendly dictionary."""
@@ -223,6 +229,13 @@ class PhoneAgent:
             "grounding_failure_code": None,
             "grounding_screen_hash": None,
             "grounding_observation": None,
+            "grounding_candidates": [],
+            "grounding_candidate_count": 0,
+            "selected_grounding_candidate_id": None,
+            "error_layer": None,
+            "error_code": None,
+            "recoverable": None,
+            "retry_policy": None,
             "action_result": None,
             "reflection": None,
             "action_succeeded": True,
@@ -238,6 +251,8 @@ class PhoneAgent:
             "action_outcome_summary": None,
             "failure_memory": [],
             "summarized_history": "",
+            "short_term_memory": {},
+            "action_ledger": [],
             "context_budget": default_context_budget(),
             "context_truncated": False,
             "context_block_chars": 0,
@@ -334,6 +349,12 @@ class PhoneAgent:
             grounding_latency_ms=state.get("grounding_latency_ms"),
             grounding_failure_code=state.get("grounding_failure_code"),
             grounding_screen_hash=state.get("grounding_screen_hash"),
+            grounding_candidate_count=int(state.get("grounding_candidate_count") or 0),
+            selected_grounding_candidate_id=state.get("selected_grounding_candidate_id"),
+            error_layer=state.get("error_layer"),
+            error_code=state.get("error_code"),
+            recoverable=state.get("recoverable"),
+            retry_policy=state.get("retry_policy"),
             **context_metrics,
         )
 

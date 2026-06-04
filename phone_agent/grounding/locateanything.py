@@ -12,8 +12,8 @@ from typing import Any
 
 from PIL import Image
 
-from phone_agent.grounding.parser import GroundingParseError, parse_box_response
-from phone_agent.grounding.provider import GroundingResult, GroundingTarget, ScreenBinding
+from phone_agent.grounding.parser import GroundingParseError, parse_box_candidates
+from phone_agent.grounding.provider import GroundingCandidate, GroundingResult, GroundingTarget, ScreenBinding
 
 
 DEFAULT_LOCATEANYTHING_MAX_SIZE = 960
@@ -56,7 +56,7 @@ class LocateAnythingMLXProvider:
         try:
             image, provider_input_hash = self._prepare_image(screenshot)
             output = self._run_model(image, description, timeout=timeout)
-            parsed = parse_box_response(output)
+            parsed_set = parse_box_candidates(output)
         except GroundingParseError as exc:
             return self._failure(exc.code, screen_binding, started, message=str(exc))
         except ImportError:
@@ -65,6 +65,28 @@ class LocateAnythingMLXProvider:
             return self._failure("timeout", screen_binding, started)
         except Exception as exc:
             return self._failure("provider_error", screen_binding, started, message=type(exc).__name__)
+        valid_candidates = parsed_set.valid_candidates
+        candidates = [
+            GroundingCandidate(
+                bbox=box.bbox,
+                center=box.center,
+                confidence=None,
+                source=self.name,
+                valid=box.valid,
+                reason=box.reason,
+            )
+            for box in parsed_set.candidates
+        ]
+        if len(valid_candidates) == 0:
+            return self._failure(
+                "grounding_no_candidate", screen_binding, started, message="no valid bbox", candidates=candidates
+            )
+        if len(valid_candidates) > 1:
+            return self._failure(
+                "grounding_ambiguous", screen_binding, started, message="multiple valid bboxes", candidates=candidates
+            )
+        parsed = valid_candidates[0]
+        selected_candidate_id = parsed_set.candidates.index(parsed)
         return GroundingResult(
             success=True,
             provider=self.name,
@@ -75,6 +97,10 @@ class LocateAnythingMLXProvider:
             raw_screenshot_hash=screen_binding.raw_screenshot_hash,
             provider_input_hash=provider_input_hash,
             latency_ms=self._latency_ms(started),
+            candidates=candidates,
+            candidate_count=len(candidates),
+            grounding_status="success",
+            selected_candidate_id=selected_candidate_id,
             metadata={"model_path": str(self.model_path), "target": target.redacted_summary()},
         )
 
@@ -154,6 +180,7 @@ class LocateAnythingMLXProvider:
         started: float,
         *,
         message: str | None = None,
+        candidates: list[GroundingCandidate] | None = None,
     ) -> GroundingResult:
         return GroundingResult(
             success=False,
@@ -163,6 +190,9 @@ class LocateAnythingMLXProvider:
             screen_id=screen_binding.screen_id,
             raw_screenshot_hash=screen_binding.raw_screenshot_hash,
             latency_ms=self._latency_ms(started),
+            candidates=candidates or [],
+            candidate_count=len(candidates or []),
+            grounding_status=code,
         )
 
     @staticmethod

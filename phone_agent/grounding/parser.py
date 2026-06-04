@@ -24,6 +24,15 @@ class ParsedBox:
     bbox: list[int]
     center: list[int]
     area: int
+    valid: bool = True
+    reason: str | None = None
+
+
+@dataclass(frozen=True)
+class ParsedBoxSet:
+    candidates: list[ParsedBox]
+    valid_candidates: list[ParsedBox]
+    candidate_count: int
 
 
 # Native LocateAnything format: <box><173><446><316><473></box>
@@ -87,7 +96,34 @@ def parse_box_response(
     max_area_ratio: float = 0.95,
     normalize_order: bool = True,
 ) -> ParsedBox:
-    """Parse and validate one LocateAnything bbox in normalized 0-1000 coordinates."""
+    """Parse exactly one valid LocateAnything bbox in normalized 0-1000 coordinates."""
+
+    parsed_set = parse_box_candidates(
+        text,
+        min_area=min_area,
+        max_area_ratio=max_area_ratio,
+        normalize_order=normalize_order,
+    )
+    if not parsed_set.valid_candidates:
+        if parsed_set.candidates:
+            raise GroundingParseError(
+                parsed_set.candidates[0].reason or "no_candidate",
+                "no valid bbox in grounding output",
+            )
+        raise GroundingParseError("no_candidate", "no valid bbox in grounding output")
+    if len(parsed_set.valid_candidates) > 1:
+        raise GroundingParseError("grounding_ambiguous", "multiple valid bboxes in grounding output")
+    return parsed_set.valid_candidates[0]
+
+
+def parse_box_candidates(
+    text: str,
+    *,
+    min_area: int = 4,
+    max_area_ratio: float = 0.95,
+    normalize_order: bool = True,
+) -> ParsedBoxSet:
+    """Parse all LocateAnything bbox candidates and classify valid candidates."""
 
     if not isinstance(text, str) or not text.strip():
         raise GroundingParseError("empty_output", "grounding output is empty")
@@ -96,23 +132,30 @@ def parse_box_response(
     if not candidates:
         raise GroundingParseError("invalid_format", "missing <box>x1 y1 x2 y2</box>")
 
-    # Take the first valid candidate (model may emit junk after the real box).
-    last_error: GroundingParseError | None = None
+    parsed: list[ParsedBox] = []
+    valid: list[ParsedBox] = []
     for coords in candidates:
         try:
-            return _validate_box(
+            box = _validate_box(
                 coords,
                 min_area=min_area,
                 max_area_ratio=max_area_ratio,
                 normalize_order=normalize_order,
             )
         except GroundingParseError as exc:
-            last_error = exc
+            x1, y1, x2, y2 = coords
+            invalid = ParsedBox(
+                bbox=[x1, y1, x2, y2],
+                center=[int(round((x1 + x2) / 2)), int(round((y1 + y2) / 2))],
+                area=max(0, (x2 - x1) * (y2 - y1)),
+                valid=False,
+                reason=exc.code,
+            )
+            parsed.append(invalid)
             continue
-
-    if last_error is not None and len(candidates) == 1:
-        raise last_error
-    raise GroundingParseError("invalid_format", "no valid bbox in grounding output")
+        parsed.append(box)
+        valid.append(box)
+    return ParsedBoxSet(candidates=parsed, valid_candidates=valid, candidate_count=len(parsed))
 
 
 def calibrate_bbox_from_resized_input(

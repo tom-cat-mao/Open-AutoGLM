@@ -63,10 +63,18 @@ def test_dry_run_eval_outputs_stable_json_shape(monkeypatch, tmp_path) -> None:
     assert output["summary"]["hitl_count"] == 1
     assert output["summary"]["retry_count"] == 1
     assert output["summary"]["failure_cause_histogram"] == {"element_not_found": 1}
+    assert output["summary"]["grounding_failure_histogram"] == {}
+    assert output["summary"]["grounding_count"] == 0
     assert output["summary"]["context_mode"] == "observe"
+    assert output["summary"]["context_strategy"] == "observe_only"
+    assert output["summary"]["prompt_version"] == "context_harness_v1"
+    assert output["summary"]["selected_section_counts"] == {"screen_belief": 3}
+    assert output["summary"]["messages_before"] == 6
+    assert output["summary"]["messages_after"] == 6
     assert output["summary"]["failure_memory_hit_count"] == 1
     assert output["summary"]["repeated_failure_count"] == 1
     assert output["summary"]["dry_run"] is True
+    assert output["summary"]["output_mode"] == "json_schema"
     first = output["results"][0]
     assert {
         "task_id",
@@ -82,6 +90,13 @@ def test_dry_run_eval_outputs_stable_json_shape(monkeypatch, tmp_path) -> None:
         "hitl_count",
         "trace_id",
         "context_mode",
+        "context_strategy",
+        "prompt_version",
+        "selected_sections",
+        "messages_before",
+        "messages_after",
+        "message_chars_before",
+        "message_chars_after",
         "context_block_chars",
         "context_truncated",
         "failure_memory_hit_count",
@@ -95,3 +110,15 @@ def test_parse_args_accepts_context_mode(monkeypatch) -> None:
     args = parse_args()
 
     assert args.context_mode == "inject"
+
+
+def test_parse_args_rejects_invalid_output_mode_env(monkeypatch) -> None:
+    monkeypatch.setenv("PHONE_AGENT_OUTPUT_MODE", "bad")
+    monkeypatch.setattr("sys.argv", ["run_eval.py", "--dry-run"])
+
+    try:
+        parse_args()
+    except SystemExit as exc:
+        assert exc.code == 2
+    else:
+        raise AssertionError("parse_args should reject invalid PHONE_AGENT_OUTPUT_MODE")

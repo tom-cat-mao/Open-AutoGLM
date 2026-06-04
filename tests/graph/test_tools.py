@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib
+import subprocess
 
 from phone_agent.graph.tools import dispatch_tool, get_all_tools
 
@@ -67,6 +68,37 @@ def test_dispatch_tool_converts_relative_coordinates_in_tool_layer(fake_device) 
     assert fake_device.calls[-1] == ("tap", (540, 600, "device-1"), {})
 
 
+def test_gesture_compiler_keeps_relative_coordinates() -> None:
+    from phone_agent.actions.gesture import compile_action_to_gesture
+
+    gesture = compile_action_to_gesture({"_metadata": "do", "action": "Tap", "element": [500, 250]})
+
+    assert gesture.kind == "tap"
+    assert gesture.params["element"] == [500, 250]
+    assert "screen_width" not in gesture.params
+
+
+def test_gesture_trace_sanitizes_typed_text(base_state, fake_device, tmp_path) -> None:
+    import json
+
+    from phone_agent.graph.nodes.execute import execute_node
+    from phone_agent.graph.trace import JsonlTraceWriter
+
+    writer = JsonlTraceWriter(trace_id="gesture-private", trace_dir=tmp_path, redact=False)
+    base_state["action_parsed"] = {"_metadata": "do", "action": "Type", "text": "13800138000"}
+
+    execute_node(
+        base_state,
+        {"configurable": {"device_factory": fake_device, "trace_writer": writer, "verbose": False}},
+    )
+
+    raw = writer.path.read_text(encoding="utf-8")
+    assert "13800138000" not in raw
+    records = [json.loads(line) for line in raw.splitlines()]
+    gesture = next(record for record in records if record["event"] == "gesture_compiled")
+    assert gesture["payload"]["gesture"]["params"]["text"] == "<redacted>"
+
+
 def test_dispatch_type_uses_injected_keyboard_flow(fake_device, monkeypatch) -> None:
     type_text_module = importlib.import_module("phone_agent.graph.tools.type_text")
     monkeypatch.setattr(type_text_module.time, "sleep", lambda _: None)
@@ -100,3 +132,91 @@ def test_dispatch_wait_and_misc_without_device(monkeypatch) -> None:
     ):
         result = dispatch_tool(action, 1000, 2000, device_factory=object())
         assert result.success is True
+
+
+def test_adb_launch_app_uses_am_start_not_monkey(monkeypatch) -> None:
+    device_module = importlib.import_module("phone_agent.adb.device")
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        if "resolve-activity" in cmd:
+            return subprocess.CompletedProcess(cmd, 0, stdout="com.android.settings/.Settings\n", stderr="")
+        return subprocess.CompletedProcess(cmd, 0, stdout="Starting: Intent\n", stderr="")
+
+    monkeypatch.setattr(device_module.subprocess, "run", fake_run)
+    monkeypatch.setattr(device_module.time, "sleep", lambda _: None)
+
+    assert device_module.launch_app("Settings", "device-1") is True
+
+    assert any(
+        "am" in cmd
+        and "start" in cmd
+        and "-n" in cmd
+        and "com.android.settings/.Settings" in cmd
+        for cmd in calls
+    )
+    assert not any("monkey" in cmd for cmd in calls)
+
+
+def test_adb_launch_app_falls_back_when_launcher_component_missing(monkeypatch) -> None:
+    device_module = importlib.import_module("phone_agent.adb.device")
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        if "resolve-activity" in cmd:
+            return subprocess.CompletedProcess(cmd, 0, stdout="No activity found\n", stderr="")
+        return subprocess.CompletedProcess(cmd, 0, stdout="Starting: Intent\n", stderr="")
+
+    monkeypatch.setattr(device_module.subprocess, "run", fake_run)
+    monkeypatch.setattr(device_module.time, "sleep", lambda _: None)
+
+    assert device_module.launch_app("Settings", "device-1") is True
+
+    assert any(
+        "am" in cmd
+        and "start" in cmd
+        and "-p" in cmd
+        and "com.android.settings" in cmd
+        for cmd in calls
+    )
+    assert not any("monkey" in cmd for cmd in calls)
+
+
+def test_adb_launch_app_returns_false_on_am_start_error(monkeypatch) -> None:
+    device_module = importlib.import_module("phone_agent.adb.device")
+
+    def fake_run(cmd, **kwargs):
+        if "resolve-activity" in cmd:
+            return subprocess.CompletedProcess(cmd, 0, stdout="com.android.settings/.Settings\n", stderr="")
+        return subprocess.CompletedProcess(cmd, 0, stdout="Error: Activity not started\n", stderr="")
+
+    monkeypatch.setattr(device_module.subprocess, "run", fake_run)
+    monkeypatch.setattr(device_module.time, "sleep", lambda _: None)
+
+    assert device_module.launch_app("Settings", "device-1") is False
+
+
+def test_adb_home_falls_back_when_input_hits_inject_events(monkeypatch) -> None:
+    device_module = importlib.import_module("phone_agent.adb.device")
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        if "input" in cmd:
+            return subprocess.CompletedProcess(
+                cmd,
+                0,
+                stdout=b"java.lang.SecurityException: inject events permission denied",
+                stderr=b"",
+            )
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(device_module.subprocess, "run", fake_run)
+    monkeypatch.setattr(device_module.time, "sleep", lambda _: None)
+
+    device_module.home("device-1")
+
+    assert any("input" in cmd and "KEYCODE_HOME" in cmd for cmd in calls)
+    assert any("am" in cmd and "android.intent.category.HOME" in cmd for cmd in calls)

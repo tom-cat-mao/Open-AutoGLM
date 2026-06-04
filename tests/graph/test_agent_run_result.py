@@ -49,10 +49,31 @@ def test_run_result_defaults_and_serialization() -> None:
         "failure_cause": None,
         "retry_count": 0,
         "context_mode": "observe",
+        "context_strategy": "unknown",
+        "prompt_version": "context_harness_v1",
+        "selected_sections": [],
         "context_block_chars": 0,
         "context_truncated": False,
+        "messages_before": 0,
+        "messages_after": 0,
+        "message_chars_before": 0,
+        "message_chars_after": 0,
+        "approx_tokens_before": 0,
+        "approx_tokens_after": 0,
         "failure_memory_hit_count": 0,
         "repeated_failure_count": 0,
+        "verifier_status": None,
+        "verifier_failure_cause": None,
+        "grounding_provider": None,
+        "grounding_latency_ms": None,
+        "grounding_failure_code": None,
+        "grounding_screen_hash": None,
+        "grounding_candidate_count": 0,
+        "selected_grounding_candidate_id": None,
+        "error_layer": None,
+        "error_code": None,
+        "recoverable": None,
+        "retry_policy": None,
     }
 
 
@@ -66,8 +87,17 @@ def test_run_structured_returns_metrics_and_keeps_config(monkeypatch) -> None:
         "failure_cause": "wrong_page",
         "retry_count": 2,
         "context_mode": "inject",
+        "context_strategy": "inject_redacted_block",
+        "prompt_version": "context_harness_v1",
+        "selected_sections": ["screen_belief"],
         "context_block_chars": 42,
         "context_truncated": True,
+        "messages_before": 4,
+        "messages_after": 4,
+        "message_chars_before": 1000,
+        "message_chars_after": 800,
+        "approx_tokens_before": 250,
+        "approx_tokens_after": 200,
         "failure_memory_hit_count": 1,
         "repeated_failure_count": 1,
     }
@@ -89,15 +119,38 @@ def test_run_structured_returns_metrics_and_keeps_config(monkeypatch) -> None:
     assert result.failure_cause == "wrong_page"
     assert result.retry_count == 2
     assert result.context_mode == "inject"
+    assert result.context_strategy == "inject_redacted_block"
+    assert result.prompt_version == "context_harness_v1"
+    assert result.selected_sections == ["screen_belief"]
     assert result.context_block_chars == 42
     assert result.context_truncated is True
+    assert result.messages_before == 4
+    assert result.messages_after == 4
+    assert result.message_chars_after == 800
     assert result.failure_memory_hit_count == 1
     assert result.repeated_failure_count == 1
     assert agent._graph.initial_state["hitl_count"] == 0
     assert agent._graph.initial_state["context_mode"] == "observe"
     assert agent._graph.config["configurable"]["trace_id"] == result.trace_id
     assert agent._graph.config["configurable"]["context_mode"] == "observe"
+    assert agent._graph.config["configurable"]["prompt_version"] == "context_harness_v1"
     assert agent._graph.config["configurable"]["trace_writer"] is not None
+
+
+def test_cli_default_output_mode_is_structured(monkeypatch) -> None:
+    import importlib.util
+    from pathlib import Path
+
+    main_path = Path(__file__).resolve().parents[2] / "main.py"
+    spec = importlib.util.spec_from_file_location("phone_agent_cli_main_default", main_path)
+    assert spec is not None and spec.loader is not None
+    main = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(main)
+
+    monkeypatch.delenv("PHONE_AGENT_OUTPUT_MODE", raising=False)
+    monkeypatch.setattr("sys.argv", ["main.py"])
+
+    assert main.parse_args().output_mode == "json_schema"
 
 
 def test_run_keeps_string_compatibility(monkeypatch) -> None:

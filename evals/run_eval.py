@@ -262,7 +262,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--apikey", default="EMPTY", help="Model API key")
     parser.add_argument(
         "--output-mode",
-        choices=["text_dsl", "json_schema", "tool_calls", "auto"],
+        choices=["json_schema", "tool_calls", "auto"],
         default=os.getenv("PHONE_AGENT_OUTPUT_MODE", "json_schema"),
         help="Model output mode",
     )
@@ -282,8 +282,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--trace-dir", default=".traces", help="Local JSONL trace dir")
     parser.add_argument("--no-trace", action="store_true", help="Disable agent tracing")
     args = parser.parse_args()
-    if args.output_mode not in {"text_dsl", "json_schema", "tool_calls", "auto"}:
-        parser.error("--output-mode must be one of: text_dsl, json_schema, tool_calls, auto")
+    if args.output_mode not in {"json_schema", "tool_calls", "auto"}:
+        parser.error("--output-mode must be one of: json_schema, tool_calls, auto")
     return args
 
 

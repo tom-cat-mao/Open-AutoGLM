@@ -6,7 +6,7 @@ import hashlib
 import time
 from typing import Any
 
-from phone_agent.grounding.provider import GroundingResult, GroundingTarget, ScreenBinding
+from phone_agent.grounding.provider import GroundingCandidate, GroundingResult, GroundingTarget, ScreenBinding
 
 
 class FakeGroundingProvider:
@@ -19,10 +19,12 @@ class FakeGroundingProvider:
         self,
         *,
         bbox: list[int] | None = None,
+        bboxes: list[list[int]] | None = None,
         failure_code: str | None = None,
         provider_input_hash: str | None = None,
     ) -> None:
         self.bbox = bbox or [400, 400, 600, 600]
+        self.bboxes = bboxes
         self.failure_code = failure_code
         self.provider_input_hash = provider_input_hash
         self.requests: list[dict[str, Any]] = []
@@ -58,15 +60,44 @@ class FakeGroundingProvider:
                 provider_input_hash=input_hash,
                 latency_ms=latency_ms,
             )
-        x1, y1, x2, y2 = self.bbox
+        boxes = self.bboxes or [self.bbox]
+        candidates = [
+            GroundingCandidate(
+                bbox=list(box),
+                center=[int(round((box[0] + box[2]) / 2)), int(round((box[1] + box[3]) / 2))],
+                confidence=1.0,
+                source=self.name,
+                valid=True,
+            )
+            for box in boxes
+        ]
+        if len(candidates) != 1:
+            return GroundingResult(
+                success=False,
+                provider=self.name,
+                failure_code="grounding_ambiguous" if candidates else "grounding_no_candidate",
+                message="candidate count must be exactly one",
+                screen_id=screen_binding.screen_id,
+                raw_screenshot_hash=screen_binding.raw_screenshot_hash,
+                provider_input_hash=input_hash,
+                latency_ms=latency_ms,
+                candidates=candidates,
+                candidate_count=len(candidates),
+                grounding_status="grounding_ambiguous" if candidates else "grounding_no_candidate",
+            )
+        x1, y1, x2, y2 = candidates[0].bbox
         return GroundingResult(
             success=True,
             provider=self.name,
-            bbox=list(self.bbox),
+            bbox=list(candidates[0].bbox),
             center=[int(round((x1 + x2) / 2)), int(round((y1 + y2) / 2))],
             confidence=1.0,
             screen_id=screen_binding.screen_id,
             raw_screenshot_hash=screen_binding.raw_screenshot_hash,
             provider_input_hash=input_hash,
             latency_ms=latency_ms,
+            candidates=candidates,
+            candidate_count=1,
+            grounding_status="success",
+            selected_candidate_id=0,
         )

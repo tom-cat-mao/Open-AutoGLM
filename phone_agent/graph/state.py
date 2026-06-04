@@ -67,6 +67,15 @@ class AgentState(TypedDict):
     grounding_failure_code: Optional[str]  # structured grounding failure code
     grounding_screen_hash: Optional[str]  # raw screenshot hash bound to grounding request/result
     grounding_observation: Optional[dict]  # bounded grounding context section payload
+    grounding_candidates: list[dict]  # trace-safe grounding candidate summaries
+    grounding_candidate_count: int  # count of provider candidates
+    selected_grounding_candidate_id: Optional[int]  # selected candidate index when exactly one valid candidate succeeds
+
+    # === Layered error taxonomy ===
+    error_layer: Optional[str]  # parse / adapter / validation / grounding / safety / execution / reflection / context
+    error_code: Optional[str]  # stable machine-readable error code
+    recoverable: Optional[bool]  # whether automatic recovery may continue
+    retry_policy: Optional[str]  # none / parse_retry / reobserve / wait / takeover
 
     # === Execute 节点输出 ===
     action_result: Optional[dict]  # ActionResult 序列化为 dict
@@ -88,6 +97,8 @@ class AgentState(TypedDict):
     action_outcome_summary: Optional[dict]  # 最近一次动作结果摘要
     failure_memory: list[dict]  # 当前 run 内最近失败摘要
     summarized_history: str  # 当前 run 内压缩历史
+    short_term_memory: dict  # bounded request-time memory sections
+    action_ledger: list[dict]  # bounded action ledger for recent steps
     context_budget: dict  # context 裁剪预算
     context_truncated: bool  # context 是否被裁剪
     context_block_chars: int  # 注入 context block 字符数

@@ -90,3 +90,89 @@ def test_execute_finish_ends_and_appends_message(base_state) -> None:
     assert result["finished"] is True
     assert result["action_result"]["message"] == "done"
     assert result["messages"][-1]["role"] == "assistant"
+
+
+def test_execute_preserves_plan_parse_failure_without_dispatch(base_state, fake_device) -> None:
+    base_state["finished"] = True
+    base_state["error"] = "Model parse failed"
+    base_state["failure_cause"] = "model_parse_failed"
+    base_state["action_parsed"] = None
+    base_state["action_result"] = {
+        "success": False,
+        "should_finish": True,
+        "message": "Model parse failed",
+    }
+
+    result = execute_node(
+        base_state, {"configurable": {"device_factory": fake_device, "verbose": False}}
+    )
+
+    assert result["finished"] is True
+    assert result["error"] == "Model parse failed"
+    assert result["failure_cause"] == "model_parse_failed"
+    assert result["action_result"]["success"] is False
+    assert fake_device.calls == []
+
+
+def test_execute_wait_clears_stale_reflection_wait_advice(base_state, fake_device) -> None:
+    base_state["action_parsed"] = {
+        "_metadata": "do",
+        "action": "Wait",
+        "duration": "0.01 seconds",
+    }
+    base_state["reflection"] = "页面可能仍在加载"
+    base_state["reflection_verdict"] = "partial"
+    base_state["failure_cause"] = "network_or_loading"
+    base_state["suggested_strategy"] = "wait"
+
+    result = execute_node(
+        base_state, {"configurable": {"device_factory": fake_device, "verbose": False}}
+    )
+
+    assert result["action_result"]["success"] is True
+    assert result["reflection"] is None
+    assert result["reflection_verdict"] is None
+    assert result["failure_cause"] is None
+    assert result["suggested_strategy"] is None
+    assert result["action_succeeded"] is True
+    assert result["action_outcome_summary"]["reflection_verdict"] is None
+    assert result["action_outcome_summary"]["failure_cause"] is None
+    assert result["action_outcome_summary"]["suggested_strategy"] is None
+
+
+def test_execute_adapter_swipe_dispatches_with_existing_tool_signature(
+    base_state, fake_device
+) -> None:
+    base_state["action_parsed"] = {
+        "_metadata": "do",
+        "action": "Swipe",
+        "start": [100, 100],
+        "end": [900, 900],
+    }
+
+    result = execute_node(
+        base_state, {"configurable": {"device_factory": fake_device, "verbose": False}}
+    )
+
+    assert result["action_result"]["success"] is True
+    assert fake_device.calls[-1] == ("swipe", (100, 200, 900, 1800, "device-1"), {})
+
+
+def test_execute_revalidates_action_and_rejects_dangerous_fields(
+    base_state, fake_device
+) -> None:
+    base_state["action_parsed"] = {
+        "_metadata": "do",
+        "action": "Tap",
+        "element": [500, 500],
+        "command": "rm -rf /",
+    }
+
+    result = execute_node(
+        base_state, {"configurable": {"device_factory": fake_device, "verbose": False}}
+    )
+
+    assert result["finished"] is True
+    assert result["action_result"]["success"] is False
+    assert result["failure_cause"] == "action_validation_failed"
+    assert fake_device.calls == []

@@ -48,6 +48,53 @@ def test_sanitize_redacts_identifiable_visible_text() -> None:
     assert sanitized["screen_belief"]["visible_text"]["redacted"] is True
 
 
+def test_sanitize_redacts_parse_error_text() -> None:
+    payload = {"parse_error": "Failed raw action 13800138000"}
+
+    sanitized = sanitize_for_trace(payload)
+
+    assert "13800138000" not in json.dumps(sanitized, ensure_ascii=False)
+    assert sanitized["parse_error"]["redacted"] is True
+
+
+def test_sanitize_keeps_context_metrics_but_not_raw_context_block() -> None:
+    payload = {
+        "prompt_version": "context_harness_v1",
+        "context_strategy": "inject_redacted_block",
+        "selected_sections": ["screen_belief", "failure_memory"],
+        "messages_before": 4,
+        "messages_after": 4,
+        "context_block": "张三 13800138000",
+    }
+
+    sanitized = sanitize_for_trace(payload)
+
+    assert sanitized["prompt_version"] == "context_harness_v1"
+    assert sanitized["selected_sections"] == ["screen_belief", "failure_memory"]
+    assert sanitized["messages_before"] == 4
+    assert "张三" not in json.dumps(sanitized, ensure_ascii=False)
+    assert sanitized["context_block"]["redacted"] is True
+
+
+def test_sanitize_redacts_grounding_target_hint_but_keeps_hashes() -> None:
+    payload = {
+        "grounding_observation": {
+            "provider": "fake",
+            "raw_screenshot_hash": "hash-1",
+            "provider_input_hash": "hash-2",
+            "target": {"target_text_hint": "张三 13800138000"},
+        }
+    }
+
+    sanitized = sanitize_for_trace(payload)
+
+    raw = json.dumps(sanitized, ensure_ascii=False)
+    assert "13800138000" not in raw
+    assert sanitized["grounding_observation"]["raw_screenshot_hash"] == "hash-1"
+    assert sanitized["grounding_observation"]["provider_input_hash"] == "hash-2"
+    assert sanitized["grounding_observation"]["target"]["target_text_hint"]["redacted"] is True
+
+
 def test_execute_trace_records_confirm_interrupt(base_state, tmp_path) -> None:
     writer = JsonlTraceWriter(trace_id="trace-confirm", trace_dir=tmp_path)
     base_state["action_parsed"] = {
@@ -66,6 +113,8 @@ def test_execute_trace_records_confirm_interrupt(base_state, tmp_path) -> None:
         json.loads(line) for line in writer.path.read_text(encoding="utf-8").splitlines()
     ]
     assert result["pending_interrupt"] == "confirmation"
+    assert any(item["event"] == "safety_decision" for item in records)
     assert any(item["event"] == "confirm_interrupt" for item in records)
-    payload = records[0]["payload"]
+    confirm_record = next(item for item in records if item["event"] == "confirm_interrupt")
+    payload = confirm_record["payload"]
     assert payload["interrupt_message"]["redacted"] is True

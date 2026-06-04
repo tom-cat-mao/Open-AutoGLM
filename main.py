@@ -22,7 +22,7 @@ Environment Variables:
     PHONE_AGENT_SCREENSHOT_FORMAT: Screenshot payload format, jpeg or png (default: jpeg)
     PHONE_AGENT_SCREENSHOT_JPEG_QUALITY: JPEG quality for model screenshot payload (default: 80)
     PHONE_AGENT_SKIP_MODEL_CHECK: Skip startup model API check when true
-    PHONE_AGENT_OUTPUT_MODE: Model output mode (text_dsl/json_schema/tool_calls/auto)
+    PHONE_AGENT_OUTPUT_MODE: Model output mode (json_schema/tool_calls/auto)
     PHONE_AGENT_MAX_STEPS: Maximum steps per task (default: 100)
     PHONE_AGENT_DEVICE_ID: ADB device ID for multi-device setups
 """
@@ -686,9 +686,9 @@ Examples:
     parser.add_argument(
         "--output-mode",
         type=str,
-        choices=["text_dsl", "json_schema", "tool_calls", "auto"],
+        choices=["json_schema", "tool_calls", "auto"],
         default=os.getenv("PHONE_AGENT_OUTPUT_MODE", "json_schema"),
-        help="Model output mode: text_dsl, json_schema, tool_calls, or auto",
+        help="Model output mode: json_schema, tool_calls, or auto",
     )
 
     parser.add_argument(
@@ -762,8 +762,8 @@ Examples:
     )
 
     args = parser.parse_args()
-    if args.output_mode not in {"text_dsl", "json_schema", "tool_calls", "auto"}:
-        parser.error("--output-mode must be one of: text_dsl, json_schema, tool_calls, auto")
+    if args.output_mode not in {"json_schema", "tool_calls", "auto"}:
+        parser.error("--output-mode must be one of: json_schema, tool_calls, auto")
     if args.model_timeout <= 0:
         parser.error("--model-timeout must be positive")
     if args.model_max_retries < 0:

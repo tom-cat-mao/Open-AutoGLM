@@ -1,6 +1,6 @@
 """Reflect node: screenshot → structured action outcome reflection."""
 
-import ast
+import json
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -29,20 +29,14 @@ if TYPE_CHECKING:
 
 REFLECT_SYSTEM_PROMPT_CN = """你是一个手机自动化任务的反思专家。你的职责是观察动作执行后的屏幕截图，判断动作是否生效，并给出下一步建议。
 
-你必须严格按照要求输出以下格式：
-<think>{think}</think>
-<answer>{action}</answer>
-
-其中：
-- {think} 是你的推理过程。
-- {action} 必须优先使用：reflection(verdict="succeeded|failed|partial", failure_cause="none|element_not_found|wrong_page|app_not_responding|network_or_loading|permission_or_login_or_captcha|unsafe_or_sensitive|coordinate_or_tap_offset|context_lost|repeated_action|model_parse_failed|unknown", suggested_strategy="continue|retry|retry_with_offset|go_back|swipe_to_find|wait|takeover|finish", message="xxx")
-- 兼容旧格式：continue(message="xxx") 表示动作生效；retry(message="xxx") 表示动作未生效
+你必须只输出一个 JSON 对象，不要 Markdown、XML、函数调用或多余文本：
+{"verdict":"succeeded|failed|partial","failure_cause":"none|element_not_found|wrong_page|app_not_responding|network_or_loading|permission_or_login_or_captcha|unsafe_or_sensitive|coordinate_or_tap_offset|context_lost|repeated_action|model_parse_failed|unknown","suggested_strategy":"continue|retry|retry_with_offset|go_back|swipe_to_find|wait|takeover|finish","message":"xxx"}
 
 判断标准：
 1. 动作生效：页面如预期发生了变化（如点击后跳转、输入后文本出现、滑动后内容变化）
 2. 动作未生效：页面没有变化，或变化与预期不符
 3. 部分成功：页面有变化但任务尚未完全进入预期状态
-4. 任务完成：如果当前页面显示任务已经完成，输出 reflection(verdict="succeeded", failure_cause="none", suggested_strategy="finish", message="任务已完成")
+4. 任务完成：如果当前页面显示任务已经完成，输出 {"verdict":"succeeded","failure_cause":"none","suggested_strategy":"finish","message":"任务已完成"}
 
 重要约束：
 - 只有在截图明确显示加载中、空白页、网络错误、进度条/转圈、或执行结果表示应用无响应时，才使用 failure_cause="network_or_loading" 和 suggested_strategy="wait"。
@@ -52,20 +46,14 @@ REFLECT_SYSTEM_PROMPT_CN = """你是一个手机自动化任务的反思专家�
 
 REFLECT_SYSTEM_PROMPT_EN = """You are a mobile automation reflection expert. Your job is to observe the screenshot after an action and judge whether the action succeeded, then give next-step advice.
 
-You MUST strictly output in the following format:
-<think>{think}</think>
-<answer>{action}</answer>
-
-Where:
-- {think} is your reasoning process.
-- {action} should use: reflection(verdict="succeeded|failed|partial", failure_cause="none|element_not_found|wrong_page|app_not_responding|network_or_loading|permission_or_login_or_captcha|unsafe_or_sensitive|coordinate_or_tap_offset|context_lost|repeated_action|model_parse_failed|unknown", suggested_strategy="continue|retry|retry_with_offset|go_back|swipe_to_find|wait|takeover|finish", message="xxx")
-- Legacy compatible formats are accepted: continue(message="xxx") or retry(message="xxx")
+You MUST output exactly one JSON object. Do not output Markdown, XML, function calls, or extra text:
+{"verdict":"succeeded|failed|partial","failure_cause":"none|element_not_found|wrong_page|app_not_responding|network_or_loading|permission_or_login_or_captcha|unsafe_or_sensitive|coordinate_or_tap_offset|context_lost|repeated_action|model_parse_failed|unknown","suggested_strategy":"continue|retry|retry_with_offset|go_back|swipe_to_find|wait|takeover|finish","message":"xxx"}
 
 Judgment criteria:
 1. Action succeeded: the page changed as expected (e.g., navigated after tap, text appeared after input, content changed after swipe)
 2. Action failed: the page did not change, or the change was unexpected
 3. Partial success: the page changed but is not yet in the expected state
-4. Task completed: if the current page shows the task is done, output reflection(verdict="succeeded", failure_cause="none", suggested_strategy="finish", message="Task completed")
+4. Task completed: if the current page shows the task is done, output {"verdict":"succeeded","failure_cause":"none","suggested_strategy":"finish","message":"Task completed"}
 
 Important constraints:
 - Use failure_cause="network_or_loading" and suggested_strategy="wait" only when the screenshot clearly shows loading, a blank page, a network error, a spinner/progress indicator, or the execution result indicates the app is not responding.
@@ -95,47 +83,26 @@ class ReflectionResult:
     message: str
 
 
-def _literal_kwargs(raw_action: str) -> tuple[str, dict[str, object]]:
-    expression = ast.parse(raw_action, mode="eval").body
-    if not isinstance(expression, ast.Call) or not isinstance(expression.func, ast.Name):
-        raise ValueError("Reflection action must be a function call")
-    return expression.func.id, {
-        keyword.arg: ast.literal_eval(keyword.value)
-        for keyword in expression.keywords
-        if keyword.arg is not None
-    }
-
-
 def parse_reflection_action(raw_action: str) -> ReflectionResult:
-    """Parse structured reflection output with safe Python literal parsing."""
+    """Parse structured JSON reflection output."""
     raw_action = raw_action.strip()
-    if raw_action.startswith("reflection("):
-        try:
-            name, kwargs = _literal_kwargs(raw_action)
-        except (SyntaxError, ValueError):
-            return ReflectionResult("failed", "unknown", "retry", raw_action)
-        if name != "reflection":
-            raise ValueError("Unknown reflection function")
-        verdict = str(kwargs.get("verdict", "failed"))
-        failure_cause = str(kwargs.get("failure_cause", "unknown"))
-        suggested_strategy = str(kwargs.get("suggested_strategy", "retry"))
-        message = str(kwargs.get("message", raw_action))
-        if verdict not in VALID_VERDICTS:
-            verdict = "failed"
-        failure_cause = normalize_failure_cause(failure_cause)
-        if suggested_strategy not in VALID_STRATEGIES:
-            suggested_strategy = "retry"
-        if verdict == "succeeded" and failure_cause == "none":
-            parsed_cause = None
-        else:
-            parsed_cause = failure_cause
-        return ReflectionResult(verdict, parsed_cause, suggested_strategy, message)
-
-    if raw_action.startswith("continue"):
-        return ReflectionResult("succeeded", None, "continue", raw_action)
-    if raw_action.startswith("retry"):
+    try:
+        data = json.loads(raw_action)
+    except json.JSONDecodeError:
         return ReflectionResult("failed", "unknown", "retry", raw_action)
-    return ReflectionResult("failed", "unknown", "retry", raw_action)
+    if not isinstance(data, dict):
+        return ReflectionResult("failed", "unknown", "retry", raw_action)
+    verdict = str(data.get("verdict", "failed"))
+    failure_cause = str(data.get("failure_cause", "unknown"))
+    suggested_strategy = str(data.get("suggested_strategy", "retry"))
+    message = str(data.get("message", raw_action))
+    if verdict not in VALID_VERDICTS:
+        verdict = "failed"
+    failure_cause = normalize_failure_cause(failure_cause)
+    if suggested_strategy not in VALID_STRATEGIES:
+        suggested_strategy = "retry"
+    parsed_cause = None if verdict == "succeeded" and failure_cause == "none" else failure_cause
+    return ReflectionResult(verdict, parsed_cause, suggested_strategy, message)
 
 
 def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
@@ -222,7 +189,7 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
     try:
         try:
             response = model_client.request(
-                reflect_messages, output_mode="text_dsl", validate_action=False
+                reflect_messages, output_mode="json_schema", validate_action=False
             )
         except TypeError as type_error:
             if "output_mode" not in str(type_error) and "validate_action" not in str(type_error):
@@ -346,6 +313,13 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
             "action_outcome_summary": outcome,
             "failure_memory": failure_memory,
             "summarized_history": summarized_history,
+            "short_term_memory": {
+                "screen_belief": belief,
+                "last_action_outcome": outcome,
+                "latest_failures": failure_memory[-3:],
+                "grounding_observation": state.get("grounding_observation"),
+            },
+            "action_ledger": (list(state.get("action_ledger") or []) + [outcome])[-10:],
             "context_truncated": bool(state.get("context_truncated")) or history_truncated,
             "failure_memory_hit_count": int(state.get("failure_memory_hit_count") or 0)
             + (1 if repeated else 0),

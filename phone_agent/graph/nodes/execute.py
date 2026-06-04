@@ -50,6 +50,17 @@ def _clear_stale_reflection_for_skip_action(action_name: str | None) -> dict:
     }
 
 
+def _layered_error(layer: str, code: str, *, recoverable: bool = False, retry_policy: str = "none") -> dict:
+    """Build stable layered error fields for terminal execute failures."""
+
+    return {
+        "error_layer": layer,
+        "error_code": code,
+        "recoverable": recoverable,
+        "retry_policy": retry_policy,
+    }
+
+
 def execute_node(state: "AgentState", config: RunnableConfig) -> dict:
     """
     Execute node: run action, strip images, append assistant message.
@@ -106,6 +117,10 @@ def execute_node(state: "AgentState", config: RunnableConfig) -> dict:
             "finished": True,
             "error": state.get("error"),
             "failure_cause": state.get("failure_cause"),
+            "error_layer": state.get("error_layer"),
+            "error_code": state.get("error_code"),
+            "recoverable": state.get("recoverable"),
+            "retry_policy": state.get("retry_policy"),
             **_context_update(result_dict),
         }
 
@@ -118,6 +133,7 @@ def execute_node(state: "AgentState", config: RunnableConfig) -> dict:
             ).__dict__,
             "finished": True,
             "error": "No action to execute",
+            **_layered_error("execution", "missing_action"),
             **_context_update({"success": False, "should_finish": True, "message": "No action to execute"}),
         }
 
@@ -142,6 +158,7 @@ def execute_node(state: "AgentState", config: RunnableConfig) -> dict:
             "finished": True,
             "error": result.message,
             "failure_cause": "action_validation_failed",
+            **_layered_error("validation", exc.code),
             **_context_update(result.__dict__),
         }
 
@@ -175,6 +192,7 @@ def execute_node(state: "AgentState", config: RunnableConfig) -> dict:
             "finished": True,
             "error": result.message,
             "failure_cause": "action_safety_rejected",
+            **_layered_error("safety", "action_safety_rejected"),
             **_context_update(result.__dict__),
         }
 
@@ -206,6 +224,8 @@ def execute_node(state: "AgentState", config: RunnableConfig) -> dict:
             "messages": messages,
             "finished": True,
             "error": result.message,
+            "failure_cause": "unknown_action_type",
+            **_layered_error("validation", "unknown_action_type"),
             **_context_update(result.__dict__),
         }
 
@@ -232,6 +252,8 @@ def execute_node(state: "AgentState", config: RunnableConfig) -> dict:
                 "error": result.message,
                 "pending_execute": False,
                 "action_confirmed": False,
+                "failure_cause": "confirmation_required",
+                **_layered_error("safety", "confirmation_required", recoverable=True, retry_policy="takeover"),
                 **_context_update(result.__dict__),
             }
         # CRITICAL-1: do NOT call _strip_and_append again (images already stripped on first pass)
@@ -246,9 +268,12 @@ def execute_node(state: "AgentState", config: RunnableConfig) -> dict:
         except Exception as e:
             if verbose:
                 traceback.print_exc()
+            execution_error = _layered_error("execution", "dispatch_failed")
             result = ActionResult(
                 success=False, should_finish=True, message=f"Action failed: {e}"
             )
+        else:
+            execution_error = {}
         emit_trace(
             config,
             state,
@@ -267,6 +292,7 @@ def execute_node(state: "AgentState", config: RunnableConfig) -> dict:
             "action_confirmed": True,
             "pending_interrupt": None,
             "interrupt_result": None,
+            **({"error": result.message, "failure_cause": "execution_failed", **execution_error} if execution_error else {}),
             **_context_update(result.__dict__),
         }
 
@@ -336,9 +362,12 @@ def execute_node(state: "AgentState", config: RunnableConfig) -> dict:
     except Exception as e:
         if verbose:
             traceback.print_exc()
+        execution_error = _layered_error("execution", "dispatch_failed")
         result = ActionResult(
             success=False, should_finish=True, message=f"Action failed: {e}"
         )
+    else:
+        execution_error = {}
     emit_trace(
         config,
         state,
@@ -358,6 +387,7 @@ def execute_node(state: "AgentState", config: RunnableConfig) -> dict:
         "action_result": result.__dict__,
         "messages": messages,
         "finished": finished,
+        **({"error": result.message, "failure_cause": "execution_failed", **execution_error} if execution_error else {}),
         **skip_reflection_updates,
         **_context_update(result.__dict__, skip_reflection_updates),
     }

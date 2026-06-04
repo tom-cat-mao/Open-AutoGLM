@@ -16,6 +16,7 @@ DEFAULT_CONTEXT_BUDGET: dict[str, int] = {
     "failure_memory_items": 3,
     "action_outcome_items": 1,
     "context_block_chars": 1500,
+    "request_recent_messages": 6,
 }
 DEFAULT_PROMPT_VERSION = "context_harness_v1"
 CONTEXT_SECTION_IDS = (
@@ -23,6 +24,8 @@ CONTEXT_SECTION_IDS = (
     "last_action_outcome",
     "failure_memory",
     "summarized_history",
+    "short_term_memory",
+    "action_ledger",
     "gui_memory.visited_screens",
     "gui_memory.tried_actions",
     "gui_memory.scroll_memory",
@@ -423,6 +426,8 @@ def build_plan_context_block(state: dict[str, Any], lang: str = "cn") -> tuple[s
         ("last_action_outcome", state.get("action_outcome_summary")),
         ("latest_failure_memory", (state.get("failure_memory") or [])[-1:]),
         ("summarized_history", state.get("summarized_history")),
+        ("short_term_memory", state.get("short_term_memory")),
+        ("action_ledger", (state.get("action_ledger") or [])[-3:]),
         ("gui_memory", state.get("gui_memory")),
         ("grounding_observation", state.get("grounding_observation")),
     ):
@@ -480,13 +485,15 @@ def compact_messages_for_request(
     """Compact request messages without mutating state messages.
 
     Historical images are stripped from every message except the latest user
-    request. Text is preserved so action auditability remains intact.
+    request. Older text is bounded in the request copy; state messages remain
+    untouched for reducer/audit semantics.
     """
     before_chars = _messages_approx_chars(messages)
     compacted = [_compact_message(message, keep_images=False) for message in messages]
     latest_user_index = _latest_user_message_index(messages)
     if latest_user_index is not None:
         compacted[latest_user_index] = _compact_message(messages[latest_user_index], keep_images=True)
+    compacted = _bound_request_messages(compacted)
     after_chars = _messages_approx_chars(compacted)
     updated = ContextSelectionResult(
         **{
@@ -502,6 +509,19 @@ def compact_messages_for_request(
     return compacted, updated
 
 
+def _bound_request_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    max_recent = DEFAULT_CONTEXT_BUDGET["request_recent_messages"]
+    if len(messages) <= max_recent:
+        return messages
+    system_messages = [message for message in messages if message.get("role") == "system"][:1]
+    tail = messages[-max_recent:]
+    bounded: list[dict[str, Any]] = []
+    for message in system_messages + tail:
+        if message not in bounded:
+            bounded.append(message)
+    return bounded
+
+
 def _section_has_value(state: dict[str, Any], section: str) -> bool:
     if section == "screen_belief":
         return bool(state.get("screen_belief"))
@@ -511,6 +531,10 @@ def _section_has_value(state: dict[str, Any], section: str) -> bool:
         return bool(state.get("failure_memory"))
     if section == "summarized_history":
         return bool(state.get("summarized_history"))
+    if section == "short_term_memory":
+        return bool(state.get("short_term_memory"))
+    if section == "action_ledger":
+        return bool(state.get("action_ledger"))
     if section.startswith("gui_memory."):
         key = section.split(".", 1)[1]
         return bool((state.get("gui_memory") or {}).get(key))
