@@ -17,7 +17,7 @@
 - **评测地基**: 已提供 `evals/run_eval.py --dry-run` smoke harness；当前统计结构化结果、HITL interrupt routing、trace 文件关联、retry count 与 failure cause histogram；不承诺跨进程 resume
 - **收益验证**: eval 已输出 `context_mode`、`context_strategy`、`prompt_version`、`selected_sections`、`messages_before/after`、`message_chars_before/after`、`approx_tokens_before/after`、`context_block_chars`、`context_truncated`、`failure_memory_hit_count`、`repeated_failure_count`，支持 off/observe/inject 对比
 - **输出适配**: `ModelConfig.output_mode=text_dsl|json_schema|tool_calls|auto`；XML/text DSL、JSON、已聚合 OpenAI `tool_calls` 统一归一到 canonical action，parse failure fail-closed，不绕过 HITL
-- **本地 Grounding**: LocateAnything-3B-4bit (MLX) 已作为 optional `GroundingProvider` 接入 description target-to-bbox 路径；主 VLM 负责语义/目标描述，MarkRegistry/LocateAnything 负责屏幕绑定定位，所有结果仍进入 canonical ActionIR/Safety/HITL/Executor
+- **本地 Grounding**: LocateAnything-3B-4bit (MLX) 已作为 optional `GroundingProvider` 接入 description target-to-bbox 路径；主 VLM 负责语义/目标描述，MarkRegistry/LocateAnything 负责屏幕绑定定位，所有结果仍进入 canonical ActionIR/Safety/HITL/Executor；LocateAnything 默认输入图最长边为 `max_size=960`，可通过 provider 专属或通用配置灰度/回滚
 
 ---
 
@@ -28,7 +28,7 @@
 **当前状态**: LAG-1 至 LAG-4 已落地。默认 CI 和单测使用 fake provider，不依赖 MLX 或真实模型；真实 LocateAnything 通过 optional extra 启用。
 
 **已落地方案**:
-- `phone_agent/grounding/`: 新增 `GroundingProvider` contract、`ScreenBinding`、`GroundingResult`、fake provider、LocateAnything MLX lazy provider、`<box>` parser 与 provider factory。
+- `phone_agent/grounding/`: 新增 `GroundingProvider` contract、`ScreenBinding`、`GroundingResult`、fake provider、LocateAnything MLX lazy provider、`<box>` parser 与 provider factory；LocateAnything provider 会读取完整截图并按 `max_size` 等比例缩小后推理，默认 `960`。
 - `phone_agent/actions/adapter.py`: `IntentIR` 支持 `target_text_hint`、兼容别名 `target_text`、`target_role`、`target_intent`、`requires_grounding`；拒绝 provider/backend/命令类危险字段。
 - `phone_agent/actions/grounding.py`: `target_mark_id` 优先走 MarkRegistry；description hints 走 provider；screen/hash/provider-input hash 校验后编译为 canonical Tap/Double Tap/Long Press ActionIR。
 - `phone_agent/graph/nodes/plan.py`: 在 Plan parse 后执行 screen-bound grounding，失败 fail-closed，不回退为主 VLM 直接坐标；成功/失败 metadata 写入 state/trace/eval。
@@ -54,8 +54,11 @@
 .venv/bin/pip install -e ".[locateanything]"
 PHONE_AGENT_GROUNDING_PROVIDER=locateanything \
 PHONE_AGENT_LOCATEANYTHING_MODEL=models/LocateAnything-3B-4bit \
+PHONE_AGENT_LOCATEANYTHING_MAX_SIZE=960 \
 .venv/bin/python main.py --output-mode json_schema "打开设置"
 ```
+
+`PHONE_AGENT_LOCATEANYTHING_MAX_SIZE` 是 provider 专属覆盖项，优先于通用 `PHONE_AGENT_GROUNDING_MAX_SIZE`；运行时 config 中 `locateanything_max_size` 优先于 `grounding_max_size`。非法或非正整数回落默认 `960`。本地 preprocess benchmark 显示 `960` 相比 `1280` 在当前截图集上保持主要 bbox 一致性，同时显著降低延迟；naive 三段切分/并发切分未作为默认路径。
 
 ---
 

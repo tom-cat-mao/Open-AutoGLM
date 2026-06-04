@@ -13,11 +13,11 @@ execution_status: completed
 iteration: 1
 planner_mode: null
 revision_scope: null
-last_planner_update: "targeted revision for LocateAnything grounding fallback, DI, state/context, hash, MLX and parser acceptance"
+last_planner_update: "LocateAnything grounding max_size default tuned to 960 with provider-specific config/env override and docs sync"
 last_architect_review: "Architect review received; revise fallback semantics, provider DI boundary, mark-vs-description routing, schema/hash/privacy, optional MLX, and parser/test coverage."
 last_critic_verdict: APPROVE
 approved_for_execution: true
-notes: "LocateAnything grounding roadmap implemented with provider DI, optional MLX extra, screen-bound IntentIR grounding, trace/eval/context privacy, docs, and tests."
+notes: "LocateAnything grounding roadmap implemented with provider DI, optional MLX extra, screen-bound IntentIR grounding, trace/eval/context privacy, docs, tests, and max_size=960 preprocessing default."
 ```
 
 # Roadmap
@@ -27,6 +27,7 @@ notes: "LocateAnything grounding roadmap implemented with provider DI, optional 
 - ✅ Phase 1-14：已建立 LangGraph `Plan -> Execute -> Reflect` 主循环、设备抽象、HITL、trace/eval、context harness、canonical ActionIR、Adapter/Validator/Repair/Safety/Executor 与 prompt/output 兼容路径。
 - ✅ Phase 15：已完成 IntentIR/Grounding/Gesture/Verifier/Memory 方向基础流水线与约束沉淀；本轮仅保留有效不变量，当前方向收敛为 LocateAnything 本地 grounding provider 集成。
 - ✅ Phase LAG-1~LAG-4：已完成 LocateAnything/Fake `GroundingProvider` contract、optional MLX packaging、IntentIR target routing、screen/hash-bound grounding、canonical ActionIR integration、`<box>` parser、trace/eval/context privacy hardening、文档与测试。
+- ✅ Phase LAG-5：已基于本地 preprocess benchmark 将 LocateAnything 默认输入图最长边调整为 `max_size=960`，保留 `locateanything_max_size` / `PHONE_AGENT_LOCATEANYTHING_MAX_SIZE` 与通用 fallback 配置用于灰度和回滚；naive 三段切分/并发切分未进入默认路径。
 
 ## RALPLAN-DR 摘要
 
@@ -35,7 +36,7 @@ notes: "LocateAnything grounding roadmap implemented with provider DI, optional 
 1. **语义、定位、执行分层**：主 VLM/Planner 表达任务意图和目标描述；LocateAnything 只做屏幕绑定 target-to-bbox；Executor 只执行 validated + safety-approved canonical ActionIR。
 2. **精确 fail-closed**：target-required grounding 失败不得回退为主 VLM 直接坐标 Tap；只能 reobserve、fail-closed、Take_over、Wait，或仅在显式 `legacy_grounding_mode` 开关允许时走旧路径。
 3. **现有 mark path 与 description path 并列**：`target_mark_id` 优先走现有 MarkRegistry；`target_text_hint` / `target_role` / `target_intent` 走 LocateAnything；冲突、歧义或低置信度 fail-closed。
-4. **Provider DI 边界清晰**：`GroundingProvider.ground(screenshot, target, screen_binding, timeout) -> GroundingResult`；provider 从 graph config/runtime factory 注入，MLX lazy import，executor/tool schema 不暴露 provider。
+4. **Provider DI 边界清晰**：`GroundingProvider.ground(screenshot, target, screen_binding, timeout) -> GroundingResult`；provider 从 graph config/runtime factory 注入，MLX lazy import，executor/tool schema 不暴露 provider；LocateAnything 图像预处理参数仅通过 provider config/env 配置，不进入 tool schema。
 5. **观测可审计且默认脱敏**：只记录 run-local `screen_id`、raw screenshot hash、provider input image hash、bbox/center、latency、failure code 与脱敏 target hints；不记录 raw screenshot。
 
 ### Decision Drivers
@@ -65,7 +66,7 @@ notes: "LocateAnything grounding roadmap implemented with provider DI, optional 
 - **Alternatives**: prompt hardening；全量 marks/overlay；直接替换主 VLM 为 GUI agent。
 - **Why chosen**: 最小化架构迁移，最大化复用现有 Validator/Repair/Safety/HITL/Executor，同时把定位变成可审计的 context-harness 资产。
 - **Consequences**: 需要新增 provider interface、runtime factory、MLX optional extra/lazy import、state/context schema、hash 校验、parser 与 fake/integration 测试；短期配置复杂度上升。
-- **Follow-ups**: 基于 eval 决定是否加入 OCR/UIAutomator hints、bbox calibration、多目标 disambiguation 与 gesture compiler 扩展。
+- **Follow-ups**: 基于 eval 决定是否加入 OCR/UIAutomator hints、bbox calibration、多目标 disambiguation 与 gesture compiler 扩展；若继续探索裁剪策略，必须有可部署的候选选择策略和线程/模型资源安全评估，不默认使用 naive split。
 
 ## 已完成 LocateAnything Grounding Phase
 
@@ -127,6 +128,19 @@ notes: "LocateAnything grounding roadmap implemented with provider DI, optional 
   - trace/eval 可关联每次 grounding 与最终 ActionIR/安全决策，但只保存 hash、bbox、计数、错误码和脱敏 metadata。
   - integration/slow 真实 MLX 测试仅在 darwin/arm64 且模型存在时运行；默认 CI 不阻塞。
 
+### Phase LAG-5 LocateAnything Preprocess Tuning / Config Docs
+
+- **目标/根因**: 降低 LocateAnything 本地 grounding 延迟，同时保持 screen-bound provider contract 与 fail-closed 语义不变。根因是原始 1440×3200 截图虽会被 provider 等比例缩小，但默认 `max_size=1280` 在本地 benchmark 中延迟偏高；naive 纵向切分会丢上下文且候选选择不可部署。
+- **已修改文件**: `phone_agent/grounding/locateanything.py`, `phone_agent/grounding/factory.py`, `tests/actions/test_grounding_provider.py`, `README.md`, `docs/future-roadmap.md`, `AGENTS.md`, `.trae/rules/graph.mdc`。
+- **执行结果**:
+  1. LocateAnything provider 默认输入图最长边调整为 `DEFAULT_LOCATEANYTHING_MAX_SIZE = 960`；仍读取当前完整截图并等比例缩小，不默认切分。
+  2. factory 支持 `locateanything_max_size` / `PHONE_AGENT_LOCATEANYTHING_MAX_SIZE` provider 专属覆盖，并保留 `grounding_max_size` / `PHONE_AGENT_GROUNDING_MAX_SIZE` 通用 fallback；非法或非正整数回落默认值。
+  3. 本地 benchmark 显示 `full_max960` 在当前截图集上相对 baseline 保持主要 bbox 一致性且明显降低延迟；`vsplit_top20_parallel:3` 和 naive split 不作为默认路径。
+- **验收标准**:
+  - `.venv/bin/pytest tests/actions/test_grounding_provider.py -q` 通过，覆盖默认值、provider-specific/config/env override、非法值 fallback 与非正构造参数拒绝。
+  - `.venv/bin/pytest tests/actions -q` 通过；默认 CI 不依赖真实 MLX 模型。
+  - README、future-roadmap、AGENTS 与 TraeCLI graph rule 对默认 `960`、覆盖优先级和 split 不默认启用保持一致。
+
 # 约束 Checklist
 
 - [x] RALPLAN 规划阶段已完成并获 Critic APPROVE；本轮 execution 已按用户显式 autopilot/handoff 执行。
@@ -141,6 +155,7 @@ notes: "LocateAnything grounding roadmap implemented with provider DI, optional 
 - [x] bbox/center 坐标统一为 0-1000；tool/backend 是唯一 relative-to-absolute 转换点，防止 double conversion。
 - [x] 所有 grounding 输出进入 canonical `ActionIR -> Validator -> Repair -> Validator -> Safety/HITL -> Executor`；Repair 只修有限格式/别名且二次 Validator。
 - [x] `<box>` parser 校验 bbox ordering、range、min/max area、center deterministic、resize calibration。
+- [x] LocateAnything provider 默认输入图最长边为 `960`；优先用 `locateanything_max_size` / `PHONE_AGENT_LOCATEANYTHING_MAX_SIZE` 覆盖，兼容 `grounding_max_size` / `PHONE_AGENT_GROUNDING_MAX_SIZE` fallback；naive split/crop 不默认启用。
 - [x] MLX/LocateAnything 依赖是 optional extra；fake provider 覆盖默认单测；真实模型路径不会阻塞默认 CI。
 - [x] Launch app 仍以现有 registry 为准；未知 app/package/action fail-closed。
 - [x] 测试命令使用项目虚拟环境 `.venv/bin/pytest`；默认测试不依赖真实模型或外部服务。

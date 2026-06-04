@@ -16,13 +16,23 @@ from phone_agent.grounding.parser import GroundingParseError, parse_box_response
 from phone_agent.grounding.provider import GroundingResult, GroundingTarget, ScreenBinding
 
 
+DEFAULT_LOCATEANYTHING_MAX_SIZE = 960
+
+
 class LocateAnythingMLXProvider:
     """Lazy MLX wrapper for LocateAnything target-to-bbox grounding."""
 
     name = "locateanything_mlx"
     version = "3b-4bit"
 
-    def __init__(self, model_path: str | Path = "models/LocateAnything-3B-4bit", *, max_size: int = 1280) -> None:
+    def __init__(
+        self,
+        model_path: str | Path = "models/LocateAnything-3B-4bit",
+        *,
+        max_size: int = DEFAULT_LOCATEANYTHING_MAX_SIZE,
+    ) -> None:
+        if max_size <= 0:
+            raise ValueError("LocateAnything max_size must be positive")
         self.model_path = Path(model_path)
         self.max_size = max_size
         self._model = None

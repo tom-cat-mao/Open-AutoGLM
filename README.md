@@ -180,7 +180,11 @@ Open-AutoGLM 支持把主 VLM 的语义/意图与本地视觉定位拆开：主 
 # 可选：启用本地 LocateAnything provider
 export PHONE_AGENT_GROUNDING_PROVIDER=locateanything
 export PHONE_AGENT_LOCATEANYTHING_MODEL=models/LocateAnything-3B-4bit
+# 可选：覆盖 LocateAnything 输入图最长边；默认 960，1280 可回滚到更高质量/更慢路径
+export PHONE_AGENT_LOCATEANYTHING_MAX_SIZE=960
 ```
+
+LocateAnything provider 会先读取当前完整截图，再按最长边 `max_size` 等比例缩小后送入模型；默认 `max_size=960`，这是基于本地 benchmark 在速度和 bbox 一致性之间的折中。运行时可通过 config `locateanything_max_size`（优先）或 `grounding_max_size` 覆盖，也可通过环境变量 `PHONE_AGENT_LOCATEANYTHING_MAX_SIZE`（优先）或 `PHONE_AGENT_GROUNDING_MAX_SIZE` 灰度/回滚；非法或非正整数会回落默认值。
 
 安全边界：`target_mark_id` 优先走 MarkRegistry；`target_text_hint` 描述路径才调用 LocateAnything。target-required grounding 失败（provider 缺失、超时、hash mismatch、stale screen、低置信、bad bbox 等）会 fail-closed 为 `model_parse_failed`，不会回退为主 VLM 直接坐标 Tap。trace/eval 只记录 provider、bbox/center、screen/hash、latency、failure code 与脱敏 target summary，不记录原始截图或 raw target text。
 
@@ -266,6 +270,8 @@ python main.py --device-id 192.168.1.100:5555 --base-url http://localhost:8000/v
 | `PHONE_AGENT_LANG` | 语言 | `cn` |
 | `PHONE_AGENT_GROUNDING_PROVIDER` | 可选 grounding provider：`locateanything` / `fake` / `off` | `off` |
 | `PHONE_AGENT_LOCATEANYTHING_MODEL` | LocateAnything-3B-4bit 模型路径 | `models/LocateAnything-3B-4bit` |
+| `PHONE_AGENT_LOCATEANYTHING_MAX_SIZE` | LocateAnything 输入图最长边；provider 专属配置，优先于通用 grounding max size | `960` |
+| `PHONE_AGENT_GROUNDING_MAX_SIZE` | 通用 grounding 输入图最长边 fallback；当前仅 LocateAnything factory 消费 | `960` |
 
 ## 开发
 
