@@ -18,8 +18,10 @@ requests>=2.31.0
 # transformers>=5.0.0rc0
 
 # Optional Visual Grounding (LocateAnything on Apple Silicon MLX)
-# Install with: pip install -e ".[locateanything]"
-# mlx-vlm is kept out of default requirements so CI and non-MLX hosts do not need it.
+# mlx-vlm is intentionally kept out of default requirements so CI and non-MLX
+# hosts do not need Apple Silicon/Metal-only dependencies. Install a compatible
+# mlx-vlm build manually in the local MLX environment before running the real
+# LocateAnything provider or benchmark.
 
 # Development & Testing
 pytest>=7.0.0

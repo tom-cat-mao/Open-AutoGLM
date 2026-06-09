@@ -6,18 +6,18 @@
 
 ## 当前状态
 
-- **Phase 1-14**: ✅ 已完成当前 graph roadmap 中已批准的实现范围；Phase 11A/11B/11C 完成 Context & Observability Harness，Phase 12A/12B/12C 完成多格式模型输出适配，Phase 13A-13E 完成 Canonical Action IR & Safety Pipeline 阶梯架构，Phase 14A-14E 完成 LangGraph-native Context Engineering Harness；long-term memory 与 LangChain provider abstraction 仍待另行规划
+- **Phase 1-14 + Structured Grounding Hardening**: ✅ 已完成当前 graph roadmap 中已批准的实现范围；Phase 11A/11B/11C 完成 Context & Observability Harness，Phase 12A/12B/12C 完成结构化模型输出适配，Phase 13A-13E 完成 Canonical Action IR & Safety Pipeline 阶梯架构，Phase 14A-14E 完成 LangGraph-native Context Engineering Harness；后续 legacy text DSL 删除、mark binding、多候选 grounding fail-closed、错误分层与 bounded context window 已在 RALPLAN/Autopilot 流程中落地；long-term memory 与 LangChain provider abstraction 仍待另行规划
 - **测试**: 已恢复可执行 graph/actions/evals 回归测试与安装门禁；当前本地门禁为 `.venv/bin/pytest tests -q` 全绿
 - **架构**: LangGraph Plan-Execute-Reflect StateGraph
 - **图拓扑**: `plan → execute → [confirm|takeover|reflect|replan|end]`
 - **结构化 API**: 已提供 `PhoneAgent.run_structured()` / `RunResult`，`run()` 继续保持字符串返回兼容
 - **可观测性**: 已提供默认本地 JSONL trace，`RunResult` / eval JSON 可通过 `trace_id` 与 `trace_path` 关联 trace 文件；默认脱敏敏感截图、prompt/API key 与隐私文本
-- **短期 Context Harness**: 已支持 `context_mode=off|observe|inject`，默认 `observe`；记录 `screen_belief`、`action_outcome_summary`、`failure_memory`、`summarized_history` 与 context 指标，仅 `inject` 模式向 Plan 注入脱敏裁剪后的 context block；Phase 14 新增 request-only compaction、section selector 与 `prompt_version` 回滚
+- **短期 Context Harness**: 已支持 `context_mode=off|observe|inject`，默认 `observe`；记录 `screen_belief`、`action_outcome_summary`、`failure_memory`、`summarized_history`、`short_term_memory`、`action_ledger` 与 context 指标，仅 `inject` 模式向 Plan 注入脱敏裁剪后的 context block；request-only compaction 不改写 `state["messages"]`，保留最新截图并裁剪旧请求文本
 - **策略反思**: 已支持结构化 `reflection_verdict`、`failure_cause`、`suggested_strategy`，下一轮 plan 可读取失败原因和建议策略
-- **评测地基**: 已提供 `evals/run_eval.py --dry-run` smoke harness；当前统计结构化结果、HITL interrupt routing、trace 文件关联、retry count 与 failure cause histogram；不承诺跨进程 resume
+- **评测地基**: 已提供 `evals/run_eval.py --dry-run` smoke harness，以及 `bench/grounding/` LocateAnything benchmark 体系；当前支持 post-training raw JSONL 转 manifest、固定 suite、prediction JSONL、summary JSON、离线复评与 target type / area bucket 分组指标
 - **收益验证**: eval 已输出 `context_mode`、`context_strategy`、`prompt_version`、`selected_sections`、`messages_before/after`、`message_chars_before/after`、`approx_tokens_before/after`、`context_block_chars`、`context_truncated`、`failure_memory_hit_count`、`repeated_failure_count`，支持 off/observe/inject 对比
-- **输出适配**: `ModelConfig.output_mode=text_dsl|json_schema|tool_calls|auto`；XML/text DSL、JSON、已聚合 OpenAI `tool_calls` 统一归一到 canonical action，parse failure fail-closed，不绕过 HITL
-- **本地 Grounding**: LocateAnything-3B-4bit (MLX) 已作为 optional `GroundingProvider` 接入 description target-to-bbox 路径；主 VLM 负责语义/目标描述，MarkRegistry/LocateAnything 负责屏幕绑定定位，所有结果仍进入 canonical ActionIR/Safety/HITL/Executor；LocateAnything 默认输入图最长边为 `max_size=960`，可通过 provider 专属或通用配置灰度/回滚
+- **输出适配**: `ModelConfig.output_mode=json_schema|tool_calls|auto`；旧 text DSL 不再作为动作执行协议；JSON、已聚合 OpenAI `tool_calls` 与 IntentIR 统一归一到 canonical action，parse/adapter/validation failure fail-closed，不绕过 HITL
+- **本地 Grounding**: LocateAnything-3B-4bit (MLX) 已作为 optional `GroundingProvider` 接入 description target-to-bbox 路径；主 VLM 负责语义/目标描述，MarkRegistry/LocateAnything 负责屏幕绑定定位，所有结果仍进入 canonical ActionIR/Safety/HITL/Executor；LocateAnything 默认输入图最长边为 `max_size=960`，可通过 provider 专属或通用配置灰度/回滚；multi-box 仅 exactly one valid candidate 可执行，0/多个 valid candidate fail-closed 为 grounding 层错误
 
 ---
 
@@ -25,7 +25,7 @@
 
 **目标**: 将主 VLM 的语义规划与 GUI 元素定位分层，使用 LocateAnything-3B-4bit (MLX) 在本地执行 `screenshot + target_description -> bbox/center`，并保持现有 harness engineering 安全边界。
 
-**当前状态**: LAG-1 至 LAG-4 已落地。默认 CI 和单测使用 fake provider，不依赖 MLX 或真实模型；真实 LocateAnything 通过 optional extra 启用。
+**当前状态**: LAG-1 至 LAG-4 已落地。默认 CI 和单测使用 fake provider，不依赖 MLX 或真实模型；真实 LocateAnything 需要本机 Apple Silicon + Metal + `mlx-vlm` 环境。当前仓库没有 `pyproject.toml` optional extra，`mlx-vlm` 不进入默认 `requirements.txt`。
 
 **已落地方案**:
 - `phone_agent/grounding/`: 新增 `GroundingProvider` contract、`ScreenBinding`、`GroundingResult`、fake provider、LocateAnything MLX lazy provider、`<box>` parser 与 provider factory；LocateAnything provider 会读取完整截图并按 `max_size` 等比例缩小后推理，默认 `960`。
@@ -33,7 +33,7 @@
 - `phone_agent/actions/grounding.py`: `target_mark_id` 优先走 MarkRegistry；description hints 走 provider；screen/hash/provider-input hash 校验后编译为 canonical Tap/Double Tap/Long Press ActionIR。
 - `phone_agent/graph/nodes/plan.py`: 在 Plan parse 后执行 screen-bound grounding，失败 fail-closed，不回退为主 VLM 直接坐标；成功/失败 metadata 写入 state/trace/eval。
 - `phone_agent/graph/context.py` / `trace.py` / `evals/run_eval.py`: 新增 `grounding_observation` section、grounding latency/failure histogram 与 target hint 默认脱敏。
-- `setup.py`: MLX/LocateAnything 依赖迁移到 `.[locateanything]` optional extra。
+- `bench/grounding/`: 新增 LocateAnything benchmark 体系，支持 post-training raw JSONL 数据接入、0-1 bbox 转 0-1000 bbox、clean/trusted filtering、random/balanced sampling、统一 scoring/reporting、prediction JSONL 与 summary JSON。
 
 **安全边界**:
 - 主 VLM 不选择 provider/backend，不输出 ADB/shell/绝对像素；adapter/validator 对危险字段 fail-closed。
@@ -51,7 +51,6 @@
 **启用真实 provider**:
 
 ```bash
-.venv/bin/pip install -e ".[locateanything]"
 PHONE_AGENT_GROUNDING_PROVIDER=locateanything \
 PHONE_AGENT_LOCATEANYTHING_MODEL=models/LocateAnything-3B-4bit \
 PHONE_AGENT_LOCATEANYTHING_MAX_SIZE=960 \
@@ -60,17 +59,40 @@ PHONE_AGENT_LOCATEANYTHING_MAX_SIZE=960 \
 
 `PHONE_AGENT_LOCATEANYTHING_MAX_SIZE` 是 provider 专属覆盖项，优先于通用 `PHONE_AGENT_GROUNDING_MAX_SIZE`；运行时 config 中 `locateanything_max_size` 优先于 `grounding_max_size`。非法或非正整数回落默认 `960`。本地 preprocess benchmark 显示 `960` 相比 `1280` 在当前截图集上保持主要 bbox 一致性，同时显著降低延迟；naive 三段切分/并发切分未作为默认路径。
 
+**Benchmark 命令**:
+
+```bash
+.venv/bin/python -m bench.grounding.run_locateanything \
+  --post-training-data /Users/bytedance/post-training/data/grounding_os_atlas_aw_mobile/raw.jsonl \
+  --model /Users/bytedance/Open-AutoGLM/models/LocateAnything-3B-4bit \
+  --limit 1000 \
+  --seed 46 \
+  --sampling balanced \
+  --per-type-cap 120 \
+  --per-area-cap 400 \
+  --clean \
+  --exclude-weak-types \
+  --trusted-types-only \
+  --min-area-ratio 0.0005 \
+  --max-size 960 \
+  --manifest-output bench_output/grounding/aw_mobile_clean_trusted_1000_manifest.json \
+  --output bench_output/grounding/locateanything_aw_mobile_clean_trusted_1000_predictions.jsonl \
+  --summary-output bench_output/grounding/locateanything_aw_mobile_clean_trusted_1000_summary.json
+```
+
+固定 manifest 后用 `bench.grounding.score_predictions` 离线复评 predictions。正式比较不同 grounding 模型时，必须复用同一 manifest，并同时报告 clickability 指标（`center_hit_rate`）与 bbox 指标（`acc_iou_0_3`、`acc_iou_0_5`、`mean_iou`）。MLX/Metal 在沙箱或 headless 环境中可能不可用，真实 LocateAnything benchmark 需要在可访问 Metal 的本机 shell 运行。
+
 ---
 
 ## 已完成 MVP: LangGraph-native Context Engineering Harness (Phase 14)
 
 **目标**: 在保留现有 LangGraph `StateGraph` 的前提下，将 prompt contract、context selector、request-only compaction、trace/eval 指标收敛为可测试、可回滚、隐私安全的请求构造层。
 
-**当前状态**: Phase 14A-14E 已落地。默认 `context_mode="observe"` 不改变行为；`inject` 仍为显式 opt-in；`prompt_version="legacy_text_dsl"` 可回滚到旧 text DSL prompt。
+**当前状态**: Phase 14A-14E 已落地并在后续 hardening 中收敛。默认 `context_mode="observe"` 不改变行为；`inject` 仍为显式 opt-in；`prompt_version` 当前仅支持 `context_harness_v1`，旧 text DSL prompt 回滚路径已删除。
 
 **已落地方案**:
-- `phone_agent/config/prompts_zh.py` / `prompts_en.py`: 将 prompt 拆为 System Contract、Action Schema、Task Policies、Context Usage Rules 与单一 Output Contract，覆盖 `text_dsl|json_schema|tool_calls|auto`。
-- `phone_agent/config/__init__.py`: 新增 `PROMPT_VERSION="context_harness_v1"`、`LEGACY_PROMPT_VERSION="legacy_text_dsl"`、`get_prompt_version()` 与 `get_system_prompt(..., prompt_version=...)`。
+- `phone_agent/config/prompts_zh.py` / `prompts_en.py`: 将 prompt 拆为 System Contract、Action Schema、Task Policies、Context Usage Rules 与单一 Output Contract，覆盖 `json_schema|tool_calls|auto`。
+- `phone_agent/config/__init__.py`: 保留 `PROMPT_VERSION="context_harness_v1"`、`get_prompt_version()` 与 `get_system_prompt(..., prompt_version=...)`；不再支持 `LEGACY_PROMPT_VERSION` 或 `legacy_text_dsl`。
 - `phone_agent/graph/context.py`: 新增 `ContextSelectionResult`、`select_plan_context()`、`compact_messages_for_request()`，输出 section IDs、策略标签和消息/字符/近似 token 计数。
 - `phone_agent/graph/nodes/plan.py`: 在调用 `model_client.request()` 前执行 context selection 与 request-only compaction；不改写 `state["messages"]`。
 - `phone_agent/agent.py` / `evals/run_eval.py`: `RunResult` 与 eval JSON 输出 `context_strategy`、`prompt_version`、`selected_sections`、messages/chars/tokens 指标。
@@ -99,15 +121,15 @@ PHONE_AGENT_LOCATEANYTHING_MAX_SIZE=960 \
 
 ## 已完成 MVP: Model Output Adapter
 
-**目标**: 兼容不同 OpenAI-compatible provider 的输出格式，在不替换 LangGraph 状态机、不扩大设备执行面的前提下，将 XML/text DSL、JSON 与 OpenAI `tool_calls` 安全映射到内部 canonical action。
+**目标**: 兼容不同 OpenAI-compatible provider 的结构化输出格式，在不替换 LangGraph 状态机、不扩大设备执行面的前提下，将 JSON、IntentIR 与 OpenAI `tool_calls` 安全映射到内部 canonical action。
 
-**当前状态**: Phase 12A/12B/12C 已落地。默认 `output_mode="text_dsl"` 保持兼容；可通过 Python API 的 `ModelConfig(output_mode=...)` 选择 `json_schema`、`tool_calls` 或 `auto`。
+**当前状态**: Phase 12A/12B/12C 已落地并在后续 hardening 中收敛。默认 `output_mode="json_schema"`；Python API 的 `ModelConfig(output_mode=...)` 仅支持 `json_schema`、`tool_calls` 或 `auto`。
 
 **已落地方案**:
-- `phone_agent/model/client.py`: response normalizer、`<answer>` 优先解析、Markdown code fence/空白清理、`output_mode`、streaming `tool_calls` delta 聚合、parse metadata。
+- `phone_agent/model/client.py`: response normalizer、Markdown code fence/空白清理、`output_mode`、streaming `tool_calls` delta 聚合、parse metadata；旧 text DSL 响应被拒绝。
 - `phone_agent/actions/adapter.py`: provider-facing JSON / 已聚合 `tool_calls` 到 canonical action 的白名单 adapter，提供 `invalid_json`、`unknown_action`、`missing_field`、`unsafe_value`、`unsupported_tool_call` 等稳定错误码。
-- `phone_agent/actions/handler.py`: `do(...)` / `finish(...)` 统一使用 `ast.parse` + `ast.literal_eval`，Type/Type_Name 不再走脆弱字符串切片。
-- `plan_node` / `execute_node`: parse failure 返回 `action_parsed=None`、`failure_cause=model_parse_failed`，不会包装成成功 `finish`，也不会 dispatch tool。
+- `phone_agent/actions/handler.py`: `parse_action()` 仅保留为内部非执行 safe parser/helper，不再作为 plan→execute 的模型动作入口。
+- `plan_node` / `execute_node`: parse/adapter/validation/grounding/execution failure 返回 `action_parsed=None` 或 terminal failed `ActionResult`，不会包装成成功 `finish`，也不会 dispatch 未验证 tool。
 - `trace`: 记录 configured mode、detected format、adapter used、parse success/error code；`parse_error` 与隐私文本默认脱敏。
 
 **Canonical action schema**:
@@ -118,7 +140,7 @@ PHONE_AGENT_LOCATEANYTHING_MAX_SIZE=960 \
 - adapter 只生成 action dict，不直接执行工具；执行仍统一经过 `execute_node -> dispatch_tool()`。
 - JSON/tool_calls 只允许白名单 action 和字段；坐标保持 0-1000 相对值，绝对像素转换只在 tool 层。
 - 敏感 `Tap` 仍走 confirmation interrupt；`Take_over` 仍走 takeover interrupt；JSON/tool_calls 不自动授权。
-- malformed / empty / unsupported 输出 fail-closed 为 `model_parse_failed`，不会伪装成任务成功。
+- malformed / empty / unsupported 输出 fail-closed，并通过 `error_layer/error_code/recoverable/retry_policy` 分层归因，不会伪装成任务成功。
 
 **验证命令**:
 

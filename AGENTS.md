@@ -23,10 +23,11 @@
 | Context | `context_mode=off|observe|inject`，默认 observe；仅 inject 注入脱敏裁剪后的 context block；context 不得绕过 HITL |
 | Context Selection | `select_plan_context()` 只产出 section IDs、脱敏 context block 与计数指标；不得修改 Action IR、HITL、pending_execute、interrupt 或 safety route 字段 |
 | Request Compaction | `compact_messages_for_request()` 只能压缩传给 `model_client.request()` 的消息；不得改写 `state["messages"]`；必须保留最新截图并剥离历史图片 |
-| Prompt Version | 默认 `context_harness_v1`；`legacy_text_dsl` 保留旧 text DSL prompt 作为回滚路径；prompt schema 只约束格式，不授权执行 |
-| Output Adapter | `ModelConfig.output_mode=text_dsl|json_schema|tool_calls|auto`；JSON/tool_calls 必须经 adapter 白名单映射到 canonical action，parse failure fail-closed，不得绕过 HITL |
+| Prompt Version | 默认且唯一支持 `context_harness_v1`；prompt schema 只约束格式，不授权执行 |
+| Output Adapter | `ModelConfig.output_mode=json_schema|tool_calls|auto`；旧 text DSL 不再是执行协议；JSON/tool_calls 必须经 adapter 白名单映射到 canonical action，parse failure fail-closed，不得绕过 HITL |
 | Grounding | 主 VLM 只输出 IntentIR target hints；`target_mark_id` 优先走 MarkRegistry，`target_text_hint` 走 LocateAnything/Fake GroundingProvider；provider 由 graph config/env 注入，不暴露给 tool schema；LocateAnything 默认输入图最长边 `max_size=960`，可用 `locateanything_max_size` / `PHONE_AGENT_LOCATEANYTHING_MAX_SIZE` 灰度或回滚 |
-| Grounding Fail-Closed | target-required grounding 失败（provider 缺失、低置信、bad bbox、stale/hash mismatch 等）不得回退为主 VLM 坐标 Tap；只能 fail-closed/等待/接管/重新观测 |
+| Grounding Fail-Closed | target-required grounding 失败（provider 缺失、低置信、bad bbox、stale/hash mismatch、多候选歧义等）不得回退为主 VLM 坐标 Tap；只能 fail-closed/等待/接管/重新观测 |
+| Grounding Benchmark | 正式入口在 `bench/grounding/`；post-training bbox 0-1 必须转换为 0-1000 manifest；LocateAnything benchmark 用 `.venv/bin/python -m bench.grounding.run_locateanything`，固定 manifest 复评用 `.venv/bin/python -m bench.grounding.score_predictions`；真实 LocateAnything 依赖 Apple Silicon + Metal + mlx-vlm，`bench_output/` 默认不提交 |
 | Action IR Pipeline | 阶梯架构：Adapter → draft ActionIR → Validator → (Repair → Validator) → Safety Gate → Executor；Repair 不得在 Safety Gate 之后；Executor 只接收 validated + safety-approved IR |
 | Validator | 集中校验 action 白名单、必填字段、坐标 0-1000、Wait duration 正数且 ≤60s、dangerous fields；fail-closed |
 | Safety Gate | 纯决策层 `decide_safety()`，输出 `approved|confirm|takeover|rejected`；不 dispatch、不调用设备 |
@@ -38,7 +39,7 @@
 
 ## Version Management
 
-- Phase 完成后按项目规范更新 `.trae/rules/graph.mdc`，若改动架构/API/评测/trace/TraeCLI 编排，同步更新 `README.md`、`docs/future-roadmap.md` 与本文件；commit message：`feat(graph): <phase 目标>` 或 `feat(trae): <phase 目标>`。
+- Phase 完成后按项目规范更新 `.trae/rules/graph.mdc`，若改动架构/API/评测/trace/TraeCLI 编排，同步更新 `README.md`、`docs/future-roadmap.md`、`.trae/traecli.yaml`、相关 `.trae/rules/*.mdc` 与本文件；commit message：`feat(graph): <phase 目标>`、`feat(trae): <phase 目标>` 或 `feat(grounding): <benchmark/grounding 目标>`。
 - 禁止对 `main` 和 `feature/langgraph-refactor` 执行 `git push --force`。
 - 未经用户明确要求，不主动创建 commit。
 

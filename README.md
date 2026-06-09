@@ -108,7 +108,7 @@ from phone_agent.model import ModelConfig
 agent = PhoneAgent(model_config=ModelConfig(
     base_url="http://localhost:8000/v1",
     model_name="autoglm-phone-9b",
-    output_mode="text_dsl",  # text_dsl | json_schema | tool_calls | auto
+    output_mode="json_schema",  # json_schema | tool_calls | auto
 ))
 
 result = agent.run("打开淘宝搜索无线耳机")
@@ -146,7 +146,7 @@ Phase 14 将 prompt、context selector 与 context-window compaction 收敛为 L
 | 能力 | 行为 |
 |------|------|
 | Prompt contract | `get_system_prompt(lang, output_mode, prompt_version)` 由 System Contract + Action Schema + Policy + Context Rules + 单一输出契约组成 |
-| Prompt rollback | 默认 `prompt_version="context_harness_v1"`；`legacy_text_dsl` 保留旧 text DSL prompt 作为回滚路径 |
+| Prompt contract | 默认且唯一支持 `prompt_version="context_harness_v1"`；旧 text DSL prompt 不再作为回滚路径 |
 | Context selector | `select_plan_context()` 输出 `context_strategy`、`selected_sections`、脱敏 context block 与计数指标 |
 | Request compaction | `compact_messages_for_request()` 仅压缩传给 `model_client.request()` 的消息，不改写 `state["messages"]` |
 | 图片预算 | 历史图片从模型请求中剥离，最新用户截图保留；保持 `messages_reducer` append/replace 语义 |
@@ -156,16 +156,15 @@ Context selector 与 compaction 只能影响模型请求构造和脱敏观测指
 
 ### Model Output Adapter
 
-默认保持原有 text DSL 输出兼容，同时支持 provider-facing JSON 与已聚合 OpenAI `tool_calls`：
+默认使用结构化 JSON 输出，同时支持已聚合 OpenAI `tool_calls`；旧 text DSL 不再作为动作执行协议：
 
 | 模式 | 行为 |
 |------|------|
-| `text_dsl` | 默认模式；解析 `do(...)` / `finish(...)` 与 `<answer>...</answer>` 包裹输出 |
 | `json_schema` | 模型输出 JSON，经 adapter 映射为内部 canonical action |
 | `tool_calls` | 聚合 streaming tool_calls delta 后，经 adapter 映射为内部 canonical action |
-| `auto` | 自动识别 JSON，否则回退 text DSL |
+| `auto` | 自动识别结构化 JSON / tool_calls；不回退旧 text DSL 执行 |
 
-所有格式最终都进入统一执行路径：adapter 只生成 canonical action，不直接调用工具；真实执行仍由 `execute_node -> dispatch_tool()` 完成。JSON/tool_calls 仅允许白名单 action 与字段，坐标保持 0-1000 相对值并在 tool 层转换为绝对像素；未知 action、缺字段、越界坐标、非 literal/危险结构均 fail-closed 为 `model_parse_failed`，不会伪装成成功 `finish`，也不会绕过 confirm/takeover HITL。
+所有格式最终都进入统一执行路径：adapter 只生成 canonical action，不直接调用工具；真实执行仍由 `execute_node -> dispatch_tool()` 完成。JSON/tool_calls 仅允许白名单 action 与字段，坐标保持 0-1000 相对值并在 tool 层转换为绝对像素；未知 action、缺字段、越界坐标、非 literal/危险结构均 fail-closed，并按 `parse|adapter|validation` 等错误层记录，不会伪装成成功 `finish`，也不会绕过 confirm/takeover HITL。
 
 解析观测字段会进入 trace/eval 相关链路，包括 configured mode、detected format、adapter used、parse success/error code；`parse_error`、截图、API key、任务文本与隐私文本默认脱敏。
 
@@ -174,8 +173,9 @@ Context selector 与 compaction 只能影响模型请求构造和脱敏观测指
 Open-AutoGLM 支持把主 VLM 的语义/意图与本地视觉定位拆开：主 VLM 在 JSON/tool_calls 模式输出 `IntentIR`（例如 `target_text_hint` / `target_role` / `target_intent` 或 `target_mark_id`），本地 `GroundingProvider` 将当前截图 + 目标描述定位为 0-1000 bbox/center，再进入 canonical `ActionIR -> Validator -> Repair -> Validator -> Safety/HITL -> Executor`。
 
 ```bash
-# 默认测试不需要 MLX；真实 LocateAnything 仅作为可选 extra
-.venv/bin/pip install -e ".[locateanything]"
+# 默认测试不需要 MLX；真实 LocateAnything 需要 Apple Silicon + Metal + mlx-vlm
+# 当前仓库没有 pyproject optional extra，mlx-vlm 不在默认 requirements 中。
+# 如需运行真实 provider/benchmark，请在本机 MLX 环境中安装兼容版本的 mlx-vlm。
 
 # 可选：启用本地 LocateAnything provider
 export PHONE_AGENT_GROUNDING_PROVIDER=locateanything
@@ -186,7 +186,56 @@ export PHONE_AGENT_LOCATEANYTHING_MAX_SIZE=960
 
 LocateAnything provider 会先读取当前完整截图，再按最长边 `max_size` 等比例缩小后送入模型；默认 `max_size=960`，这是基于本地 benchmark 在速度和 bbox 一致性之间的折中。运行时可通过 config `locateanything_max_size`（优先）或 `grounding_max_size` 覆盖，也可通过环境变量 `PHONE_AGENT_LOCATEANYTHING_MAX_SIZE`（优先）或 `PHONE_AGENT_GROUNDING_MAX_SIZE` 灰度/回滚；非法或非正整数会回落默认值。
 
-安全边界：`target_mark_id` 优先走 MarkRegistry；`target_text_hint` 描述路径才调用 LocateAnything。target-required grounding 失败（provider 缺失、超时、hash mismatch、stale screen、低置信、bad bbox 等）会 fail-closed 为 `model_parse_failed`，不会回退为主 VLM 直接坐标 Tap。trace/eval 只记录 provider、bbox/center、screen/hash、latency、failure code 与脱敏 target summary，不记录原始截图或 raw target text。
+安全边界：`target_mark_id` 优先走 MarkRegistry；`target_text_hint` 描述路径才调用 LocateAnything。target-required grounding 失败（provider 缺失、超时、hash mismatch、stale screen、低置信、bad bbox、多候选歧义等）会 fail-closed 为 `error_layer=grounding`，不会回退为主 VLM 直接坐标 Tap。多 bbox 只有 exactly one valid candidate 才能执行；0 个或多个 valid candidate 都停止执行。trace/eval 只记录 provider、bbox/center、screen/hash、latency、failure code、candidate_count 与脱敏 target summary，不记录原始截图或 raw target text。
+
+### Grounding Benchmark
+
+正式 benchmark 代码位于 `bench/grounding/`，用于评估 `screenshot + target description -> bbox` 的 grounding 能力。当前已支持把 `/Users/bytedance/post-training/data/grounding_os_atlas_aw_mobile/raw.jsonl` 转为项目统一 manifest，并用 LocateAnything 跑固定 suite。
+
+核心文件：
+
+| 文件 | 作用 |
+|------|------|
+| `bench/grounding/datasets.py` | post-training JSONL 读取、0-1 bbox 转 0-1000 bbox、clean/trusted 过滤、balanced sampling |
+| `bench/grounding/scoring.py` | CI 可运行的纯 Python scoring primitives |
+| `bench/grounding/reporting.py` | prediction enrichment、summary、按 target type / area bucket 分组 |
+| `bench/grounding/run_locateanything.py` | LocateAnything 正式 benchmark runner |
+| `bench/grounding/score_predictions.py` | 固定 manifest 后离线复评 predictions |
+
+推荐先固定 manifest，再用同一 manifest 比较不同模型。当前 LocateAnything 主 suite：
+
+```bash
+.venv/bin/python -m bench.grounding.run_locateanything \
+  --post-training-data /Users/bytedance/post-training/data/grounding_os_atlas_aw_mobile/raw.jsonl \
+  --model /Users/bytedance/Open-AutoGLM/models/LocateAnything-3B-4bit \
+  --limit 1000 \
+  --seed 46 \
+  --sampling balanced \
+  --per-type-cap 120 \
+  --per-area-cap 400 \
+  --clean \
+  --exclude-weak-types \
+  --trusted-types-only \
+  --min-area-ratio 0.0005 \
+  --max-size 960 \
+  --manifest-output bench_output/grounding/aw_mobile_clean_trusted_1000_manifest.json \
+  --output bench_output/grounding/locateanything_aw_mobile_clean_trusted_1000_predictions.jsonl \
+  --summary-output bench_output/grounding/locateanything_aw_mobile_clean_trusted_1000_summary.json
+```
+
+MLX/Metal 需要可访问 GPU 的 macOS arm64 环境。若在沙箱、headless 或虚拟化环境中出现 `No Metal device available`，需要在非沙箱 shell 中运行同一命令。`bench_output/` 是本地结果目录，默认不作为源码提交对象。
+
+离线复评：
+
+```bash
+.venv/bin/python -m bench.grounding.score_predictions \
+  --manifest bench_output/grounding/aw_mobile_clean_trusted_1000_manifest.json \
+  --predictions bench_output/grounding/locateanything_aw_mobile_clean_trusted_1000_predictions.jsonl \
+  --output bench_output/grounding/locateanything_aw_mobile_clean_trusted_1000_scored.jsonl \
+  --summary-output bench_output/grounding/locateanything_aw_mobile_clean_trusted_1000_rescore_summary.json
+```
+
+关键指标包括 `parse_success_rate`、`success_rate`、`center_hit_rate`、`acc_iou_0_3`、`acc_iou_0_5`、`mean_iou`、`required_recall`、`precision`、`latency_ms_p50/p95`，summary 会同时输出 `by_target_type`、`by_area_bucket` 与 `parse_errors`。
 
 ## 模型部署
 
@@ -265,6 +314,7 @@ python main.py --device-id 192.168.1.100:5555 --base-url http://localhost:8000/v
 | `PHONE_AGENT_BASE_URL` | 模型 API 地址 | `http://localhost:8000/v1` |
 | `PHONE_AGENT_MODEL` | 模型名称 | `autoglm-phone-9b` |
 | `PHONE_AGENT_API_KEY` | API Key | `EMPTY` |
+| `PHONE_AGENT_OUTPUT_MODE` | 模型输出模式：`json_schema` / `tool_calls` / `auto` | `json_schema` |
 | `PHONE_AGENT_MAX_STEPS` | 最大步数 | `100` |
 | `PHONE_AGENT_DEVICE_ID` | 设备 ID | 自动检测 |
 | `PHONE_AGENT_LANG` | 语言 | `cn` |
@@ -315,10 +365,10 @@ python main.py --device-id 192.168.1.100:5555 --base-url http://localhost:8000/v
 | Project agents | `.trae/agents/*.md` |
 | Hooks | `.trae/hooks/ralplan.py`, `.trae/hooks/autopilot.py` |
 
-Autopilot 已完成 TraeCLI-native 编排：`ralplan -> execution -> ralph -> qa -> complete`。它复用 RALPLAN `planner` / `architect` / `critic`，并新增 `executor`、`debugger`、`test-engineer`、`designer`、`code-reviewer`、`security-reviewer` 六个项目级 stage agents；不迁移 `.omc` runtime，不修改 `.trae/traecli.yaml`，不改变 `phone_agent/` 业务运行时。涉及 prompt/context/grounding harness 的执行计划、验收矩阵与阶段状态以 `.trae/rules/graph.mdc` 为准；TraeCLI 文档和 AGENTS 约束必须同步更新。项目命令必须优先使用 `.venv/bin/python`、`.venv/bin/pytest`、`.venv/bin/pip`。
+Autopilot 已完成 TraeCLI-native 编排：`ralplan -> execution -> ralph -> qa -> complete`。它复用 RALPLAN `planner` / `architect` / `critic`，并新增 `executor`、`debugger`、`test-engineer`、`designer`、`code-reviewer`、`security-reviewer` 六个项目级 stage agents；不迁移 `.omc` runtime，不改变 `phone_agent/` 业务运行时。`.trae/traecli.yaml` 只承载项目级 TraeCLI 行为约束、hook 与 MCP 配置；业务执行协议以 `json_schema|tool_calls|auto` 为准，不再包含旧 text DSL 回滚。涉及 prompt/context/grounding harness 的执行计划、验收矩阵与阶段状态以 `.trae/rules/graph.mdc` 为准；TraeCLI 规则、README、docs 与 AGENTS 约束必须同步更新。项目命令必须优先使用 `.venv/bin/python`、`.venv/bin/pytest`、`.venv/bin/pip`。
 
 ```bash
-.venv/bin/pytest tests/trae/test_autopilot_hook.py -q
+.venv/bin/pytest tests -q
 ```
 
 ## 常见问题
