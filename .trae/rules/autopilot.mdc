@@ -90,7 +90,7 @@ max_stage_iterations: 10
 | `execution/solo` | 主 Agent 实现，按需调用 `designer` / `executor` / `debugger` / `test-engineer` 辅助 |
 | `execution/team` | TodoWrite 拆分后并行调用 `designer` / `executor` / `debugger` / `test-engineer`，主 Agent 负责最终编辑、合并与一致性 |
 | `ralph` | 并行只读审查：`code-reviewer`、`security-reviewer`、`architect`、`critic`；必要时调用 `debugger` / `test-engineer`；主 Agent 修复高置信问题 |
-| `qa` | `test-engineer` 辅助验证，`code-reviewer` / `security-reviewer` 最终抽查；主 Agent 汇总 diff/测试/临时产物/状态边界 |
+| `qa` | `test-engineer` 辅助验证，`code-reviewer` / `security-reviewer` 最终抽查；主 Agent 汇总 diff/测试/临时产物/状态边界；prompt/context harness 任务必须验证 `context_mode=off|observe|inject`、`prompt_version=context_harness_v1`、request-only compaction、trace/eval 隐私指标和 Safety/HITL 不变式，且不得恢复旧 text DSL prompt 回滚路径 |
 
 项目级 Autopilot stage agents 定义在 `.trae/agents/`：
 

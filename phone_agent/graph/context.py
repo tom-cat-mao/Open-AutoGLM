@@ -93,13 +93,13 @@ SAFE_CONTEXT_TEXT_KEYS = {
     "raw_screenshot_hash",
     "failure_code",
     "last_verdict",
+    "sha256",
 }
 SENSITIVE_PATTERN = re.compile(
     r"(1[3-9]\d{9}|[\w.+-]+@[\w-]+(?:\.[\w-]+)+|(?:订单|order)[\s:#：-]*[A-Za-z0-9-]{4,}|"
     r"(?:验证码|code)[\s:#：-]*\d{4,8}|(?:api[_-]?key|token|secret)[\s:=：]+[A-Za-z0-9._-]+|"
     r"sk-[A-Za-z0-9._-]+|Bearer\s+[A-Za-z0-9._-]+|eyJ[A-Za-z0-9._-]+\.[A-Za-z0-9._-]+\.[A-Za-z0-9._-]+|"
-    r"[赵钱孙李周吴郑王冯陈褚卫蒋沈韩杨朱秦尤许何吕施张孔曹严华金魏陶姜谢邹喻柏水窦章云苏潘葛奚范彭郎鲁韦昌马苗凤花方俞任袁柳鲍史唐费廉岑薛雷贺倪汤滕殷罗毕郝邬安常乐于时傅皮卞齐康伍余元卜顾孟平黄和穆萧尹][\u4e00-\u9fff]{1,2}|"
-    r"[A-Za-z0-9+/]{80,}={0,2})",
+    r"[A-Za-z0-9+/]{120,}={0,2})",
     re.IGNORECASE,
 )
 
@@ -182,12 +182,10 @@ def normalize_failure_cause(value: str | None) -> str:
 
 
 def redact_context_text(text: str | None) -> str:
-    """Redact identifiable UI text before state/trace/eval/prompt use."""
+    """Replace sensitive patterns inline, preserving surrounding text."""
     if not text:
         return ""
-    if SENSITIVE_PATTERN.search(str(text)):
-        return "<redacted>"
-    return str(text)
+    return SENSITIVE_PATTERN.sub("<redacted>", str(text))
 
 
 def _redacted_private_text(text: str) -> dict[str, Any]:
@@ -198,21 +196,31 @@ def _redacted_private_text(text: str) -> dict[str, Any]:
     }
 
 
-def sanitize_context_payload(payload: Any, key: str | None = None) -> Any:
-    """Recursively sanitize context payload independent of trace key names."""
+def sanitize_context_payload(payload: Any, key: str | None = None, *, inject: bool = False) -> Any:
+    """Recursively sanitize context payload.
+
+    When *inject* is True, only regex-matched sensitive patterns (phone numbers,
+    emails, API keys, verification codes, etc.) are redacted.  Model-generated
+    descriptive text is preserved so the plan LLM receives useful context.
+
+    When *inject* is False (default), all private-text keys are replaced with
+    a redaction stub for trace/state storage safety.
+    """
     normalized_key = (key or "").lower()
     if isinstance(payload, str):
+        if inject:
+            return redact_context_text(payload)
         if normalized_key in PRIVATE_CONTEXT_TEXT_KEYS:
             return _redacted_private_text(payload)
         if normalized_key and normalized_key not in SAFE_CONTEXT_TEXT_KEYS:
             return _redacted_private_text(payload)
         return redact_context_text(payload)
     if isinstance(payload, dict):
-        return {str(k): sanitize_context_payload(v, str(k)) for k, v in payload.items()}
+        return {str(k): sanitize_context_payload(v, str(k), inject=inject) for k, v in payload.items()}
     if isinstance(payload, list):
-        return [sanitize_context_payload(item, key) for item in payload]
+        return [sanitize_context_payload(item, key, inject=inject) for item in payload]
     if isinstance(payload, tuple):
-        return [sanitize_context_payload(item, key) for item in payload]
+        return [sanitize_context_payload(item, key, inject=inject) for item in payload]
     return payload
 
 
@@ -233,9 +241,7 @@ def build_screen_belief(
     safe_summary: Any = "unknown"
     if summary:
         summary_text, _ = trim_text(str(summary), DEFAULT_CONTEXT_BUDGET["screen_belief_summary_chars"])
-        # Reflection messages are model-generated free text derived from screenshots.
-        # Treat them as private by default so inject mode cannot recycle arbitrary UI text.
-        safe_summary = sanitize_context_payload(summary_text, "message")
+        safe_summary = sanitize_context_payload(summary_text, "summary")
     return {
         "current_app": current_app or "unknown",
         "summary": safe_summary or "unknown",
@@ -447,6 +453,85 @@ def build_plan_context_block(state: dict[str, Any], lang: str = "cn") -> tuple[s
     return block, {"context_block_chars": len(block), "context_truncated": truncated or component_truncated}
 
 
+def _build_inject_context_block(state: dict[str, Any], lang: str = "cn") -> tuple[str, dict[str, Any]]:
+    """Build a context block with inject-mode sanitization.
+
+    Reads raw state fields directly (reflection, action_parsed, action_result,
+    etc.) instead of pre-built sanitized payloads.  Only regex-matched sensitive
+    patterns are redacted so the plan LLM receives high-signal context.
+    """
+    budget = state.get("context_budget") or DEFAULT_CONTEXT_BUDGET
+    component_truncated = False
+    title = "** Short-term Context (belief, not authorization) **"
+    if lang != "en":
+        title = "** 短期上下文（仅为信念，不代表授权） **"
+
+    reflection = state.get("reflection") or ""
+    current_app = state.get("current_app") or "unknown"
+    screen_belief = state.get("screen_belief") or {}
+    summary_text = str(reflection or screen_belief.get("summary") or "unknown")
+    summary_text, summary_truncated = trim_text(summary_text, budget["screen_belief_summary_chars"])
+    if summary_truncated:
+        component_truncated = True
+
+    belief = {
+        "current_app": current_app,
+        "summary": sanitize_context_payload(summary_text, "summary", inject=True),
+        "loading_or_blocked": bool(screen_belief.get("loading_or_blocked")),
+        "unsafe_or_sensitive": bool(screen_belief.get("unsafe_or_sensitive")),
+        "confidence": str(screen_belief.get("confidence") or "unknown"),
+    }
+
+    action_parsed = state.get("action_parsed") or {}
+    action_result = state.get("action_result") or {}
+    outcome = {
+        "step_count": int(state.get("step_count") or 0),
+        "action": action_parsed.get("action") if isinstance(action_parsed, dict) else None,
+        "execution_success": action_result.get("success") if isinstance(action_result, dict) else None,
+        "result_message": sanitize_context_payload(
+            str(action_result.get("message") or ""), "message", inject=True,
+        ) if isinstance(action_result, dict) else "",
+        "reflection_verdict": state.get("reflection_verdict"),
+        "failure_cause": state.get("failure_cause"),
+        "suggested_strategy": state.get("suggested_strategy"),
+    }
+
+    failure_memory = sanitize_context_payload(
+        (state.get("failure_memory") or [])[-1:], "failure_memory", inject=True,
+    )
+    summarized_history = sanitize_context_payload(
+        str(state.get("summarized_history") or ""), "summarized_history", inject=True,
+    )
+    if len(str(summarized_history)) > budget["summarized_history_chars"]:
+        summarized_history, _ = trim_text(str(summarized_history), budget["summarized_history_chars"])
+        component_truncated = True
+
+    gui_memory = sanitize_context_payload(state.get("gui_memory"), "gui_memory", inject=True)
+    grounding_obs = sanitize_context_payload(
+        state.get("grounding_observation"), "grounding_observation", inject=True,
+    )
+
+    parts = []
+    for label, value in (
+        ("screen_belief", belief),
+        ("last_action_outcome", outcome),
+        ("latest_failure_memory", failure_memory),
+        ("summarized_history", summarized_history),
+        ("gui_memory", gui_memory),
+        ("grounding_observation", grounding_obs),
+    ):
+        if value:
+            parts.append(f"{label}: {json.dumps(value, ensure_ascii=False)}")
+
+    if not parts:
+        return "", {"context_block_chars": 0, "context_truncated": False}
+
+    block, truncated = trim_text(
+        title + "\n" + "\n".join(parts), budget["context_block_chars"]
+    )
+    return block, {"context_block_chars": len(block), "context_truncated": truncated or component_truncated}
+
+
 def select_plan_context(
     state: dict[str, Any], *, mode: str, lang: str = "cn", prompt_version: str | None = None
 ) -> ContextSelectionResult:
@@ -467,7 +552,7 @@ def select_plan_context(
             prompt_version=prompt_version or DEFAULT_PROMPT_VERSION,
             selected_sections=sections,
         )
-    block, metrics = build_plan_context_block(state, lang)
+    block, metrics = _build_inject_context_block(state, lang)
     return ContextSelectionResult(
         context_mode=normalized_mode,
         context_strategy="inject_redacted_block",

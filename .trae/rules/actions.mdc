@@ -9,9 +9,9 @@ globs: "phone_agent/actions/**/*.py,phone_agent/graph/tools/**/*.py,phone_agent/
 ## Action System Overview
 
 The action system has three layers:
-1. **Text parsing**: `parse_action()` converts safe DSL text -> canonical `dict` with `_metadata` key
-2. **Format adapter**: `adapt_json_action()` / `adapt_tool_calls()` convert JSON or aggregated provider tool calls -> the same canonical dict
-3. **Execution**: `execute_node` calls `dispatch_tool()` to route canonical actions to `@tool` functions in `phone_agent/graph/tools/`
+1. **Format adapter**: `adapt_json_action()` / `adapt_tool_calls()` convert JSON, IntentIR, or aggregated provider tool calls -> canonical `dict` with `_metadata` key
+2. **Validator / Repair / Safety**: canonical actions are validated, narrowly repaired when safe, validated again, then routed through Safety/HITL
+3. **Execution**: `execute_node` calls `dispatch_tool()` to route validated actions to `@tool` functions in `phone_agent/graph/tools/`
 
 ## Action Dictionary Format
 
@@ -25,11 +25,11 @@ All actions are plain dicts with a `_metadata` key:
 {"_metadata": "finish", "message": "Task completed successfully"}
 ```
 
-Helper functions:
-- `do(**kwargs)` -> adds `_metadata="do"`
-- `finish(**kwargs)` -> adds `_metadata="finish"`
+Provider-facing outputs must use `json_schema`, `tool_calls`, or `auto`; old text DSL model actions are rejected before execution.
 
 ## parse_action() / Safe DSL Parser (handler.py)
+
+`parse_action()` is retained only as an internal, non-execution safe parser/helper for legacy fixtures or developer utilities. It must not be used as the Plan → Execute model action entry point.
 
 Parsing rules:
 1. `do(...)` and `finish(...)` are parsed as Python expression AST calls.

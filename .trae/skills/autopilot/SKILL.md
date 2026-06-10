@@ -32,6 +32,6 @@ RALPLAN -> execution -> RALPH/verification -> qa -> complete
 - execution=team 时先拆任务并调度 `designer` / `executor` / `debugger` / `test-engineer`，主 Agent 负责最终编辑、合并与一致性。
 - RALPH/verification stage 并行调用 `code-reviewer`、`security-reviewer`、`architect`、`critic` 做只读审查，必要时调用 `debugger` / `test-engineer`。
 - QA stage 可调用 `test-engineer`、`code-reviewer`、`security-reviewer` 辅助，但主 Agent 负责最终汇总和完成信号。
-- prompt/context harness 任务的 QA 必须验证 `off|observe|inject`、`prompt_version` 回滚、request-only compaction、trace/eval 隐私指标和 Safety/HITL 不变式。
+- prompt/context harness 任务的 QA 必须验证 `off|observe|inject`、`prompt_version=context_harness_v1`、request-only compaction、trace/eval 隐私指标和 Safety/HITL 不变式；旧 text DSL prompt 回滚路径不得恢复。
 - 尊重 `.trae/modes/state.json` 的互斥锁，不抢占 active RALPLAN/team/RALPH。
 - 不主动 commit，不清理用户已有改动，不修改本任务批准范围外的业务代码。
