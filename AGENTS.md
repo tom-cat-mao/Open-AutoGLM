@@ -20,7 +20,7 @@
 | Tool DI | `execute_node` 从 graph config 注入 `device_factory`；tool schema 不得暴露 `device_factory` |
 | Trace | 默认本地 JSONL trace；`RunResult.trace_id/trace_path` 与 eval JSON 可关联 `.traces/{trace_id}.jsonl`；敏感截图/API key/隐私文本默认脱敏 |
 | Reflection | `reflect_node` 维护 `reflection_verdict/failure_cause/suggested_strategy`；Plan 下一轮必须能读取结构化失败原因和策略 |
-| Context | `context_mode=off|observe|inject`，默认 observe；仅 inject 注入脱敏裁剪后的 context block；context 不得绕过 HITL |
+| Context | `context_mode=off|observe|inject`，默认 observe；仅 inject 注入 regex-redacted、按 budget 裁剪的 context block（`build_plan_context_block`）；observe 仅产出 section IDs 不构建 block；context 不得绕过 HITL |
 | Context Selection | `select_plan_context()` 只产出 section IDs、脱敏 context block 与计数指标；不得修改 Action IR、HITL、pending_execute、interrupt 或 safety route 字段 |
 | Request Compaction | `compact_messages_for_request()` 只能压缩传给 `model_client.request()` 的消息；不得改写 `state["messages"]`；必须保留最新截图并剥离历史图片 |
 | Prompt Version | 默认且唯一支持 `context_harness_v1`；prompt schema 只约束格式，不授权执行 |
@@ -33,7 +33,7 @@
 | Safety Gate | 纯决策层 `decide_safety()`，输出 `approved|confirm|takeover|rejected`；不 dispatch、不调用设备 |
 | Repair | 仅修复 metadata 大小写、action 别名；禁止猜坐标/动作/隐私文本；repair 后必须二次 Validator |
 | Launch Registry | `get_app_registry_summary()` 以 `APP_PACKAGES` 为单一来源；Validator 对未知 Launch app fail-closed；registry 中每个名称必须可被 `normalize_app_name()` 归一化 |
-| Context Privacy | `screen_belief.summary` 默认按 private text 处理（redacted metadata），防止 reflection 自由文本回注入 prompt；`build_plan_context_block()` 注入前二次 sanitize |
+| Context Privacy | 采用 consumer-aware 脱敏：state 写入路径只 regex 替换（手机号/邮箱/订单号/验证码/API key/JWT/base64 等），不 stub；stub 策略仅在 `sanitize_context_payload(consumer="checkpoint")` 触发，由 `phone_agent/checkpoint/serde.py::RedactingSerializer` 在 checkpoint egress 调用；`build_plan_context_block()` 是 inject 模式的唯一 builder，从 raw state 字段重建并 regex 替换；`inject: bool` 保留为向后兼容别名（`True` ≡ `consumer="inject"`、`False` ≡ `consumer="checkpoint"`），新代码应使用 `consumer=` 参数；context 不绕过 HITL |
 | Streaming Stdout | `ModelConfig.stream_stdout=False` 默认关闭；reasoning/content 不打印到 stdout；仅显式 opt-in 才输出 |
 | URL Redaction | `redact_url_for_display()` 隐藏 URL userinfo 和敏感 query 参数（api_key/token/secret 等）；所有 stdout 路径使用脱敏 URL |
 

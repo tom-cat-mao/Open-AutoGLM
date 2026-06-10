@@ -17,7 +17,6 @@ from phone_agent.graph.context import (
     get_context_mode,
     sanitize_context_payload,
     select_plan_context,
-    should_inject_context,
 )
 from phone_agent.graph.observation import build_observation
 from phone_agent.graph.trace import emit_trace
@@ -30,14 +29,14 @@ if TYPE_CHECKING:
     from phone_agent.graph.state import AgentState
 
 
-def _build_reflection_context(state: "AgentState", *, inject: bool = False) -> str:
+def _build_reflection_context(state: "AgentState", *, consumer: str = "inject") -> str:
     reflection = state.get("reflection")
     verdict = state.get("reflection_verdict")
     cause = state.get("failure_cause")
     strategy = state.get("suggested_strategy")
     parts = []
     if reflection:
-        safe_reflection = sanitize_context_payload(reflection, "reflection", inject=inject)
+        safe_reflection = sanitize_context_payload(reflection, "reflection", consumer=consumer)
         parts.append(f"** Reflection **\n\n{safe_reflection}")
     structured = []
     if verdict:
@@ -412,7 +411,7 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
         )
     else:
         screen_info = MessageBuilder.build_screen_info(current_app)
-        reflection_context = _build_reflection_context(state, inject=should_inject_context(context_mode))
+        reflection_context = _build_reflection_context(state)
         if reflection_context:
             text_content = f"** Screen Info **\n\n{screen_info}\n\n{reflection_context}"
         else:

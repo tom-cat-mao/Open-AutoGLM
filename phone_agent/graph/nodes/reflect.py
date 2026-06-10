@@ -153,8 +153,8 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
     else:
         system_prompt = REFLECT_SYSTEM_PROMPT_CN
 
-    action_str = str(sanitize_context_payload(action_parsed)) if action_parsed else "None"
-    result_str = str(sanitize_context_payload(action_result)) if action_result else "None"
+    action_str = str(sanitize_context_payload(action_parsed, consumer="reflect_prompt")) if action_parsed else "None"
+    result_str = str(sanitize_context_payload(action_result, consumer="reflect_prompt")) if action_result else "None"
 
     screen_info = MessageBuilder.build_screen_info(current_app)
     if lang == "en":

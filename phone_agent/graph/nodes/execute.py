@@ -349,7 +349,7 @@ def execute_node(state: "AgentState", config: RunnableConfig) -> dict:
         state,
         "execute",
         "gesture_compiled",
-        {"gesture": sanitize_context_payload(gesture_trace), "coordinate_space": "relative_0_1000"},
+        {"gesture": sanitize_context_payload(gesture_trace, consumer="trace_payload"), "coordinate_space": "relative_0_1000"},
     )
     try:
         result = dispatch_tool(

@@ -34,7 +34,7 @@ class Mark:
 
     def to_trace_dict(self) -> dict[str, Any]:
         data = asdict(self)
-        data["text_summary"] = sanitize_context_payload(self.text_summary or "", "message")
+        data["text_summary"] = sanitize_context_payload(self.text_summary or "", "message", consumer="checkpoint")
         return data
 
 

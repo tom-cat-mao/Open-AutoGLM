@@ -12,7 +12,7 @@
 - **图拓扑**: `plan → execute → [confirm|takeover|reflect|replan|end]`
 - **结构化 API**: 已提供 `PhoneAgent.run_structured()` / `RunResult`，`run()` 继续保持字符串返回兼容
 - **可观测性**: 已提供默认本地 JSONL trace，`RunResult` / eval JSON 可通过 `trace_id` 与 `trace_path` 关联 trace 文件；默认脱敏敏感截图、prompt/API key 与隐私文本
-- **短期 Context Harness**: 已支持 `context_mode=off|observe|inject`，默认 `observe`；记录 `screen_belief`、`action_outcome_summary`、`failure_memory`、`summarized_history`、`short_term_memory`、`action_ledger` 与 context 指标，仅 `inject` 模式向 Plan 注入脱敏裁剪后的 context block；request-only compaction 不改写 `state["messages"]`，保留最新截图并裁剪旧请求文本
+- **短期 Context Harness**: 已支持 `context_mode=off|observe|inject`，默认 `observe`；记录 `screen_belief`、`action_outcome_summary`、`failure_memory`、`summarized_history`、`short_term_memory`、`action_ledger` 与 context 指标；仅 `inject` 模式通过单一 `build_plan_context_block()` 从 raw state 字段重建并 regex 替换敏感文本后注入 Plan；state 写入路径只做 regex 替换、不 stub，stub 策略仅在 `phone_agent/checkpoint/serde.py::RedactingSerializer` 的 checkpoint egress 触发；request-only compaction 不改写 `state["messages"]`，保留最新截图并裁剪旧请求文本
 - **策略反思**: 已支持结构化 `reflection_verdict`、`failure_cause`、`suggested_strategy`，下一轮 plan 可读取失败原因和建议策略
 - **评测地基**: 已提供 `evals/run_eval.py --dry-run` smoke harness，以及 `bench/grounding/` LocateAnything benchmark 体系；当前支持 post-training raw JSONL 转 manifest、固定 suite、prediction JSONL、summary JSON、离线复评与 target type / area bucket 分组指标
 - **收益验证**: eval 已输出 `context_mode`、`context_strategy`、`prompt_version`、`selected_sections`、`messages_before/after`、`message_chars_before/after`、`approx_tokens_before/after`、`context_block_chars`、`context_truncated`、`failure_memory_hit_count`、`repeated_failure_count`，支持 off/observe/inject 对比
@@ -88,15 +88,19 @@ PHONE_AGENT_LOCATEANYTHING_MAX_SIZE=960 \
 
 **目标**: 在保留现有 LangGraph `StateGraph` 的前提下，将 prompt contract、context selector、request-only compaction、trace/eval 指标收敛为可测试、可回滚、隐私安全的请求构造层。
 
-**当前状态**: Phase 14A-14E 已落地并在后续 hardening 中收敛。默认 `context_mode="observe"` 不改变行为；`inject` 仍为显式 opt-in；`prompt_version` 当前仅支持 `context_harness_v1`，旧 text DSL prompt 回滚路径已删除。
+**当前状态**: Phase 14A-14E 已落地并在后续 hardening 中收敛；后续引入 consumer-aware 脱敏重构：state 写入路径只 regex 替换、不 stub，`build_plan_context_block()` 收敛为 inject 模式唯一 builder，从 raw state 字段重建；stub 策略仅在 `phone_agent/checkpoint/serde.py::RedactingSerializer` 的 checkpoint egress 触发；`sanitize_context_payload()` 接受 `consumer=` 参数，`inject: bool` 保留为向后兼容别名。默认 `context_mode="observe"` 不改变行为；`inject` 仍为显式 opt-in；`prompt_version` 当前仅支持 `context_harness_v1`，旧 text DSL prompt 回滚路径已删除。
 
 **已落地方案**:
 - `phone_agent/config/prompts_zh.py` / `prompts_en.py`: 将 prompt 拆为 System Contract、Action Schema、Task Policies、Context Usage Rules 与单一 Output Contract，覆盖 `json_schema|tool_calls|auto`。
 - `phone_agent/config/__init__.py`: 保留 `PROMPT_VERSION="context_harness_v1"`、`get_prompt_version()` 与 `get_system_prompt(..., prompt_version=...)`；不再支持 `LEGACY_PROMPT_VERSION` 或 `legacy_text_dsl`。
-- `phone_agent/graph/context.py`: 新增 `ContextSelectionResult`、`select_plan_context()`、`compact_messages_for_request()`，输出 section IDs、策略标签和消息/字符/近似 token 计数。
-- `phone_agent/graph/nodes/plan.py`: 在调用 `model_client.request()` 前执行 context selection 与 request-only compaction；不改写 `state["messages"]`。
+- `phone_agent/graph/context.py`: 新增 `ContextSelectionResult`、`select_plan_context()`、`compact_messages_for_request()`，输出 section IDs、策略标签和消息/字符/近似 token 计数；`sanitize_context_payload(consumer=...)` 按 `CONSUMER_POLICY` 选择 regex-only 或 stub；`build_plan_context_block()` 是 inject 模式唯一 builder，从 `reflection`、`action_parsed`、`action_result`、`screen_belief`、`failure_memory`、`summarized_history`、`gui_memory`、`grounding_observation` 等 raw 字段重建并 regex 替换。
+- `phone_agent/checkpoint/serde.py`: 新增 `RedactingSerializer(inner=...)`，在 `dumps` / `dumps_typed` 时调用 `sanitize_context_payload(consumer="checkpoint")`，让未来接入 `SqliteSaver`/`PostgresSaver` 时 checkpoint 自动 stub `PRIVATE_CONTEXT_TEXT_KEYS` 对应字段、regex 替换其余字符串；`loads` / `loads_typed` 透传。
+- `phone_agent/graph/nodes/plan.py`: 在调用 `model_client.request()` 前执行 context selection 与 request-only compaction；不改写 `state["messages"]`；reflect 上下文通过 `_build_reflection_context(consumer="inject")` 构造。
+- `phone_agent/graph/nodes/reflect.py`: reflect prompt 使用 `sanitize_context_payload(consumer="reflect_prompt")` 对 `action_parsed` / `action_result` 做 regex-only 替换。
+- `phone_agent/graph/nodes/execute.py`: gesture trace 使用 `sanitize_context_payload(consumer="trace_payload")`。
+- `phone_agent/graph/marks.py`: mark `text_summary` 走 `sanitize_context_payload(consumer="checkpoint")` 进行 stub，避免任意屏幕文本经 `mark_registry.prompt_block()` 泄漏进 Plan prompt。
 - `phone_agent/agent.py` / `evals/run_eval.py`: `RunResult` 与 eval JSON 输出 `context_strategy`、`prompt_version`、`selected_sections`、messages/chars/tokens 指标。
-- `phone_agent/graph/trace.py`: trace 持久化保持脱敏；raw prompt、raw context、截图、任务文本与隐私文本不落盘。
+- `phone_agent/graph/trace.py`: trace 持久化保持独立 `sanitize_for_trace` 策略；raw prompt、raw context、截图、任务文本与隐私文本不落盘。
 
 **核心不变量**:
 - 不迁移到 LangChain Agent，不改变 `plan → execute → reflect` 图拓扑。
@@ -205,20 +209,20 @@ provider output
 
 **目标**: 在不提前进入长期记忆的前提下，先建立可观测、可评测、可回滚的短期 context 能力。
 
-**当前状态**: Phase 11A/11B/11C 已落地。默认 `context_mode="observe"`，只记录 context state、trace/eval 指标，不向 Plan 注入；仅显式设置 `inject` 时注入脱敏、裁剪后的 context block。
+**当前状态**: Phase 11A/11B/11C 已落地。默认 `context_mode="observe"`，只记录 context state、trace/eval 指标，不向 Plan 注入；仅显式设置 `inject` 时通过 `build_plan_context_block()` 从 raw state 字段重建并 regex 替换敏感文本后注入；state 写入路径只做 regex 替换、不 stub，stub 策略仅在 checkpoint egress 触发。
 
 **已落地方案**:
-- `phone_agent/graph/context.py`: context mode、failure taxonomy、脱敏、预算裁剪、context block 构造与 metrics。
+- `phone_agent/graph/context.py`: context mode、failure taxonomy、consumer-aware 脱敏（`sanitize_context_payload(consumer=...)` 按 `CONSUMER_POLICY` 选择 regex-only 或 stub）、预算裁剪、context block 构造与 metrics。
 - `AgentState`: `screen_belief`、`action_outcome_summary`、`failure_memory`、`summarized_history`、`context_budget`、`context_truncated`、`context_block_chars`、`failure_memory_hit_count`、`repeated_failure_count`。
 - `plan_node`: observe 不注入，inject 才注入 context block。
-- `execute_node` / `reflect_node`: 生成 action outcome、screen belief、failure memory 与 history summary。
+- `execute_node` / `reflect_node`: 生成 action outcome、screen belief、failure memory 与 history summary；写入路径只做 regex 替换、不 stub。
 - `RunResult` / eval: 输出 context 可比指标，支持 `--context-mode off|observe|inject`。
 
 **默认预算与隐私**:
 - failure memory 最近 3 条，action outcome 最近 1 条。
 - screen belief 摘要 300 字符，history 摘要 800 字符，context block 1500 字符。
 - 裁剪优先级：当前 screen belief > 最近 action outcome > latest failure memory > summarized history。
-- 姓名、手机号、邮箱、订单号、验证码、API key/token、长 base64/JWT 等默认脱敏；context/memory 不绕过 HITL/confirm/takeover。
+- state 写入路径对手机号、邮箱、订单号、验证码、API key/token、长 base64/JWT 等做 regex 替换；stub 策略仅在 `RedactingSerializer` checkpoint egress 触发；context/memory 不绕过 HITL/confirm/takeover。
 
 **验证命令**:
 

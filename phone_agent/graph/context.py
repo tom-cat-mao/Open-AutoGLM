@@ -53,6 +53,10 @@ FAILURE_CAUSE_ALIASES = {
     "coordinate_or_click_offset": "coordinate_or_tap_offset",
     "network": "network_or_loading",
 }
+# Key-level stub policy is CHECKPOINT-CONSUMER ONLY.
+# At state write time, NO stub is applied — only regex inline redaction.
+# Stub-by-key fires only when sanitize_context_payload is invoked with
+# consumer="checkpoint" (e.g. from the RedactingSerializer at checkpoint egress).
 PRIVATE_CONTEXT_TEXT_KEYS = {
     "visible_text",
     "observed_text",
@@ -76,6 +80,9 @@ PRIVATE_CONTEXT_TEXT_KEYS = {
     "error",
     "reflection",
 }
+# Backward-compat alias: some callers used SAFE_CONTEXT_TEXT_KEYS to ask
+# "will this key survive inject=False sanitization?". With the consumer model
+# the answer is always "yes at write time; only stubbed at checkpoint egress".
 SAFE_CONTEXT_TEXT_KEYS = {
     "summary",
     "current_app",
@@ -95,6 +102,15 @@ SAFE_CONTEXT_TEXT_KEYS = {
     "last_verdict",
     "sha256",
 }
+CONSUMER_POLICY: dict[str, str] = {
+    "inject": "regex",
+    "reflect_prompt": "regex",
+    "trace_payload": "regex",
+    "checkpoint": "stub",
+    "default": "regex",
+}
+ContextConsumer = str
+
 SENSITIVE_PATTERN = re.compile(
     r"(1[3-9]\d{9}|[\w.+-]+@[\w-]+(?:\.[\w-]+)+|(?:订单|order)[\s:#：-]*[A-Za-z0-9-]{4,}|"
     r"(?:验证码|code)[\s:#：-]*\d{4,8}|(?:api[_-]?key|token|secret)[\s:=：]+[A-Za-z0-9._-]+|"
@@ -188,6 +204,11 @@ def redact_context_text(text: str | None) -> str:
     return SENSITIVE_PATTERN.sub("<redacted>", str(text))
 
 
+# Canonical name for regex-only sanitization. `redact_context_text` is kept as
+# an alias for backward compatibility.
+sanitize_context_text_regex = redact_context_text
+
+
 def _redacted_private_text(text: str) -> dict[str, Any]:
     return {
         "redacted": True,
@@ -196,31 +217,71 @@ def _redacted_private_text(text: str) -> dict[str, Any]:
     }
 
 
-def sanitize_context_payload(payload: Any, key: str | None = None, *, inject: bool = False) -> Any:
-    """Recursively sanitize context payload.
+def _resolve_consumer(*, consumer: str | None, inject: bool | None) -> str:
+    """Map (consumer, inject) to a canonical consumer tag.
 
-    When *inject* is True, only regex-matched sensitive patterns (phone numbers,
-    emails, API keys, verification codes, etc.) are redacted.  Model-generated
-    descriptive text is preserved so the plan LLM receives useful context.
-
-    When *inject* is False (default), all private-text keys are replaced with
-    a redaction stub for trace/state storage safety.
+    The *inject* bool is a deprecated alias retained for backward compatibility:
+    inject=True maps to consumer="inject", inject=False maps to
+    consumer="checkpoint". If both are given, *consumer* wins.
     """
+    if consumer:
+        return consumer
+    if inject is True:
+        return "inject"
+    if inject is False:
+        return "checkpoint"
+    return "default"
+
+
+def sanitize_context_payload(
+    payload: Any,
+    key: str | None = None,
+    *,
+    inject: bool | None = None,
+    consumer: str | None = None,
+) -> Any:
+    """Recursively sanitize context payload per *consumer* policy.
+
+    Consumer policy (see ``CONSUMER_POLICY``):
+
+    * ``"inject"`` / ``"reflect_prompt"`` / ``"trace_payload"`` / default:
+      every string is regex-redacted (``redact_context_text``); key-level
+      classification is ignored.
+    * ``"checkpoint"``: private-text keys are replaced with a redaction stub
+      (``{redacted, length, sha256}``); safe keys are regex-redacted.  This
+      policy is used by ``RedactingSerializer`` at checkpoint egress.
+
+    The legacy ``inject: bool`` parameter is accepted as a backward-compatible
+    alias: ``inject=True`` ≡ ``consumer="inject"``, ``inject=False`` ≡
+    ``consumer="checkpoint"``.  Passing neither yields the ``default`` policy,
+    which is regex-only.
+    """
+    resolved = _resolve_consumer(consumer=consumer, inject=inject)
+    policy = CONSUMER_POLICY.get(resolved, CONSUMER_POLICY["default"])
+    return _sanitize_payload_impl(payload, key, policy=policy)
+
+
+def _sanitize_payload_impl(payload: Any, key: str | None, *, policy: str) -> Any:
     normalized_key = (key or "").lower()
     if isinstance(payload, str):
-        if inject:
-            return redact_context_text(payload)
-        if normalized_key in PRIVATE_CONTEXT_TEXT_KEYS:
+        if policy == "stub" and normalized_key in PRIVATE_CONTEXT_TEXT_KEYS:
             return _redacted_private_text(payload)
-        if normalized_key and normalized_key not in SAFE_CONTEXT_TEXT_KEYS:
+        if (
+            policy == "stub"
+            and normalized_key
+            and normalized_key not in SAFE_CONTEXT_TEXT_KEYS
+        ):
             return _redacted_private_text(payload)
         return redact_context_text(payload)
     if isinstance(payload, dict):
-        return {str(k): sanitize_context_payload(v, str(k), inject=inject) for k, v in payload.items()}
+        return {
+            str(k): _sanitize_payload_impl(v, str(k), policy=policy)
+            for k, v in payload.items()
+        }
     if isinstance(payload, list):
-        return [sanitize_context_payload(item, key, inject=inject) for item in payload]
+        return [_sanitize_payload_impl(item, key, policy=policy) for item in payload]
     if isinstance(payload, tuple):
-        return [sanitize_context_payload(item, key, inject=inject) for item in payload]
+        return [_sanitize_payload_impl(item, key, policy=policy) for item in payload]
     return payload
 
 
@@ -237,11 +298,18 @@ def build_screen_belief(
     unsafe_or_sensitive: bool = False,
     confidence: str = "medium",
 ) -> dict[str, Any]:
-    """Build a conservative short-term screen belief."""
+    """Build a short-term screen belief.
+
+    ``summary`` is regex-redacted (``sanitize_context_text_regex``) so that
+    phone numbers / emails / API keys echoed from screenshots cannot leak
+    through the prompt reflection loop.  No key-level stub is applied — stub
+    policy is reserved for the checkpoint consumer
+    (``RedactingSerializer``).
+    """
     safe_summary: Any = "unknown"
     if summary:
         summary_text, _ = trim_text(str(summary), DEFAULT_CONTEXT_BUDGET["screen_belief_summary_chars"])
-        safe_summary = sanitize_context_payload(summary_text, "summary")
+        safe_summary = sanitize_context_text_regex(summary_text)
     return {
         "current_app": current_app or "unknown",
         "summary": safe_summary or "unknown",
@@ -253,23 +321,28 @@ def build_screen_belief(
 
 
 def build_action_outcome_summary(state: dict[str, Any]) -> dict[str, Any]:
-    """Build a sanitized action outcome summary from graph state."""
+    """Build an action outcome summary from graph state.
+
+    Free-text fields (``result_message_summary``) are regex-redacted.  No
+    key-level stub is applied at write time; stub policy is reserved for the
+    checkpoint consumer (``RedactingSerializer``).
+    """
     action = state.get("action_parsed") or {}
     result = state.get("action_result") or {}
-    return sanitize_context_payload(
-        {
-            "step_count": int(state.get("step_count") or 0),
-            "action": action.get("action") if isinstance(action, dict) else None,
-            "action_metadata": action.get("_metadata") if isinstance(action, dict) else None,
-            "execution_success": result.get("success") if isinstance(result, dict) else None,
-            "should_finish": result.get("should_finish") if isinstance(result, dict) else None,
-            "result_message_summary": result.get("message") if isinstance(result, dict) else None,
-            "current_app": state.get("current_app") or "unknown",
-            "reflection_verdict": state.get("reflection_verdict"),
-            "failure_cause": state.get("failure_cause"),
-            "suggested_strategy": state.get("suggested_strategy"),
-        }
-    )
+    raw_message = result.get("message") if isinstance(result, dict) else None
+    return {
+        "step_count": int(state.get("step_count") or 0),
+        "action": action.get("action") if isinstance(action, dict) else None,
+        "action_metadata": action.get("_metadata") if isinstance(action, dict) else None,
+        "execution_success": result.get("success") if isinstance(result, dict) else None,
+        "should_finish": result.get("should_finish") if isinstance(result, dict) else None,
+        "result_message_summary": sanitize_context_text_regex(raw_message)
+        if isinstance(raw_message, str) else raw_message,
+        "current_app": state.get("current_app") or "unknown",
+        "reflection_verdict": state.get("reflection_verdict"),
+        "failure_cause": state.get("failure_cause"),
+        "suggested_strategy": state.get("suggested_strategy"),
+    }
 
 
 def is_failed_outcome(outcome: dict[str, Any]) -> bool:
@@ -299,15 +372,14 @@ def update_failure_memory(
     if not is_failed_outcome(outcome):
         return list(existing or [])
     active_budget = budget or DEFAULT_CONTEXT_BUDGET
-    item = sanitize_context_payload(
-        {
-            "step_count": outcome.get("step_count"),
-            "action": outcome.get("action"),
-            "current_app": outcome.get("current_app"),
-            "failure_cause": outcome.get("failure_cause") or "unknown",
-            "suggested_strategy": outcome.get("suggested_strategy"),
-        }
-    )
+    item = {
+        "step_count": outcome.get("step_count"),
+        "action": outcome.get("action"),
+        "current_app": sanitize_context_text_regex(outcome.get("current_app"))
+        if isinstance(outcome.get("current_app"), str) else outcome.get("current_app"),
+        "failure_cause": outcome.get("failure_cause") or "unknown",
+        "suggested_strategy": outcome.get("suggested_strategy"),
+    }
     return (list(existing or []) + [item])[-active_budget["failure_memory_items"] :]
 
 
@@ -363,7 +435,11 @@ def update_gui_memory(state: dict[str, Any], *, current_app: str, screen_id: str
     step = int(state.get("step_count") or 0)
     if screen_id:
         visited = list(memory.get("visited_screens") or [])
-        item = {"screen_id": screen_id, "current_app": current_app or "unknown", "step_count": step}
+        item = {
+            "screen_id": screen_id,
+            "current_app": sanitize_context_text_regex(current_app or "unknown"),
+            "step_count": step,
+        }
         if not visited or visited[-1].get("screen_id") != screen_id:
             visited.append(item)
         memory["visited_screens"] = visited[-10:]
@@ -371,21 +447,21 @@ def update_gui_memory(state: dict[str, Any], *, current_app: str, screen_id: str
     action = state.get("action_parsed") or {}
     if isinstance(action, dict) and action.get("_metadata") == "do":
         tried = list(memory.get("tried_actions") or [])
+        raw_failure_cause = state.get("failure_cause")
         tried.append(
-            sanitize_context_payload(
-                {
-                    "step_count": step,
-                    "screen_id": screen_id,
-                    "action": action.get("action"),
-                    "mark_id": (state.get("intent_raw") or {}).get("target_mark_id")
-                    if isinstance(state.get("intent_raw"), dict)
-                    else None,
-                    "result_success": (state.get("action_result") or {}).get("success")
-                    if isinstance(state.get("action_result"), dict)
-                    else None,
-                    "failure_cause": state.get("failure_cause"),
-                }
-            )
+            {
+                "step_count": step,
+                "screen_id": screen_id,
+                "action": action.get("action"),
+                "mark_id": (state.get("intent_raw") or {}).get("target_mark_id")
+                if isinstance(state.get("intent_raw"), dict)
+                else None,
+                "result_success": (state.get("action_result") or {}).get("success")
+                if isinstance(state.get("action_result"), dict)
+                else None,
+                "failure_cause": sanitize_context_text_regex(raw_failure_cause)
+                if isinstance(raw_failure_cause, str) else raw_failure_cause,
+            }
         )
         memory["tried_actions"] = tried[-10:]
         if action.get("action") == "Swipe":
@@ -401,9 +477,11 @@ def update_gui_memory(state: dict[str, Any], *, current_app: str, screen_id: str
     if state.get("reflection_verdict"):
         progress["last_verdict"] = state.get("reflection_verdict")
     if state.get("suggested_strategy"):
-        progress["suggested_strategy"] = state.get("suggested_strategy")
-    memory["task_progress"] = sanitize_context_payload(progress)
-    return sanitize_context_payload(memory)
+        raw_strategy = state.get("suggested_strategy")
+        progress["suggested_strategy"] = sanitize_context_text_regex(raw_strategy) \
+            if isinstance(raw_strategy, str) else raw_strategy
+    memory["task_progress"] = progress
+    return memory
 
 
 def _swipe_direction(action: dict[str, Any]) -> str:
@@ -419,46 +497,25 @@ def _swipe_direction(action: dict[str, Any]) -> str:
     return "down" if dy > 0 else "up"
 
 
-def build_plan_context_block(state: dict[str, Any], lang: str = "cn") -> tuple[str, dict[str, Any]]:
-    """Build a bounded, sanitized context block for plan injection."""
-    budget = state.get("context_budget") or DEFAULT_CONTEXT_BUDGET
-    parts = []
-    component_truncated = False
-    title = "** Short-term Context (belief, not authorization) **"
-    if lang != "en":
-        title = "** 短期上下文（仅为信念，不代表授权） **"
-    for label, value in (
-        ("screen_belief", state.get("screen_belief")),
-        ("last_action_outcome", state.get("action_outcome_summary")),
-        ("latest_failure_memory", (state.get("failure_memory") or [])[-1:]),
-        ("summarized_history", state.get("summarized_history")),
-        ("short_term_memory", state.get("short_term_memory")),
-        ("action_ledger", (state.get("action_ledger") or [])[-3:]),
-        ("gui_memory", state.get("gui_memory")),
-        ("grounding_observation", state.get("grounding_observation")),
-    ):
-        if value:
-            if label == "summarized_history" and len(str(value)) > budget["summarized_history_chars"]:
-                component_truncated = True
-            if label == "screen_belief" and isinstance(value, dict):
-                summary = str(value.get("summary") or "")
-                if len(summary) > budget["screen_belief_summary_chars"]:
-                    component_truncated = True
-            parts.append(f"{label}: {json.dumps(sanitize_context_payload(value), ensure_ascii=False)}")
-    if not parts:
-        return "", {"context_block_chars": 0, "context_truncated": False}
-    block, truncated = trim_text(
-        title + "\n" + "\n".join(parts), budget["context_block_chars"]
-    )
-    return block, {"context_block_chars": len(block), "context_truncated": truncated or component_truncated}
+def build_plan_context_block(
+    state: dict[str, Any],
+    lang: str = "cn",
+    *,
+    consumer: ContextConsumer = "inject",
+) -> tuple[str, dict[str, Any]]:
+    """Build a bounded, regex-redacted context block for plan injection.
 
+    Reads raw state fields directly (``reflection``, ``action_parsed``,
+    ``action_result``, ``screen_belief``, ``failure_memory``,
+    ``summarized_history``, ``gui_memory``, ``grounding_observation``) and
+    applies :func:`sanitize_context_text_regex` to every string.  No
+    key-level stub is applied; stub policy is reserved for the checkpoint
+    consumer (``RedactingSerializer``).
 
-def _build_inject_context_block(state: dict[str, Any], lang: str = "cn") -> tuple[str, dict[str, Any]]:
-    """Build a context block with inject-mode sanitization.
-
-    Reads raw state fields directly (reflection, action_parsed, action_result,
-    etc.) instead of pre-built sanitized payloads.  Only regex-matched sensitive
-    patterns are redacted so the plan LLM receives high-signal context.
+    ``consumer`` selects the policy from ``CONSUMER_POLICY`` (today all
+    policies resolve to regex-only; the argument is kept so that a future
+    "verbose" or "terse" consumer can tune the block without re-introducing
+    the inject/observe split).
     """
     budget = state.get("context_budget") or DEFAULT_CONTEXT_BUDGET
     component_truncated = False
@@ -469,14 +526,19 @@ def _build_inject_context_block(state: dict[str, Any], lang: str = "cn") -> tupl
     reflection = state.get("reflection") or ""
     current_app = state.get("current_app") or "unknown"
     screen_belief = state.get("screen_belief") or {}
-    summary_text = str(reflection or screen_belief.get("summary") or "unknown")
-    summary_text, summary_truncated = trim_text(summary_text, budget["screen_belief_summary_chars"])
+    summary_source = reflection or screen_belief.get("summary") or "unknown"
+    summary_source_str = str(summary_source)
+    if len(summary_source_str) > budget["screen_belief_summary_chars"]:
+        component_truncated = True
+    summary_text, summary_truncated = trim_text(
+        summary_source_str, budget["screen_belief_summary_chars"]
+    )
     if summary_truncated:
         component_truncated = True
 
     belief = {
-        "current_app": current_app,
-        "summary": sanitize_context_payload(summary_text, "summary", inject=True),
+        "current_app": sanitize_context_text_regex(current_app),
+        "summary": sanitize_context_text_regex(summary_text),
         "loading_or_blocked": bool(screen_belief.get("loading_or_blocked")),
         "unsafe_or_sensitive": bool(screen_belief.get("unsafe_or_sensitive")),
         "confidence": str(screen_belief.get("confidence") or "unknown"),
@@ -484,31 +546,42 @@ def _build_inject_context_block(state: dict[str, Any], lang: str = "cn") -> tupl
 
     action_parsed = state.get("action_parsed") or {}
     action_result = state.get("action_result") or {}
+    raw_action = action_parsed.get("action") if isinstance(action_parsed, dict) else None
+    raw_message = action_result.get("message") if isinstance(action_result, dict) else None
     outcome = {
         "step_count": int(state.get("step_count") or 0),
-        "action": action_parsed.get("action") if isinstance(action_parsed, dict) else None,
+        "action": sanitize_context_text_regex(raw_action) if isinstance(raw_action, str) else raw_action,
         "execution_success": action_result.get("success") if isinstance(action_result, dict) else None,
-        "result_message": sanitize_context_payload(
-            str(action_result.get("message") or ""), "message", inject=True,
-        ) if isinstance(action_result, dict) else "",
+        "result_message": sanitize_context_text_regex(raw_message)
+        if isinstance(raw_message, str) else (raw_message or ""),
         "reflection_verdict": state.get("reflection_verdict"),
         "failure_cause": state.get("failure_cause"),
         "suggested_strategy": state.get("suggested_strategy"),
     }
 
-    failure_memory = sanitize_context_payload(
-        (state.get("failure_memory") or [])[-1:], "failure_memory", inject=True,
-    )
-    summarized_history = sanitize_context_payload(
-        str(state.get("summarized_history") or ""), "summarized_history", inject=True,
-    )
-    if len(str(summarized_history)) > budget["summarized_history_chars"]:
-        summarized_history, _ = trim_text(str(summarized_history), budget["summarized_history_chars"])
+    failure_memory = [
+        {
+            "step_count": item.get("step_count"),
+            "action": item.get("action"),
+            "current_app": sanitize_context_text_regex(item.get("current_app"))
+            if isinstance(item.get("current_app"), str) else item.get("current_app"),
+            "failure_cause": item.get("failure_cause"),
+            "suggested_strategy": item.get("suggested_strategy"),
+        }
+        for item in (state.get("failure_memory") or [])[-1:]
+    ]
+
+    raw_summarized_history = str(state.get("summarized_history") or "")
+    if len(raw_summarized_history) > budget["summarized_history_chars"]:
+        component_truncated = True
+    summarized_history = sanitize_context_text_regex(raw_summarized_history)
+    if len(summarized_history) > budget["summarized_history_chars"]:
+        summarized_history, _ = trim_text(summarized_history, budget["summarized_history_chars"])
         component_truncated = True
 
-    gui_memory = sanitize_context_payload(state.get("gui_memory"), "gui_memory", inject=True)
+    gui_memory = _sanitize_gui_memory_for_block(state.get("gui_memory"))
     grounding_obs = sanitize_context_payload(
-        state.get("grounding_observation"), "grounding_observation", inject=True,
+        state.get("grounding_observation"), "grounding_observation", consumer=consumer,
     )
 
     parts = []
@@ -532,10 +605,56 @@ def _build_inject_context_block(state: dict[str, Any], lang: str = "cn") -> tupl
     return block, {"context_block_chars": len(block), "context_truncated": truncated or component_truncated}
 
 
+def _sanitize_gui_memory_for_block(gui_memory: Any) -> dict[str, Any]:
+    """Produce a regex-redacted view of gui_memory for context block emission."""
+    if not isinstance(gui_memory, dict):
+        return {}
+    visited = []
+    for item in (gui_memory.get("visited_screens") or []):
+        if isinstance(item, dict):
+            visited.append(
+                {
+                    "screen_id": item.get("screen_id"),
+                    "current_app": sanitize_context_text_regex(item.get("current_app"))
+                    if isinstance(item.get("current_app"), str) else item.get("current_app"),
+                    "step_count": item.get("step_count"),
+                }
+            )
+    tried = []
+    for item in (gui_memory.get("tried_actions") or []):
+        if isinstance(item, dict):
+            raw_failure = item.get("failure_cause")
+            tried.append(
+                {
+                    "step_count": item.get("step_count"),
+                    "screen_id": item.get("screen_id"),
+                    "action": item.get("action"),
+                    "mark_id": item.get("mark_id"),
+                    "result_success": item.get("result_success"),
+                    "failure_cause": sanitize_context_text_regex(raw_failure)
+                    if isinstance(raw_failure, str) else raw_failure,
+                }
+            )
+    scroll_memory = dict(gui_memory.get("scroll_memory") or {})
+    progress = dict(gui_memory.get("task_progress") or {})
+    return {
+        "visited_screens": visited,
+        "tried_actions": tried,
+        "scroll_memory": scroll_memory,
+        "task_progress": progress,
+    }
+
+
 def select_plan_context(
     state: dict[str, Any], *, mode: str, lang: str = "cn", prompt_version: str | None = None
 ) -> ContextSelectionResult:
-    """Select trace-safe context sections without mutating graph state."""
+    """Select trace-safe context sections without mutating graph state.
+
+    ``observe`` mode selects section IDs for trace metrics but does **not**
+    build a context block — observe is meant to be read-only at the LLM
+    prompt layer.  ``inject`` mode builds a regex-redacted block via
+    :func:`build_plan_context_block` and returns it for prompt injection.
+    """
     normalized_mode = normalize_context_mode(mode)
     sections = [section for section in CONTEXT_SECTION_IDS if _section_has_value(state, section)]
     if normalized_mode == "off":
@@ -552,7 +671,7 @@ def select_plan_context(
             prompt_version=prompt_version or DEFAULT_PROMPT_VERSION,
             selected_sections=sections,
         )
-    block, metrics = _build_inject_context_block(state, lang)
+    block, metrics = build_plan_context_block(state, lang, consumer="inject")
     return ContextSelectionResult(
         context_mode=normalized_mode,
         context_strategy="inject_redacted_block",
