@@ -14,6 +14,7 @@
 | 动作解析 | 必须用 `ast.parse` + `ast.literal_eval`；禁止 `eval()` |
 | 图片上下文 | 每步后必须用 `MessageBuilder.remove_images_from_message()` 剥离历史图片 |
 | HITL | 支付/隐私走 `confirm_node`；登录/验证码走 `takeover_node`；均使用 LangGraph `interrupt()` |
+| Edge Terminal Guard | `edges.py` 的三条条件边 `after_execute()` / `after_interrupt()` / `should_continue()` 都必须在任何其他路由判断之前先检查 `state.get("finished")` 或 `state.get("error")`，命中即返回 `"end"`；不得让滞留的 `pending_interrupt`、`pending_execute` 或 `action_parsed` 把已终止状态错路由到 `confirm`/`takeover`/`reflect`/`replan`；新增或修改条件边/路由分支必须遵守该不变式 |
 | 设备抽象 | 设备操作统一经 `DeviceFactory` -> `phone_agent/adb/` |
 | messages reducer | `plan_node` 只返回新增消息；`execute_node` 返回完整重建列表，避免 token 爆炸 |
 | confirm-then-execute | confirm 接受敏感 Tap 后路由到 `execute`；`pending_execute` 分支不得再次 `_strip_and_append` |

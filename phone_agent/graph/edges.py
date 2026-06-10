@@ -29,13 +29,27 @@ def after_execute(
     Decide the route after execute node.
 
     Routes:
-    - "end" if action is finish or execution resulted in finish
-    - "confirm" if action is Tap with message (sensitive operation)
+    - "end" if the state is terminal (finished or errored) — always wins
+    - "confirm" / "takeover" if a pending HITL interrupt is waiting to be
+      dispatched (resume path only — terminal guard above prevents this
+      from firing when the run is already done)
+    - "end" if action is finish or missing
+    - "reflect" if action_confirmed (already dispatched on resume)
     - "takeover" if action is Take_over
+    - "confirm" if action is Tap with message (sensitive operation)
     - "replan" if action is a skip type (Wait, Note, Call_API, Interact)
     - "reflect" otherwise
     """
-    # Check pending interrupt first (for resume path)
+    # Terminal guard: finished/error always routes to "end".
+    # Must come BEFORE the pending_interrupt check so that a stale
+    # pending_interrupt left over from a previous step cannot misroute
+    # a terminal state into confirm/takeover. Mirrors the contract of
+    # should_continue() and after_interrupt().
+    if state.get("finished") or state.get("error"):
+        return "end"
+
+    # Check pending interrupt (resume path — safe now that terminal states
+    # have been filtered out above).
     pending = state.get("pending_interrupt")
     if pending == "confirmation":
         return "confirm"
