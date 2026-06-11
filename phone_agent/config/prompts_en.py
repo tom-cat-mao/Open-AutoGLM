@@ -18,7 +18,7 @@ Hard constraints:
 
 ACTION_SCHEMA = """# Action Schema (single action contract)
 - Output must be a JSON object or provider tool call; do not emit Python function calls, XML, Markdown, or the removed text DSL.
-- Screen-target tap-like actions must prefer IntentIR: `{"type":"intent","action":"tap|double_tap|long_press","target_mark_id":"m1"}` or a target description with `target_text_hint`/`target_role`; do not guess Tap coordinates.
+- Screen-target tap-like actions must use IntentIR with `target_mark_id`, for example `{"type":"intent","action":"tap|double_tap|long_press","target_mark_id":"m1"}`; do not guess Tap coordinates and do not use target descriptions as executable targets.
 - Launch: `{"type":"do","action":"launch","app":"AppName"}`, preferred when opening the target app.
 - Type / Type_Name: `{"type":"do","action":"type","text":"text"}`; focus the input first, existing text is cleared automatically.
 - Swipe: `{"type":"do","action":"swipe","start":[x1,y1],"end":[x2,y2]}` in 0-1000 relative coordinates.
@@ -64,8 +64,7 @@ JSON_OUTPUT_CONTRACT = """# Output format: JSON schema
 Return exactly one JSON object. Do not output Markdown, code fences, XML, or thinking/answer tags.
 Examples:
 - {"type":"intent","action":"tap","target_mark_id":"m1"}
-- {"type":"intent","action":"tap","target_text_hint":"Settings button","target_role":"button"}
-- {"type":"intent","action":"tap","target_mark_id":"m2","target_intent":"confirm payment"}
+- {"type":"intent","action":"tap","target_mark_id":"m2","message":"confirm payment"}
 - {"type":"do","action":"swipe","start":[500,800],"end":[500,200]}
 - {"type":"do","action":"type","text":"hello"}
 - {"type":"do","action":"launch","app":"Settings"}

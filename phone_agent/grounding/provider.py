@@ -1,4 +1,4 @@
-"""Grounding provider contract for screen-bound target localization."""
+"""Mark provider contracts for screen-bound target localization."""
 
 from __future__ import annotations
 
@@ -7,29 +7,29 @@ from typing import Any, Protocol
 
 
 @dataclass(frozen=True)
-class GroundingTarget:
-    """Privacy-aware target description supplied by the planner."""
+class MarkProviderHint:
+    """Privacy-aware hint supplied to query-conditioned mark providers."""
 
-    text_hint: str | None = None
+    text: str
+    source: str = "task"
     role: str | None = None
     intent: str | None = None
     action: str | None = None
-    requires_grounding: bool = True
 
     def description(self) -> str:
-        parts = [self.role, self.text_hint, self.intent]
+        parts = [self.role, self.text, self.intent]
         return " ".join(str(part).strip() for part in parts if str(part or "").strip())
 
     def redacted_summary(self) -> dict[str, Any]:
         return {
-            "has_text_hint": bool(self.text_hint),
-            "text_hint_length": len(self.text_hint or ""),
+            "source": self.source,
+            "has_text": bool(self.text),
+            "text_length": len(self.text or ""),
             "has_role": bool(self.role),
             "role_length": len(self.role or ""),
             "has_intent": bool(self.intent),
             "intent_length": len(self.intent or ""),
             "action": self.action,
-            "requires_grounding": self.requires_grounding,
         }
 
 
@@ -52,56 +52,57 @@ class ScreenBinding:
 
 
 @dataclass(frozen=True)
-class GroundingCandidate:
-    """One provider bbox candidate in normalized 0-1000 coordinates."""
+class MarkCandidate:
+    """One provider mark candidate in normalized 0-1000 coordinates."""
 
+    mark_id: str
     bbox: list[int]
     center: list[int]
     confidence: float | None = None
     source: str | None = None
     valid: bool = True
     reason: str | None = None
+    role: str | None = None
+    text_summary: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
 
 @dataclass(frozen=True)
-class GroundingResult:
-    """Provider result in 0-1000 screen-relative coordinates."""
+class MarkProviderResult:
+    """Provider result containing screen-bound mark candidates."""
 
     success: bool
     provider: str
-    bbox: list[int] | None = None
-    center: list[int] | None = None
-    confidence: float | None = None
     failure_code: str | None = None
     message: str | None = None
     screen_id: str | None = None
     raw_screenshot_hash: str | None = None
     provider_input_hash: str | None = None
     latency_ms: int | None = None
-    candidates: list[GroundingCandidate] = field(default_factory=list)
+    marks: list[MarkCandidate] = field(default_factory=list)
+    candidates: list[MarkCandidate] = field(default_factory=list)
     candidate_count: int = 0
-    grounding_status: str | None = None
-    selected_candidate_id: int | None = None
+    status: str | None = None
+    hints: list[dict[str, Any]] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
 
-class GroundingProvider(Protocol):
-    """Contract implemented by local or test grounding providers."""
+class MarkProvider(Protocol):
+    """Contract implemented by local or test mark providers."""
 
     name: str
     version: str
 
-    def ground(
+    def provide_marks(
         self,
         screenshot: Any,
-        target: GroundingTarget,
         screen_binding: ScreenBinding,
+        hints: list[MarkProviderHint] | None = None,
         timeout: float | None = None,
-    ) -> GroundingResult:
-        """Locate target on screenshot and return a screen-bound result."""
+    ) -> MarkProviderResult:
+        """Return screen-bound mark candidates for the current observation."""

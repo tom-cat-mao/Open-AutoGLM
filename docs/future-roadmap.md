@@ -17,27 +17,27 @@
 - **评测地基**: 已提供 `evals/run_eval.py --dry-run` smoke harness，以及 `bench/grounding/` LocateAnything benchmark 体系；当前支持 post-training raw JSONL 转 manifest、固定 suite、prediction JSONL、summary JSON、离线复评与 target type / area bucket 分组指标
 - **收益验证**: eval 已输出 `context_mode`、`context_strategy`、`prompt_version`、`selected_sections`、`messages_before/after`、`message_chars_before/after`、`approx_tokens_before/after`、`context_block_chars`、`context_truncated`、`failure_memory_hit_count`、`repeated_failure_count`，支持 off/observe/inject 对比
 - **输出适配**: `ModelConfig.output_mode=json_schema|tool_calls|auto`；旧 text DSL 不再作为动作执行协议；JSON、已聚合 OpenAI `tool_calls` 与 IntentIR 统一归一到 canonical action，parse/adapter/validation failure fail-closed，不绕过 HITL
-- **本地 Grounding**: LocateAnything-3B-4bit (MLX) 已作为 optional `GroundingProvider` 接入 description target-to-bbox 路径；主 VLM 负责语义/目标描述，MarkRegistry/LocateAnything 负责屏幕绑定定位，所有结果仍进入 canonical ActionIR/Safety/HITL/Executor；LocateAnything 默认输入图最长边为 `max_size=960`，可通过 provider 专属或通用配置灰度/回滚；multi-box 仅 exactly one valid candidate 可执行，0/多个 valid candidate fail-closed 为 grounding 层错误
+- **本地 Grounding**: LocateAnything-3B-4bit (MLX) 已收敛为 optional `MarkProvider`，只在 Observation 阶段生成 MarkRegistry 候选 marks；主 VLM 的屏幕目标点击类动作只输出 `target_mark_id`，不再通过 `target_text_hint` 直接生成 ActionIR；所有结果仍进入 canonical ActionIR/Safety/HITL/Executor；LocateAnything 默认输入图最长边为 `max_size=960`，可通过 provider 专属或通用配置灰度/回滚；multi-box 不得 first-box 执行，可注册多个 marks 或 fail-closed 为歧义
 
 ---
 
-## 已完成 MVP: LocateAnything Local Grounding Provider
+## 已完成 MVP: LocateAnything Local Mark Provider
 
-**目标**: 将主 VLM 的语义规划与 GUI 元素定位分层，使用 LocateAnything-3B-4bit (MLX) 在本地执行 `screenshot + target_description -> bbox/center`，并保持现有 harness engineering 安全边界。
+**目标**: 将主 VLM 的语义规划与 GUI 元素定位分层，使用 LocateAnything-3B-4bit (MLX) 在本地把受控 hints 转为 screen-bound mark candidates，并保持现有 harness engineering 安全边界。
 
-**当前状态**: LAG-1 至 LAG-4 已落地。默认 CI 和单测使用 fake provider，不依赖 MLX 或真实模型；真实 LocateAnything 需要本机 Apple Silicon + Metal + `mlx-vlm` 环境。当前仓库没有 `pyproject.toml` optional extra，`mlx-vlm` 不进入默认 `requirements.txt`。
+**当前状态**: LAG-1 至 LAG-4 已落地。默认 CI 和单测使用 fake provider，不依赖 MLX 或真实模型；真实 LocateAnything 需要本机 Apple Silicon + Metal + `mlx-vlm` 环境，`mlx-vlm` 不进入默认 `requirements.txt`。
 
 **已落地方案**:
-- `phone_agent/grounding/`: 新增 `GroundingProvider` contract、`ScreenBinding`、`GroundingResult`、fake provider、LocateAnything MLX lazy provider、`<box>` parser 与 provider factory；LocateAnything provider 会读取完整截图并按 `max_size` 等比例缩小后推理，默认 `960`。
-- `phone_agent/actions/adapter.py`: `IntentIR` 支持 `target_text_hint`、兼容别名 `target_text`、`target_role`、`target_intent`、`requires_grounding`；拒绝 provider/backend/命令类危险字段。
-- `phone_agent/actions/grounding.py`: `target_mark_id` 优先走 MarkRegistry；description hints 走 provider；screen/hash/provider-input hash 校验后编译为 canonical Tap/Double Tap/Long Press ActionIR。
-- `phone_agent/graph/nodes/plan.py`: 在 Plan parse 后执行 screen-bound grounding，失败 fail-closed，不回退为主 VLM 直接坐标；成功/失败 metadata 写入 state/trace/eval。
+- `phone_agent/grounding/`: 提供 `MarkProvider` contract、`ScreenBinding`、`MarkProviderResult`、fake provider、LocateAnything MLX lazy provider、`<box>` parser 与 provider factory；LocateAnything provider 会读取完整截图并按 `max_size` 等比例缩小后推理，默认 `960`。
+- `phone_agent/actions/adapter.py`: `IntentIR` 的屏幕目标点击类动作必须带 `target_mark_id`；`target_text_hint`/`target_role` 仅保留为非执行 hint metadata；拒绝 provider/backend/命令类危险字段。
+- `phone_agent/actions/grounding.py`: 仅将 `target_mark_id` 通过 MarkRegistry 编译为 canonical Tap/Double Tap/Long Press ActionIR；description hints 不再直接走 provider 或生成 ActionIR。
+- `phone_agent/graph/nodes/plan.py`: 在 Plan 请求前构建 MarkRegistry 并注入 marks block；provider 失败或无 marks 只记录 mark_provider_observation，不回退为主 VLM 直接坐标。
 - `phone_agent/graph/context.py` / `trace.py` / `evals/run_eval.py`: 新增 `grounding_observation` section、grounding latency/failure histogram 与 target hint 默认脱敏。
 - `bench/grounding/`: 新增 LocateAnything benchmark 体系，支持 post-training raw JSONL 数据接入、0-1 bbox 转 0-1000 bbox、clean/trusted filtering、random/balanced sampling、统一 scoring/reporting、prediction JSONL 与 summary JSON。
 
 **安全边界**:
-- 主 VLM 不选择 provider/backend，不输出 ADB/shell/绝对像素；adapter/validator 对危险字段 fail-closed。
-- target-required description grounding 的 provider unavailable、timeout、bad bbox、low confidence、stale screen、hash mismatch 等不会执行设备动作。
+- 主 VLM 不选择 provider/backend，不输出 ADB/shell/绝对像素；屏幕目标点击类动作只引用 `target_mark_id`；adapter/validator 对危险字段 fail-closed。
+- Provider unavailable、timeout、bad bbox、low confidence、stale screen、hash mismatch、missing hint 等只影响 mark generation 或 mark lookup，不会直接执行设备动作。
 - bbox/center 保持 0-1000 相对坐标；绝对像素转换仍只在 tool/backend 层。
 - trace/eval 只记录 screen_id、raw screenshot hash、provider input hash、bbox/center、latency、failure code 与脱敏 target summary；不记录 raw screenshot/raw target text。
 

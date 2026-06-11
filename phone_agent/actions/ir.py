@@ -37,7 +37,6 @@ class IntentDict(TypedDict, total=False):
     target_mark_id: str
     target_role: str
     target_text_hint: str
-    target_intent: str
     text: str
     message: str
     app: str

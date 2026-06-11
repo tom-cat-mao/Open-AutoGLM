@@ -1,4 +1,4 @@
-"""Optional LocateAnything-3B-4bit MLX grounding provider."""
+"""Optional LocateAnything-3B-4bit MLX mark provider."""
 
 from __future__ import annotations
 
@@ -13,14 +13,14 @@ from typing import Any
 from PIL import Image
 
 from phone_agent.grounding.parser import GroundingParseError, parse_box_candidates
-from phone_agent.grounding.provider import GroundingCandidate, GroundingResult, GroundingTarget, ScreenBinding
+from phone_agent.grounding.provider import MarkCandidate, MarkProviderHint, MarkProviderResult, ScreenBinding
 
 
 DEFAULT_LOCATEANYTHING_MAX_SIZE = 960
 
 
 class LocateAnythingMLXProvider:
-    """Lazy MLX wrapper for LocateAnything target-to-bbox grounding."""
+    """Lazy MLX wrapper for LocateAnything hint-to-mark generation."""
 
     name = "locateanything_mlx"
     version = "3b-4bit"
@@ -38,25 +38,52 @@ class LocateAnythingMLXProvider:
         self._model = None
         self._processor = None
 
-    def ground(
+    def provide_marks(
         self,
         screenshot: Any,
-        target: GroundingTarget,
         screen_binding: ScreenBinding,
+        hints: list[MarkProviderHint] | None = None,
         timeout: float | None = None,
-    ) -> GroundingResult:
+    ) -> MarkProviderResult:
         started = time.perf_counter()
         if platform.system() != "Darwin" or platform.machine() != "arm64":
             return self._failure("unsupported_platform", screen_binding, started)
         if not self.model_path.exists():
             return self._failure("model_not_found", screen_binding, started)
-        description = target.description()
-        if not description:
-            return self._failure("missing_target", screen_binding, started)
+        descriptions = [hint.description() for hint in hints or [] if hint.description()]
+        if not descriptions:
+            return self._failure("missing_hint", screen_binding, started)
+        all_candidates: list[MarkCandidate] = []
+        provider_input_hash: str | None = None
         try:
             image, provider_input_hash = self._prepare_image(screenshot)
-            output = self._run_model(image, description, timeout=timeout)
-            parsed_set = parse_box_candidates(output)
+            for hint_index, description in enumerate(descriptions, start=1):
+                output = self._run_model(image, description, timeout=timeout)
+                parsed_set = parse_box_candidates(output)
+                valid_candidates = parsed_set.valid_candidates
+                candidates = [
+                    MarkCandidate(
+                        mark_id=f"la_{hint_index}_{index}",
+                        bbox=box.bbox,
+                        center=box.center,
+                        confidence=None,
+                        source=self.name,
+                        valid=box.valid,
+                        reason=box.reason,
+                        role=(hints or [None])[hint_index - 1].role if hints and len(hints) >= hint_index else None,
+                        text_summary=description,
+                    )
+                    for index, box in enumerate(parsed_set.candidates, start=1)
+                ]
+                if len(valid_candidates) > 1:
+                    return self._failure(
+                        "grounding_ambiguous",
+                        screen_binding,
+                        started,
+                        message="multiple valid bboxes",
+                        candidates=all_candidates + candidates,
+                    )
+                all_candidates.extend(candidates)
         except GroundingParseError as exc:
             return self._failure(exc.code, screen_binding, started, message=str(exc))
         except ImportError:
@@ -65,43 +92,24 @@ class LocateAnythingMLXProvider:
             return self._failure("timeout", screen_binding, started)
         except Exception as exc:
             return self._failure("provider_error", screen_binding, started, message=type(exc).__name__)
-        valid_candidates = parsed_set.valid_candidates
-        candidates = [
-            GroundingCandidate(
-                bbox=box.bbox,
-                center=box.center,
-                confidence=None,
-                source=self.name,
-                valid=box.valid,
-                reason=box.reason,
-            )
-            for box in parsed_set.candidates
-        ]
-        if len(valid_candidates) == 0:
+        valid_marks = [candidate for candidate in all_candidates if candidate.valid]
+        if len(valid_marks) == 0:
             return self._failure(
-                "grounding_no_candidate", screen_binding, started, message="no valid bbox", candidates=candidates
+                "grounding_no_candidate", screen_binding, started, message="no valid bbox", candidates=all_candidates
             )
-        if len(valid_candidates) > 1:
-            return self._failure(
-                "grounding_ambiguous", screen_binding, started, message="multiple valid bboxes", candidates=candidates
-            )
-        parsed = valid_candidates[0]
-        selected_candidate_id = parsed_set.candidates.index(parsed)
-        return GroundingResult(
+        return MarkProviderResult(
             success=True,
             provider=self.name,
-            bbox=parsed.bbox,
-            center=parsed.center,
-            confidence=None,
             screen_id=screen_binding.screen_id,
             raw_screenshot_hash=screen_binding.raw_screenshot_hash,
             provider_input_hash=provider_input_hash,
             latency_ms=self._latency_ms(started),
-            candidates=candidates,
-            candidate_count=len(candidates),
-            grounding_status="success",
-            selected_candidate_id=selected_candidate_id,
-            metadata={"model_path": str(self.model_path), "target": target.redacted_summary()},
+            marks=valid_marks,
+            candidates=all_candidates,
+            candidate_count=len(all_candidates),
+            status="success",
+            hints=[hint.redacted_summary() for hint in hints or []],
+            metadata={"model_path": str(self.model_path)},
         )
 
     def _prepare_image(self, screenshot: Any) -> tuple[Image.Image, str]:
@@ -180,9 +188,9 @@ class LocateAnythingMLXProvider:
         started: float,
         *,
         message: str | None = None,
-        candidates: list[GroundingCandidate] | None = None,
-    ) -> GroundingResult:
-        return GroundingResult(
+        candidates: list[MarkCandidate] | None = None,
+    ) -> MarkProviderResult:
+        return MarkProviderResult(
             success=False,
             provider=self.name,
             failure_code=code,
@@ -190,9 +198,10 @@ class LocateAnythingMLXProvider:
             screen_id=screen_binding.screen_id,
             raw_screenshot_hash=screen_binding.raw_screenshot_hash,
             latency_ms=self._latency_ms(started),
+            marks=[],
             candidates=candidates or [],
             candidate_count=len(candidates or []),
-            grounding_status=code,
+            status=code,
         )
 
     @staticmethod

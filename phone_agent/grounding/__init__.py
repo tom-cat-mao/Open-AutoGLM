@@ -1,17 +1,19 @@
-"""Screen grounding provider interfaces and implementations."""
+"""Screen mark provider interfaces and implementations."""
 
 from phone_agent.grounding.fake import FakeGroundingProvider
 from phone_agent.grounding.provider import (
-    GroundingProvider,
-    GroundingResult,
-    GroundingTarget,
+    MarkCandidate,
+    MarkProvider,
+    MarkProviderHint,
+    MarkProviderResult,
     ScreenBinding,
 )
 
 __all__ = [
     "FakeGroundingProvider",
-    "GroundingProvider",
-    "GroundingResult",
-    "GroundingTarget",
+    "MarkCandidate",
+    "MarkProvider",
+    "MarkProviderHint",
+    "MarkProviderResult",
     "ScreenBinding",
 ]

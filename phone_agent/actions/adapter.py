@@ -70,7 +70,6 @@ INTENT_FIELDS = {
     "target_role",
     "target_text_hint",
     "target_text",
-    "target_intent",
     "requires_grounding",
     "text",
     "message",
@@ -105,7 +104,6 @@ def adapt_json_action(payload: str | dict[str, Any]) -> dict[str, Any]:
         "target_text_hint",
         "target_text",
         "target_role",
-        "target_intent",
         "requires_grounding",
     }
     if action_type == "intent" or bool(intent_keys & set(data)):
@@ -119,20 +117,14 @@ def adapt_json_action(payload: str | dict[str, Any]) -> dict[str, Any]:
                 if key == "requires_grounding":
                     if not isinstance(value, bool):
                         raise ActionAdapterError("unsafe_value", "requires_grounding must be a boolean")
-                elif (
-                    key in {"action", "target_mark_id", "target_role", "target_text_hint", "target_intent", "text", "message", "app", "duration"}
-                    and not isinstance(value, str)
-                ):
+                elif key in {"action", "target_mark_id", "target_role", "target_text_hint", "text", "message", "app", "duration"} and not isinstance(value, str):
                     raise ActionAdapterError("unsafe_value", f"{key} must be a string")
                 intent[key] = value
-        if "target_mark_id" not in intent and not any(
-            intent.get(key) for key in ("target_text_hint", "target_role", "target_intent")
-        ):
-            raise ActionAdapterError("missing_field", "intent requires target_mark_id or target description")
-        if "action" not in intent and "target_intent" not in intent:
-            raise ActionAdapterError("missing_field", "intent requires action or target_intent")
-        if "action" in intent:
-            intent["action"] = _canonical_action_name(intent["action"])
+        if "action" not in intent:
+            raise ActionAdapterError("missing_field", "intent requires action")
+        intent["action"] = _canonical_action_name(intent["action"])
+        if intent["action"] in {"Tap", "Double Tap", "Long Press"} and "target_mark_id" not in intent:
+            raise ActionAdapterError("mark_required", "tap-like intent requires target_mark_id")
         return intent
     if action_type == "finish":
         _reject_unexpected_provider_fields(data, {"type", "_metadata", "message"})
@@ -145,15 +137,15 @@ def adapt_json_action(payload: str | dict[str, Any]) -> dict[str, Any]:
 
     action_name = _canonical_action_name(data.get("action"))
     _reject_unexpected_provider_fields(data, ALLOWED_PROVIDER_FIELDS_BY_ACTION[action_name])
+    if action_name in {"Tap", "Double Tap", "Long Press"}:
+        raise ActionAdapterError("mark_required", "tap-like actions must use intent target_mark_id")
     action: dict[str, Any] = {"_metadata": "do", "action": action_name}
     if "message" in data:
         if not isinstance(data["message"], str):
             raise ActionAdapterError("unsafe_value", "message must be a string")
         action["message"] = data["message"]
 
-    if action_name in {"Tap", "Double Tap", "Long Press"}:
-        action["element"] = _extract_point(data)
-    elif action_name == "Swipe":
+    if action_name == "Swipe":
         start = data.get("start") or data.get("start_element")
         end = data.get("end") or data.get("end_element")
         if start is None or end is None:

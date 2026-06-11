@@ -26,7 +26,7 @@
 | Request Compaction | `compact_messages_for_request()` 只能压缩传给 `model_client.request()` 的消息；不得改写 `state["messages"]`；必须保留最新截图并剥离历史图片 |
 | Prompt Version | 默认且唯一支持 `context_harness_v1`；prompt schema 只约束格式，不授权执行 |
 | Output Adapter | `ModelConfig.output_mode=json_schema|tool_calls|auto`；旧 text DSL 不再是执行协议；JSON/tool_calls 必须经 adapter 白名单映射到 canonical action，parse failure fail-closed，不得绕过 HITL |
-| Grounding | 主 VLM 只输出 IntentIR target hints；`target_mark_id` 优先走 MarkRegistry，`target_text_hint` 走 LocateAnything/Fake GroundingProvider；provider 由 graph config/env 注入，不暴露给 tool schema；LocateAnything 默认输入图最长边 `max_size=960`，可用 `locateanything_max_size` / `PHONE_AGENT_LOCATEANYTHING_MAX_SIZE` 灰度或回滚 |
+| Grounding | 主 VLM 的屏幕目标点击类动作只输出 `target_mark_id`；LocateAnything/Fake/OCR/UIAutomator/SoM 只能作为 MarkRegistry provider 生成 marks，`target_text_hint` 只能作为受控 provider hint，不能作为可执行目标；provider 由 graph config/env 注入，不暴露给 tool schema；LocateAnything 默认输入图最长边 `max_size=960`，可用 `locateanything_max_size` / `PHONE_AGENT_LOCATEANYTHING_MAX_SIZE` 灰度或回滚 |
 | Grounding Fail-Closed | target-required grounding 失败（provider 缺失、低置信、bad bbox、stale/hash mismatch、多候选歧义等）不得回退为主 VLM 坐标 Tap；只能 fail-closed/等待/接管/重新观测 |
 | Grounding Benchmark | 正式入口在 `bench/grounding/`；post-training bbox 0-1 必须转换为 0-1000 manifest；LocateAnything benchmark 用 `.venv/bin/python -m bench.grounding.run_locateanything`，固定 manifest 复评用 `.venv/bin/python -m bench.grounding.score_predictions`；真实 LocateAnything 依赖 Apple Silicon + Metal + mlx-vlm，`bench_output/` 默认不提交 |
 | Action IR Pipeline | 阶梯架构：Adapter → draft ActionIR → Validator → (Repair → Validator) → Safety Gate → Executor；Repair 不得在 Safety Gate 之后；Executor 只接收 validated + safety-approved IR |

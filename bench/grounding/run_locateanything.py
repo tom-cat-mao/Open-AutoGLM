@@ -23,7 +23,7 @@ from bench.grounding.datasets import (
 from bench.grounding.reporting import build_summary, enrich_prediction, write_jsonl
 from phone_agent.grounding.locateanything import LocateAnythingMLXProvider
 from phone_agent.grounding.parser import GroundingParseError
-from phone_agent.grounding.provider import GroundingTarget, ScreenBinding
+from phone_agent.grounding.provider import MarkProviderHint, ScreenBinding
 
 
 @dataclass(frozen=True)
@@ -75,7 +75,7 @@ def run_case(provider: LocateAnythingMLXProvider, case: dict[str, Any], *, timeo
 
     try:
         screenshot, binding = load_screenshot(image_path)
-        result = provider.ground(screenshot, GroundingTarget(text_hint=prompt), binding, timeout=timeout)
+        result = provider.provide_marks(screenshot, binding, hints=[MarkProviderHint(text=prompt)], timeout=timeout)
     except GroundingParseError as exc:
         return {
             **prediction,
@@ -97,14 +97,14 @@ def run_case(provider: LocateAnythingMLXProvider, case: dict[str, Any], *, timeo
         **prediction,
         "success": result.success,
         "parsed": result.success,
-        "bbox": result.bbox,
-        "boxes": [result.bbox] if result.bbox else [],
+        "bbox": result.marks[0].bbox if result.marks else None,
+        "boxes": [mark.bbox for mark in result.marks],
         "latency_ms": result.latency_ms,
         "candidate_count": result.candidate_count,
         "failure_code": result.failure_code,
         "parse_error": None if result.success else result.failure_code,
         "provider_input_hash": result.provider_input_hash,
-        "selected_candidate_id": result.selected_candidate_id,
+        "selected_candidate_id": 0 if result.marks else None,
     }
     return {key: value for key, value in output.items() if value is not None}
 

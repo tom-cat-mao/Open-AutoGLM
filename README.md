@@ -31,7 +31,7 @@ phone_agent/
 ├── actions/
 │   ├── handler.py               # parse_action(), ActionResult, do(), finish()
 │   └── adapter.py               # JSON/tool_calls → canonical action 适配与校验
-├── grounding/                   # GroundingProvider、LocateAnything MLX、fake provider、bbox parser
+├── grounding/                   # MarkProvider、LocateAnything MLX、fake provider、bbox parser
 ├── adb/                         # Android 设备控制
 ├── config/
 │   ├── apps.py                  # 应用包名映射
@@ -168,16 +168,16 @@ Context selector 与 compaction 只能影响模型请求构造和脱敏观测指
 
 解析观测字段会进入 trace/eval 相关链路，包括 configured mode、detected format、adapter used、parse success/error code；`parse_error`、截图、API key、任务文本与隐私文本默认脱敏。
 
-### LocateAnything 本地 Grounding（可选）
+### LocateAnything 本地 Mark Provider（可选）
 
-Open-AutoGLM 支持把主 VLM 的语义/意图与本地视觉定位拆开：主 VLM 在 JSON/tool_calls 模式输出 `IntentIR`（例如 `target_text_hint` / `target_role` / `target_intent` 或 `target_mark_id`），本地 `GroundingProvider` 将当前截图 + 目标描述定位为 0-1000 bbox/center，再进入 canonical `ActionIR -> Validator -> Repair -> Validator -> Safety/HITL -> Executor`。
+Open-AutoGLM 支持把主 VLM 的语义/意图与本地视觉定位拆开：Observation 阶段先由静态 marks、设备 marks、LocateAnything/Fake 等 `MarkProvider` 生成当前屏幕的 `MarkRegistry`；主 VLM 在 JSON/tool_calls 模式只通过 `target_mark_id` 引用屏幕目标；本地 harness 再把 mark 编译为 canonical `ActionIR -> Validator -> Repair -> Validator -> Safety/HITL -> Executor`。
 
 ```bash
 # 默认测试不需要 MLX；真实 LocateAnything 需要 Apple Silicon + Metal + mlx-vlm
 # 当前仓库没有 pyproject optional extra，mlx-vlm 不在默认 requirements 中。
 # 如需运行真实 provider/benchmark，请在本机 MLX 环境中安装兼容版本的 mlx-vlm。
 
-# 可选：启用本地 LocateAnything provider
+# 可选：启用本地 LocateAnything mark provider
 export PHONE_AGENT_GROUNDING_PROVIDER=locateanything
 export PHONE_AGENT_LOCATEANYTHING_MODEL=models/LocateAnything-3B-4bit
 # 可选：覆盖 LocateAnything 输入图最长边；默认 960，1280 可回滚到更高质量/更慢路径
@@ -186,11 +186,11 @@ export PHONE_AGENT_LOCATEANYTHING_MAX_SIZE=960
 
 LocateAnything provider 会先读取当前完整截图，再按最长边 `max_size` 等比例缩小后送入模型；默认 `max_size=960`，这是基于本地 benchmark 在速度和 bbox 一致性之间的折中。运行时可通过 config `locateanything_max_size`（优先）或 `grounding_max_size` 覆盖，也可通过环境变量 `PHONE_AGENT_LOCATEANYTHING_MAX_SIZE`（优先）或 `PHONE_AGENT_GROUNDING_MAX_SIZE` 灰度/回滚；非法或非正整数会回落默认值。
 
-安全边界：`target_mark_id` 优先走 MarkRegistry；`target_text_hint` 描述路径才调用 LocateAnything。target-required grounding 失败（provider 缺失、超时、hash mismatch、stale screen、低置信、bad bbox、多候选歧义等）会 fail-closed 为 `error_layer=grounding`，不会回退为主 VLM 直接坐标 Tap。多 bbox 只有 exactly one valid candidate 才能执行；0 个或多个 valid candidate 都停止执行。trace/eval 只记录 provider、bbox/center、screen/hash、latency、failure code、candidate_count 与脱敏 target summary，不记录原始截图或 raw target text。
+安全边界：屏幕目标点击类动作的唯一可执行 IntentIR target 是 `target_mark_id`。`target_text_hint` / 目标描述只能作为受控、脱敏、bounded 的 MarkProvider hint，不能直接生成 ActionIR。LocateAnything/Fake/OCR/UIAutomator/SoM 只能生成 marks；未知 mark、缺失 registry、provider 缺失、stale/hash mismatch、低置信、bad bbox、多候选歧义等会 fail-closed 为 `error_layer=grounding`，不会回退为主 VLM 直接坐标 Tap。trace/eval 只记录 provider、mark id、bbox/center、screen/hash、latency、failure code、candidate_count 与脱敏 hint summary，不记录原始截图或 raw target text。
 
 ### Grounding Benchmark
 
-正式 benchmark 代码位于 `bench/grounding/`，用于评估 `screenshot + target description -> bbox` 的 grounding 能力。当前已支持把 `/Users/bytedance/post-training/data/grounding_os_atlas_aw_mobile/raw.jsonl` 转为项目统一 manifest，并用 LocateAnything 跑固定 suite。
+正式 benchmark 代码位于 `bench/grounding/`，用于评估 `screenshot + target description -> bbox` 的 provider 能力。benchmark 仍使用 description-to-bbox 任务形态；runtime 不把 benchmark target description 当执行协议，而是把 provider 输出转成 mark candidates 后再由 VLM 选择 `target_mark_id`。
 
 核心文件：
 

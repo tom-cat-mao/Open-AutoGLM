@@ -20,7 +20,7 @@ SYSTEM_CONTRACT = f"""今天的日期是: {formatted_date}
 
 ACTION_SCHEMA = """# Action Schema（唯一动作契约）
 - 输出必须是 JSON 对象或 provider tool call；不要输出 Python 函数调用、XML、Markdown 或旧文本 DSL。
-- 屏幕目标点击类动作必须优先使用 IntentIR：`{"type":"intent","action":"tap|double_tap|long_press","target_mark_id":"m1"}` 或带 `target_text_hint`/`target_role` 的目标描述；不要猜 Tap 坐标。
+- 屏幕目标点击类动作必须使用带 `target_mark_id` 的 IntentIR：`{"type":"intent","action":"tap|double_tap|long_press","target_mark_id":"m1"}`；不要猜 Tap 坐标，也不要把目标描述当成可执行目标。
 - Launch: `{"type":"do","action":"launch","app":"应用名"}`，优先用于启动目标 App。
 - Type / Type_Name: `{"type":"do","action":"type","text":"文本"}`；输入前先确保输入框聚焦，系统会自动清空旧文本。
 - Swipe: `{"type":"do","action":"swipe","start":[x1,y1],"end":[x2,y2]}`，坐标为 0-1000 相对坐标。
@@ -66,8 +66,7 @@ JSON_OUTPUT_CONTRACT = """# 输出格式：JSON schema
 只返回一个 JSON 对象，不要 Markdown、代码块、XML 或思考/答案标签。
 示例：
 - {"type":"intent","action":"tap","target_mark_id":"m1"}
-- {"type":"intent","action":"tap","target_text_hint":"设置按钮","target_role":"button"}
-- {"type":"intent","action":"tap","target_mark_id":"m2","target_intent":"confirm payment"}
+- {"type":"intent","action":"tap","target_mark_id":"m2","message":"confirm payment"}
 - {"type":"do","action":"swipe","start":[500,800],"end":[500,200]}
 - {"type":"do","action":"type","text":"你好"}
 - {"type":"do","action":"launch","app":"Settings"}

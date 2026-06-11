@@ -507,6 +507,7 @@ class ModelClient:
                                     "Launch", "Wait", "Note", "Call_API",
                                     "Interact", "Take_over",
                                 ],
+                                "description": "Tap/Double Tap/Long Press are screen-target actions and must include target_mark_id; raw coordinates are not accepted.",
                             },
                             "start": {
                                 "type": "array",
@@ -532,9 +533,14 @@ class ModelClient:
                                 "type": "string",
                                 "description": "Required for tap-like screen targeting in structured modes; harness grounds it before execution",
                             },
-                            "target_role": {"type": "string"},
-                            "target_text_hint": {"type": "string"},
-                            "target_intent": {"type": "string"},
+                            "target_role": {
+                                "type": "string",
+                                "description": "Non-executable metadata only; tap-like intent still requires target_mark_id",
+                            },
+                            "target_text_hint": {
+                                "type": "string",
+                                "description": "Non-executable provider hint metadata only; cannot replace target_mark_id",
+                            },
                             "requires_grounding": {"type": "boolean"},
                         },
                         "required": ["type", "action"],

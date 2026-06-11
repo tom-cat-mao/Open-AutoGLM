@@ -18,9 +18,9 @@ from phone_agent.graph.context import (
     sanitize_context_payload,
     select_plan_context,
 )
-from phone_agent.graph.observation import build_observation
+from phone_agent.graph.observation import build_mark_provider_hints, build_observation
 from phone_agent.graph.trace import emit_trace
-from phone_agent.grounding.factory import build_grounding_provider
+from phone_agent.grounding.factory import build_mark_providers
 from phone_agent.grounding.provider import ScreenBinding
 from phone_agent.model.client import MessageBuilder
 from phone_agent.model.client import ModelParseError
@@ -153,6 +153,8 @@ GROUNDING_ERROR_CODES = {
     "grounding_ambiguous",
     "grounding_no_candidate",
     "mark_required",
+    "missing_hint",
+    "mark_generation_failed",
     "target_required",
     "bad_bbox",
     "missing_provider_hash",
@@ -217,7 +219,6 @@ def _parse_and_ground_response(
     configurable: dict,
     mark_registry,
     screen_binding: ScreenBinding,
-    screenshot,
 ):
     """Parse provider response, optionally ground IntentIR, then validate canonical ActionIR."""
 
@@ -260,8 +261,6 @@ def _parse_and_ground_response(
                 action_parsed,
                 mark_registry=mark_registry,
                 screen_id=screen_binding.screen_id,
-                grounding_provider=build_grounding_provider(configurable),
-                screenshot=screenshot,
                 screen_binding=screen_binding,
                 timeout=float(configurable.get("grounding_timeout", 10.0) or 10.0),
                 grounding_metadata=grounding_observation,
@@ -271,9 +270,8 @@ def _parse_and_ground_response(
                 "intent_detected": True,
                 "grounding_success": True,
                 "target_mark_id": intent_raw.get("target_mark_id"),
-                "grounding_provider": grounding_observation.get("provider"),
-                "grounding_latency_ms": grounding_observation.get("latency_ms"),
-                "grounding_screen_hash": grounding_observation.get("raw_screenshot_hash"),
+                "grounding_provider": "mark_registry",
+                "grounding_screen_hash": screen_binding.raw_screenshot_hash,
             }
         except GroundingError as exc:
             action_parsed = None
@@ -343,10 +341,18 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
     screen_marks = configurable.get("screen_marks")
     if screen_marks is None and hasattr(device_factory, "get_screen_marks"):
         screen_marks = device_factory.get_screen_marks(device_id)
+    mark_provider_hints = build_mark_provider_hints(
+        task=task,
+        reflection=state.get("reflection"),
+        provider_hints=configurable.get("mark_provider_hints") or configurable.get("grounding_hints"),
+    )
     observation = build_observation(
         screenshot=screenshot,
         current_app=current_app,
         marks=screen_marks,
+        mark_providers=build_mark_providers(configurable),
+        provider_hints=mark_provider_hints,
+        provider_timeout=float(configurable.get("grounding_timeout", 10.0) or 10.0),
     )
     screen_binding = ScreenBinding(
         screen_id=observation.snapshot.screen_id,
@@ -378,7 +384,12 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
         state,
         "plan",
         "plan_start",
-        {"task": task, "current_app": current_app, **context_metrics},
+        {
+            "task": task,
+            "current_app": current_app,
+            "mark_provider_observation": observation.mark_provider_observation,
+            **context_metrics,
+        },
     )
 
     # 2. Build new messages (only the new ones, reducer will append)
@@ -617,7 +628,6 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
         configurable,
         mark_registry,
         screen_binding,
-        screenshot,
     )
     retry_count = request_retry_count
     current_error_layer = _layer_for_error(parse_metadata.get("parse_error_code"), grounding_error)
@@ -642,7 +652,6 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
                 configurable,
                 mark_registry,
                 screen_binding,
-                screenshot,
             )
             parse_metadata = {**retry_metadata, "parse_retry_count": retry_count, "parse_retry_success": retry_error is None}
             response = retry_response
@@ -693,6 +702,7 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
             "parse_retry_success": parse_metadata.get("parse_retry_success"),
             "grounding_error_code": parse_metadata.get("grounding_error_code"),
             "grounding_observation": grounding_observation,
+            "mark_provider_observation": observation.mark_provider_observation,
             "grounding_candidate_count": grounding_candidate_count,
             "selected_grounding_candidate_id": selected_grounding_candidate_id,
             "mark_registry": mark_registry.trace_summary(),
@@ -726,6 +736,7 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
             "grounding_failure_code": grounding_error,
             "grounding_screen_hash": grounding_observation.get("raw_screenshot_hash") or observation.snapshot.screen_hash,
             "grounding_observation": grounding_observation or None,
+            "mark_provider_observation": observation.mark_provider_observation,
             "grounding_candidates": grounding_candidates,
             "grounding_candidate_count": grounding_candidate_count,
             "selected_grounding_candidate_id": selected_grounding_candidate_id,
@@ -766,6 +777,7 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
         "grounding_failure_code": grounding_error,
         "grounding_screen_hash": grounding_observation.get("raw_screenshot_hash") or observation.snapshot.screen_hash,
         "grounding_observation": grounding_observation or None,
+        "mark_provider_observation": observation.mark_provider_observation,
         "grounding_candidates": grounding_candidates,
         "grounding_candidate_count": grounding_candidate_count,
         "selected_grounding_candidate_id": selected_grounding_candidate_id,
