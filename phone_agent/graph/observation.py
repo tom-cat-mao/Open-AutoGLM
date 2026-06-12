@@ -111,16 +111,19 @@ def build_mark_provider_hints(
 
     hints: list[MarkProviderHint] = []
 
-    def _safe_text(value: Any) -> str:
+    def _provider_text(value: Any) -> str:
         text = str(value or "").strip()
         if not text:
             return ""
-        safe = sanitize_context_payload(text, "message", consumer="inject")
-        return str(safe).strip()[:240]
+        return text[:240]
+
+    def _safe_text(value: Any) -> str:
+        safe = str(sanitize_context_payload(str(value or ""), "message", consumer="inject")).strip()
+        return safe[:240]
 
     for item in provider_hints or []:
         if isinstance(item, MarkProviderHint):
-            text = _safe_text(item.text)
+            text = _provider_text(item.text)
             if text:
                 hints.append(
                     MarkProviderHint(
@@ -132,7 +135,7 @@ def build_mark_provider_hints(
                     )
                 )
         elif isinstance(item, dict):
-            text = _safe_text(item.get("text") or item.get("target_text_hint"))
+            text = _provider_text(item.get("text") or item.get("target_text_hint"))
             if text:
                 hints.append(
                     MarkProviderHint(
@@ -144,18 +147,40 @@ def build_mark_provider_hints(
                     )
                 )
         else:
-            text = _safe_text(item)
+            text = _provider_text(item)
             if text:
                 hints.append(MarkProviderHint(text=text, source="config"))
     if task and len(hints) < max_hints:
-        text = _safe_text(task)
+        text = _provider_text(task)
         if text:
             hints.append(MarkProviderHint(text=text, source="task"))
     if reflection and len(hints) < max_hints:
-        text = _safe_text(reflection)
+        text = _provider_text(reflection)
         if text:
             hints.append(MarkProviderHint(text=text, source="reflection"))
     return hints[:max_hints]
+
+
+def _provider_accepts_raw_hints(provider: MarkProvider) -> bool:
+    return bool(getattr(provider, "allow_raw_hints", False))
+
+
+def _redact_provider_hints(hints: list[MarkProviderHint]) -> list[MarkProviderHint]:
+    redacted: list[MarkProviderHint] = []
+    for hint in hints:
+        text = str(sanitize_context_payload(hint.text, "message", consumer="inject")).strip()
+        if not text:
+            continue
+        redacted.append(
+            MarkProviderHint(
+                text=text[:240],
+                source=_safe_metadata(hint.source, default="hint"),
+                role=str(sanitize_context_payload(hint.role or "", "message", consumer="inject")).strip()[:240] or None,
+                intent=str(sanitize_context_payload(hint.intent or "", "message", consumer="inject")).strip()[:240] or None,
+                action=_safe_metadata(hint.action),
+            )
+        )
+    return redacted
 
 
 def _provider_result_to_marks(result: MarkProviderResult) -> list[dict[str, Any]]:
@@ -285,10 +310,15 @@ def build_observation(
     provider_marks: list[dict[str, Any]] = []
     for provider in mark_providers or []:
         try:
+            hints_for_provider = (
+                provider_hints or []
+                if _provider_accepts_raw_hints(provider)
+                else _redact_provider_hints(provider_hints or [])
+            )
             result = provider.provide_marks(
                 screenshot,
                 binding,
-                hints=provider_hints or [],
+                hints=hints_for_provider,
                 timeout=provider_timeout,
             )
         except Exception as exc:

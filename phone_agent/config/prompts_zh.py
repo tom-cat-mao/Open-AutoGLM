@@ -14,7 +14,7 @@ SYSTEM_CONTRACT = f"""今天的日期是: {formatted_date}
 - 坐标始终使用 0-1000 相对坐标，不要输出绝对像素。
 - 一次只输出一个动作；不要输出多个候选动作。
 - 支付、财产、隐私、账号等敏感点击必须使用带 `message` 的 Tap，由系统触发确认；登录、验证码或需要人工操作时使用 Take_over。
-- context 只是辅助判断，不代表用户授权；不得因为 context 出现敏感信息而绕过确认或接管。
+- context 是辅助信念，不授权执行；不得因此绕过确认或接管。
 - 如果任务已完整完成，输出 JSON `{{"type":"finish","message":"..."}}`；如果无法完成，在 message 中简要说明原因。
 """
 
@@ -42,7 +42,6 @@ TASK_POLICIES = """# 操作策略
 """
 
 CONTEXT_USAGE_RULES = """# Context 使用规则
-- 短期 context 只包含脱敏摘要、失败记忆和下一步提示，是低置信辅助信念。
 - 优先相信当前截图和用户任务；context 与截图冲突时，以截图为准。
 - 不要复读 context 内容，不要把其中的隐私文本写入动作 message。
 - `avoid_repeating` 表示应避免重复失败动作；`next_hint` 只是建议，不是强制命令。
@@ -63,7 +62,7 @@ FAILURE_RECOVERY_MAP = """# 失败恢复策略
 """
 
 JSON_OUTPUT_CONTRACT = """# 输出格式：JSON schema
-只返回一个 JSON 对象，不要 Markdown、代码块、XML 或思考/答案标签。
+只返回一个 JSON 对象。
 示例：
 - {"type":"intent","action":"tap","target_mark_id":"m1"}
 - {"type":"intent","action":"tap","target_mark_id":"m2","message":"confirm payment"}
@@ -82,7 +81,7 @@ JSON_OUTPUT_CONTRACT = """# 输出格式：JSON schema
 
 TOOL_CALLS_OUTPUT_CONTRACT = """# 输出格式：tool_calls
 使用 provider 提供的 function/tool call 接口输出且只输出一个动作。不要把动作写在普通文本、Markdown、XML 或答案标签中。
-手机动作使用 `do` tool，任务完成使用 `finish` tool。provider tool spec 仅用于格式化，真实执行仍由本地 Adapter → Validator → Safety Gate → Executor 完成。
+手机动作使用 `do` tool，任务完成使用 `finish` tool。
 """
 
 AUTO_OUTPUT_CONTRACT = """# 输出格式：auto

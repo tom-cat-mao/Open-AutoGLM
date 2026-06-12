@@ -10,6 +10,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from phone_agent.actions.constants import BASE_DANGEROUS_FIELDS
+
 
 class ActionAdapterError(ValueError):
     """Adapter error with a stable machine-readable error code."""
@@ -41,25 +43,9 @@ CANONICAL_ACTIONS = set(ACTION_ALIASES.values())
 TOOL_NAME_ALIASES = {"do", "finish", "phone_do", "phone_finish"}
 ALLOWED_TOOL_CALL_FIELDS = {"id", "type", "function", "index"}
 ALLOWED_TOOL_FUNCTION_FIELDS = {"name", "arguments"}
-DANGEROUS_PROVIDER_FIELDS = {
-    "api_key",
-    "apikey",
-    "authorization",
+DANGEROUS_PROVIDER_FIELDS = BASE_DANGEROUS_FIELDS | {
     "backend",
-    "base64_data",
-    "command",
-    "device_factory",
-    "device_id",
-    "env",
-    "image_url",
     "model_path",
-    "raw_command",
-    "screen_height",
-    "screen_width",
-    "secret",
-    "shell",
-    "subprocess",
-    "token",
 }
 COMMON_DO_FIELDS = {"type", "_metadata", "action", "message"}
 INTENT_FIELDS = {

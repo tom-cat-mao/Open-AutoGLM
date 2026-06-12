@@ -87,11 +87,11 @@ def after_interrupt(state: AgentState) -> Literal["reflect", "execute", "end"]:
     Decide the route after confirm/takeover interrupt node.
 
     Routes:
-    - "end" if user cancelled or task finished
+    - "end" if user cancelled or task finished/errored
     - "execute" if confirm accepted and pending action needs dispatch
     - "reflect" otherwise (continue to reflect node)
     """
-    if state.get("finished"):
+    if state.get("finished") or state.get("error"):
         return "end"
 
     # BUG 2 fix: if confirm accepted and there's a pending action, route to execute

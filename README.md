@@ -186,7 +186,7 @@ export PHONE_AGENT_LOCATEANYTHING_MAX_SIZE=960
 
 LocateAnything provider 会先读取当前完整截图，再按最长边 `max_size` 等比例缩小后送入模型；默认 `max_size=960`，这是基于本地 benchmark 在速度和 bbox 一致性之间的折中。运行时可通过 config `locateanything_max_size`（优先）或 `grounding_max_size` 覆盖，也可通过环境变量 `PHONE_AGENT_LOCATEANYTHING_MAX_SIZE`（优先）或 `PHONE_AGENT_GROUNDING_MAX_SIZE` 灰度/回滚；非法或非正整数会回落默认值。
 
-安全边界：屏幕目标点击类动作的唯一可执行 IntentIR target 是 `target_mark_id`。`target_text_hint` / 目标描述只能作为受控、脱敏、bounded 的 MarkProvider hint，不能直接生成 ActionIR。LocateAnything/Fake/OCR/UIAutomator/SoM 只能生成 marks；未知 mark、缺失 registry、provider 缺失、stale/hash mismatch、低置信、bad bbox、多候选歧义等会 fail-closed 为 `error_layer=grounding`，不会回退为主 VLM 直接坐标 Tap。trace/eval 只记录 provider、mark id、bbox/center、screen/hash、latency、failure code、candidate_count 与脱敏 hint summary，不记录原始截图或 raw target text。
+安全边界：屏幕目标点击类动作的唯一可执行 IntentIR target 是 `target_mark_id`。`target_text_hint` / 目标描述只能作为受控、bounded 的本地 MarkProvider hint，不能直接生成 ActionIR；本地 LocateAnything/Fake 可在内存中使用 raw hint 做 query-conditioned grounding，但 raw hint 不写入 trace、checkpoint、prompt marks block、eval JSON 或报告。LocateAnything/Fake/OCR/UIAutomator/SoM 只能生成 marks；未知 mark、缺失 registry、provider 缺失、stale/hash mismatch、低置信、bad bbox、多候选歧义等会 fail-closed 为 `error_layer=grounding`，不会回退为主 VLM 直接坐标 Tap。trace/eval 只记录 provider、mark id、bbox/center、screen/hash、latency、failure code、candidate_count 与脱敏 hint summary，不记录原始截图或 raw target text。若未来接入远程 grounding provider，raw hint 必须显式 opt-in，否则默认使用脱敏 hint。
 
 ### Grounding Benchmark
 

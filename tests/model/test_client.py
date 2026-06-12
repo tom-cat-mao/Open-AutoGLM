@@ -286,12 +286,13 @@ def test_parse_response_with_metadata_adapts_json_schema() -> None:
     client = ModelClient(ModelConfig(output_mode="json_schema"))
 
     thinking, action, metadata = client._parse_response_with_metadata(
-        '{"type":"do","action":"tap","x":500,"y":500}'
+        '{"type":"intent","action":"tap","target_mark_id":"m1"}'
     )
 
     assert thinking == ""
-    assert '"_metadata": "do"' in action
+    assert '"_metadata": "intent"' in action
     assert '"action": "Tap"' in action
+    assert '"target_mark_id": "m1"' in action
     assert metadata["configured_mode"] == "json_schema"
     assert metadata["detected_format"] == "json_schema"
     assert metadata["adapter_used"] == "json_schema"
@@ -307,13 +308,13 @@ def test_parse_response_with_metadata_adapts_tool_calls() -> None:
             {
                 "function": {
                     "name": "do",
-                    "arguments": '{"type":"do","action":"tap","x":1,"y":2}',
+                    "arguments": '{"type":"do","action":"back"}',
                 }
             }
         ],
     )
 
-    assert '"element": [1, 2]' in action
+    assert '"action": "Back"' in action
     assert metadata["detected_format"] == "tool_calls"
     assert metadata["adapter_used"] == "tool_calls"
 
@@ -332,6 +333,15 @@ def test_json_schema_mode_rejects_text_dsl_response() -> None:
     assert exc_info.value.parse_metadata["parse_error_code"] == "invalid_json"
 
 
+def test_json_schema_mode_rejects_direct_coordinate_tap() -> None:
+    client = ModelClient(ModelConfig(output_mode="json_schema"))
+
+    with pytest.raises(ModelParseError) as exc_info:
+        client._parse_response_with_metadata('{"type":"do","action":"tap","x":1,"y":2}')
+
+    assert exc_info.value.parse_metadata["parse_error_code"] == "mark_required"
+
+
 def test_tool_calls_mode_rejects_plain_text_without_tool_call() -> None:
     client = ModelClient(ModelConfig(output_mode="tool_calls"))
 
@@ -345,7 +355,7 @@ def test_auto_mode_detects_json_and_rejects_legacy_text_dsl() -> None:
     client = ModelClient(ModelConfig(output_mode="auto"))
 
     _thinking, json_action, json_metadata = client._parse_response_with_metadata(
-        '{"type":"do","action":"tap","x":1,"y":2}'
+        '{"type":"intent","action":"tap","target_mark_id":"m1"}'
     )
 
     assert '"action": "Tap"' in json_action
@@ -537,6 +547,8 @@ def test_tool_spec_target_mark_has_grounding_description() -> None:
     assert "y" not in properties
     assert "description" in mark_prop
     assert "harness grounds" in mark_prop["description"]
+    assert "target_intent" not in properties
+    assert "non-executable" in properties["target_text_hint"]["description"].lower()
 
 
 def test_tool_spec_duration_has_format_description() -> None:

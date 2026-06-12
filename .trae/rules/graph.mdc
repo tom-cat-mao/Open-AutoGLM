@@ -13,260 +13,186 @@ execution_status: completed
 iteration: 1
 planner_mode: null
 revision_scope: null
-last_planner_update: "Targeted revision after Architect ITERATE: added pre-VLM Hint Source Contract, split enumerative/query-conditioned MarkProviders, tightened adapter rules and old provider deletion gates."
-last_architect_review: "APPROVE_FOR_CRITIC: targeted revision resolved hint-source and adapter-boundary blockers; no remaining blocking architecture findings."
+last_planner_update: "Targeted revision after Architect ITERATE: clarified raw task prompt boundary, constrained task-aware redaction to derived action/result/context fields, specified provider raw hint in-memory testing, added local-vs-remote provider documentation scope, and aligned context section detection."
+last_architect_review: "ITERATE: P3 contradicted current raw task prompt behavior; P2 raw hint persistence/testing and remote-provider documentation were under-specified."
 last_critic_verdict: APPROVE
 approved_for_execution: true
-notes: "Autopilot execution completed for Scheme A MarkRegistry-only grounding. Runtime, tests, docs, search gates, code review, and security review passed."
+notes: "Autopilot execution completed; tests and RALPH/security review passed. No commit created."
 ```
 
 # Roadmap
 
 ## 已完成 Phase
 
-- ✅ 基础执行框架：LangGraph `Plan -> Execute -> Reflect` 主循环、DeviceFactory/ADB 抽象、HITL confirm/takeover、local JSONL trace、eval dry-run、Context Harness、request-only compaction、structured reflection、ActionIR/Validator/Repair/Safety/Executor 已落地。
-- ✅ 结构化输出基础：`json_schema|tool_calls|auto` 是当前模型输出协议；旧 text DSL 不再作为执行协议；`context_harness_v1` 是唯一 prompt version。
-- ✅ 当前 grounding 现状：代码已实现 MarkRegistry path 与 LocateAnything description path 两条 target grounding 路线；本次 RALPLAN 的目标是纠正该偏差，完全重设 grounding roadmap。
-- ✅ Benchmark 资产：`bench/grounding/` 已有 LocateAnything benchmark runner、manifest/scoring/reporting；该资产保留，但其 runtime 集成语义需要从“description -> ActionIR”调整为“provider -> MarkRegistry”。
+- 基础执行框架已存在：LangGraph `Plan -> Execute -> Reflect`、DeviceFactory/ADB、HITL confirm/takeover、local JSONL trace、eval dry-run、Context Harness、request-only compaction、structured reflection、ActionIR/Validator/Repair/Safety/Executor。
+- 当前代码事实已验证：`plan_node` 原始用户任务不被脱敏；`reflect_node` 的 `action_parsed/action_result` 和 context block 会 regex 脱敏。
+- 执行前问题已验证：`build_mark_provider_hints()` 曾对 task/reflection/config hints 使用 `consumer="inject"`，会把手机号、订单号、验证码等定位目标替换为 `<redacted>` 后传给本地 LocateAnything/Fake provider；本轮执行已改为本地 allowlisted provider 可用 raw bounded hints，未知 provider 默认接收 redacted hints。
+- 当前代码事实已验证：空 state 下 `build_plan_context_block({})` 仍输出默认 `unknown/null/empty` block，形成低信息 prompt 噪声。
 
 ## RALPLAN-DR 摘要
 
 ### Principles
 
-1. **单一目标定位入口**：所有屏幕目标点击类动作必须通过 `target_mark_id -> MarkRegistry -> canonical ActionIR`；不得存在 `target_text_hint -> provider -> ActionIR` 的第二执行通道。
-2. **Provider 只生产 marks，不执行 grounding 编译**：LocateAnything、Fake、OCR、UIAutomator、SoM 等只能作为 `MarkRegistry` 上游 provider，输出候选 `Mark`/`MarkSet`；它们不能直接把 intent 编译为 Tap/LongPress。
-3. **Planner 只引用符号目标**：主 VLM 在屏幕目标动作中只选择 `target_mark_id`；自然语言 target hints 只能用于 mark generation / disambiguation / reobserve，不得作为 executor-facing target。
-4. **Fail-closed 与 HITL 不变量保持**：未知 mark、缺失 registry、provider 失败、stale/hash mismatch、多候选歧义、低置信均不得回退为主 VLM 坐标；支付/隐私仍 confirm，登录/验证码仍 takeover。
-5. **评测资产迁移而非丢弃**：LocateAnything benchmark 继续评估 `screenshot + target description -> bbox` 能力，但 runtime 消费结果必须转成 synthetic Mark，再进入统一 MarkRegistry path。
-6. **Hints 是 provider 输入，不是执行协议**：pre-VLM hints 只能来自受控来源并用于 query-conditioned MarkProvider 生成 marks；hints 不得作为 `IntentIR` 可执行 target 字段，也不得被 compiler 直接消费。
+1. **Local provider input is not a persistence boundary**: 本地 LocateAnything/MarkProvider 可使用 raw task hints 完成 grounding；不得把 prompt/checkpoint 的脱敏策略错套到本地 provider 输入。
+2. **External visibility remains redacted**: raw provider hints 不得进入 trace、checkpoint、prompt marks block、eval JSON、report 或 durable metadata；对外只记录长度、来源、hash/summary 和脱敏文本。
+3. **Task-aware redaction preserves derived comparison signal**: 原始用户任务仍是模型请求的授权输入；task-aware redaction 只处理 action/result/reflection/context 等派生字段，避免派生路径重复暴露 raw 任务值，同时用 `<matches_task_value>` 保留“执行的是任务要求值”的结构化信号。
+4. **Context should earn prompt budget**: `unknown`、`null`、空列表/空字典等默认 context 不应注入模型请求；只注入有信息量的短期记忆。
+5. **Post-execution safety stays intact**: Adapter、Grounding、Validator、Repair、Safety Gate、HITL、Edge terminal guard 仍是执行安全边界；本计划不削弱 fail-closed、确认/接管或坐标校验。
 
 ### Decision Drivers
 
-1. 当前实现偏离原始 harness engineering 目标：`1c0b08e` 将 LocateAnything 接成独立 description path，后续 README/AGENTS/tests 固化了并列路线，导致 MarkRegistry 退化成可选分支。
-2. 多 target 表达会让 prompt、adapter、trace、eval 和恢复策略长期双轨；未来接 OCR/UIAutomator/SoM 时还会继续分裂 provider-specific path。
-3. MarkRegistry 是 stale validation、source/confidence、候选管理、隐私摘要、trace/eval 关联和 HITL 安全的统一抽象；LocateAnything 应该增强它，而不是绕过它。
+1. LocateAnything 是 query-conditioned provider；如果 hint 中的目标文本被 `<redacted>` 替换，`screenshot + target description -> mark` 的核心能力会退化。
+2. Reflect prompt 当前同时显示 raw task 和 redacted action/result，导致模型缺少任务值与执行值是否一致的判断信号，容易让 verdict 保守化或误判。
+3. Context Harness 目前把 prompt consumer、provider input consumer、trace/checkpoint consumer 混用，导致安全策略边界不清晰。
 
 ### Viable Options
 
 | Option | Pros | Cons |
 |---|---|---|
-| A. 强收敛：删除 description execution path，LocateAnything 只作为 MarkRegistry provider | 架构最干净；所有屏幕目标统一走 mark；长期 prompt/adapter/eval 简化；符合原始设计 | 改动面大；需要迁移 tests/docs；无 marks 时会显式 fail-closed 或 reobserve，短期可用性下降 |
-| B. 过渡收敛：保留 `target_text_hint` 输入，但先生成 synthetic mark 再走 MarkRegistry | 回归风险较低；复用现有 description tests；逐步迁移 prompt | 仍保留第二入口语义，容易继续鼓励模型绕过 mark；不是用户要求的方案 A |
-| C. 保持当前并列路径，仅加强文档说明 | 改动最小；当前测试大多保留 | 继续偏离目标；MarkRegistry 无法成为统一抽象；未来 provider 接入会继续发散 |
+| A. 保持现状，只加强文档说明 | 改动最小；不会触碰脱敏代码 | Provider grounding 继续丢目标值；reflect 继续丢比较信号；context 噪声不变 |
+| B. 完全关闭 inject/reflect/provider 脱敏 | 能力恢复最直接；实现简单 | raw 私密文本会进入 prompt/context/trace 风险上升；违背 checkpoint/trace 脱敏边界 |
+| C. Consumer 分层：本地 provider raw hints，reflect/inject 使用 task-aware marker，trace/checkpoint 强脱敏 | 保留 provider 能力；保护持久化和外部 prompt；测试边界清晰 | 需要新增 sanitizer 分支和覆盖测试；需要明确本地/远程 provider 策略 |
 
 ### Selected Approach
 
-选择 **A. 强收敛**：完全删除 `target_text_hint / target_role / target_intent -> GroundingProvider -> ActionIR` 的执行路径。LocateAnything/Fake provider 迁移为 `MarkRegistry` 的上游 provider：它们可以基于当前截图和候选描述生成或补全 marks，但 `ground_intent_to_action()` 只能消费 `target_mark_id`。如果当前屏幕没有可用 marks，plan 应 fail-closed/reobserve/takeover，而不是让 VLM 或 provider 直接产出坐标动作。
+选择 **C. Consumer 分层**。
 
-目标流水线：
+目标边界：
 
 ```text
-┌─────────────────────────────────────────────────────────────────────┐
-│  plan_node (VLM request 前)                                        │
-│                                                                     │
-│  Screenshot + current_app                                           │
-│    │                                                                │
-│    ├─ static/device marks (config / device_factory)                 │
-│    │                                                                │
-│    ├─ build_mark_provider_hints(task, reflection, config hints)     │
-│    │    └─ MarkProviderHint (脱敏、bounded、max 3)                  │
-│    │                                                                │
-│    ├─ MarkProvider.provide_marks(screenshot, ScreenBinding, hints)  │
-│    │    ├─ Enumerative: FakeMarkProvider (bbox/bboxes)              │
-│    │    └─ Query-conditioned: LocateAnythingMLXProvider             │
-│    │         ├─ 无 hints → failure(missing_hint)                    │
-│    │         ├─ 单 valid bbox → MarkCandidate(la_N_1)              │
-│    │         └─ 多 valid bbox → failure(grounding_ambiguous)        │
-│    │                                                                │
-│    └─ build_observation() → Observation                             │
-│         ├─ MarkRegistry (screen-bound, hash/topology validated)     │
-│         ├─ ScreenSnapshot (screen_id, perceptual_hash, ...)        │
-│         └─ mark_provider_observation (trace-safe summary)           │
-│                                                                     │
-│  Prompt: marks_block = MarkRegistry.prompt_block()                  │
-│    → "Screen Marks (use target_mark_id; do not guess coordinates)"  │
-│                                                                     │
-│  VLM → JSON/tool_calls → adapt_json_action()                       │
-│    ├─ type=intent + target_mark_id → IntentIR                       │
-│    ├─ type=intent + no target_mark_id (tap-like) → mark_required   │
-│    ├─ type=do + tap-like → mark_required                            │
-│    └─ type=do/finish (non-target) → canonical ActionIR              │
-│                                                                     │
-│  IntentIR → ground_intent_to_action()                               │
-│    ├─ target_mark_id → MarkRegistry.get() → validate binding       │
-│    │    ├─ stale / hash_mismatch / low_confidence → GroundingError  │
-│    │    ├─ sensitivity=takeover → Take_over (interrupt)             │
-│    │    ├─ sensitivity=confirm → Tap + confirm (interrupt)          │
-│    │    └─ ok → canonical ActionIR {action:Tap, element:[x,y]}     │
-│    ├─ requires_grounding=False → Back/Home/Launch/Wait/Type         │
-│    └─ no mark_id + requires_grounding → GroundingError(mark_required)│
-│                                                                     │
-│  canonical ActionIR → Validator → (Repair → Validator) → Safety    │
-│    → approved/confirm/takeover/rejected → Executor                  │
-└─────────────────────────────────────────────────────────────────────┘
+raw task / reflection / config hints
+  -> local provider input: raw text allowed, bounded, not persisted
+  -> provider observation / trace / checkpoint: raw text forbidden, summary only
+  -> MarkRegistry prompt block: raw text forbidden, text_summary redacted/stubbed
+  -> model request task text: raw user task allowed as original instruction
+  -> derived reflect/inject fields: raw task value forbidden, task match signal allowed
 ```
 
-非屏幕目标动作（Launch/Back/Home/Wait/Type/Finish）继续走 canonical ActionIR，不强制 MarkRegistry。
+关键规则：
 
-### Hint Source Contract
-
-LocateAnything 是 query-conditioned provider，不是 enumerative detector。因此 Scheme A 必须先定义 hints 的来源、边界和失败行为，避免把旧 `target_text_hint -> ActionIR` 路径换名恢复。
-
-允许的 pre-VLM hint 来源：
-
-| 来源 | 用途 | 约束 |
-|---|---|---|
-| `state["task"]` 的脱敏任务摘要 | 初始页面常见目标生成，例如搜索框、设置按钮、确认入口 | 只用于 provider query；不得原样写入 executable IntentIR |
-| 当前 screen/context 的脱敏 section IDs 与短期 memory | 基于上一轮失败、反思策略或已知目标生成 bounded hints | 必须走 `select_plan_context()` / `build_plan_context_block()` 的脱敏预算 |
-| 外部测试/benchmark 注入的 provider hints | 离线 replay、benchmark、fixture 精准验证 | 仅在 config/test harness 中出现，trace 记录来源与脱敏摘要 |
-| Enumerative providers 的文本/OCR/accessibility 摘要 | 作为 LocateAnything query 补充或 mark merge signal | 不记录 raw private text；只记录 redacted summary/hash |
-| provider-specific static hints | 灰度实验或固定 app workflow | 必须显式配置、计数限额、trace 可见 |
-
-禁止的 hint 行为：
-
-- 主 VLM 输出的 `target_text_hint` 不得作为 executable target；tap-like intent 缺 `target_mark_id` 必须 fail-closed。
-- Hint 不得绕过 MarkRegistry 生成 ActionIR；query-conditioned provider 成功后只能产出 `Mark` 或 `MarkProviderResult`。
-- Hint 不得绕过 HITL、安全门、context privacy、raw screenshot redaction。
-- Provider 无 hint 或 hint 低置信时必须返回 no-mark / provider failure summary；不得请求 VLM 猜坐标。
-
-MarkProvider 类型：
-
-| 类型 | 示例 | 行为 |
-|---|---|---|
-| Enumerative MarkProvider | static `screen_marks`, UIAutomator, OCR, SoM/OmniParser | 不依赖目标 query，直接枚举当前屏幕候选 marks |
-| Query-conditioned MarkProvider | LocateAnything, test FakeLocate provider | 依赖 bounded hints 生成 synthetic marks；无 hints 时默认不产 mark 或返回稳定 failure code |
+- `provider_hint` consumer 只适用于本地 provider input，不写 trace/checkpoint/prompt。
+- `trace_payload` 和 `checkpoint` 不接受 task-aware marker，继续强脱敏/stub。
+- `reflect_prompt` 和 `inject` 可接收 `task_context`，只在派生字段中将 task 中已授权的敏感片段匹配为 `<matches_task_value>`，但不改变原始任务文本的现有传递方式。
+- 空 context 不注入；默认 `unknown/null/empty` 不消耗 prompt budget。
 
 ### ADR
 
-- **Decision**: 将 LocateAnything 从独立 description grounding execution path 改为 MarkRegistry provider；删除 runtime 中 description intent 直接生成 ActionIR 的能力。
-- **Drivers**: 恢复原始 harness boundary；消除 target grounding 双轨；让 MarkRegistry 承担统一 stale validation、candidate/source/confidence、trace/eval 和 HITL 安全边界。
-- **Alternatives**: 过渡 synthetic mark 路线；保留并列路径；只改 prompt 不改 runtime。
-- **Why chosen**: 方案 A 最符合用户明确要求和长期架构，避免继续把临时可用性问题扩大成永久协议。
-- **Consequences**: 需要同步改 adapter、prompt、plan_node、grounding/provider API、tests、README/docs/AGENTS/.trae rules；短期必须接受无 mark 时 fail-closed。
-- **Follow-ups**: 执行完成后基于 eval 决定是否增加 UIAutomator/OCR/SoM provider，提高 mark 覆盖率；benchmark 继续作为 provider quality 评测，而非 runtime 第二执行通道。
+- **Decision**: 将脱敏策略按 consumer 边界拆分：本地 MarkProvider 使用 raw bounded hints；reflect/inject 使用 task-aware redaction；trace/checkpoint/prompt-visible mark metadata 继续强脱敏。
+- **Drivers**: 修复 LocateAnything hint 被脱敏导致的 grounding 能力损失；修复 reflect 缺少任务值匹配信号；减少 context block 噪声。
+- **Alternatives**: 保持现状；完全关闭脱敏；只做 prompt 去重。
+- **Why chosen**: Consumer 分层同时满足 harness engineering 的能力目标和隐私边界，不把本地推理输入误当成持久化/远程边界。
+- **Consequences**: 需要新增 sanitizer 测试、provider hint 测试、reflect prompt 测试和 context block 过滤测试；文档需说明 local provider 与 remote provider 的区别。
+- **Follow-ups**: 若未来接入远程 grounding provider，必须新增显式 raw hint opt-in 或默认 redacted hints 策略。
 
 ## 当前规划 Phase
 
-### Phase A1 — Contract Reset: Mark-Only Screen Targeting
+### Phase P1 — Context Block Noise Filter
 
-- **目标/根因**: 先收敛协议边界，防止实现阶段继续把 `target_text_hint` 当作可执行 target。根因是当前 prompt/model schema/adapter 允许 screen-target tap-like action 通过 description hints 绕过 MarkRegistry。
-- **修改文件候选**: `phone_agent/config/prompts_zh.py`, `phone_agent/config/prompts_en.py`, `phone_agent/model/client.py`, `phone_agent/actions/adapter.py`, `phone_agent/actions/ir.py`, `phone_agent/actions/grounding.py`, `tests/model/test_client.py`, `tests/actions/test_adapter.py`, `tests/actions/test_grounding_provider.py`。
+- **目标/根因**: 空 state 和默认 context 目前仍注入 `unknown/null/empty` block，浪费 prompt budget。根因是 `build_plan_context_block()` 只用 `if value` 判断非空 dict，而默认 belief/outcome/gui_memory 都是 truthy。
+- **修改文件候选**: `phone_agent/graph/context.py`, `tests/graph/test_state.py`, `tests/graph/test_context_consumer.py`。
 - **执行步骤**:
-  1. Prompt 中点击类屏幕目标只允许 `{"type":"intent","action":"tap","target_mark_id":"m1"}`；删除或降级 `target_text_hint` 点击示例，明确 target hints 不可直接执行。
-  2. `model/client.py` JSON schema 尽量表达 screen-target intent 需要 `target_mark_id`；但 schema 不能作为唯一防线，adapter/compiler 必须硬性拒绝 description-only tap-like intent。
-  3. `adapter.py` 精确定义：`Tap` / `Double Tap` / `Long Press` 的 `type=intent` 必须有 `target_mark_id`；只有 `target_text_hint` / `target_role` / `target_intent` 的 tap-like intent 返回稳定 `mark_required`。
-  4. 非目标动作不得被误伤：`Launch` / `Back` / `Home` / `Wait` / `Type` / `Finish` 必须使用 canonical `type=do|finish` 与各自必填字段，不应通过 `target_intent` 伪装成 intent grounding。
-  5. `target_intent` 不能继续作为 action alias 让 description-only tap 存活；tap-like executable intent 的 action 必须来自 `action` 字段并绑定 `target_mark_id`。
-  6. `IntentDict` 保留或删除 description hint 字段需明确语义：保留时只能用于 mark generation metadata，不得进入 `ground_intent_to_action()` 的 executable branch。
-  7. 更新 adapter/model tests，确保 description-only intent 被拒绝，mark intent 仍 accepted，非屏幕动作不受影响。
+  1. 在 `build_plan_context_block()` 中增加有信息量判断 helper，例如 `_is_informative_belief()`、`_is_informative_outcome()`、`_is_informative_gui_memory()`。
+  2. 当 belief 只有 `summary="unknown"`、`confidence="unknown"`、无 loading/sensitive 信号时不输出。
+  3. 当 outcome 只有 `step_count=0`、`action=None`、`execution_success=None`、空 result_message 时不输出。
+  4. 当 gui_memory 四个子字段全为空时不输出。
+  5. 保持 failure_memory、summarized_history、grounding_observation 的现有空值过滤。
+  6. 对齐 `select_plan_context()` 的 section detection，避免过滤后不注入的默认 `screen_belief` 仍被统计为 selected section。
 - **验收标准**:
-  - `rg -n "target_text_hint.*走|description path|description grounding supports|provider_unavailable.*description" phone_agent README.md docs AGENTS.md .trae` 不再出现把 description 作为执行 path 的描述。
-  - JSON/tool_calls schema 与 prompt 不再鼓励 VLM 输出 description-only tap intent。
-  - 单测证明：description-only tap-like intent 以稳定 `mark_required` fail-closed；`target_mark_id` tap intent 正常进入 MarkRegistry；Launch/Back/Home/Wait/Type/Finish 不受影响。
-  - 单测覆盖 `target_intent` 不能作为 description-only tap 的逃逸字段。
+  - `build_plan_context_block({})` 返回空 block 或 `context_block_chars=0`。
+  - 含真实 reflection、action_result、failure_memory、gui_memory 的 state 仍输出对应 section。
+  - 现有 context observe/inject metrics 不破坏，`select_plan_context(mode="observe")` 仍只产有信息量的 section IDs。
 
-### Phase A2 — Provider Layer Reframe: LocateAnything Generates Marks
+### Phase P2 — Local Provider Raw Hint Boundary
 
-- **目标/根因**: 将 `GroundingProvider` 从 “Intent description -> GroundingResult -> ActionIR” 改成 “Observation input -> Mark candidates -> MarkRegistry”。根因是当前 provider contract 直接服务 `_ground_description_intent()`，绕过 MarkRegistry。
-- **修改文件候选**: `phone_agent/grounding/provider.py`, `phone_agent/grounding/fake.py`, `phone_agent/grounding/locateanything.py`, `phone_agent/grounding/factory.py`, `phone_agent/grounding/__init__.py`, `phone_agent/graph/marks.py`, `phone_agent/graph/observation.py`, `tests/actions/test_grounding_provider.py`, `tests/graph/test_plan_reflect.py`。
+- **目标/根因**: `build_mark_provider_hints()` 对 provider hint text 复用 `consumer="inject"`，导致手机号、订单号、验证码等目标文本被 `<redacted>` 后传给本地 LocateAnything，直接损害 grounding 能力。
+- **修改文件候选**: `phone_agent/graph/observation.py`, `phone_agent/grounding/provider.py`, `phone_agent/grounding/fake.py`, `phone_agent/grounding/locateanything.py`, `README.md`, `AGENTS.md`, `.trae/traecli.yaml`, `tests/graph/test_state.py`, `tests/actions/test_grounding_provider.py`, `tests/graph/test_plan_reflect.py`。
 - **执行步骤**:
-  1. 定义新的 provider contract，例如 `MarkProvider.provide_marks(screenshot, screen_binding, hints, timeout) -> MarkProviderResult`；结果包含 `marks[]`、`candidate_count`、`provider`、`failure_code`、`latency_ms`、脱敏 metadata。
-  2. 明确 provider 分类：enumerative providers 可无 hints 运行；query-conditioned providers（LocateAnything/FakeLocate）必须接收 bounded hints，且无 hints 时返回 `missing_hint` / no marks。
-  3. LocateAnything provider 根据当前截图和可用 hints 产生 synthetic marks，例如 `la_1`，写入 `bbox/center/source="locateanything"/confidence/text_summary`；不得返回 executable ActionIR。
-  4. Fake provider 拆分语义：static fake mark provider 用于枚举固定 marks；query fake provider 用于测试 hints -> synthetic marks；二者都不能返回 fixed executable center。
-  5. Factory 改名或兼容为 `build_mark_providers()` / `build_mark_provider()`；provider 仍从 graph config/env 注入，但 tool schema 不暴露。
-  6. 删除或强废弃旧 public runtime API：`GroundingProvider.ground`, `GroundingTarget`, `GroundingResult` 不得在 runtime compiler/plan path 中继续使用；如 benchmark 需要保留，应移动到 bench-only adapter 或标注 benchmark-only。
-  7. Parser 中 `<box>`/multi-box/candidate validation 继续用于 LocateAnything mark candidate 生成；multiple valid candidates 以多 marks 或 ambiguous failure 的策略明确化，但不得 first-box 执行。
+  1. 将 `build_mark_provider_hints()` 的 hint text 处理拆成 provider-input 专用 helper：strip + trim bounded chars，不做 regex redaction。
+  2. `source/action` 等 metadata 继续走 `_safe_metadata()`，避免 provider config/log 字段携带长敏感串。
+  3. `MarkProviderHint.redacted_summary()` 继续只返回 source、has_text、text_length、role_length、intent_length、action，不返回 raw text。
+  4. `_summarize_provider_result()` 和 `mark_provider_observation` 只记录 redacted summary，不记录 raw hints。
+  5. `_provider_result_to_marks()` / `Mark.to_trace_dict()` / `MarkRegistry.prompt_block()` 继续脱敏 `text_summary`，禁止 raw hint 回流到主 VLM prompt 或 trace。
+  6. 测试中如需证明 provider 接收 raw hint，只允许 fake/test provider 暴露短生命周期 in-memory capture；该 capture 不得进入 `MarkProviderResult`、`mark_provider_observation`、trace、checkpoint 或 prompt-visible mark metadata。
+  7. 文档标注：该 raw hint 策略仅适用于本地 provider；remote provider 需要显式 opt-in 或默认 redacted hints。
 - **验收标准**:
-  - `phone_agent/grounding/*` 不再暴露 “description intent -> executable center” 的 public path。
-  - LocateAnything/Fake 单测验证 provider 输出 marks 或 provider failure，不输出 `{"_metadata":"do","action":"Tap"}`。
-  - Multi-box 行为可审计：多个候选要么注册为多个 marked candidates 并让 VLM 后续选择 mark，要么 fail-closed 为 ambiguous；绝不静默执行第一个候选。
-  - Code search gate：`GroundingTarget`, `GroundingResult`, `GroundingProvider.ground`, `build_grounding_provider` 不得出现在 runtime execution path；若 benchmark 保留，必须位于 `bench/` 或清楚标注 benchmark-only。
+  - `build_mark_provider_hints(task="点击屏幕上的 13812345678 联系人")` 的 `MarkProviderHint.text` 保留 `13812345678`。
+  - provider request 内部可见 raw hint 的测试只使用非持久化 in-memory capture；`mark_provider_observation` JSON 不包含 raw 手机号/订单号/验证码。
+  - `mark_registry.prompt_block()` 和 `trace_summary()` 不包含 raw hint。
+  - LocateAnything/Fake provider tests 证明 raw hint 不会被 provider result summary 持久化。
 
-### Phase A3 — ObservationBuilder Owns MarkRegistry Population
+### Phase P3 — Task-Aware Redaction for Derived Reflect and Inject Fields
 
-- **目标/根因**: 让 `plan_node` 在调用 VLM 前先构建完整 `MarkRegistry`，并把 marks block 注入 prompt。根因是目前 marks 只来自 config/device optional path，LocateAnything 在 VLM 输出 description 后才被调用，顺序反了。
-- **修改文件候选**: `phone_agent/graph/observation.py`, `phone_agent/graph/nodes/plan.py`, `phone_agent/graph/state.py`, `phone_agent/graph/context.py`, `phone_agent/graph/trace.py`, `tests/graph/test_plan_reflect.py`, `tests/graph/test_trace.py`, `tests/evals/test_eval_harness.py`。
+- **目标/根因**: Reflect prompt 当前保留 raw task 作为原始用户指令，却把 action/result 中的同一敏感值替换为 `<redacted>`，模型无法判断“执行值是否等于任务值”。问题范围是 action/result/reflection/context 等派生字段的二次回流，不是隐藏原始用户任务。
+- **修改文件候选**: `phone_agent/graph/context.py`, `phone_agent/graph/nodes/reflect.py`, `phone_agent/graph/nodes/plan.py`, `tests/graph/test_plan_reflect.py`, `tests/graph/test_context_consumer.py`, `tests/graph/test_state.py`。
 - **执行步骤**:
-  1. `build_observation()` 接收 static/device marks、enumerative providers 输出、query-conditioned providers 输出，合并成一个 screen-bound `MarkRegistry`；所有 mark 都绑定 `screen_id`、`semantic_screen_id`、`mark_set_version`、`perceptual_hash`。
-  2. 在 ObservationBuilder 内构造 bounded hint set：从 task summary、reflection/context、external config/test hints、enumerative provider text summaries 中脱敏生成，记录 hint source/count/budget/truncation。
-  3. `plan_node` 在 VLM request 前构建 MarkRegistry，不在解析 VLM response 后调用 LocateAnything 执行动作。
-  4. `mark_registry.prompt_block()` 成为 screen-target action 的唯一 target inventory；若 registry 为空，prompt 应明确当前无可引用 mark，screen-target tap-like action 应 reobserve/fail-closed，而不是猜坐标。
-  5. Trace/context/eval 记录 provider mark generation 摘要：provider、mark_count、candidate_count、failure_code、latency、source distribution、hint source/count；不记录 raw screenshot/raw target private text。
-  6. 保留 config/device `screen_marks` 作为测试和外部 provider 注入方式，但与 LocateAnything/Fake provider 输出统一合并。
+  1. 给 `sanitize_context_payload()` 增加可选 `task_context: str | None = None`，默认 `None` 保持现有行为。
+  2. 从 `task_context` 中用现有 `SENSITIVE_PATTERN` 提取敏感片段；在 `consumer in {"inject", "reflect_prompt"}` 且 payload 是派生字段时，将 payload 字符串中完全匹配这些片段的位置替换为 `<matches_task_value>`，再执行常规 regex redaction。
+  3. `trace_payload` 和 `checkpoint` 忽略 `task_context`，保持强脱敏/stub。
+  4. `reflect_node` 对 `action_parsed/action_result` 调用 sanitizer 时传入 `task_context=task`；`原始任务：{task}` / `Original task: {task}` 的现有 raw task 行保持不变。
+  5. `build_plan_context_block()` / `select_plan_context()` 支持从 `state["task"]` 传入 task context；只对 context block 中的 action result、reflection、summarized_history、failure/gui memory 等派生内容应用 marker，不修改 plan prompt 的原始 task 行。
+  6. `_build_reflection_context()` 对 reflection 文本传入 task context，保留比较信号但不重复暴露 raw task value。
+  7. 不实现编号 marker；多个任务值统一用 `<matches_task_value>`，避免 prompt 复杂化。
 - **验收标准**:
-  - `plan_node` 中不再出现 parse 后根据 description intent 调 `build_grounding_provider()` 的路径。
-  - VLM prompt 中出现 marks block 时，模型可输出 `target_mark_id` 并成功执行；registry 为空时 target tap-like action 不执行。
-  - Trace/eval 能展示 mark provider coverage，不泄露 raw image/private text。
-  - Query-conditioned provider 无 hints 时不生成 marks，并以稳定 code 记录；有 bounded hints 时只生成 marks，不生成 ActionIR。
+  - Reflect prompt 的原始任务行可包含 raw 用户任务；`action_parsed/action_result` 派生字段不包含 raw 手机号/订单号/验证码，且与 task 一致的值显示为 `<matches_task_value>`。
+  - 与 task 不一致的敏感值仍显示 `<redacted>`。
+  - Plan prompt 的原始 task 行保持现有 raw task 行为；context/reflection 派生块使用 `<matches_task_value>` 或 `<redacted>`。
+  - `sanitize_context_payload(... consumer="trace_payload", task_context=...)` 不输出 `<matches_task_value>`，仍为 `<redacted>`。
+  - `checkpoint` consumer 仍按 key-level stub 策略工作。
 
-### Phase A4 — Mark-Only Grounding Compiler Cleanup
+### Phase P4 — Prompt Contract Dedupe
 
-- **目标/根因**: 删除 `_ground_description_intent()` 和相关结果校验，把 `ground_intent_to_action()` 收敛成 mark-only compiler。根因是当前 compiler 同时负责 mark lookup 与 provider result validation，职责混乱。
-- **修改文件候选**: `phone_agent/actions/grounding.py`, `phone_agent/actions/adapter.py`, `phone_agent/actions/validator.py`, `phone_agent/graph/nodes/plan.py`, `tests/actions/test_adapter.py`, `tests/actions/test_grounding_provider.py`, `tests/graph/test_plan_reflect.py`。
+- **目标/根因**: 中英文 prompt 中 context 非授权、低置信辅助、本地执行链路等约束重复出现，挤占注意力但不增加安全能力。
+- **修改文件候选**: `phone_agent/config/prompts_zh.py`, `phone_agent/config/prompts_en.py`, `tests/model/test_client.py`。
 - **执行步骤**:
-  1. 删除 `_has_description_target()`、`_ground_description_intent()`、description sensitivity path 和 provider-result-to-action validation path。
-  2. `ground_intent_to_action()` 只接受 mark intent 或 `requires_grounding=False` 非目标动作；缺 `target_mark_id` 的 tap-like intent 返回 `mark_required`。
-  3. 非目标动作应优先作为 canonical `type=do|finish` 处理；若保留 `requires_grounding=False` intent 兼容，只允许 Back/Home/Launch/Wait/Type 且字段完整，不得通过 target description 执行屏幕目标。
-  4. Mark sensitivity 保留并统一读取 mark metadata 与 intent message；confirm/takeover 行为不变。
-  5. Provider failure 与 mark generation failure 归类为 observation/mark-provider 层错误；unknown/stale/low-confidence mark 归类为 grounding 层错误。
-  6. 删除/迁移所有 “description grounding success produces Tap” 测试，替换为 “provider produces mark -> VLM chooses mark -> compiler produces Tap”。
+  1. `SYSTEM_CONTRACT` 保留一句 “context 是辅助信念，不授权执行”。
+  2. `CONTEXT_USAGE_RULES` 只保留截图优先、冲突处理、不要复读隐私文本。
+  3. `TOOL_CALLS_OUTPUT_CONTRACT` 删除 “真实执行仍由本地 Adapter → Validator → Safety Gate → Executor 完成” 这类架构说明，仅保留输出格式要求。
+  4. `JSON_OUTPUT_CONTRACT` 保留示例，减少与 Action Schema 重复的格式说明。
+  5. 保持关键硬约束：单动作、0-1000 坐标、HITL、JSON/tool_calls、Tap 类目标协议。
 - **验收标准**:
-  - `rg -n "_ground_description_intent|description grounding|provider_unavailable.*description|GroundingProvider.*ground\\(" phone_agent/actions phone_agent/graph/nodes/plan.py tests` 无 runtime execution 残留。
-  - mark intent success、unknown mark、stale mark、low-confidence mark、sensitive mark confirm/takeover 均有测试。
-  - description-only tap intent 不触发 parse retry，不执行设备动作，错误层为 `grounding` 或 `adapter` 中约定的稳定 code。
-  - 旧正向测试锚点必须迁移：`tests/graph/test_plan_reflect.py` 中 description provider success，以及 `tests/actions/test_grounding_provider.py` 中 `target_text_hint + FakeGroundingProvider` success，均不得继续断言直接 Tap。
+  - 中英文 prompt 长度下降，关键 contract 字符串仍被测试覆盖。
+  - `ModelClient` tool/json schema tests 通过。
+  - Prompt 不再把内部执行链路作为模型必须理解的内容。
 
-### Phase A5 — Documentation / Rules / Reported Contracts Reset
+### Phase P5 — Dangerous Field Constants Consolidation
 
-- **目标/根因**: 当前 README、docs、AGENTS、`.trae` rules 已把错误并列路线写成规范；必须同步清除，否则后续 agent 会继续按错误 contract 工作。
-- **修改文件候选**: `README.md`, `docs/future-roadmap.md`, `AGENTS.md`, `.trae/traecli.yaml`, `.trae/rules/actions.mdc`, `.trae/rules/tools.mdc`, `.trae/rules/graph.mdc`, `bench/grounding/README.md`。
+- **目标/根因**: Adapter 与 Validator 维护两套 dangerous field 列表，交集大且容易漂移；但二者语义不同，不能删除任一层。
+- **修改文件候选**: `phone_agent/actions/constants.py` 或 `phone_agent/actions/ir.py`, `phone_agent/actions/adapter.py`, `phone_agent/actions/validator.py`, `tests/actions/test_adapter.py`。
 - **执行步骤**:
-  1. 将所有 “`target_text_hint` 走 LocateAnything/Fake GroundingProvider” 改为 “LocateAnything/Fake 是 MarkRegistry provider；执行只消费 `target_mark_id`”。
-  2. README 的 runtime grounding 段重写为 MarkRegistry provider pipeline；benchmark 段保留 description-to-bbox 评测语义，但明确 benchmark 输出在 runtime 中会转成 mark candidates。
-  3. AGENTS Non-Negotiable Constraints 更新：主 VLM 屏幕目标只输出 `target_mark_id`；`target_text_hint` 不再是执行协议。
-  4. `.trae/traecli.yaml` 和 rules 更新，避免 Autopilot/RALPH/未来 agent 继续恢复旧并列路径。
-  5. 文档新增 Hint Source Contract 摘要：hints 是 provider 输入，不是 executable IntentIR；query-conditioned providers 无 hints 不产 mark。
-  6. 删除本次临时生成的 `docs/grounding-architecture.html` 或改为新架构图（执行阶段按用户选择）；计划阶段不要求保留该非核心产物。
+  1. 新增共享 `BASE_DANGEROUS_FIELDS`，包含 `api_key/apikey/authorization/base64_data/command/device_factory/device_id/env/image_url/raw_command/screen_height/screen_width/secret/shell/subprocess/token` 等基础危险字段。
+  2. Adapter 定义 `DANGEROUS_PROVIDER_FIELDS = BASE_DANGEROUS_FIELDS | {"backend", "model_path"}`。
+  3. Validator 定义 `DANGEROUS_FIELDS = BASE_DANGEROUS_FIELDS`。
+  4. 保留 Adapter 的 provider-facing 拦截和 Validator 的 canonical IR 拦截；只消除列表漂移。
 - **验收标准**:
-  - 文档搜索确认没有把 LocateAnything 描述为 direct description execution path。
-  - README、docs、AGENTS、`.trae` 规则共同描述同一 pipeline：provider -> marks -> MarkRegistry -> target_mark_id -> ActionIR。
-  - Benchmark 文档仍可指导 LocateAnything 评测，但不会误导 runtime 接入方式。
-  - 文档明确 benchmark description-to-bbox 类型不能导入 runtime execution path；runtime 只消费 mark candidates。
+  - Adapter 仍拒绝 provider-only 字段 `backend/model_path`。
+  - Validator 仍拒绝 canonical action 中的 dangerous fields，包括 `apikey`。
+  - 现有 action validation/adapter tests 通过。
 
-### Phase A6 — Regression, Migration, and Acceptance Matrix
+### Phase P6 — Regression and Acceptance Matrix
 
-- **目标/根因**: 固化新 contract，防止 description path、first-box execution、raw coordinate fallback 或 provider-to-executor shortcut 回归。
-- **修改文件候选**: `tests/model/*`, `tests/actions/*`, `tests/graph/*`, `tests/evals/*`, `tests/test_grounding_bench_*`, `bench/grounding/*` 必要小调整。
+- **目标/根因**: 固化新 privacy boundary，防止 raw provider hint 泄露到持久化路径，或 task-aware marker 被 trace/checkpoint 使用。
+- **修改文件候选**: `tests/graph/test_context_consumer.py`, `tests/graph/test_state.py`, `tests/graph/test_plan_reflect.py`, `tests/actions/test_grounding_provider.py`, `tests/model/test_client.py`。
 - **执行步骤**:
-  1. Unit：adapter rejects description-only executable intent；MarkProvider output validation；MarkRegistry merge/source/confidence/stale validation；mark-only compiler success/failure/sensitivity。
-  2. Integration：plan_node builds MarkRegistry before model call; marks block injected; fake provider produces mark; model selects mark; executor receives canonical ActionIR.
-  3. Failure：provider unavailable/model missing/unsupported platform results in no marks or provider failure summary; screen-target tap intent without mark fails closed; parse retry not used for mark/provider failure.
-  4. Observability：trace/eval include mark provider coverage and selected mark metadata, not raw screenshot/raw target text; error taxonomy distinguishes mark_generation vs grounding lookup.
-  5. Benchmark isolation：bench runner can still evaluate LocateAnything with target descriptions, but runtime imports from `bench/` are prohibited.
-  6. Code search gates：no `_ground_description_intent`; no direct `target_text_hint -> result.center`; no `provider.ground(... intent ...)` in plan/action compiler; no first valid bbox execution; old provider runtime symbols removed/deprecated outside benchmark-only scope.
+  1. Unit: sanitizer consumer matrix 覆盖 inject/reflect_prompt/trace_payload/checkpoint/default + task_context。
+  2. Unit: provider hints raw input 与 provider observation redacted output 分离。
+  3. Integration: plan_node with fake provider receives raw hint and prompt/trace-safe summaries stay redacted。
+  4. Integration: reflect_node emits `<matches_task_value>` without raw sensitive value。
+  5. Search gates: raw sensitive fixture strings 不出现在 mark prompt、trace summary、checkpoint serializer dump 中。
 - **验收标准**:
-  - 建议测试命令 `.venv/bin/pytest tests/model tests/actions tests/graph tests/evals tests/test_grounding_bench_datasets.py tests/test_grounding_bench_scoring.py tests/test_grounding_bench_reporting.py -q` 通过，或环境依赖失败有明确说明。
-  - Code search gates 全部通过，证明 description execution path 已删除。
-  - benchmark harness 保持可运行；runtime tests 不依赖真实 MLX/Metal。
+  - 建议测试命令：`.venv/bin/pytest tests/graph/test_context_consumer.py tests/graph/test_state.py tests/graph/test_plan_reflect.py tests/actions/test_grounding_provider.py tests/model/test_client.py -q` 通过。
+  - 新增 tests 明确证明 local provider raw input 与 external redaction boundary 同时成立。
+  - 不修改 executor、安全门、HITL、Edge terminal guard 行为。
 
 # 约束 Checklist
 
-- [x] 当前 RALPLAN 设计已 Critic APPROVE；用户已明确启动 Autopilot 执行。
-- [x] 本 roadmap 已完全替换旧执行 roadmap；旧并列 description path 设计不得保留为当前方案。
-- [x] 方案 A 固定：LocateAnything/Fake/OCR/UIAutomator/SoM 是 MarkRegistry provider，不是 ActionIR compiler 或 executor shortcut。
-- [x] 屏幕目标点击类 action 的唯一 executable IntentIR target 是 `target_mark_id`；description hints 只能用于 mark generation/metadata，不能直接执行。
-- [x] `ground_intent_to_action()` 最终只能消费 MarkRegistry 或非目标动作；不得直接调用 LocateAnything/Fake provider。
-- [x] 没有 marks 或 mark 不可信时必须 fail-closed/reobserve/takeover/wait；不得回退主 VLM 坐标 Tap。
-- [x] MarkRegistry 继续绑定 `screen_id`、semantic/topology/perceptual metadata；stale/cross-screen/low-confidence mark 不进入 executor。
-- [x] Provider output 坐标保持 0-1000 normalized；tool/backend 仍是唯一 relative-to-absolute 转换点。
-- [x] Multi-box LocateAnything 输出不得 first-box 执行；可转为多个 mark candidates 或 ambiguous fail-closed。
-- [x] HITL 不变量保持：支付/隐私 confirm，登录/验证码 takeover；context/mark provider/benchmark 不得绕过 Safety Gate。
-- [x] Trace/eval/context 默认脱敏：不得记录原始截图、API key、隐私文本、raw target text；只记录 hash、mark id、bbox、provider、confidence、计数、错误码。
-- [x] Benchmark 保留为 provider quality 评测；runtime 不再把 benchmark-style target description 当执行协议。
-- [x] Hint Source Contract 生效：pre-VLM hints 只能来自受控、脱敏、bounded 来源；hints 不得作为 executable IntentIR target 字段。
-- [x] MarkProvider 分为 enumerative 与 query-conditioned；LocateAnything 属于 query-conditioned provider，无 hints 时不得产 executable target。
-- [x] Adapter 边界明确：Tap/Double Tap/Long Press intent 必须有 `target_mark_id`；非目标动作走 canonical `do/finish`，不得通过 `target_intent` 绕过 mark_required。
-- [x] 旧 runtime provider API（`GroundingTarget` / `GroundingResult` / `GroundingProvider.ground` / `build_grounding_provider`）不得继续服务 plan/action compiler；如保留必须限定 benchmark-only。
-- [x] 文档与 AGENTS/.trae rules 必须同步修正，避免未来 agent 恢复 `target_text_hint -> LocateAnything -> ActionIR`。
+- [x] 原旧 graph roadmap 已整体替换，不保留上一轮 MarkRegistry-only grounding 规划正文。
+- [x] 当前已进入 Autopilot execution；批准范围包括 `phone_agent/graph`, `phone_agent/grounding`, `phone_agent/actions`, prompts, README/AGENTS 与相关 tests，不主动 commit。
+- [x] 本地 LocateAnything/Fake MarkProvider 输入可使用 raw bounded hints，但 raw hint 不得进入 trace/checkpoint/main VLM prompt/report。
+- [x] `trace_payload` 与 `checkpoint` consumer 不得输出 `<matches_task_value>`；只能强脱敏或 stub。
+- [x] Reflect/inject 可用 `<matches_task_value>` 保留任务值比较信号，但不得暴露 raw 敏感值。
+- [x] Context block 必须过滤默认 unknown/null/empty 内容。
+- [x] Provider result 仍需 screen-bound validation、candidate validation、stale/hash/confidence fail-closed。
+- [x] Adapter/Validator/Repair/Safety/HITL/Edge terminal guard 不因本计划削弱。
+- [x] Prompt 去重不得删除单动作、0-1000 坐标、HITL、JSON/tool_calls、Tap target contract 等关键约束。
+- [x] Dangerous field 常量合并只改善维护性，不删除 Adapter 或 Validator 任一层。
 - [ ] 执行阶段不得主动 commit；禁止对 `main` 和 `feature/langgraph-refactor` force push。

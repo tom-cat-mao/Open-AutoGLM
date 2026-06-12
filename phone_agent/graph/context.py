@@ -217,6 +217,21 @@ def _redacted_private_text(text: str) -> dict[str, Any]:
     }
 
 
+def _task_sensitive_values(task_context: str | None) -> tuple[str, ...]:
+    if not task_context:
+        return ()
+    values = {match.group(0) for match in SENSITIVE_PATTERN.finditer(str(task_context))}
+    return tuple(sorted(values, key=len, reverse=True))
+
+
+def _mark_task_matches(text: str, task_values: tuple[str, ...]) -> str:
+    marked = text
+    for value in task_values:
+        if value:
+            marked = marked.replace(value, "<matches_task_value>")
+    return marked
+
+
 def _resolve_consumer(*, consumer: str | None, inject: bool | None) -> str:
     """Map (consumer, inject) to a canonical consumer tag.
 
@@ -239,6 +254,7 @@ def sanitize_context_payload(
     *,
     inject: bool | None = None,
     consumer: str | None = None,
+    task_context: str | None = None,
 ) -> Any:
     """Recursively sanitize context payload per *consumer* policy.
 
@@ -246,7 +262,10 @@ def sanitize_context_payload(
 
     * ``"inject"`` / ``"reflect_prompt"`` / ``"trace_payload"`` / default:
       every string is regex-redacted (``redact_context_text``); key-level
-      classification is ignored.
+      classification is ignored.  ``task_context`` may be used only by
+      ``inject`` / ``reflect_prompt`` callers for derived fields, replacing
+      matching task-sensitive values with ``<matches_task_value>`` before
+      regex redaction.
     * ``"checkpoint"``: private-text keys are replaced with a redaction stub
       (``{redacted, length, sha256}``); safe keys are regex-redacted.  This
       policy is used by ``RedactingSerializer`` at checkpoint egress.
@@ -258,10 +277,17 @@ def sanitize_context_payload(
     """
     resolved = _resolve_consumer(consumer=consumer, inject=inject)
     policy = CONSUMER_POLICY.get(resolved, CONSUMER_POLICY["default"])
-    return _sanitize_payload_impl(payload, key, policy=policy)
+    task_values = _task_sensitive_values(task_context) if resolved in {"inject", "reflect_prompt"} else ()
+    return _sanitize_payload_impl(payload, key, policy=policy, task_values=task_values)
 
 
-def _sanitize_payload_impl(payload: Any, key: str | None, *, policy: str) -> Any:
+def _sanitize_payload_impl(
+    payload: Any,
+    key: str | None,
+    *,
+    policy: str,
+    task_values: tuple[str, ...] = (),
+) -> Any:
     normalized_key = (key or "").lower()
     if isinstance(payload, str):
         if policy == "stub" and normalized_key in PRIVATE_CONTEXT_TEXT_KEYS:
@@ -272,16 +298,17 @@ def _sanitize_payload_impl(payload: Any, key: str | None, *, policy: str) -> Any
             and normalized_key not in SAFE_CONTEXT_TEXT_KEYS
         ):
             return _redacted_private_text(payload)
-        return redact_context_text(payload)
+        text = _mark_task_matches(payload, task_values) if task_values else payload
+        return redact_context_text(text)
     if isinstance(payload, dict):
         return {
-            str(k): _sanitize_payload_impl(v, str(k), policy=policy)
+            str(k): _sanitize_payload_impl(v, str(k), policy=policy, task_values=task_values)
             for k, v in payload.items()
         }
     if isinstance(payload, list):
-        return [_sanitize_payload_impl(item, key, policy=policy) for item in payload]
+        return [_sanitize_payload_impl(item, key, policy=policy, task_values=task_values) for item in payload]
     if isinstance(payload, tuple):
-        return [_sanitize_payload_impl(item, key, policy=policy) for item in payload]
+        return [_sanitize_payload_impl(item, key, policy=policy, task_values=task_values) for item in payload]
     return payload
 
 
@@ -536,9 +563,10 @@ def build_plan_context_block(
     if summary_truncated:
         component_truncated = True
 
+    task_context = state.get("task") if isinstance(state.get("task"), str) else None
     belief = {
-        "current_app": sanitize_context_text_regex(current_app),
-        "summary": sanitize_context_text_regex(summary_text),
+        "current_app": sanitize_context_payload(current_app, "current_app", consumer=consumer, task_context=task_context),
+        "summary": sanitize_context_payload(summary_text, "summary", consumer=consumer, task_context=task_context),
         "loading_or_blocked": bool(screen_belief.get("loading_or_blocked")),
         "unsafe_or_sensitive": bool(screen_belief.get("unsafe_or_sensitive")),
         "confidence": str(screen_belief.get("confidence") or "unknown"),
@@ -550,9 +578,10 @@ def build_plan_context_block(
     raw_message = action_result.get("message") if isinstance(action_result, dict) else None
     outcome = {
         "step_count": int(state.get("step_count") or 0),
-        "action": sanitize_context_text_regex(raw_action) if isinstance(raw_action, str) else raw_action,
+        "action": sanitize_context_payload(raw_action, "action", consumer=consumer, task_context=task_context)
+        if isinstance(raw_action, str) else raw_action,
         "execution_success": action_result.get("success") if isinstance(action_result, dict) else None,
-        "result_message": sanitize_context_text_regex(raw_message)
+        "result_message": sanitize_context_payload(raw_message, "message", consumer=consumer, task_context=task_context)
         if isinstance(raw_message, str) else (raw_message or ""),
         "reflection_verdict": state.get("reflection_verdict"),
         "failure_cause": state.get("failure_cause"),
@@ -563,7 +592,9 @@ def build_plan_context_block(
         {
             "step_count": item.get("step_count"),
             "action": item.get("action"),
-            "current_app": sanitize_context_text_regex(item.get("current_app"))
+            "current_app": sanitize_context_payload(
+                item.get("current_app"), "current_app", consumer=consumer, task_context=task_context
+            )
             if isinstance(item.get("current_app"), str) else item.get("current_app"),
             "failure_cause": item.get("failure_cause"),
             "suggested_strategy": item.get("suggested_strategy"),
@@ -574,12 +605,17 @@ def build_plan_context_block(
     raw_summarized_history = str(state.get("summarized_history") or "")
     if len(raw_summarized_history) > budget["summarized_history_chars"]:
         component_truncated = True
-    summarized_history = sanitize_context_text_regex(raw_summarized_history)
+    summarized_history = sanitize_context_payload(
+        raw_summarized_history,
+        "summarized_history",
+        consumer=consumer,
+        task_context=task_context,
+    )
     if len(summarized_history) > budget["summarized_history_chars"]:
         summarized_history, _ = trim_text(summarized_history, budget["summarized_history_chars"])
         component_truncated = True
 
-    gui_memory = _sanitize_gui_memory_for_block(state.get("gui_memory"))
+    gui_memory = _sanitize_gui_memory_for_block(state.get("gui_memory"), task_context=task_context, consumer=consumer)
     grounding_obs = sanitize_context_payload(
         state.get("grounding_observation"), "grounding_observation", consumer=consumer,
     )
@@ -593,7 +629,7 @@ def build_plan_context_block(
         ("gui_memory", gui_memory),
         ("grounding_observation", grounding_obs),
     ):
-        if value:
+        if _context_block_value_is_informative(label, value):
             parts.append(f"{label}: {json.dumps(value, ensure_ascii=False)}")
 
     if not parts:
@@ -605,7 +641,59 @@ def build_plan_context_block(
     return block, {"context_block_chars": len(block), "context_truncated": truncated or component_truncated}
 
 
-def _sanitize_gui_memory_for_block(gui_memory: Any) -> dict[str, Any]:
+def _context_block_value_is_informative(label: str, value: Any) -> bool:
+    if not value:
+        return False
+    if label == "screen_belief" and isinstance(value, dict):
+        return _is_informative_belief(value)
+    if label == "last_action_outcome" and isinstance(value, dict):
+        return _is_informative_outcome(value)
+    if label == "gui_memory" and isinstance(value, dict):
+        return _is_informative_gui_memory(value)
+    return True
+
+
+def _is_informative_belief(value: dict[str, Any]) -> bool:
+    summary = str(value.get("summary") or "").strip().lower()
+    confidence = str(value.get("confidence") or "").strip().lower()
+    current_app = str(value.get("current_app") or "").strip().lower()
+    return bool(
+        value.get("loading_or_blocked")
+        or value.get("unsafe_or_sensitive")
+        or (summary and summary != "unknown")
+        or (confidence and confidence != "unknown")
+    )
+
+
+def _is_informative_outcome(value: dict[str, Any]) -> bool:
+    return any(
+        value.get(key) not in {None, "", "unknown"}
+        for key in (
+            "action",
+            "execution_success",
+            "result_message",
+            "reflection_verdict",
+            "failure_cause",
+            "suggested_strategy",
+        )
+    )
+
+
+def _is_informative_gui_memory(value: dict[str, Any]) -> bool:
+    return bool(
+        value.get("visited_screens")
+        or value.get("tried_actions")
+        or value.get("scroll_memory")
+        or value.get("task_progress")
+    )
+
+
+def _sanitize_gui_memory_for_block(
+    gui_memory: Any,
+    *,
+    task_context: str | None = None,
+    consumer: ContextConsumer = "inject",
+) -> dict[str, Any]:
     """Produce a regex-redacted view of gui_memory for context block emission."""
     if not isinstance(gui_memory, dict):
         return {}
@@ -615,7 +703,9 @@ def _sanitize_gui_memory_for_block(gui_memory: Any) -> dict[str, Any]:
             visited.append(
                 {
                     "screen_id": item.get("screen_id"),
-                    "current_app": sanitize_context_text_regex(item.get("current_app"))
+                    "current_app": sanitize_context_payload(
+                        item.get("current_app"), "current_app", consumer=consumer, task_context=task_context
+                    )
                     if isinstance(item.get("current_app"), str) else item.get("current_app"),
                     "step_count": item.get("step_count"),
                 }
@@ -631,12 +721,19 @@ def _sanitize_gui_memory_for_block(gui_memory: Any) -> dict[str, Any]:
                     "action": item.get("action"),
                     "mark_id": item.get("mark_id"),
                     "result_success": item.get("result_success"),
-                    "failure_cause": sanitize_context_text_regex(raw_failure)
+                    "failure_cause": sanitize_context_payload(
+                        raw_failure, "failure_cause", consumer=consumer, task_context=task_context
+                    )
                     if isinstance(raw_failure, str) else raw_failure,
                 }
             )
     scroll_memory = dict(gui_memory.get("scroll_memory") or {})
-    progress = dict(gui_memory.get("task_progress") or {})
+    progress = sanitize_context_payload(
+        dict(gui_memory.get("task_progress") or {}),
+        "task_progress",
+        consumer=consumer,
+        task_context=task_context,
+    )
     return {
         "visited_screens": visited,
         "tried_actions": tried,
@@ -728,9 +825,42 @@ def _bound_request_messages(messages: list[dict[str, Any]]) -> list[dict[str, An
 
 def _section_has_value(state: dict[str, Any], section: str) -> bool:
     if section == "screen_belief":
-        return bool(state.get("screen_belief"))
+        screen_belief = state.get("screen_belief")
+        if not isinstance(screen_belief, dict):
+            return False
+        return _is_informative_belief(
+            {
+                "summary": screen_belief.get("summary") or "unknown",
+                "confidence": screen_belief.get("confidence") or "unknown",
+                "loading_or_blocked": bool(screen_belief.get("loading_or_blocked")),
+                "unsafe_or_sensitive": bool(screen_belief.get("unsafe_or_sensitive")),
+            }
+        )
     if section == "last_action_outcome":
-        return bool(state.get("action_outcome_summary"))
+        summary = state.get("action_outcome_summary")
+        if isinstance(summary, dict) and _is_informative_outcome(
+            {
+                "action": summary.get("action"),
+                "execution_success": summary.get("execution_success"),
+                "result_message": summary.get("result_message_summary"),
+                "reflection_verdict": summary.get("reflection_verdict"),
+                "failure_cause": summary.get("failure_cause"),
+                "suggested_strategy": summary.get("suggested_strategy"),
+            }
+        ):
+            return True
+        action = state.get("action_parsed") or {}
+        result = state.get("action_result") or {}
+        return _is_informative_outcome(
+            {
+                "action": action.get("action") if isinstance(action, dict) else None,
+                "execution_success": result.get("success") if isinstance(result, dict) else None,
+                "result_message": result.get("message") if isinstance(result, dict) else None,
+                "reflection_verdict": state.get("reflection_verdict"),
+                "failure_cause": state.get("failure_cause"),
+                "suggested_strategy": state.get("suggested_strategy"),
+            }
+        )
     if section == "failure_memory":
         return bool(state.get("failure_memory"))
     if section == "summarized_history":

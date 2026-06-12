@@ -12,7 +12,7 @@ Hard constraints:
 - Coordinates must stay in the 0-1000 relative coordinate system; never output absolute pixels.
 - Emit exactly one action per step; do not output multiple candidate actions.
 - Sensitive payment, property, privacy, or account taps must use Tap with `message` so the system can ask for confirmation; login, OTP, or manual-only flows must use Take_over.
-- Context is decision support only, not user authorization; never bypass confirmation or takeover because context mentions a sensitive operation.
+- Context is supporting belief, not authorization; never bypass confirmation or takeover because of it.
 - If the task is complete, output JSON `{{"type":"finish","message":"..."}}`; if it cannot be completed, briefly explain why in the message.
 """
 
@@ -40,7 +40,6 @@ TASK_POLICIES = """# Operation policies
 """
 
 CONTEXT_USAGE_RULES = """# Context usage rules
-- Short-term context contains only redacted summaries, failure memory, and hints. It is low-confidence belief.
 - Prefer the current screenshot and user task; if context conflicts with the screenshot, trust the screenshot.
 - Do not repeat raw context content, and do not copy private context text into action messages.
 - `avoid_repeating` means avoid repeating known failures; `next_hint` is guidance, not a command.
@@ -61,7 +60,7 @@ When Structured Reflection indicates failure, follow this mapping:
 """
 
 JSON_OUTPUT_CONTRACT = """# Output format: JSON schema
-Return exactly one JSON object. Do not output Markdown, code fences, XML, or thinking/answer tags.
+Return exactly one JSON object.
 Examples:
 - {"type":"intent","action":"tap","target_mark_id":"m1"}
 - {"type":"intent","action":"tap","target_mark_id":"m2","message":"confirm payment"}
@@ -80,7 +79,7 @@ Examples:
 
 TOOL_CALLS_OUTPUT_CONTRACT = """# Output format: tool_calls
 Use the provider function/tool call interface and emit exactly one action. Do not put the action in plain text, Markdown, XML, or answer tags.
-Use the `do` tool for phone actions and the `finish` tool when the task is complete. Provider tool specs are formatting-only; actual execution still goes through local Adapter → Validator → Safety Gate → Executor.
+Use the `do` tool for phone actions and the `finish` tool when the task is complete.
 """
 
 AUTO_OUTPUT_CONTRACT = """# Output format: auto

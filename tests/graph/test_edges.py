@@ -9,6 +9,38 @@ def test_after_execute_routes_pending_interrupts_first(base_state) -> None:
     assert after_execute(base_state) == "takeover"
 
 
+def test_after_execute_terminal_state_wins_over_stale_pending_interrupt(
+    base_state,
+) -> None:
+    """Terminal guard must beat pending_interrupt routing.
+
+    If a previous step set pending_interrupt="confirmation" (e.g. HITL
+    confirm path) and the current execute_node returns finished=True /
+    error without clearing it, after_execute must route to "end" — not
+    "confirm". Mirrors the contract of should_continue() and
+    after_interrupt(), which both treat finished/error as terminal.
+    """
+    base_state["pending_interrupt"] = "confirmation"
+    base_state["action_parsed"] = {
+        "_metadata": "do",
+        "action": "Tap",
+        "element": [1, 2],
+        "message": "pay",
+    }
+
+    base_state["finished"] = True
+    assert after_execute(base_state) == "end"
+
+    base_state["finished"] = False
+    base_state["error"] = "Action rejected by safety gate"
+    assert after_execute(base_state) == "end"
+
+    base_state["pending_interrupt"] = "takeover"
+    base_state["error"] = None
+    base_state["finished"] = True
+    assert after_execute(base_state) == "end"
+
+
 def test_after_execute_confirmed_sensitive_tap_goes_to_reflect(base_state) -> None:
     base_state["action_parsed"] = {
         "_metadata": "do",
@@ -49,6 +81,14 @@ def test_after_interrupt_confirm_accept_routes_pending_execute(base_state) -> No
 def test_after_interrupt_cancel_or_normal_routes_by_finished(base_state) -> None:
     assert after_interrupt(base_state) == "reflect"
     base_state["finished"] = True
+    assert after_interrupt(base_state) == "end"
+
+
+def test_after_interrupt_terminal_error_wins_over_pending_execute(base_state) -> None:
+    base_state["pending_execute"] = True
+    base_state["interrupt_result"] = True
+    base_state["error"] = "Action rejected by safety gate"
+
     assert after_interrupt(base_state) == "end"
 
 

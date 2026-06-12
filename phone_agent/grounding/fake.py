@@ -14,6 +14,7 @@ class FakeGroundingProvider:
 
     name = "fake"
     version = "test"
+    allow_raw_hints = True
 
     def __init__(
         self,
@@ -42,6 +43,7 @@ class FakeGroundingProvider:
         ).hexdigest()[:16]
         self.requests.append(
             {
+                "raw_hints": [hint.description() for hint in hints or []],
                 "hints": [hint.redacted_summary() for hint in hints or []],
                 "screen_binding": screen_binding.to_dict(),
                 "timeout": timeout,

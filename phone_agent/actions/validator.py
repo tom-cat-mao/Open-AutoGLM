@@ -9,6 +9,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from phone_agent.actions.constants import BASE_DANGEROUS_FIELDS
 from phone_agent.actions.ir import ActionIR, to_action_dict
 
 
@@ -20,24 +21,7 @@ class ActionValidationError(ValueError):
         self.code = code
 
 
-DANGEROUS_FIELDS = {
-    "api_key",
-    "apikey",
-    "authorization",
-    "base64_data",
-    "command",
-    "device_factory",
-    "device_id",
-    "env",
-    "image_url",
-    "raw_command",
-    "screen_height",
-    "screen_width",
-    "secret",
-    "shell",
-    "subprocess",
-    "token",
-}
+DANGEROUS_FIELDS = BASE_DANGEROUS_FIELDS
 
 ALLOWED_FIELDS_BY_ACTION: dict[str, set[str]] = {
     "Tap": {"_metadata", "action", "element", "message"},

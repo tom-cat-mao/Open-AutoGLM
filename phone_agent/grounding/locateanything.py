@@ -24,6 +24,7 @@ class LocateAnythingMLXProvider:
 
     name = "locateanything_mlx"
     version = "3b-4bit"
+    allow_raw_hints = True
 
     def __init__(
         self,

@@ -1,3 +1,4 @@
+import json
 from dataclasses import dataclass
 
 import pytest
@@ -205,7 +206,8 @@ def test_plan_node_rejects_structured_coordinate_tap_without_mark_intent(
     )
 
     assert result["action_parsed"] is None
-    assert result["grounding_error"] == "mark_required"
+    assert result["grounding_error"] is None
+    assert result["parse_metadata"]["parse_error_code"] == "mark_required"
     assert result["finished"] is True
 
 
@@ -279,7 +281,8 @@ def test_structured_coordinate_tap_requires_mark_when_marks_available(base_state
     )
 
     assert result["action_parsed"] is None
-    assert result["grounding_error"] == "mark_required"
+    assert result["grounding_error"] is None
+    assert result["parse_metadata"]["parse_error_code"] == "mark_required"
 
 
 def test_auto_json_coordinate_tap_requires_mark_even_without_adapter_metadata(base_state, fake_device) -> None:
@@ -299,7 +302,8 @@ def test_auto_json_coordinate_tap_requires_mark_even_without_adapter_metadata(ba
     )
 
     assert result["action_parsed"] is None
-    assert result["grounding_error"] == "mark_required"
+    assert result["grounding_error"] is None
+    assert result["parse_metadata"]["parse_error_code"] == "mark_required"
     assert result["finished"] is True
 
 
@@ -342,8 +346,8 @@ def test_plan_node_rejects_json_action_out_of_range(base_state, fake_device) -> 
     assert result["finished"] is True
     assert result["action_parsed"] is None
     assert result["action_result"]["success"] is False
-    assert result["failure_cause"] == "action_validation_failed"
-    assert result["error_layer"] == "validation"
+    assert result["failure_cause"] == "mark_required"
+    assert result["error_layer"] == "grounding"
 
 
 def test_plan_node_validates_structured_json_and_repairs_safe_action_alias(
@@ -451,14 +455,48 @@ def test_json_sensitive_mark_tap_preserves_confirmation_message(base_state, fake
     }
 
 
-def test_plan_node_grounds_description_intent_with_provider(base_state, fake_device) -> None:
+def test_plan_node_builds_provider_marks_before_model_and_uses_mark_id(base_state, fake_device) -> None:
     provider = FakeGroundingProvider(bbox=[100, 200, 300, 400])
     model = FakeModelClient(
         FakeModelResponse(
             "",
-            '{"type":"intent","action":"tap","target_text_hint":"设置按钮","target_role":"button"}',
+            '{"type":"intent","action":"tap","target_mark_id":"fake_1"}',
         )
     )
+
+    result = plan_node(
+        base_state,
+        {
+            "configurable": {
+                "model_client": model,
+                "device_factory": fake_device,
+                "output_mode": "json_schema",
+                "grounding_provider": provider,
+                "mark_provider_hints": ["设置按钮"],
+                "verbose": False,
+            }
+        },
+    )
+
+    assert result["action_parsed"] == {"_metadata": "do", "action": "Tap", "element": [200, 300]}
+    assert result["grounding_error"] is None
+    assert result["grounding_provider"] == "mark_registry"
+    assert result["mark_provider_observation"]["provider_count"] == 1
+    assert result["mark_registry"]["marks"]["fake_1"]["source"] == "fake"
+    assert provider.requests[0]["screen_binding"]["raw_screenshot_hash"] == result["observation"]["snapshot"]["raw_screenshot_hash"]
+
+
+def test_plan_node_provider_receives_raw_hint_but_prompt_and_observation_are_redacted(
+    base_state,
+    fake_device,
+) -> None:
+    provider = FakeGroundingProvider(bbox=[100, 200, 300, 400])
+    model = FakeModelClient(
+        FakeModelResponse("", '{"type":"intent","action":"tap","target_mark_id":"fake_1"}')
+    )
+    base_state["task"] = "点击屏幕上的 13800138000 联系人"
+    base_state["messages"] = []
+    base_state["step_count"] = 0
 
     result = plan_node(
         base_state,
@@ -473,14 +511,19 @@ def test_plan_node_grounds_description_intent_with_provider(base_state, fake_dev
         },
     )
 
+    provider_prompt = provider.requests[0]["raw_hints"][0]
+    model_text = model.messages[-1]["content"][-1]["text"]
+    observation_raw = json.dumps(result["mark_provider_observation"], ensure_ascii=False)
+    registry_raw = json.dumps(result["mark_registry"], ensure_ascii=False)
+
+    assert "13800138000" in provider_prompt
+    assert "13800138000" in model_text  # original task remains the raw instruction boundary
+    assert "13800138000" not in observation_raw
+    assert "13800138000" not in registry_raw
     assert result["action_parsed"] == {"_metadata": "do", "action": "Tap", "element": [200, 300]}
-    assert result["grounding_error"] is None
-    assert result["grounding_provider"] == "fake"
-    assert result["grounding_observation"]["target"]["has_text_hint"] is True
-    assert provider.requests[0]["screen_binding"]["screen_id"] == result["screen_id"]
 
 
-def test_plan_node_description_grounding_failure_fails_closed(base_state, fake_device) -> None:
+def test_plan_node_description_only_intent_fails_closed(base_state, fake_device) -> None:
     model = FakeModelClient(
         FakeModelResponse("", '{"type":"intent","action":"tap","target_text_hint":"设置按钮"}')
     )
@@ -498,8 +541,9 @@ def test_plan_node_description_grounding_failure_fails_closed(base_state, fake_d
     )
 
     assert result["action_parsed"] is None
-    assert result["grounding_error"] == "provider_unavailable"
-    assert result["failure_cause"] == "provider_unavailable"
+    assert result["grounding_error"] is None
+    assert result["parse_metadata"]["parse_error_code"] == "mark_required"
+    assert result["failure_cause"] == "mark_required"
     assert result["error_layer"] == "grounding"
     assert result["finished"] is True
 
@@ -724,8 +768,9 @@ def test_reflect_node_updates_gui_memory(base_state, fake_device) -> None:
 
 
 def test_reflect_prompt_sanitizes_action_and_result_text(base_state, fake_device) -> None:
+    base_state["task"] = "给 13800138000 发短信"
     base_state["action_parsed"] = {"_metadata": "do", "action": "Type", "text": "13800138000"}
-    base_state["action_result"] = {"success": True, "message": "张三"}
+    base_state["action_result"] = {"success": True, "message": "已发送短信至13900139000"}
     model = FakeModelClient(
         FakeModelResponse("ok", '{"verdict":"succeeded","failure_cause":"none","suggested_strategy":"continue","message":"ok"}')
     )
@@ -736,8 +781,12 @@ def test_reflect_prompt_sanitizes_action_and_result_text(base_state, fake_device
     )
 
     text = model.messages[-1]["content"][-1]["text"]
-    assert "13800138000" not in text
-    assert "张三" not in text
+    assert "原始任务：给 13800138000 发短信" in text
+    derived_text = text.split("刚执行的动作：", 1)[1]
+    assert "13800138000" not in derived_text
+    assert "13900139000" not in text
+    assert "<matches_task_value>" in text
+    assert "<redacted>" in text
 
 
 def test_plan_node_includes_structured_reflection_context(base_state, fake_device) -> None:
@@ -802,7 +851,7 @@ def test_plan_node_inject_mode_adds_bounded_context(base_state, fake_device) -> 
 
 def test_plan_node_inject_mode_redacts_sensitive_context(base_state, fake_device) -> None:
     base_state["context_mode"] = "inject"
-    base_state["screen_belief"] = {"summary": "张三", "visible_text": "13800138000"}
+    base_state["screen_belief"] = {"summary": "允许存储权限", "visible_text": "13800138000"}
     base_state["summarized_history"] = "sk-secret 明天三点见"
     model = FakeModelClient(FakeModelResponse("think", '{"type":"do","action":"Wait","duration":"1 seconds"}'))
 
@@ -812,9 +861,9 @@ def test_plan_node_inject_mode_redacts_sensitive_context(base_state, fake_device
     )
 
     text = model.messages[-1]["content"][-1]["text"]
-    assert "张三" not in text
     assert "13800138000" not in text
     assert "sk-secret" not in text
+    assert "允许存储权限" in text
 
 
 def test_reflect_node_updates_context_memory(base_state, fake_device) -> None:
@@ -837,17 +886,19 @@ def test_reflect_node_updates_context_memory(base_state, fake_device) -> None:
 
 
 def test_reflection_context_redacts_raw_reflection(base_state, fake_device) -> None:
-    base_state["reflection"] = "张三 13800138000"
+    base_state["reflection"] = "张三 13800138000 请重试"
+    base_state["context_mode"] = "inject"
     model = FakeModelClient(FakeModelResponse("think", '{"type":"do","action":"Wait","duration":"1 seconds"}'))
 
     plan_node(
         base_state,
-        {"configurable": {"model_client": model, "device_factory": fake_device}},
+        {"configurable": {"model_client": model, "device_factory": fake_device, "context_mode": "inject"}},
     )
 
     text = model.messages[-1]["content"][-1]["text"]
-    assert "张三" not in text
-    assert "13800138000" not in text
+    assert "张三" in text  # regex-only preserves non-sensitive Chinese text
+    assert "13800138000" not in text  # phone number regex-redacted
+    assert "请重试" in text
 
 
 def test_plan_node_request_compaction_strips_historical_images_only(

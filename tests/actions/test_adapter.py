@@ -7,10 +7,11 @@ from phone_agent.actions.safety import decide_safety
 from phone_agent.actions.validator import ActionValidationError, validate_action
 
 
-def test_adapt_json_maps_lowercase_tap_xy_to_canonical_action() -> None:
-    action = adapt_json_action('{"type":"do","action":"tap","x":500,"y":250}')
+def test_adapt_json_rejects_lowercase_tap_xy_without_mark() -> None:
+    with pytest.raises(ActionAdapterError) as exc_info:
+        adapt_json_action('{"type":"do","action":"tap","x":500,"y":250}')
 
-    assert action == {"_metadata": "do", "action": "Tap", "element": [500, 250]}
+    assert exc_info.value.code == "mark_required"
 
 
 def test_adapt_json_maps_mark_payload_to_intent_ir_not_canonical_action() -> None:
@@ -22,17 +23,11 @@ def test_adapt_json_maps_mark_payload_to_intent_ir_not_canonical_action() -> Non
     assert exc_info.value.code == "invalid_metadata"
 
 
-def test_adapt_json_maps_target_text_alias_to_intent_ir() -> None:
-    action = adapt_json_action(
-        {"type": "intent", "action": "tap", "target_text": "设置", "target_role": "button"}
-    )
+def test_adapt_json_rejects_description_only_tap_intent() -> None:
+    with pytest.raises(ActionAdapterError) as exc_info:
+        adapt_json_action({"type": "intent", "action": "tap", "target_text": "设置", "target_role": "button"})
 
-    assert action == {
-        "_metadata": "intent",
-        "action": "Tap",
-        "target_text_hint": "设置",
-        "target_role": "button",
-    }
+    assert exc_info.value.code == "mark_required"
 
 
 def test_adapt_json_rejects_provider_selection_in_intent() -> None:
@@ -53,9 +48,9 @@ def test_adapt_json_maps_finish_to_canonical_action() -> None:
     (
         ("not-json", "invalid_json"),
         ({"type": "do", "action": "unknown"}, "unknown_action"),
-        ({"type": "do", "action": "tap", "x": 1}, "missing_field"),
-        ({"type": "do", "action": "tap", "x": 1001, "y": 1}, "unsafe_value"),
-        ({"type": "do", "action": "tap", "element": ["__import__", 1]}, "unsafe_value"),
+        ({"type": "do", "action": "tap", "x": 1}, "mark_required"),
+        ({"type": "do", "action": "tap", "x": 1001, "y": 1}, "mark_required"),
+        ({"type": "do", "action": "tap", "element": ["__import__", 1]}, "mark_required"),
     ),
 )
 def test_adapt_json_fails_closed_with_error_codes(payload, code: str) -> None:
@@ -65,19 +60,20 @@ def test_adapt_json_fails_closed_with_error_codes(payload, code: str) -> None:
     assert exc_info.value.code == code
 
 
-def test_adapt_tool_calls_accepts_single_whitelisted_call() -> None:
-    action = adapt_tool_calls(
-        [
-            {
-                "function": {
-                    "name": "do",
-                    "arguments": '{"type":"do","action":"tap","x":1,"y":2}',
+def test_adapt_tool_calls_rejects_coordinate_tap_without_mark() -> None:
+    with pytest.raises(ActionAdapterError) as exc_info:
+        adapt_tool_calls(
+            [
+                {
+                    "function": {
+                        "name": "do",
+                        "arguments": '{"type":"do","action":"tap","x":1,"y":2}',
+                    }
                 }
-            }
-        ]
-    )
+            ]
+        )
 
-    assert action == {"_metadata": "do", "action": "Tap", "element": [1, 2]}
+    assert exc_info.value.code == "mark_required"
 
 
 def test_adapt_tool_calls_infers_type_from_function_name() -> None:
@@ -368,7 +364,7 @@ def test_build_screen_belief_accepts_derived_fields() -> None:
     assert belief["unsafe_or_sensitive"] is False
     assert belief["confidence"] == "high"
     assert belief["current_app"] == "Settings"
-    assert belief["summary"]["redacted"] is True
+    assert belief["summary"] == "WiFi page is open"
 
 
 def test_build_screen_belief_redacts_free_text_summary_by_default() -> None:
@@ -377,12 +373,12 @@ def test_build_screen_belief_redacts_free_text_summary_by_default() -> None:
     belief = build_screen_belief(
         current_app="Chat",
         step_count=2,
-        summary="Please contact Alice about internal pricing",
+        summary="请联系13800138000获取内部信息",
     )
     block, _ = build_plan_context_block({"screen_belief": belief}, lang="en")
 
-    assert "Please contact Alice" not in block
-    assert belief["summary"]["redacted"] is True
+    assert "13800138000" not in block
+    assert "请联系" in block
 
 
 def test_build_screen_belief_defaults() -> None:

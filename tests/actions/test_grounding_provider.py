@@ -4,10 +4,10 @@ from types import ModuleType, SimpleNamespace
 
 from phone_agent.actions.grounding import GroundingError, ground_intent_to_action
 from phone_agent.grounding.fake import FakeGroundingProvider
-from phone_agent.grounding.factory import build_grounding_provider
+from phone_agent.grounding.factory import build_mark_provider
 from phone_agent.grounding.locateanything import LocateAnythingMLXProvider
 from phone_agent.grounding.parser import GroundingParseError, calibrate_bbox_from_resized_input, parse_box_response
-from phone_agent.grounding.provider import GroundingCandidate, ScreenBinding
+from phone_agent.grounding.provider import MarkProviderHint, ScreenBinding
 
 
 class Screenshot:
@@ -65,8 +65,8 @@ def test_locateanything_default_max_size_is_960() -> None:
     assert provider.max_size == 960
 
 
-def test_grounding_factory_passes_locateanything_max_size_from_config() -> None:
-    provider = build_grounding_provider(
+def test_mark_provider_factory_passes_locateanything_max_size_from_config() -> None:
+    provider = build_mark_provider(
         {
             "grounding_provider_name": "locateanything",
             "grounding_model_path": "models/LocateAnything-3B-4bit",
@@ -78,11 +78,11 @@ def test_grounding_factory_passes_locateanything_max_size_from_config() -> None:
     assert provider.max_size == 720
 
 
-def test_grounding_factory_prefers_locateanything_specific_max_size(monkeypatch) -> None:
+def test_mark_provider_factory_prefers_locateanything_specific_max_size(monkeypatch) -> None:
     monkeypatch.setenv("PHONE_AGENT_LOCATEANYTHING_MAX_SIZE", "720")
     monkeypatch.setenv("PHONE_AGENT_GROUNDING_MAX_SIZE", "512")
 
-    provider = build_grounding_provider(
+    provider = build_mark_provider(
         {
             "grounding_provider_name": "locateanything",
             "grounding_max_size": 640,
@@ -94,21 +94,21 @@ def test_grounding_factory_prefers_locateanything_specific_max_size(monkeypatch)
     assert provider.max_size == 960
 
 
-def test_grounding_factory_passes_locateanything_max_size_from_env(monkeypatch) -> None:
+def test_mark_provider_factory_passes_locateanything_max_size_from_env(monkeypatch) -> None:
     monkeypatch.setenv("PHONE_AGENT_GROUNDING_PROVIDER", "locateanything")
     monkeypatch.setenv("PHONE_AGENT_LOCATEANYTHING_MAX_SIZE", "720")
 
-    provider = build_grounding_provider()
+    provider = build_mark_provider()
 
     assert isinstance(provider, LocateAnythingMLXProvider)
     assert provider.max_size == 720
 
 
-def test_grounding_factory_invalid_max_size_falls_back_to_default(monkeypatch) -> None:
+def test_mark_provider_factory_invalid_max_size_falls_back_to_default(monkeypatch) -> None:
     monkeypatch.setenv("PHONE_AGENT_GROUNDING_PROVIDER", "locateanything")
     monkeypatch.setenv("PHONE_AGENT_LOCATEANYTHING_MAX_SIZE", "not-an-int")
 
-    provider = build_grounding_provider()
+    provider = build_mark_provider()
 
     assert isinstance(provider, LocateAnythingMLXProvider)
     assert provider.max_size == 960
@@ -119,99 +119,84 @@ def test_locateanything_rejects_non_positive_max_size() -> None:
         LocateAnythingMLXProvider(max_size=0)
 
 
-def test_description_grounding_compiles_to_canonical_tap() -> None:
-    metadata: dict = {}
-    action = ground_intent_to_action(
-        {"_metadata": "intent", "action": "tap", "target_text_hint": "Settings"},
-        mark_registry=None,
-        screen_id="screen-1",
-        grounding_provider=FakeGroundingProvider(bbox=[100, 200, 300, 400]),
-        screenshot=Screenshot(),
-        screen_binding=binding(),
-        grounding_metadata=metadata,
+def test_description_only_intent_requires_mark_id() -> None:
+    with pytest.raises(GroundingError) as exc_info:
+        ground_intent_to_action(
+            {"_metadata": "intent", "action": "tap", "target_text_hint": "Settings"},
+            mark_registry=None,
+            screen_id="screen-1",
+            screen_binding=binding(),
+        )
+
+    assert exc_info.value.code == "mark_required"
+
+
+def test_fake_mark_provider_returns_mark_candidates() -> None:
+    provider = FakeGroundingProvider(bbox=[100, 200, 300, 400])
+    result = provider.provide_marks(
+        Screenshot(),
+        binding(),
+        hints=[MarkProviderHint(text="Settings", source="test")],
     )
 
-    assert action == {"_metadata": "do", "action": "Tap", "element": [200, 300]}
-    assert metadata["provider"] == "fake"
-    assert metadata["raw_screenshot_hash"] == "hash-1"
-    assert metadata["target"]["has_text_hint"] is True
+    assert result.success is True
+    assert result.provider == "fake"
+    assert result.marks[0].mark_id == "fake_1"
+    assert result.marks[0].bbox == [100, 200, 300, 400]
+    assert result.marks[0].center == [200, 300]
+    assert result.hints[0]["source"] == "test"
 
 
-def test_description_grounding_fails_closed_without_provider() -> None:
-    with pytest.raises(GroundingError) as exc_info:
-        ground_intent_to_action(
-            {"_metadata": "intent", "action": "tap", "target_text_hint": "Settings"},
-            mark_registry=None,
-            screen_id="screen-1",
-            screenshot=Screenshot(),
-            screen_binding=binding(),
-        )
+def test_fake_mark_provider_failure_is_not_executable_action() -> None:
+    provider = FakeGroundingProvider(failure_code="provider_unavailable")
+    result = provider.provide_marks(Screenshot(), binding(), hints=[MarkProviderHint(text="Settings")])
 
-    assert exc_info.value.code == "provider_unavailable"
+    assert result.success is False
+    assert result.failure_code == "provider_unavailable"
+    assert result.marks == []
 
 
-def test_description_grounding_rejects_hash_mismatch() -> None:
-    class HashMismatchProvider(FakeGroundingProvider):
-        def ground(self, screenshot, target, screen_binding, timeout=None):
-            result = super().ground(screenshot, target, screen_binding, timeout)
-            return result.__class__(**{**result.to_dict(), "raw_screenshot_hash": "other"})
+def test_locateanything_provider_multiple_hints_create_multiple_marks(monkeypatch) -> None:
+    outputs = iter(["<box>100 200 300 400</box>", "<box>500 600 700 800</box>"])
+    provider = LocateAnythingMLXProvider(model_path="models/LocateAnything-3B-4bit")
 
-    with pytest.raises(GroundingError) as exc_info:
-        ground_intent_to_action(
-            {"_metadata": "intent", "action": "tap", "target_text_hint": "Settings"},
-            mark_registry=None,
-            screen_id="screen-1",
-            grounding_provider=HashMismatchProvider(),
-            screenshot=Screenshot(),
-            screen_binding=binding(),
-        )
+    monkeypatch.setattr("phone_agent.grounding.locateanything.platform.system", lambda: "Darwin")
+    monkeypatch.setattr("phone_agent.grounding.locateanything.platform.machine", lambda: "arm64")
+    monkeypatch.setattr("pathlib.Path.exists", lambda self: True)
+    monkeypatch.setattr(provider, "_prepare_image", lambda screenshot: (object(), "input-hash"))
+    monkeypatch.setattr(provider, "_run_model", lambda image, description, timeout=None: next(outputs))
 
-    assert exc_info.value.code == "hash_mismatch"
+    result = provider.provide_marks(
+        Screenshot(),
+        binding(),
+        hints=[MarkProviderHint(text="first"), MarkProviderHint(text="second")],
+    )
 
-
-def test_low_confidence_description_grounding_fails_closed() -> None:
-    class LowConfidenceProvider(FakeGroundingProvider):
-        def ground(self, screenshot, target, screen_binding, timeout=None):
-            result = super().ground(screenshot, target, screen_binding, timeout)
-            return result.__class__(**{**result.to_dict(), "confidence": 0.1})
-
-    with pytest.raises(GroundingError) as exc_info:
-        ground_intent_to_action(
-            {"_metadata": "intent", "action": "tap", "target_text_hint": "Settings"},
-            mark_registry=None,
-            screen_id="screen-1",
-            grounding_provider=LowConfidenceProvider(),
-            screenshot=Screenshot(),
-            screen_binding=binding(),
-        )
-
-    assert exc_info.value.code == "low_confidence"
+    assert result.success is True
+    assert [mark.mark_id for mark in result.marks] == ["la_1_1", "la_2_1"]
+    assert [mark.bbox for mark in result.marks] == [[100, 200, 300, 400], [500, 600, 700, 800]]
+    assert result.provider_input_hash == "input-hash"
 
 
-def test_low_confidence_candidate_grounding_fails_closed() -> None:
-    class LowConfidenceCandidateProvider(FakeGroundingProvider):
-        def ground(self, screenshot, target, screen_binding, timeout=None):
-            result = super().ground(screenshot, target, screen_binding, timeout)
-            candidate = GroundingCandidate(
-                bbox=list(result.bbox or []),
-                center=list(result.center or []),
-                confidence=0.1,
-                source="fake",
-                valid=True,
-            )
-            return result.__class__(**{**result.to_dict(), "confidence": None, "candidates": [candidate]})
+def test_locateanything_provider_ambiguous_single_hint_fails_closed(monkeypatch) -> None:
+    provider = LocateAnythingMLXProvider(model_path="models/LocateAnything-3B-4bit")
 
-    with pytest.raises(GroundingError) as exc_info:
-        ground_intent_to_action(
-            {"_metadata": "intent", "action": "tap", "target_text_hint": "Settings"},
-            mark_registry=None,
-            screen_id="screen-1",
-            grounding_provider=LowConfidenceCandidateProvider(),
-            screenshot=Screenshot(),
-            screen_binding=binding(),
-        )
+    monkeypatch.setattr("phone_agent.grounding.locateanything.platform.system", lambda: "Darwin")
+    monkeypatch.setattr("phone_agent.grounding.locateanything.platform.machine", lambda: "arm64")
+    monkeypatch.setattr("pathlib.Path.exists", lambda self: True)
+    monkeypatch.setattr(provider, "_prepare_image", lambda screenshot: (object(), "input-hash"))
+    monkeypatch.setattr(
+        provider,
+        "_run_model",
+        lambda image, description, timeout=None: "<box>100 200 300 400</box><box>500 600 700 800</box>",
+    )
 
-    assert exc_info.value.code == "low_confidence"
+    result = provider.provide_marks(Screenshot(), binding(), hints=[MarkProviderHint(text="target")])
+
+    assert result.success is False
+    assert result.failure_code == "grounding_ambiguous"
+    assert result.marks == []
+    assert result.candidate_count == 2
 
 
 def test_locateanything_mlx_run_model_uses_gui_prompt_and_fallback_generate(monkeypatch) -> None:

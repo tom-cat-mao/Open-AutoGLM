@@ -31,12 +31,18 @@ if TYPE_CHECKING:
 
 def _build_reflection_context(state: "AgentState", *, consumer: str = "inject") -> str:
     reflection = state.get("reflection")
+    task_context = state.get("task") if isinstance(state.get("task"), str) else None
     verdict = state.get("reflection_verdict")
     cause = state.get("failure_cause")
     strategy = state.get("suggested_strategy")
     parts = []
     if reflection:
-        safe_reflection = sanitize_context_payload(reflection, "reflection", consumer=consumer)
+        safe_reflection = sanitize_context_payload(
+            reflection,
+            "reflection",
+            consumer=consumer,
+            task_context=task_context,
+        )
         parts.append(f"** Reflection **\n\n{safe_reflection}")
     structured = []
     if verdict:
