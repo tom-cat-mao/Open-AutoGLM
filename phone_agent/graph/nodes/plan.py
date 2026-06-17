@@ -345,8 +345,42 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
     screenshot = device_factory.get_screenshot(device_id)
     current_app = device_factory.get_current_app(device_id)
     screen_marks = configurable.get("screen_marks")
-    if screen_marks is None and hasattr(device_factory, "get_screen_marks"):
-        screen_marks = device_factory.get_screen_marks(device_id)
+    accessibility_enabled = configurable.get("accessibility_marks")
+    if accessibility_enabled is None:
+        import os
+
+        accessibility_enabled = os.getenv("PHONE_AGENT_ACCESSIBILITY_MARKS", "").lower() in {"1", "true", "yes", "on"}
+    provider_name = str(configurable.get("grounding_provider_name") or "").lower()
+    hybrid_provider_enabled = provider_name in {"hybrid", "accessibility_locateanything", "uiautomator_locateanything"}
+    if screen_marks is None and accessibility_enabled and not hybrid_provider_enabled and hasattr(device_factory, "get_screen_marks"):
+        try:
+            screen_marks = device_factory.get_screen_marks(
+                device_id,
+                width=screenshot.width,
+                height=screenshot.height,
+                timeout=float(configurable.get("accessibility_timeout", 3.0) or 3.0),
+                max_marks=int(configurable.get("accessibility_max_marks", 80) or 80),
+            )
+        except Exception as exc:
+            screen_marks = None
+            emit_trace(
+                config,
+                state,
+                "plan",
+                "accessibility_marks_error",
+                {"failure_code": type(exc).__name__, "message": "accessibility marks unavailable"},
+            )
+    provider_configurable = dict(configurable)
+    if (
+        provider_configurable.get("accessibility_tree_dump") is None
+        and not provider_configurable.get("skip_accessibility_provider")
+        and hasattr(device_factory, "module")
+        and hasattr(device_factory.module, "dump_uiautomator_xml")
+    ):
+        provider_configurable["accessibility_tree_dump"] = lambda timeout=None: device_factory.module.dump_uiautomator_xml(
+            device_id,
+            timeout=timeout,
+        )
     mark_provider_hints = build_mark_provider_hints(
         task=task,
         reflection=state.get("reflection"),
@@ -356,7 +390,7 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
         screenshot=screenshot,
         current_app=current_app,
         marks=screen_marks,
-        mark_providers=build_mark_providers(configurable),
+        mark_providers=build_mark_providers(provider_configurable),
         provider_hints=mark_provider_hints,
         provider_timeout=float(configurable.get("grounding_timeout", 10.0) or 10.0),
     )

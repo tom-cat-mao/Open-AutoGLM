@@ -31,11 +31,15 @@ class LocateAnythingMLXProvider:
         model_path: str | Path = "models/LocateAnything-3B-4bit",
         *,
         max_size: int = DEFAULT_LOCATEANYTHING_MAX_SIZE,
+        context_max_chars: int = 0,
     ) -> None:
         if max_size <= 0:
             raise ValueError("LocateAnything max_size must be positive")
+        if context_max_chars < 0:
+            raise ValueError("LocateAnything context_max_chars must be non-negative")
         self.model_path = Path(model_path)
         self.max_size = max_size
+        self.context_max_chars = context_max_chars
         self._model = None
         self._processor = None
 
@@ -58,8 +62,13 @@ class LocateAnythingMLXProvider:
         provider_input_hash: str | None = None
         try:
             image, provider_input_hash = self._prepare_image(screenshot)
+            hint_items = hints or []
             for hint_index, description in enumerate(descriptions, start=1):
-                output = self._run_model(image, description, timeout=timeout)
+                context = self._context_for_hint(hint_items[hint_index - 1] if len(hint_items) >= hint_index else None)
+                if context:
+                    output = self._run_model(image, description, timeout=timeout, context=context)
+                else:
+                    output = self._run_model(image, description, timeout=timeout)
                 parsed_set = parse_box_candidates(output)
                 valid_candidates = parsed_set.valid_candidates
                 candidates = [
@@ -110,7 +119,7 @@ class LocateAnythingMLXProvider:
             candidate_count=len(all_candidates),
             status="success",
             hints=[hint.redacted_summary() for hint in hints or []],
-            metadata={"model_path": str(self.model_path)},
+            metadata={"model_path": str(self.model_path), "context_max_chars": self.context_max_chars},
         )
 
     def _prepare_image(self, screenshot: Any) -> tuple[Image.Image, str]:
@@ -122,13 +131,20 @@ class LocateAnythingMLXProvider:
         provider_bytes = buffered.getvalue()
         return Image.open(BytesIO(provider_bytes)).convert("RGB"), hashlib.sha256(provider_bytes).hexdigest()[:16]
 
-    def _run_model(self, image: Image.Image, description: str, *, timeout: float | None = None) -> str:
+    def _run_model(
+        self,
+        image: Image.Image,
+        description: str,
+        *,
+        timeout: float | None = None,
+        context: str | None = None,
+    ) -> str:
         # Lazy import keeps default CI and non-MLX installs independent of the optional extra.
         from mlx_vlm import generate, load  # type: ignore
 
         if self._model is None or self._processor is None:
             self._model, self._processor = load(str(self.model_path))
-        prompt = self._build_prompt(description)
+        prompt = self._build_prompt(description, context=context)
 
         pbd_generate = getattr(self._model, "pbd_generate", None)
         if callable(pbd_generate):
@@ -164,23 +180,41 @@ class LocateAnythingMLXProvider:
         )
         return str(self._processor.decode(tokens, skip_special_tokens=False))
 
-    def _build_prompt(self, description: str) -> str:
-        instruction = f"Locate the region that matches the following description: {description}."
+    def _build_prompt(self, description: str, *, context: str | None = None) -> str:
+        instruction = self._build_instruction(description, context=context)
         try:
             from mlx_vlm.prompt_utils import apply_chat_template  # type: ignore
-
-            return str(
-                apply_chat_template(
-                    self._processor,
-                    getattr(self._model, "config", {"model_type": "locateanything"}),
-                    instruction,
-                    num_images=1,
-                )
-            )
-        except Exception:
-            # LocateAnything processors expand any <image-N> placeholder in order.
-            # Keep a conservative fallback for older mlx-vlm branches without prompt_utils.
+        except ImportError:
+            # Older mlx-vlm builds may not expose prompt_utils. Keep the legacy
+            # image placeholder fallback only for that explicit compatibility case.
             return f"<image-0>{instruction}"
+        return str(
+            apply_chat_template(
+                self._processor,
+                getattr(self._model, "config", {"model_type": "locateanything"}),
+                instruction,
+                num_images=1,
+            )
+        )
+
+    def _build_instruction(self, description: str, *, context: str | None = None) -> str:
+        instruction = f"Locate the region that matches the following description: {description}."
+        bounded_context = self._bound_context(context)
+        if bounded_context:
+            return f"{instruction}\nContext: {bounded_context}"
+        return instruction
+
+    def _context_for_hint(self, hint: MarkProviderHint | None) -> str | None:
+        if hint is None or self.context_max_chars <= 0:
+            return None
+        pieces = [hint.role, hint.intent, hint.action]
+        context = " ".join(str(piece).strip() for piece in pieces if str(piece or "").strip())
+        return self._bound_context(context)
+
+    def _bound_context(self, context: str | None) -> str:
+        if self.context_max_chars <= 0 or not context:
+            return ""
+        return " ".join(str(context).split())[: self.context_max_chars]
 
     def _failure(
         self,

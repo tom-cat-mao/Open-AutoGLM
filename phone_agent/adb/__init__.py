@@ -10,7 +10,9 @@ from phone_agent.adb.connection import (
 from phone_agent.adb.device import (
     back,
     double_tap,
+    dump_uiautomator_xml,
     get_current_app,
+    get_screen_marks,
     home,
     launch_app,
     long_press,
@@ -42,6 +44,8 @@ __all__ = [
     "double_tap",
     "long_press",
     "launch_app",
+    "dump_uiautomator_xml",
+    "get_screen_marks",
     # Connection management
     "ADBConnection",
     "DeviceInfo",

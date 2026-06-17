@@ -492,3 +492,59 @@ def test_observation_sanitizes_successful_provider_mark_summary_fields() -> None
     assert len(mark_summary["mark_id"]) <= 64
     assert len(mark_summary["source"]) <= 64
     assert len(mark_summary["reason"]) <= 64
+
+
+def test_observation_includes_bounded_fallback_chain_metadata() -> None:
+    from phone_agent.graph.observation import build_observation
+    from phone_agent.grounding.provider import MarkCandidate, MarkProviderResult
+
+    class Screenshot:
+        base64_data = "fake-image"
+        width = 1000
+        height = 2000
+
+    class Provider:
+        name = "fallback"
+        version = "test"
+        allow_raw_hints = False
+
+        def provide_marks(self, screenshot, screen_binding, hints=None, timeout=None):
+            mark = MarkCandidate(mark_id="m1", bbox=[100, 200, 300, 400], center=[200, 300])
+            return MarkProviderResult(
+                success=True,
+                provider="fallback",
+                screen_id=screen_binding.screen_id,
+                raw_screenshot_hash=screen_binding.raw_screenshot_hash,
+                provider_input_hash="hash",
+                marks=[mark],
+                candidates=[mark],
+                candidate_count=1,
+                metadata={
+                    "fallback_chain": [
+                        {
+                            "provider": "accessibility_tree",
+                            "success": True,
+                            "failure_code": "secret-13800138000",
+                            "candidate_count": 3,
+                            "mark_count": 3,
+                            "latency_ms": 4,
+                            "usable": False,
+                            "raw_xml": "<secret>",
+                        }
+                    ]
+                },
+            )
+
+    observation = build_observation(
+        screenshot=Screenshot(),
+        current_app="Settings",
+        mark_providers=[Provider()],
+        provider_hints=[],
+    )
+
+    metadata = observation.mark_provider_observation["providers"][0]["metadata"]
+    assert metadata["fallback_chain"][0]["provider"] == "accessibility_tree"
+    assert metadata["fallback_chain"][0]["usable"] is False
+    raw = json.dumps(metadata, ensure_ascii=False)
+    assert "13800138000" not in raw
+    assert "raw_xml" not in raw

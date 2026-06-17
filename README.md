@@ -170,6 +170,8 @@ Context selector 与 compaction 只能影响模型请求构造和脱敏观测指
 
 ### LocateAnything 本地 Mark Provider（可选）
 
+> 完整架构文档见 [Grounding Architecture](docs/grounding-architecture.html)
+
 Open-AutoGLM 支持把主 VLM 的语义/意图与本地视觉定位拆开：Observation 阶段先由静态 marks、设备 marks、LocateAnything/Fake 等 `MarkProvider` 生成当前屏幕的 `MarkRegistry`；主 VLM 在 JSON/tool_calls 模式只通过 `target_mark_id` 引用屏幕目标；本地 harness 再把 mark 编译为 canonical `ActionIR -> Validator -> Repair -> Validator -> Safety/HITL -> Executor`。
 
 ```bash
@@ -182,9 +184,19 @@ export PHONE_AGENT_GROUNDING_PROVIDER=locateanything
 export PHONE_AGENT_LOCATEANYTHING_MODEL=models/LocateAnything-3B-4bit
 # 可选：覆盖 LocateAnything 输入图最长边；默认 960，1280 可回滚到更高质量/更慢路径
 export PHONE_AGENT_LOCATEANYTHING_MAX_SIZE=960
+
+# 可选：优先使用 Android UiAutomator accessibility tree，失败时再调用 LocateAnything
+export PHONE_AGENT_GROUNDING_PROVIDER=hybrid
+export PHONE_AGENT_ACCESSIBILITY_MAX_MARKS=80
+# 可选：直接把 accessibility tree marks 注入 MarkRegistry，不启用小模型 provider
+export PHONE_AGENT_ACCESSIBILITY_MARKS=true
 ```
 
 LocateAnything provider 会先读取当前完整截图，再按最长边 `max_size` 等比例缩小后送入模型；默认 `max_size=960`，这是基于本地 benchmark 在速度和 bbox 一致性之间的折中。运行时可通过 config `locateanything_max_size`（优先）或 `grounding_max_size` 覆盖，也可通过环境变量 `PHONE_AGENT_LOCATEANYTHING_MAX_SIZE`（优先）或 `PHONE_AGENT_GROUNDING_MAX_SIZE` 灰度/回滚；非法或非正整数会回落默认值。
+
+Android accessibility tree 通过 `adb exec-out uiautomator dump /dev/tty` 获取当前 UI XML，解析可交互节点的 `bounds/text/content-desc/resource-id/class/clickable/focusable/enabled` 等字段，并统一转换为 0-1000 MarkRegistry marks。`PHONE_AGENT_GROUNDING_PROVIDER=hybrid` 是推荐的省时路径：先尝试 accessibility tree；如果 tree marks 与 provider hint 没有弱匹配、树为空、不可用或没有候选 marks，会继续 fallback 到 LocateAnything 并合并候选。`PHONE_AGENT_ACCESSIBILITY_MARKS=true` 则把 accessibility marks 作为设备 base marks 注入；如果它与 `hybrid` 同时开启，direct/base accessibility mark 注入会被跳过，accessibility marks 由 hybrid provider 链统一生成和 gating，避免绕过 hint-aware fallback。
+
+LocateAnything prompt 必须保持官方/库侧 chat template：代码通过 `mlx_vlm.prompt_utils.apply_chat_template(..., num_images=1)` 生成最终 prompt，fallback 仅为旧版 `mlx-vlm` 保留 `<image-0>` 前缀。默认 instruction 保持短句：`Locate the region that matches the following description: ...`。可选 `PHONE_AGENT_LOCATEANYTHING_CONTEXT_MAX_CHARS` / config `locateanything_context_max_chars` 只允许追加一行 bounded `Context:`，默认 `0` 表示不注入额外 context，避免小模型被长 prompt 干扰。
 
 安全边界：屏幕目标点击类动作的唯一可执行 IntentIR target 是 `target_mark_id`。`target_text_hint` / 目标描述只能作为受控、bounded 的本地 MarkProvider hint，不能直接生成 ActionIR；本地 LocateAnything/Fake 可在内存中使用 raw hint 做 query-conditioned grounding，但 raw hint 不写入 trace、checkpoint、prompt marks block、eval JSON 或报告。LocateAnything/Fake/OCR/UIAutomator/SoM 只能生成 marks；未知 mark、缺失 registry、provider 缺失、stale/hash mismatch、低置信、bad bbox、多候选歧义等会 fail-closed 为 `error_layer=grounding`，不会回退为主 VLM 直接坐标 Tap。trace/eval 只记录 provider、mark id、bbox/center、screen/hash、latency、failure code、candidate_count 与脱敏 hint summary，不记录原始截图或 raw target text。若未来接入远程 grounding provider，raw hint 必须显式 opt-in，否则默认使用脱敏 hint。
 
@@ -318,9 +330,13 @@ python main.py --device-id 192.168.1.100:5555 --base-url http://localhost:8000/v
 | `PHONE_AGENT_MAX_STEPS` | 最大步数 | `100` |
 | `PHONE_AGENT_DEVICE_ID` | 设备 ID | 自动检测 |
 | `PHONE_AGENT_LANG` | 语言 | `cn` |
-| `PHONE_AGENT_GROUNDING_PROVIDER` | 可选 grounding provider：`locateanything` / `fake` / `off` | `off` |
+| `PHONE_AGENT_GROUNDING_PROVIDER` | 可选 grounding provider：`hybrid` / `locateanything` / `accessibility` / `fake` / `off`（别名：`accessibility_tree`/`uiautomator`→accessibility，`locateanything_mlx`/`mlx`→locateanything，`accessibility_locateanything`/`uiautomator_locateanything`→hybrid） | `off` |
+| `PHONE_AGENT_ACCESSIBILITY_MARKS` | 是否把 Android UiAutomator tree 作为设备 base marks 注入 MarkRegistry | `false` |
+| `PHONE_AGENT_ACCESSIBILITY_TIMEOUT` | `uiautomator dump` 超时时间（秒） | `3.0` |
+| `PHONE_AGENT_ACCESSIBILITY_MAX_MARKS` | 每屏最多保留的 accessibility marks 数量 | `80` |
 | `PHONE_AGENT_LOCATEANYTHING_MODEL` | LocateAnything-3B-4bit 模型路径 | `models/LocateAnything-3B-4bit` |
 | `PHONE_AGENT_LOCATEANYTHING_MAX_SIZE` | LocateAnything 输入图最长边；provider 专属配置，优先于通用 grounding max size | `960` |
+| `PHONE_AGENT_LOCATEANYTHING_CONTEXT_MAX_CHARS` | LocateAnything prompt 的可选短 context 字符预算；0 表示关闭 | `0` |
 | `PHONE_AGENT_GROUNDING_MAX_SIZE` | 通用 grounding 输入图最长边 fallback；当前仅 LocateAnything factory 消费 | `960` |
 
 ## 开发

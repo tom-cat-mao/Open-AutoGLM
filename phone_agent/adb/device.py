@@ -1,12 +1,11 @@
 """Device control utilities for Android automation."""
 
-import os
 import subprocess
 import time
-from typing import List, Optional, Tuple
 
 from phone_agent.config.apps import APP_PACKAGES
 from phone_agent.config.timing import TIMING_CONFIG
+from phone_agent.grounding.accessibility import parse_uiautomator_marks
 
 
 def get_current_app(device_id: str | None = None) -> str:
@@ -273,6 +272,58 @@ def launch_app(
 
     time.sleep(delay)
     return result.returncode == 0 and "Error:" not in (result.stdout + result.stderr)
+
+
+def dump_uiautomator_xml(device_id: str | None = None, timeout: float | None = None) -> str:
+    """Return the current Android UiAutomator hierarchy XML from stdout."""
+
+    adb_prefix = _get_adb_prefix(device_id)
+    try:
+        result = subprocess.run(
+            adb_prefix + ["exec-out", "uiautomator", "dump", "/dev/tty"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout or 5,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise TimeoutError("UiAutomator dump timed out") from exc
+    output = (result.stdout or "") + (result.stderr or "")
+    marker = "<?xml"
+    start = output.find(marker)
+    end = output.find("</hierarchy>", start)
+    if result.returncode != 0 or start < 0:
+        raise ValueError("No UiAutomator XML output")
+    if end < 0:
+        raise ValueError("Incomplete UiAutomator XML output")
+    return output[start : end + len("</hierarchy>")].strip()
+
+
+def get_screen_marks(
+    device_id: str | None = None,
+    *,
+    width: int | None = None,
+    height: int | None = None,
+    timeout: float | None = None,
+    max_marks: int = 80,
+) -> list[dict]:
+    """Return Accessibility/UiAutomator marks in normalized 0-1000 coordinates."""
+
+    xml_text = dump_uiautomator_xml(device_id, timeout=timeout)
+    if width is None or height is None:
+        from phone_agent.adb.screenshot import get_screenshot
+
+        screenshot = get_screenshot(device_id)
+        width = int(getattr(screenshot, "width", 0) or 0)
+        height = int(getattr(screenshot, "height", 0) or 0)
+    return parse_uiautomator_marks(
+        xml_text,
+        screen_width=int(width or 0),
+        screen_height=int(height or 0),
+        source="uiautomator",
+        max_marks=max_marks,
+    )
 
 
 def _resolve_launcher_component(adb_prefix: list[str], package: str) -> str | None:

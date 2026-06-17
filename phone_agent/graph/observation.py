@@ -213,7 +213,7 @@ def _provider_result_to_marks(result: MarkProviderResult) -> list[dict[str, Any]
 def _summarize_provider_result(result: MarkProviderResult) -> dict[str, Any]:
     """Return trace-safe provider metadata without raw hint or mark text."""
 
-    return {
+    summary = {
         "provider": _safe_metadata(result.provider, default="unknown"),
         "success": result.success,
         "failure_code": _safe_metadata(result.failure_code),
@@ -248,6 +248,31 @@ def _summarize_provider_result(result: MarkProviderResult) -> dict[str, Any]:
             for mark in list(result.marks or [])[:20]
         ],
     }
+    fallback_chain = _safe_fallback_chain((result.metadata or {}).get("fallback_chain"))
+    if fallback_chain:
+        summary["metadata"] = {"fallback_chain": fallback_chain}
+    return summary
+
+
+def _safe_fallback_chain(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    rows: list[dict[str, Any]] = []
+    for item in value[:5]:
+        if not isinstance(item, dict):
+            continue
+        rows.append(
+            {
+                "provider": _safe_metadata(item.get("provider"), default="unknown"),
+                "success": bool(item.get("success")),
+                "failure_code": _safe_metadata(item.get("failure_code")),
+                "candidate_count": _safe_int(item.get("candidate_count")),
+                "mark_count": _safe_int(item.get("mark_count")),
+                "latency_ms": _safe_int(item.get("latency_ms")),
+                "usable": bool(item.get("usable")),
+            }
+        )
+    return rows
 
 
 def _validate_provider_result(result: MarkProviderResult, binding: ScreenBinding) -> str | None:

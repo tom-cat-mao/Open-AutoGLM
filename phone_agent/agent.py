@@ -37,6 +37,11 @@ class AgentConfig:
     trace_strict: bool = False
     context_mode: str = DEFAULT_CONTEXT_MODE
     prompt_version: str = PROMPT_VERSION
+    grounding_provider_name: str | None = None
+    accessibility_marks: bool = False
+    accessibility_timeout: float = 3.0
+    accessibility_max_marks: int = 80
+    locateanything_context_max_chars: int = 0
 
     def __post_init__(self):
         self.context_mode = normalize_context_mode(self.context_mode)
@@ -308,6 +313,11 @@ class PhoneAgent:
                 "trace_writer": trace_writer,
                 "context_mode": self.agent_config.context_mode,
                 "prompt_version": self.agent_config.prompt_version,
+                "grounding_provider_name": self.agent_config.grounding_provider_name,
+                "accessibility_marks": self.agent_config.accessibility_marks,
+                "accessibility_timeout": self.agent_config.accessibility_timeout,
+                "accessibility_max_marks": self.agent_config.accessibility_max_marks,
+                "locateanything_context_max_chars": self.agent_config.locateanything_context_max_chars,
             }
         }
 

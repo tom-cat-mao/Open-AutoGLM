@@ -25,6 +25,10 @@ Environment Variables:
     PHONE_AGENT_OUTPUT_MODE: Model output mode (json_schema/tool_calls/auto)
     PHONE_AGENT_MAX_STEPS: Maximum steps per task (default: 100)
     PHONE_AGENT_DEVICE_ID: ADB device ID for multi-device setups
+    PHONE_AGENT_GROUNDING_PROVIDER: Mark provider (off/fake/locateanything/hybrid)
+    PHONE_AGENT_ACCESSIBILITY_MARKS: Include UiAutomator marks as device screen marks
+    PHONE_AGENT_ACCESSIBILITY_MAX_MARKS: Maximum UiAutomator marks per screen
+    PHONE_AGENT_LOCATEANYTHING_CONTEXT_MAX_CHARS: Optional short LocateAnything context budget
 """
 
 import argparse
@@ -698,6 +702,42 @@ Examples:
         help="Maximum steps per task",
     )
 
+    parser.add_argument(
+        "--grounding-provider",
+        type=str,
+        choices=["off", "fake", "locateanything", "locateanything_mlx", "mlx", "accessibility", "accessibility_tree", "uiautomator", "hybrid"],
+        default=os.getenv("PHONE_AGENT_GROUNDING_PROVIDER"),
+        help="Optional mark provider: off, fake, locateanything, accessibility, or hybrid",
+    )
+
+    parser.add_argument(
+        "--accessibility-marks",
+        action="store_true",
+        default=parse_env_bool("PHONE_AGENT_ACCESSIBILITY_MARKS", False),
+        help="Include Android UiAutomator accessibility marks as device screen marks",
+    )
+
+    parser.add_argument(
+        "--accessibility-timeout",
+        type=float,
+        default=float(os.getenv("PHONE_AGENT_ACCESSIBILITY_TIMEOUT", "3.0")),
+        help="UiAutomator dump timeout in seconds",
+    )
+
+    parser.add_argument(
+        "--accessibility-max-marks",
+        type=int,
+        default=int(os.getenv("PHONE_AGENT_ACCESSIBILITY_MAX_MARKS", "80")),
+        help="Maximum UiAutomator marks per screen",
+    )
+
+    parser.add_argument(
+        "--locateanything-context-max-chars",
+        type=int,
+        default=int(os.getenv("PHONE_AGENT_LOCATEANYTHING_CONTEXT_MAX_CHARS", "0")),
+        help="Optional short context budget for LocateAnything prompts; 0 disables extra context",
+    )
+
     # Device options
     parser.add_argument(
         "--device-id",
@@ -936,6 +976,11 @@ def main():
         device_id=args.device_id,
         verbose=not args.quiet,
         lang=args.lang,
+        grounding_provider_name=args.grounding_provider,
+        accessibility_marks=args.accessibility_marks,
+        accessibility_timeout=args.accessibility_timeout,
+        accessibility_max_marks=args.accessibility_max_marks,
+        locateanything_context_max_chars=args.locateanything_context_max_chars,
     )
 
     agent = PhoneAgent(

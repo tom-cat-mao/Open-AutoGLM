@@ -42,6 +42,26 @@ class DeviceFactory:
         """Get screenshot from device."""
         return self.module.get_screenshot(device_id, timeout)
 
+    def get_screen_marks(
+        self,
+        device_id: str | None = None,
+        *,
+        width: int | None = None,
+        height: int | None = None,
+        timeout: float | None = None,
+        max_marks: int = 80,
+    ) -> list[dict]:
+        """Get normalized Accessibility/UiAutomator marks from the device."""
+        if not hasattr(self.module, "get_screen_marks"):
+            return []
+        return self.module.get_screen_marks(
+            device_id,
+            width=width,
+            height=height,
+            timeout=timeout,
+            max_marks=max_marks,
+        )
+
     def get_current_app(self, device_id: str | None = None) -> str:
         """Get current app name."""
         return self.module.get_current_app(device_id)

@@ -17,7 +17,7 @@
 - **评测地基**: 已提供 `evals/run_eval.py --dry-run` smoke harness，以及 `bench/grounding/` LocateAnything benchmark 体系；当前支持 post-training raw JSONL 转 manifest、固定 suite、prediction JSONL、summary JSON、离线复评与 target type / area bucket 分组指标
 - **收益验证**: eval 已输出 `context_mode`、`context_strategy`、`prompt_version`、`selected_sections`、`messages_before/after`、`message_chars_before/after`、`approx_tokens_before/after`、`context_block_chars`、`context_truncated`、`failure_memory_hit_count`、`repeated_failure_count`，支持 off/observe/inject 对比
 - **输出适配**: `ModelConfig.output_mode=json_schema|tool_calls|auto`；旧 text DSL 不再作为动作执行协议；JSON、已聚合 OpenAI `tool_calls` 与 IntentIR 统一归一到 canonical action，parse/adapter/validation failure fail-closed，不绕过 HITL
-- **本地 Grounding**: LocateAnything-3B-4bit (MLX) 已收敛为 optional `MarkProvider`，只在 Observation 阶段生成 MarkRegistry 候选 marks；主 VLM 的屏幕目标点击类动作只输出 `target_mark_id`，不再通过 `target_text_hint` 直接生成 ActionIR；所有结果仍进入 canonical ActionIR/Safety/HITL/Executor；LocateAnything 默认输入图最长边为 `max_size=960`，可通过 provider 专属或通用配置灰度/回滚；multi-box 不得 first-box 执行，可注册多个 marks 或 fail-closed 为歧义
+- **本地 Grounding**: LocateAnything-3B-4bit (MLX) 与 Android UiAutomator accessibility tree 均已收敛为 MarkRegistry mark 生成层；推荐 `PHONE_AGENT_GROUNDING_PROVIDER=hybrid` 先用 accessibility tree 的结构化 bounds/text/class/clickable 信息，失败时再 fallback 到 LocateAnything；主 VLM 的屏幕目标点击类动作只输出 `target_mark_id`，不再通过 `target_text_hint` 直接生成 ActionIR；所有结果仍进入 canonical ActionIR/Safety/HITL/Executor；LocateAnything 默认输入图最长边为 `max_size=960`，默认不注入额外 context，必须经 `apply_chat_template(..., num_images=1)`，可通过 bounded `locateanything_context_max_chars` 灰度短 context；multi-box 不得 first-box 执行，可注册多个 marks 或 fail-closed 为歧义
 
 ---
 
@@ -81,6 +81,45 @@ PHONE_AGENT_LOCATEANYTHING_MAX_SIZE=960 \
 ```
 
 固定 manifest 后用 `bench.grounding.score_predictions` 离线复评 predictions。正式比较不同 grounding 模型时，必须复用同一 manifest，并同时报告 clickability 指标（`center_hit_rate`）与 bbox 指标（`acc_iou_0_3`、`acc_iou_0_5`、`mean_iou`）。MLX/Metal 在沙箱或 headless 环境中可能不可用，真实 LocateAnything benchmark 需要在可访问 Metal 的本机 shell 运行。
+
+---
+
+## 已完成 MVP: Accessibility Tree + LocateAnything Hybrid Grounding
+
+**目标**: 用 Android accessibility tree 作为低延迟、结构化的首选 mark 来源；当 tree 为空、不可用、无候选，或 tree marks 与 provider hint 没有弱匹配时继续调用 LocateAnything 并合并候选，降低平均 grounding 延迟，同时保持主 VLM 只能选择 `target_mark_id` 的执行边界。
+
+**已落地方案**:
+- `phone_agent/grounding/accessibility.py`: 新增 UiAutomator XML parser 与 `AccessibilityTreeProvider`，解析 `bounds/text/content-desc/resource-id/class/clickable/focusable/enabled`，过滤不可见/不可用节点，输出 0-1000 `MarkCandidate`。
+- `phone_agent/adb/device.py`: 新增 `dump_uiautomator_xml()` 与 `get_screen_marks()`；默认命令为 `adb exec-out uiautomator dump /dev/tty`，避免写入设备临时文件。
+- `phone_agent/device_factory.py` 与 `phone_agent/graph/nodes/plan.py`: 支持 `accessibility_marks` 直接把 tree marks 注入 MarkRegistry；并向 provider factory 注入 `accessibility_tree_dump`，供 hybrid fallback 使用。
+- `phone_agent/grounding/fallback.py` / `factory.py`: 新增 ordered fallback provider；`PHONE_AGENT_GROUNDING_PROVIDER=hybrid` 先尝试 `accessibility_tree`，只有 tree marks 与 hint 弱匹配或无 hint 时才停止；不匹配、失败或无候选时继续调用 `locateanything_mlx` 并合并候选。
+- `phone_agent/grounding/locateanything.py`: Prompt 保持官方 `apply_chat_template(..., num_images=1)` 路径；默认 instruction 极短；`locateanything_context_max_chars` 仅允许追加 bounded 单行 `Context:`，默认 `0` 关闭。
+
+**配置**:
+
+```bash
+# 推荐：tree 优先，tree 不覆盖 hint 时调用 LocateAnything
+PHONE_AGENT_GROUNDING_PROVIDER=hybrid \
+PHONE_AGENT_ACCESSIBILITY_MAX_MARKS=80 \
+PHONE_AGENT_LOCATEANYTHING_CONTEXT_MAX_CHARS=0 \
+.venv/bin/python main.py --output-mode json_schema "打开设置"
+
+# 只把 tree marks 注入 MarkRegistry，不启用小模型 provider
+PHONE_AGENT_ACCESSIBILITY_MARKS=true \
+.venv/bin/python main.py --output-mode json_schema "打开设置"
+```
+
+**核心不变量**:
+- Accessibility tree 与 LocateAnything 都只是 mark provider；它们不能直接生成可执行 ActionIR。
+- Tree bounds 必须转换为 0-1000；绝对像素转换仍只在 tool/backend 层。
+- Tree 失败、XML parse 失败、无候选 marks、LocateAnything 失败或歧义，都不能 fallback 为主 VLM raw coordinate tap。
+- LocateAnything context 默认关闭；开启时只能通过 `locateanything_context_max_chars` 注入短 context，不能构造长 prompt 或绕过官方 chat template。
+
+**验证命令**:
+
+```bash
+.venv/bin/pytest tests/actions/test_grounding_provider.py tests/graph/test_state.py tests/graph/test_plan_reflect.py -q
+```
 
 ---
 
@@ -591,36 +630,37 @@ CREATE TABLE skills (
 
 ---
 
-## P2: 结构化 Screen State (Accessibility Tree)
+## 未来方向: 增强结构化 Screen State 注入
 
-**问题**: Agent 对屏幕的理解完全依赖原始截图（像素），没有结构化的 UI 元素信息。模型必须从截图推断按钮位置、文本内容、可滚动区域等，导致坐标精度有限且无法获取不可见元素信息。
+**当前状态**: Accessibility Tree 已通过 `AccessibilityTreeProvider` 解析为 MarkRegistry marks，并通过 `mark_registry.prompt_block()` 注入主 VLM prompt（包含 role、text_summary、source、confidence）。`PHONE_AGENT_GROUNDING_PROVIDER=hybrid` 已实现 tree-first + LocateAnything fallback 的完整链路。
+
+**剩余差距**: 当前 marks block 仅提供扁平化的元素列表（mark_id + role + text_summary），未利用以下结构化信息：
+- 页面层级（parent-child 关系、嵌套深度）
+- 可滚动区域标识（scrollable 容器及其子元素范围）
+- 选中态 / 开关态（checked、selected、enabled 状态）
+- 输入框当前值与 hint text
 
 **方案设计**:
 
-使用 `uiautomator dump` 或 Android Accessibility Service 获取当前页面的结构化 UI 状态：
+在 `AccessibilityTreeProvider` 解析阶段保留层级与状态信息，扩展 `Mark` dataclass 或新增 `ScreenStructure` 注入层：
 
 ```python
-screen_state = {
+screen_structure = {
     "current_app": "Settings",
-    "current_page": "WiFi设置",
-    "elements": [
-        {"type": "switch", "text": "WiFi", "bounds": [0, 200, 1000, 280], "checked": True},
-        {"type": "list_item", "text": "HomeNetwork_5G", "bounds": [0, 300, 1000, 380]},
-        {"type": "button", "text": "添加网络", "bounds": [400, 900, 600, 960]},
-    ],
-    "scrollable": True,
-    "has_input": False,
+    "scrollable_regions": [{"mark_id": "ax_5", "child_count": 12}],
+    "checked_elements": [{"mark_id": "ax_1", "checked": True, "text": "Wi-Fi"}],
+    "input_fields": [{"mark_id": "ax_8", "hint": "搜索设置", "focused": False}],
 }
 ```
 
-在 `plan_node` 中将结构化状态注入 prompt，模型同时看到截图和元素树，可直接输出"点击 WiFi 开关"而非猜测坐标。
+在 `plan_node` 中作为补充 context block 注入，与 marks block 并列，不替代 marks block。
 
 **依赖条件**:
-- Android 设备需启用 USB debugging + Accessibility
-- 不同 Android 版本 `uiautomator` 行为不一致
-- 需要处理敏感信息过滤（密码输入框等）
+- 需扩展 `parse_uiautomator_marks()` 保留 parent/child/checked/selected/focused 信息
+- 需评估 VLM 对额外结构化 context 的利用能力
+- 敏感信息过滤（密码输入框内容等）需同步扩展
 
-**预估复杂度**: 🔴 高 (5-7 天)
+**预估复杂度**: 🟡 中等 (3-5 天，核心解析已有基础)
 
 ---
 
@@ -653,47 +693,48 @@ TAOBAO_PAGES = {
 
 ---
 
-## P2: 动态 Prompt 注入 (已安装 App / 当前页面元素)
+## P2: 动态 Prompt 注入 (已部分实现，增强中)
 
-**问题**: 当前 system prompt 是静态的，不包含设备特定信息。模型不知道设备上安装了哪些 app，也不知道当前页面有哪些可交互元素。
-
-**方案设计**:
-
-分两层动态注入：
-
-1. **App 列表注入** (已在 P0-1 部分实现): 当前使用静态 APP_PACKAGES 作为 registry。后续可调用 `pm list packages` 获取设备已安装 app，与 APP_PACKAGES 取交集，只注入实际可用的 app。
-
-2. **页面元素注入**: 结合 P2-1 的结构化 Screen State，将当前页面的可交互元素列表注入 user message。
-
+**当前状态**: `MarkRegistry.prompt_block()` 已实现当前页面可交互元素的动态注入，输出格式如：
 ```
-** 当前页面可交互元素 **
-- [Switch] WiFi (已开启)
-- [ListItem] HomeNetwork_5G
-- [Button] 添加网络
-- [Scrollable] 列表 (可下滑查看更多)
+** Screen Marks (use target_mark_id; do not guess coordinates) **
+- ax_1: role=Switch source=accessibility_tree confidence=1.0 text_summary=Wi-Fi
+- ax_2: role=ListItem source=accessibility_tree confidence=0.8 text_summary=HomeNetwork_5G
+- ax_3: role=Button source=accessibility_tree confidence=1.0 text_summary=添加网络
 ```
 
-**依赖条件**: P2-1 结构化 Screen State
+**剩余差距**:
+1. App 列表注入仍使用静态 `APP_PACKAGES` registry，未调用 `pm list packages` 获取设备实际已安装 app
+2. Marks block 不包含 scrollable/checked/focused 等状态信息（见上方"增强结构化 Screen State 注入"）
+3. 无 app 内页面层级推断（见下方"UI 状态机"）
 
-**预估复杂度**: 🟡 中等 (2-3 天，依赖 P2-1)
+**后续增强方向**:
+- 调用 `pm list packages` 与 `APP_PACKAGES` 取交集，只注入实际可用的 app
+- 结合结构化 Screen State 注入 scrollable/checked/focused 状态
+- 结合 UI 状态机注入当前页面层级信息
+
+**预估复杂度**: 🟢 低 (1-2 天，核心注入机制已就绪)
 
 ---
 
 ## P3: Multi-model Pipeline
 
-**问题**: Plan 和 Reflect 都使用同一个大模型，但两者的任务复杂度不同。Plan 需要理解任务 + 截图 + 历史来决策，Reflect 只需要判断截图变化。用小模型做 Reflect 可以降低成本和延迟。
+**当前状态**: Grounding 已使用专用模型（LocateAnything-3B-4bit）作为 MarkProvider，与主 VLM 分离。Reflect 仍使用主 VLM。
 
 **方案设计**:
 
 ```
 Plan:    大模型 (7B+) — 复杂推理 + 动作决策
 Reflect: 小模型 (1-3B) — 截图对比 + 成败判断
-Grounding: 专用模型 — UI 元素定位 (可选)
+Grounding: LocateAnything-3B-4bit (MLX) — 已实现，作为 MarkProvider 运行
 ```
 
 在 `ModelConfig` 中支持多模型配置，`plan_node` 和 `reflect_node` 使用不同的 `model_client`。
 
-**依赖条件**: 需要部署多个模型端点
+**剩余工作**:
+- 为 reflect_node 配置独立小模型
+- 评估小模型 reflect 的准确率与延迟收益
+- 部署多模型端点
 
 **预估复杂度**: 🟡 中等 (2-3 天代码 + 部署)
 

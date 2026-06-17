@@ -1,5 +1,7 @@
 """Screen mark provider interfaces and implementations."""
 
+from phone_agent.grounding.accessibility import AccessibilityTreeProvider
+from phone_agent.grounding.fallback import FallbackMarkProvider
 from phone_agent.grounding.fake import FakeGroundingProvider
 from phone_agent.grounding.provider import (
     MarkCandidate,
@@ -10,6 +12,8 @@ from phone_agent.grounding.provider import (
 )
 
 __all__ = [
+    "AccessibilityTreeProvider",
+    "FallbackMarkProvider",
     "FakeGroundingProvider",
     "MarkCandidate",
     "MarkProvider",

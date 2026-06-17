@@ -523,6 +523,135 @@ def test_plan_node_provider_receives_raw_hint_but_prompt_and_observation_are_red
     assert result["action_parsed"] == {"_metadata": "do", "action": "Tap", "element": [200, 300]}
 
 
+def test_plan_node_accessibility_marks_failure_does_not_abort(base_state, fake_device) -> None:
+    class FailingAccessibilityDevice:
+        def __init__(self, delegate):
+            self.delegate = delegate
+
+        def get_screenshot(self, device_id=None):
+            return self.delegate.get_screenshot(device_id)
+
+        def get_current_app(self, device_id=None):
+            return self.delegate.get_current_app(device_id)
+
+        def get_screen_marks(self, *args, **kwargs):
+            raise ValueError("No UiAutomator XML output")
+
+    model = FakeModelClient(FakeModelResponse("", '{"type":"do","action":"Wait","duration":"1 seconds"}'))
+
+    result = plan_node(
+        base_state,
+        {
+            "configurable": {
+                "model_client": model,
+                "device_factory": FailingAccessibilityDevice(fake_device),
+                "output_mode": "json_schema",
+                "accessibility_marks": True,
+                "verbose": False,
+            }
+        },
+    )
+
+    assert result["action_parsed"]["action"] == "Wait"
+    assert result["mark_registry"]["marks"] == {}
+
+
+def test_plan_node_hybrid_ignores_direct_accessibility_marks_and_uses_provider_gate(base_state, fake_device) -> None:
+    class DeviceWithMarks:
+        def __init__(self, delegate):
+            self.delegate = delegate
+
+        def get_screenshot(self, device_id=None):
+            return self.delegate.get_screenshot(device_id)
+
+        def get_current_app(self, device_id=None):
+            return self.delegate.get_current_app(device_id)
+
+        def get_screen_marks(self, *args, **kwargs):
+            raise AssertionError("hybrid owns accessibility tree marks")
+
+        @property
+        def module(self):
+            class Module:
+                @staticmethod
+                def dump_uiautomator_xml(device_id=None, timeout=None):
+                    return """<hierarchy>
+                      <node text="设置按钮" class="android.widget.Button" clickable="true" enabled="true" bounds="[100,400][300,800]" />
+                    </hierarchy>"""
+
+            return Module
+
+    model = FakeModelClient(FakeModelResponse("", '{"type":"intent","action":"tap","target_mark_id":"ax_1"}'))
+    base_state["task"] = "点击设置按钮"
+
+    result = plan_node(
+        base_state,
+        {
+            "configurable": {
+                "model_client": model,
+                "device_factory": DeviceWithMarks(fake_device),
+                "output_mode": "json_schema",
+                "accessibility_marks": True,
+                "grounding_provider_name": "hybrid",
+                "verbose": False,
+            }
+        },
+    )
+
+    assert result["action_parsed"] == {"_metadata": "do", "action": "Tap", "element": [200, 300]}
+    assert result["mark_provider_observation"]["provider_count"] == 1
+    provider_summary = result["mark_provider_observation"]["providers"][0]
+    assert provider_summary["provider"] == "accessibility_tree"
+    assert provider_summary["metadata"]["fallback_chain"][0]["provider"] == "accessibility_tree"
+
+
+def test_plan_node_hybrid_filters_unrelated_accessibility_base_path(base_state, fake_device) -> None:
+    class DeviceWithUnrelatedMarks:
+        def __init__(self, delegate):
+            self.delegate = delegate
+
+        def get_screenshot(self, device_id=None):
+            return self.delegate.get_screenshot(device_id)
+
+        def get_current_app(self, device_id=None):
+            return self.delegate.get_current_app(device_id)
+
+        def get_screen_marks(self, *args, **kwargs):
+            raise AssertionError("hybrid should not inject direct base marks")
+
+        @property
+        def module(self):
+            class Module:
+                @staticmethod
+                def dump_uiautomator_xml(device_id=None, timeout=None):
+                    return """<hierarchy>
+                      <node text="Bluetooth" class="android.widget.Button" clickable="true" enabled="true" bounds="[100,400][300,800]" />
+                    </hierarchy>"""
+
+            return Module
+
+    model = FakeModelClient(FakeModelResponse("", '{"type":"intent","action":"tap","target_mark_id":"ax_1"}'))
+    base_state["task"] = "点击 Wi-Fi"
+
+    result = plan_node(
+        base_state,
+        {
+            "configurable": {
+                "model_client": model,
+                "device_factory": DeviceWithUnrelatedMarks(fake_device),
+                "output_mode": "json_schema",
+                "accessibility_marks": True,
+                "grounding_provider_name": "hybrid",
+                "verbose": False,
+            }
+        },
+    )
+
+    assert result["action_parsed"] is None
+    assert result["grounding_error"] == "mark_unavailable"
+    assert "ax_1" not in result["mark_registry"]["marks"]
+
+
 def test_plan_node_description_only_intent_fails_closed(base_state, fake_device) -> None:
     model = FakeModelClient(
         FakeModelResponse("", '{"type":"intent","action":"tap","target_text_hint":"设置按钮"}')
