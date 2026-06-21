@@ -33,7 +33,7 @@ def test_execute_sensitive_tap_sets_pending_confirm_without_dispatch(
 
     assert result["pending_interrupt"] == "confirmation"
     assert result["pending_execute"] is True
-    assert result["context_mode"] == "observe"
+    assert result["context_mode"] == "inject"
     assert fake_device.calls == []
 
 
@@ -83,13 +83,29 @@ def test_execute_takeover_sets_interrupt(base_state) -> None:
 
 def test_execute_finish_ends_and_appends_message(base_state) -> None:
     base_state["action_parsed"] = {"_metadata": "finish", "message": "done"}
-    base_state["action_raw"] = 'finish(message="done")'
+    base_state["action_raw"] = '{"type":"finish","message":"done"}'
 
     result = execute_node(base_state, {"configurable": {"verbose": False}})
 
     assert result["finished"] is True
     assert result["action_result"]["message"] == "done"
     assert result["messages"][-1]["role"] == "assistant"
+
+
+def test_execute_appends_display_safe_action_raw(base_state, fake_device) -> None:
+    private_phrase = "张三的家庭住址"
+    base_state["action_parsed"] = {"_metadata": "do", "action": "Type", "text": private_phrase}
+    base_state["action_raw"] = (
+        '{"action":{"_metadata":"do","action":"Type",'
+        '"text":{"redacted":true,"length":7,"sha256":"abc"}},"parse_success":true}'
+    )
+
+    result = execute_node(
+        base_state, {"configurable": {"device_factory": fake_device, "verbose": False}}
+    )
+
+    assert any(call[0] == "type_text" for call in fake_device.calls)
+    assert private_phrase not in result["messages"][-1]["content"]
 
 
 def test_execute_preserves_plan_parse_failure_without_dispatch(base_state, fake_device) -> None:

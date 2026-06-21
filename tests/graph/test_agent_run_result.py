@@ -48,7 +48,7 @@ def test_run_result_defaults_and_serialization() -> None:
         "trace_path": None,
         "failure_cause": None,
         "retry_count": 0,
-        "context_mode": "observe",
+        "context_mode": "inject",
         "context_strategy": "unknown",
         "prompt_version": "context_harness_v1",
         "selected_sections": [],
@@ -64,6 +64,7 @@ def test_run_result_defaults_and_serialization() -> None:
         "repeated_failure_count": 0,
         "verifier_status": None,
         "verifier_failure_cause": None,
+        "verifier_evidence": None,
         "grounding_provider": None,
         "grounding_latency_ms": None,
         "grounding_failure_code": None,
@@ -75,6 +76,13 @@ def test_run_result_defaults_and_serialization() -> None:
         "recoverable": None,
         "retry_policy": None,
     }
+
+
+def test_agent_config_defaults_to_inject_context_and_hybrid_grounding() -> None:
+    config = AgentConfig()
+
+    assert config.context_mode == "inject"
+    assert config.grounding_provider_name == "hybrid"
 
 
 def test_run_structured_returns_metrics_and_keeps_config(monkeypatch) -> None:
@@ -130,9 +138,9 @@ def test_run_structured_returns_metrics_and_keeps_config(monkeypatch) -> None:
     assert result.failure_memory_hit_count == 1
     assert result.repeated_failure_count == 1
     assert agent._graph.initial_state["hitl_count"] == 0
-    assert agent._graph.initial_state["context_mode"] == "observe"
+    assert agent._graph.initial_state["context_mode"] == "inject"
     assert agent._graph.config["configurable"]["trace_id"] == result.trace_id
-    assert agent._graph.config["configurable"]["context_mode"] == "observe"
+    assert agent._graph.config["configurable"]["context_mode"] == "inject"
     assert agent._graph.config["configurable"]["prompt_version"] == "context_harness_v1"
     assert agent._graph.config["configurable"]["trace_writer"] is not None
 
@@ -151,6 +159,25 @@ def test_cli_default_output_mode_is_structured(monkeypatch) -> None:
     monkeypatch.setattr("sys.argv", ["main.py"])
 
     assert main.parse_args().output_mode == "json_schema"
+
+
+def test_cli_defaults_context_and_grounding(monkeypatch) -> None:
+    import importlib.util
+    from pathlib import Path
+
+    main_path = Path(__file__).resolve().parents[2] / "main.py"
+    spec = importlib.util.spec_from_file_location("phone_agent_cli_main_defaults", main_path)
+    assert spec is not None and spec.loader is not None
+    main = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(main)
+
+    monkeypatch.delenv("PHONE_AGENT_CONTEXT_MODE", raising=False)
+    monkeypatch.delenv("PHONE_AGENT_GROUNDING_PROVIDER", raising=False)
+    monkeypatch.setattr("sys.argv", ["main.py"])
+
+    args = main.parse_args()
+    assert args.context_mode == "inject"
+    assert args.grounding_provider == "hybrid"
 
 
 def test_run_keeps_string_compatibility(monkeypatch) -> None:

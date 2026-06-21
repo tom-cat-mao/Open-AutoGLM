@@ -265,8 +265,8 @@ class ModelClient:
                 if saw_reasoning_content and time_to_thinking_end is None:
                     # Providers such as Qwen stream reasoning in `reasoning_content`
                     # and final answer in `content`. Seeing content after a reasoning
-                    # phase marks the end of thinking even if the final answer has no
-                    # do()/finish() marker yet.
+                    # phase marks the end of thinking even if the final JSON answer has
+                    # not completed yet.
                     time_to_thinking_end = time.time() - start_time
 
                 if in_action_phase:
@@ -378,14 +378,19 @@ class ModelClient:
                         }
                     )
                     return "", normalized, metadata
-                action = adapt_json_action(normalized)
+                provider_payload = json.loads(normalized)
+                action_payload = _extract_provider_action_payload(provider_payload)
+                action = adapt_json_action(action_payload)
                 metadata.update(
                     {
                         "detected_format": "json_schema",
                         "adapter_used": "json_schema",
                         "parse_success": True,
+                        "expected_outcome_present": _is_provider_envelope(provider_payload),
                     }
                 )
+                if _is_provider_envelope(provider_payload):
+                    return "", normalized, metadata
                 return "", json.dumps(action, ensure_ascii=False), metadata
 
             if effective_output_mode == "auto" and self._looks_like_json(normalized):
@@ -398,14 +403,19 @@ class ModelClient:
                         }
                     )
                     return "", normalized, metadata
-                action = adapt_json_action(normalized)
+                provider_payload = json.loads(normalized)
+                action_payload = _extract_provider_action_payload(provider_payload)
+                action = adapt_json_action(action_payload)
                 metadata.update(
                     {
                         "detected_format": "json_schema",
                         "adapter_used": "json_schema",
                         "parse_success": True,
+                        "expected_outcome_present": _is_provider_envelope(provider_payload),
                     }
                 )
+                if _is_provider_envelope(provider_payload):
+                    return "", normalized, metadata
                 return "", json.dumps(action, ensure_ascii=False), metadata
 
             raise ActionAdapterError(
@@ -426,7 +436,7 @@ class ModelClient:
         Parsing rules:
         1. Strip outer Markdown code fences and surrounding whitespace.
         2. If content contains '<answer>', parse XML-style thinking/answer first.
-           This prevents '</answer>' from leaking into do()/finish() actions.
+           This prevents '</answer>' from leaking into structured actions.
         3. Otherwise, return the normalized content for internal compatibility.
         4. Empty or malformed XML responses raise ValueError so callers can fail closed.
 
@@ -587,6 +597,22 @@ class ModelClient:
     def _strip_thinking_tags(self, content: str) -> str:
         """Remove simple thinking tags from model-visible reasoning text."""
         return content.replace("<think>", "").replace("</think>", "")
+
+
+def _extract_provider_action_payload(payload: Any) -> Any:
+    """Return nested action payload from a provider envelope without importing graph."""
+
+    if _is_provider_envelope(payload):
+        return payload["action"]
+    return payload
+
+
+def _is_provider_envelope(payload: Any) -> bool:
+    return (
+        isinstance(payload, dict)
+        and "expected_outcome" in payload
+        and isinstance(payload.get("action"), dict)
+    )
 
 
 class MessageBuilder:

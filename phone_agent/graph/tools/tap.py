@@ -2,7 +2,7 @@
 
 from langchain_core.tools import tool
 
-from phone_agent.actions.handler import ActionResult
+from phone_agent.actions.result import ActionResult
 from phone_agent.graph.tools.coords import convert_relative_to_absolute
 from phone_agent.graph.tools.runtime import get_tool_device_factory
 

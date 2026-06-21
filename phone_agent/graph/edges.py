@@ -5,18 +5,21 @@ from typing import Literal
 from phone_agent.graph.state import AgentState
 
 
-def should_continue(state: AgentState) -> Literal["end", "replan"]:
+def should_continue(state: AgentState) -> Literal["end", "replan", "takeover"]:
     """
     Decide whether to continue looping or end after reflect node.
 
     Routes:
     - "end" if finished, error, or max_steps reached
+    - "takeover" if reflect requested a takeover interrupt
     - "replan" otherwise (go back to plan node)
     """
     if state.get("finished"):
         return "end"
     if state.get("error"):
         return "end"
+    if state.get("pending_interrupt") == "takeover":
+        return "takeover"
     if state["step_count"] >= state["max_steps"]:
         return "end"
     return "replan"

@@ -29,13 +29,13 @@ phone_agent/
 ├── model/
 │   └── client.py                # ModelClient (OpenAI 兼容；text/json/tool_calls 输出适配)
 ├── actions/
-│   ├── handler.py               # parse_action(), ActionResult, do(), finish()
+│   ├── result.py                # ActionResult
 │   └── adapter.py               # JSON/tool_calls → canonical action 适配与校验
 ├── grounding/                   # MarkProvider、LocateAnything MLX、fake provider、bbox parser
 ├── adb/                         # Android 设备控制
 ├── config/
 │   ├── apps.py                  # 应用包名映射
-│   ├── prompts.py / prompts_zh.py / prompts_en.py  # prompt contract + legacy rollback
+│   ├── prompts_zh.py / prompts_en.py  # structured prompt contract
 │   └── timing.py
 └── graph/                       # LangGraph 核心
     ├── state.py                 # AgentState TypedDict
@@ -129,15 +129,15 @@ print(structured.to_dict())
 
 ### Context & Observability Harness
 
-默认启用短期 context 观测模式，用于记录可比较的执行上下文和失败模式，但默认不注入模型 Plan：
+默认启用短期 context 注入模式，用于把脱敏、裁剪后的执行上下文和失败模式注入模型 Plan：
 
 | 模式 | 行为 |
 |------|------|
 | `off` | 不生成新增 context 指标 |
-| `observe` | 默认模式；生成 state/trace/eval 指标，但不向 Plan 注入 context block |
-| `inject` | 注入脱敏、裁剪后的短期 context block |
+| `observe` | 生成 state/trace/eval 指标，但不向 Plan 注入 context block |
+| `inject` | 默认模式；注入脱敏、裁剪后的短期 context block |
 
-`AgentConfig(context_mode="observe")` 可切换模式。context 字段包括 `screen_belief`、`action_outcome_summary`、`failure_memory`、`summarized_history` 与预算/截断指标；默认预算为 failure memory 最近 3 条、screen belief 摘要 300 字符、history 摘要 800 字符、context block 1500 字符。姓名、手机号、邮箱、订单号、验证码、API key/token、长 base64/JWT 等敏感文本默认脱敏，context 不绕过 HITL/confirm/takeover。
+`AgentConfig(context_mode="inject")` 为默认值，也可通过 `--context-mode` 或 `PHONE_AGENT_CONTEXT_MODE` 切换为 `observe/off`。context 字段包括 `screen_belief`、`action_outcome_summary`、`failure_memory`、`summarized_history` 与预算/截断指标；默认预算为 failure memory 最近 3 条、screen belief 摘要 300 字符、history 摘要 800 字符、context block 1500 字符。姓名、手机号、邮箱、订单号、验证码、API key/token、长 base64/JWT 等敏感文本默认脱敏，context 不绕过 HITL/confirm/takeover。
 
 #### LangGraph-native Context Engineering Harness
 
@@ -153,6 +153,14 @@ Phase 14 将 prompt、context selector 与 context-window compaction 收敛为 L
 | 隐私指标 | trace/eval 只持久化 section IDs、消息数、字符数、近似 token、截断状态等，不持久化 raw prompt/context/image |
 
 Context selector 与 compaction 只能影响模型请求构造和脱敏观测指标，不得修改 `action_raw`、`action_parsed`、`pending_execute`、`interrupt_result`、`action_confirmed` 或 Safety/HITL 路由字段。
+
+### ExpectedOutcome 与动作验证
+
+Plan 阶段支持 provider response envelope：`{"action": {...}, "expected_outcome": {...}}`。其中 `action` 继续经 adapter、grounding、validator、repair、safety gate 和 executor；`expected_outcome` 是 sibling postcondition contract，只写入 state/trace/context/verifier，绝不进入 canonical `ActionIR` 或 executor payload，也不提供执行授权。真实 `ModelClient` 会先校验 nested `action`，再保留 envelope 给 Plan 拆分；旧 plain action JSON 仍兼容。
+
+`ExpectedOutcome` 支持 `kind`、`must_observe`、`must_not_observe`、`target_mark_id`、`target_text_hint`、`timeout_hint`、`dynamic_regions`。provider 未给出时会按动作生成保守默认：Launch 验证目标 app；Type 默认不把原始输入文本持久化到 `must_observe`，只有 provider 显式给出隐私安全的 outcome 时才做文本匹配；Tap/Double Tap/Long Press 默认保持 `generic`，避免把原本已存在的 target hint 当作成功证据；Swipe 只把内容位移作为弱确定信号；Wait 验证 loading/spinner/network error 等消失。
+
+Reflect 阶段会基于动作后的截图/current_app 重新构建 after observation，并携带动作前/动作后的脱敏 observation 摘要运行 deterministic verifier；高置信 deterministic success/failure 会直接映射到结构化 reflection，只有 unknown/低置信才把 verifier signal、ExpectedOutcome、before/after observation summary 与当前截图作为 isolated verifier request 交给模型判断。该请求不追加到 `state["messages"]`，也不参与 request compaction 的持久状态。`screen_changed` 已降级为 `weak_signals.screen_changed`，不能单独证明 Tap/Type/搜索/打开视频成功。广告、banner、推荐流、热词、计数器等动态区域默认视为噪声；搜索框/输入框类 `input_focused` 后置条件还会参考 focused/editable/keyboard/top activity 等只读信号，trace 只记录 `verifier_evidence` 中 stubbed/redacted matched/missing postconditions、weak signals 与 redacted summaries。
 
 ### Model Output Adapter
 
@@ -327,10 +335,11 @@ python main.py --device-id 192.168.1.100:5555 --base-url http://localhost:8000/v
 | `PHONE_AGENT_MODEL` | 模型名称 | `autoglm-phone-9b` |
 | `PHONE_AGENT_API_KEY` | API Key | `EMPTY` |
 | `PHONE_AGENT_OUTPUT_MODE` | 模型输出模式：`json_schema` / `tool_calls` / `auto` | `json_schema` |
+| `PHONE_AGENT_CONTEXT_MODE` | Context harness 模式：`inject` / `observe` / `off` | `inject` |
 | `PHONE_AGENT_MAX_STEPS` | 最大步数 | `100` |
 | `PHONE_AGENT_DEVICE_ID` | 设备 ID | 自动检测 |
 | `PHONE_AGENT_LANG` | 语言 | `cn` |
-| `PHONE_AGENT_GROUNDING_PROVIDER` | 可选 grounding provider：`hybrid` / `locateanything` / `accessibility` / `fake` / `off`（别名：`accessibility_tree`/`uiautomator`→accessibility，`locateanything_mlx`/`mlx`→locateanything，`accessibility_locateanything`/`uiautomator_locateanything`→hybrid） | `off` |
+| `PHONE_AGENT_GROUNDING_PROVIDER` | grounding provider：`hybrid` / `locateanything` / `accessibility` / `fake` / `off`（别名：`accessibility_tree`/`uiautomator`→accessibility，`locateanything_mlx`/`mlx`→locateanything，`accessibility_locateanything`/`uiautomator_locateanything`→hybrid） | `hybrid` |
 | `PHONE_AGENT_ACCESSIBILITY_MARKS` | 是否把 Android UiAutomator tree 作为设备 base marks 注入 MarkRegistry | `false` |
 | `PHONE_AGENT_ACCESSIBILITY_TIMEOUT` | `uiautomator dump` 超时时间（秒） | `3.0` |
 | `PHONE_AGENT_ACCESSIBILITY_MAX_MARKS` | 每屏最多保留的 accessibility marks 数量 | `80` |
@@ -395,4 +404,4 @@ Autopilot 已完成 TraeCLI-native 编排：`ralplan -> execution -> ralph -> qa
 
 **文本输入不工作**：确认 ADB Keyboard 已安装并启用。
 
-**截图黑屏**：敏感页面（支付/银行）的正常现象，系统会自动处理。
+**截图无效或黑屏**：敏感页面（支付/银行）可能触发 Android secure screenshot block。运行时会 fail-closed，返回 `error_layer="grounding"`、`error_code="secure_screenshot_blocked"` 或 `screenshot_unavailable`，不会把黑图继续发给模型。

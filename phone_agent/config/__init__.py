@@ -80,8 +80,8 @@ def get_system_prompt(
     return "\n\n".join([base_prompt, _output_contract(lang, output_mode)])
 
 
-# Default to Chinese for backward compatibility. `prompts.py` is retained as a
-# compatibility wrapper; active prompt rendering goes through get_system_prompt().
+# Default to Chinese for backward compatibility. Active prompt rendering goes
+# through get_system_prompt(); the legacy prompts.py rollback file was removed.
 SYSTEM_PROMPT = SYSTEM_PROMPT_ZH
 
 __all__ = [

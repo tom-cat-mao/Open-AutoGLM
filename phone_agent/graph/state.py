@@ -58,7 +58,7 @@ class AgentState(TypedDict):
     # === Plan 节点输出 ===
     thinking: str  # 模型思考过程
     action_raw: str  # 模型原始 action 文本
-    action_parsed: Optional[dict]  # parse_action() 解析结果
+    action_parsed: Optional[dict]  # validated canonical ActionIR
     intent_raw: Optional[dict]  # grounding 前的 IntentIR，仅供 trace/debug，不能进入 executor
     grounding_error: Optional[str]  # IntentIR grounding 失败原因
     grounding_result: Optional[dict]  # provider/mark grounding result, trace-safe metadata only
@@ -70,6 +70,7 @@ class AgentState(TypedDict):
     grounding_candidates: list[dict]  # trace-safe grounding candidate summaries
     grounding_candidate_count: int  # count of provider candidates
     selected_grounding_candidate_id: Optional[int]  # selected candidate index when exactly one valid candidate succeeds
+    expected_outcome: Optional[dict]  # sibling postcondition contract for verifier, never executor payload
 
     # === Layered error taxonomy ===
     error_layer: Optional[str]  # parse / adapter / validation / grounding / safety / execution / reflection / context
@@ -116,6 +117,7 @@ class AgentState(TypedDict):
     verifier_result: Optional[dict]
     verifier_status: Optional[str]
     verifier_failure_cause: Optional[str]
+    verifier_evidence: Optional[dict]
 
     # === Human-in-the-Loop (Phase 2) ===
     pending_interrupt: Optional[str]  # 待处理的中断类型: "confirmation" / "takeover"

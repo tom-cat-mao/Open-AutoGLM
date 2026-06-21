@@ -11,6 +11,8 @@ from phone_agent.grounding.fake import FakeGroundingProvider
 from phone_agent.grounding.locateanything import DEFAULT_LOCATEANYTHING_MAX_SIZE, LocateAnythingMLXProvider
 from phone_agent.grounding.provider import MarkProvider
 
+DEFAULT_GROUNDING_PROVIDER_NAME = "hybrid"
+
 
 def _resolve_positive_int(value: Any, *, default: int) -> int:
     if value in {None, ""}:
@@ -29,7 +31,10 @@ def build_mark_provider(config: dict[str, Any] | None = None) -> MarkProvider | 
     provider = cfg.get("mark_provider") or cfg.get("grounding_provider")
     if provider is not None:
         return provider
-    name = str(cfg.get("grounding_provider_name") or os.getenv("PHONE_AGENT_GROUNDING_PROVIDER", "")).lower()
+    name = str(
+        cfg.get("grounding_provider_name")
+        or os.getenv("PHONE_AGENT_GROUNDING_PROVIDER", DEFAULT_GROUNDING_PROVIDER_NAME)
+    ).lower()
     if name in {"", "none", "disabled", "off"}:
         return None
     if name == "fake":
@@ -53,7 +58,13 @@ def build_mark_providers(config: dict[str, Any] | None = None) -> list[MarkProvi
     providers = cfg.get("mark_providers") or cfg.get("grounding_providers")
     if providers:
         return [provider for provider in providers if provider is not None]
-    name = str(cfg.get("grounding_provider_name") or os.getenv("PHONE_AGENT_GROUNDING_PROVIDER", "")).lower()
+    provider = cfg.get("mark_provider") or cfg.get("grounding_provider")
+    if provider is not None:
+        return [provider]
+    name = str(
+        cfg.get("grounding_provider_name")
+        or os.getenv("PHONE_AGENT_GROUNDING_PROVIDER", DEFAULT_GROUNDING_PROVIDER_NAME)
+    ).lower()
     if name in {"hybrid", "accessibility_locateanything", "uiautomator_locateanything"}:
         built: list[MarkProvider] = []
         dump_tree = cfg.get("accessibility_tree_dump") or cfg.get("uiautomator_dump")

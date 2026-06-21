@@ -61,8 +61,11 @@ When Structured Reflection indicates failure, follow this mapping:
 
 JSON_OUTPUT_CONTRACT = """# Output format: JSON schema
 Return exactly one JSON object.
+You may use a provider envelope: {"action": <one action JSON below>, "expected_outcome": {"kind":"...","must_observe":["..."],"must_not_observe":["..."],"target_mark_id":"m1","target_text_hint":"..."}}.
+`expected_outcome` is only a post-action verification contract, not execution authorization. It must not contain raw private text, commands, device config, provider, or backend fields; execution still comes only from `action`.
 Examples:
 - {"type":"intent","action":"tap","target_mark_id":"m1"}
+- {"action":{"type":"intent","action":"tap","target_mark_id":"m1"},"expected_outcome":{"kind":"input_focused","must_observe":["Search","Cancel"]}}
 - {"type":"intent","action":"tap","target_mark_id":"m2","message":"confirm payment"}
 - {"type":"do","action":"swipe","start":[500,800],"end":[500,200]}
 - {"type":"do","action":"type","text":"hello"}

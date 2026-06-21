@@ -15,12 +15,21 @@ from phone_agent.graph.context import (
     get_context_mode,
     normalize_failure_cause,
     sanitize_context_payload,
+    _redacted_private_text,
     update_gui_memory,
     update_failure_memory,
     update_summarized_history,
 )
+from phone_agent.graph.expected_outcome import expected_outcome_prompt_block
+from phone_agent.graph.observation import build_mark_provider_hints, build_observation
+from phone_agent.graph.screenshot_status import (
+    screenshot_failure_code,
+    screenshot_failure_message,
+    screenshot_is_sensitive,
+)
 from phone_agent.graph.trace import emit_trace
 from phone_agent.graph.verifier import merge_verifier_with_reflection, verify_action_outcome
+from phone_agent.grounding.factory import build_mark_providers
 from phone_agent.model.client import MessageBuilder
 
 if TYPE_CHECKING:
@@ -33,7 +42,7 @@ REFLECT_SYSTEM_PROMPT_CN = """你是一个手机自动化任务的反思专家�
 {"verdict":"succeeded|failed|partial","failure_cause":"none|element_not_found|wrong_page|app_not_responding|network_or_loading|permission_or_login_or_captcha|unsafe_or_sensitive|coordinate_or_tap_offset|context_lost|repeated_action|model_parse_failed|unknown","suggested_strategy":"continue|retry|retry_with_offset|go_back|swipe_to_find|wait|takeover|finish","message":"xxx"}
 
 判断标准：
-1. 动作生效：页面如预期发生了变化（如点击后跳转、输入后文本出现、滑动后内容变化）
+1. 动作生效：页面满足预期后置条件（如输入框聚焦、目标文本出现、目标页面打开、目标应用打开）
 2. 动作未生效：页面没有变化，或变化与预期不符
 3. 部分成功：页面有变化但任务尚未完全进入预期状态
 4. 任务完成：如果当前页面显示任务已经完成，输出 {"verdict":"succeeded","failure_cause":"none","suggested_strategy":"finish","message":"任务已完成"}
@@ -42,6 +51,7 @@ REFLECT_SYSTEM_PROMPT_CN = """你是一个手机自动化任务的反思专家�
 - 只有在截图明确显示加载中、空白页、网络错误、进度条/转圈、或执行结果表示应用无响应时，才使用 failure_cause="network_or_loading" 和 suggested_strategy="wait"。
 - 如果刚执行的是 Launch/启动应用，且当前屏幕信息或截图已显示目标应用/设置页/目标页面已打开，即使任务还没完成，也应判定为 succeeded + continue，而不是 partial + wait。
 - 不要因为页面内容很多、设置项列表尚需下一步操作，就误判为加载中；可继续操作的稳定页面应输出 continue。
+- 广告、banner、推荐流、热词、计数器或首页动态内容变化只能作为噪声，不能单独证明 Tap/Type/搜索/打开视频成功；必须引用后置条件证据。
 """
 
 REFLECT_SYSTEM_PROMPT_EN = """You are a mobile automation reflection expert. Your job is to observe the screenshot after an action and judge whether the action succeeded, then give next-step advice.
@@ -50,7 +60,7 @@ You MUST output exactly one JSON object. Do not output Markdown, XML, function c
 {"verdict":"succeeded|failed|partial","failure_cause":"none|element_not_found|wrong_page|app_not_responding|network_or_loading|permission_or_login_or_captcha|unsafe_or_sensitive|coordinate_or_tap_offset|context_lost|repeated_action|model_parse_failed|unknown","suggested_strategy":"continue|retry|retry_with_offset|go_back|swipe_to_find|wait|takeover|finish","message":"xxx"}
 
 Judgment criteria:
-1. Action succeeded: the page changed as expected (e.g., navigated after tap, text appeared after input, content changed after swipe)
+1. Action succeeded: expected postconditions are satisfied (for example focused input, expected text, target page, or target app)
 2. Action failed: the page did not change, or the change was unexpected
 3. Partial success: the page changed but is not yet in the expected state
 4. Task completed: if the current page shows the task is done, output {"verdict":"succeeded","failure_cause":"none","suggested_strategy":"finish","message":"Task completed"}
@@ -59,6 +69,7 @@ Important constraints:
 - Use failure_cause="network_or_loading" and suggested_strategy="wait" only when the screenshot clearly shows loading, a blank page, a network error, a spinner/progress indicator, or the execution result indicates the app is not responding.
 - If the action just executed is Launch and the current screen info or screenshot already shows the target app/settings/target page is open, judge it as succeeded + continue even if the overall task still needs more steps; do not return partial + wait.
 - Do not treat a stable page with many settings/list items as loading. If the page is actionable, return continue.
+- Ads, banners, recommendation feeds, hot words, counters, or dynamic home-page content changes are noise and cannot alone prove Tap/Type/search/video success; cite postcondition evidence.
 """
 
 VALID_VERDICTS = {"succeeded", "failed", "partial"}
@@ -73,6 +84,8 @@ VALID_STRATEGIES = {
     "takeover",
     "finish",
 }
+VERIFIED_REFLECTION_SKIP_CONFIDENCE = 0.9
+DEFAULT_TAKEOVER_RETRY_THRESHOLD = 3
 
 
 @dataclass
@@ -81,6 +94,37 @@ class ReflectionResult:
     failure_cause: str | None
     suggested_strategy: str | None
     message: str
+    has_evidence: bool = False
+
+
+def _reflection_from_verifier(verifier_result) -> ReflectionResult | None:
+    """Return a deterministic reflection when verifier is conclusive."""
+
+    if verifier_result.hard_failure:
+        return ReflectionResult(
+            "failed",
+            verifier_result.failure_cause or "unknown",
+            "retry",
+            "deterministic verifier hard failure",
+            True,
+        )
+    if verifier_result.status == "success" and verifier_result.confidence >= VERIFIED_REFLECTION_SKIP_CONFIDENCE:
+        return ReflectionResult(
+            "succeeded",
+            None,
+            "continue",
+            "deterministic postconditions matched",
+            True,
+        )
+    if verifier_result.status == "failure" and verifier_result.confidence >= 0.7:
+        return ReflectionResult(
+            "failed",
+            verifier_result.failure_cause or "unknown",
+            "retry",
+            "deterministic postconditions missing",
+            True,
+        )
+    return None
 
 
 def parse_reflection_action(raw_action: str) -> ReflectionResult:
@@ -92,17 +136,308 @@ def parse_reflection_action(raw_action: str) -> ReflectionResult:
         return ReflectionResult("failed", "unknown", "retry", raw_action)
     if not isinstance(data, dict):
         return ReflectionResult("failed", "unknown", "retry", raw_action)
-    verdict = str(data.get("verdict", "failed"))
-    failure_cause = str(data.get("failure_cause", "unknown"))
-    suggested_strategy = str(data.get("suggested_strategy", "retry"))
-    message = str(data.get("message", raw_action))
+    if "verdict" in data:
+        verdict = str(data.get("verdict", "failed"))
+        failure_cause = str(data.get("failure_cause", "unknown"))
+        suggested_strategy = str(data.get("suggested_strategy", "retry"))
+        message = str(data.get("message", raw_action))
+        has_evidence = False
+    else:
+        action_effect = str(data.get("action_effect", "unknown"))
+        dynamic_only = data.get("dynamic_change_only") is True
+        missing = data.get("missing_postconditions")
+        matched = data.get("matched_postconditions")
+        evidence = data.get("evidence")
+        has_missing = bool(missing)
+        has_positive_evidence = bool(matched) or bool(evidence)
+        has_evidence = has_positive_evidence
+        if action_effect in {"succeeded", "success"} and not dynamic_only and not has_missing and has_positive_evidence:
+            verdict = "succeeded"
+            failure_cause = "none"
+            suggested_strategy = str(data.get("next_strategy", "continue"))
+        elif action_effect in {"succeeded", "success"} and (dynamic_only or has_missing):
+            verdict = "failed"
+            failure_cause = "wrong_page" if has_missing else "unknown"
+            suggested_strategy = str(data.get("next_strategy", "retry"))
+        elif action_effect in {"partial", "unknown"}:
+            verdict = "partial"
+            failure_cause = "unknown"
+            suggested_strategy = str(data.get("next_strategy", "retry"))
+        else:
+            verdict = "failed"
+            failure_cause = "wrong_page" if missing else "unknown"
+            suggested_strategy = str(data.get("next_strategy", "retry"))
+        message = str(data.get("evidence") or data.get("task_progress") or raw_action)
+        task_progress = str(data.get("task_progress") or "").lower()
+        if suggested_strategy == "finish" and (
+            "not finished" in task_progress
+            or "unfinished" in task_progress
+            or "未完成" in task_progress
+            or "尚未完成" in task_progress
+        ):
+            verdict = "partial"
+            failure_cause = "unknown"
+            suggested_strategy = "continue"
     if verdict not in VALID_VERDICTS:
         verdict = "failed"
     failure_cause = normalize_failure_cause(failure_cause)
     if suggested_strategy not in VALID_STRATEGIES:
         suggested_strategy = "retry"
     parsed_cause = None if verdict == "succeeded" and failure_cause == "none" else failure_cause
-    return ReflectionResult(verdict, parsed_cause, suggested_strategy, message)
+    return ReflectionResult(verdict, parsed_cause, suggested_strategy, message, has_evidence)
+
+
+def _screenshot_failure_update(
+    *,
+    state: "AgentState",
+    config: RunnableConfig,
+    screenshot: object,
+    current_app: str,
+    context_mode: str,
+) -> dict:
+    """Build a terminal reflect update when a screenshot is unavailable."""
+
+    code = screenshot_failure_code(screenshot) or "screenshot_unavailable"
+    sensitive = screenshot_is_sensitive(screenshot)
+    failure_cause = "unsafe_or_sensitive" if sensitive or code == "secure_screenshot_blocked" else "context_lost"
+    suggested_strategy = "takeover" if failure_cause == "unsafe_or_sensitive" else "retry"
+    error_fields = {
+        "error_layer": "grounding",
+        "error_code": code,
+        "recoverable": True,
+        "retry_policy": "takeover" if failure_cause == "unsafe_or_sensitive" else "reobserve",
+    }
+    error_message = f"Screenshot unavailable: {code}"
+    result_dict = {"success": False, "should_finish": True, "message": error_message}
+    emit_trace(
+        config,
+        state,
+        "reflect",
+        "reflect_error",
+        {
+            "message": error_message,
+            "failure_cause": failure_cause,
+            "grounding_error_code": code,
+            **error_fields,
+        },
+    )
+    return {
+        "screenshot_b64": None,
+        "current_app": current_app,
+        "action_result": result_dict,
+        "reflection": error_message,
+        "action_succeeded": False,
+        "reflection_verdict": "failed",
+        "failure_cause": failure_cause,
+        "suggested_strategy": suggested_strategy,
+        "grounding_error": code,
+        "grounding_failure_code": code,
+        "grounding_provider": "screenshot",
+        "retry_count": int(state.get("retry_count") or 0) + 1,
+        "finished": True,
+        "error": error_message,
+        "context_mode": context_mode,
+        **error_fields,
+    }
+
+
+def _build_after_observation(
+    *,
+    state: "AgentState",
+    config: RunnableConfig,
+    screenshot: object,
+    current_app: str,
+    device_factory: object,
+    device_id: str | None,
+) -> object:
+    """Build a fresh after-action observation for postcondition verification."""
+
+    configurable = config.get("configurable", {})
+    screen_marks = configurable.get("after_screen_marks")
+    if screen_marks is None:
+        screen_marks = configurable.get("screen_marks_after")
+    accessibility_enabled = configurable.get("accessibility_marks")
+    if accessibility_enabled is None:
+        import os
+
+        accessibility_enabled = os.getenv("PHONE_AGENT_ACCESSIBILITY_MARKS", "").lower() in {"1", "true", "yes", "on"}
+    provider_name = str(configurable.get("grounding_provider_name") or "").lower()
+    hybrid_provider_enabled = provider_name in {"hybrid", "accessibility_locateanything", "uiautomator_locateanything"}
+    if (
+        screen_marks is None
+        and accessibility_enabled
+        and not hybrid_provider_enabled
+        and hasattr(device_factory, "get_screen_marks")
+    ):
+        try:
+            screen_marks = device_factory.get_screen_marks(
+                device_id,
+                width=getattr(screenshot, "width", 0),
+                height=getattr(screenshot, "height", 0),
+                timeout=float(configurable.get("accessibility_timeout", 3.0) or 3.0),
+                max_marks=int(configurable.get("accessibility_max_marks", 80) or 80),
+            )
+        except Exception as exc:
+            screen_marks = None
+            emit_trace(
+                config,
+                state,
+                "reflect",
+                "after_accessibility_marks_error",
+                {"failure_code": type(exc).__name__, "message": "after accessibility marks unavailable"},
+            )
+
+    provider_configurable = dict(configurable)
+    if (
+        provider_configurable.get("accessibility_tree_dump") is None
+        and not provider_configurable.get("skip_accessibility_provider")
+        and hasattr(device_factory, "module")
+        and hasattr(device_factory.module, "dump_uiautomator_xml")
+    ):
+        provider_configurable["accessibility_tree_dump"] = lambda timeout=None: device_factory.module.dump_uiautomator_xml(
+            device_id,
+            timeout=timeout,
+        )
+    provider_hints = build_mark_provider_hints(
+        task=state.get("task"),
+        reflection=state.get("reflection"),
+        provider_hints=configurable.get("mark_provider_hints") or configurable.get("grounding_hints"),
+    )
+    return build_observation(
+        screenshot=screenshot,
+        current_app=current_app,
+        marks=screen_marks,
+        mark_providers=build_mark_providers(provider_configurable),
+        provider_hints=provider_hints,
+        provider_timeout=float(configurable.get("grounding_timeout", 10.0) or 10.0),
+    )
+
+
+def _bounded_observation_summary(payload: dict | None, *, task_context: str | None = None) -> dict:
+    """Return prompt/trace-safe screen evidence without raw screenshots or trees."""
+
+    if not isinstance(payload, dict):
+        return {}
+    safe = sanitize_context_payload(payload, consumer="reflect_prompt", task_context=task_context)
+    if not isinstance(safe, dict):
+        return {}
+    marks = safe.get("marks")
+    if isinstance(marks, list):
+        safe["marks"] = marks[:20]
+    return safe
+
+
+def _state_before_observation_payload(state: "AgentState", *, task_context: str | None = None) -> dict:
+    observation = state.get("observation")
+    if not isinstance(observation, dict):
+        return {}
+    snapshot = observation.get("snapshot") if isinstance(observation.get("snapshot"), dict) else {}
+    registry = observation.get("mark_registry") if isinstance(observation.get("mark_registry"), dict) else {}
+    marks_value = registry.get("marks") if isinstance(registry, dict) else []
+    if isinstance(marks_value, dict):
+        iterable_marks = marks_value.values()
+    elif isinstance(marks_value, list):
+        iterable_marks = marks_value
+    else:
+        iterable_marks = []
+    marks = []
+    for mark in iterable_marks:
+        if not isinstance(mark, dict):
+            continue
+        marks.append(
+            {
+                "mark_id": mark.get("mark_id"),
+                "role": mark.get("role"),
+                "text_summary": sanitize_context_payload(
+                    mark.get("text_summary") or "",
+                    consumer="trace_payload",
+                    task_context=task_context,
+                ),
+            }
+        )
+    payload = {
+        "snapshot": {
+            key: snapshot.get(key)
+            for key in ("screen_id", "screen_hash", "current_app", "semantic_screen_id", "mark_set_version")
+            if snapshot.get(key) is not None
+        },
+        "marks": marks,
+        "mark_provider_observation": observation.get("mark_provider_observation"),
+    }
+    return _bounded_observation_summary(payload, task_context=task_context)
+
+
+def _collect_device_verifier_signals(
+    *,
+    device_factory: object,
+    device_id: str | None,
+    config: RunnableConfig,
+) -> dict:
+    """Collect optional read-only post-action signals for verifier use."""
+
+    configurable = config.get("configurable", {})
+    signals: dict[str, object] = {}
+
+    for config_key, output_key in (
+        ("focused_editable", "focused_editable"),
+        ("focused_window", "focused_window"),
+        ("top_activity", "top_activity"),
+        ("keyboard_visible", "keyboard_visible"),
+    ):
+        if config_key in configurable:
+            signals[output_key] = configurable[config_key]
+
+    module = getattr(device_factory, "module", None)
+    for owner in (device_factory, module):
+        if owner is None:
+            continue
+        if "focused_window" not in signals and hasattr(owner, "get_focused_window_or_app"):
+            try:
+                signals["focused_window"] = owner.get_focused_window_or_app(device_id)
+            except Exception:
+                pass
+        if "top_activity" not in signals and hasattr(owner, "get_top_activity"):
+            try:
+                signals["top_activity"] = owner.get_top_activity(device_id)
+            except Exception:
+                pass
+        if "keyboard_visible" not in signals and hasattr(owner, "is_keyboard_visible"):
+            try:
+                signals["keyboard_visible"] = bool(owner.is_keyboard_visible(device_id))
+            except Exception:
+                pass
+    return signals
+
+
+def _verifier_observation_payload(observation, *, task_context: str | None = None) -> dict:
+    """Build regex-redacted after-observation text for verifier only."""
+
+    marks = []
+    for mark in observation.mark_registry.marks.values():
+        row = {
+            "mark_id": mark.mark_id,
+            "role": mark.role,
+            "text_summary": sanitize_context_payload(
+                mark.text_summary or "",
+                consumer="trace_payload",
+                task_context=task_context,
+            ),
+        }
+        marks.append(row)
+    return {
+        "snapshot": observation.snapshot.to_dict(),
+        "marks": marks,
+        "mark_provider_observation": observation.mark_provider_observation,
+    }
+
+
+def _takeover_threshold(config: RunnableConfig) -> int:
+    configurable = config.get("configurable", {})
+    try:
+        value = int(configurable.get("verifier_takeover_threshold", DEFAULT_TAKEOVER_RETRY_THRESHOLD))
+    except (TypeError, ValueError):
+        return DEFAULT_TAKEOVER_RETRY_THRESHOLD
+    return max(1, value)
 
 
 def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
@@ -121,6 +456,9 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
     action_parsed = state.get("action_parsed")
     action_result = state.get("action_result")
     task = state["task"]
+    task_for_prompt = str(
+        sanitize_context_payload(task, consumer="reflect_prompt", task_context=task)
+    )
     step_count = state["step_count"]
     max_steps = state["max_steps"]
     context_mode = get_context_mode(state, config)
@@ -128,11 +466,64 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
     # 1. Capture screen again
     screenshot = device_factory.get_screenshot(device_id)
     current_app = device_factory.get_current_app(device_id)
+    if screenshot_failure_code(screenshot):
+        return _screenshot_failure_update(
+            state=state,
+            config=config,
+            screenshot=screenshot,
+            current_app=current_app,
+            context_mode=context_mode,
+        )
+    after_observation = _build_after_observation(
+        state=state,
+        config=config,
+        screenshot=screenshot,
+        current_app=current_app,
+        device_factory=device_factory,
+        device_id=device_id,
+    )
+    after_verifier_observation = _verifier_observation_payload(
+        after_observation,
+        task_context=task,
+    )
+    before_verifier_observation = _state_before_observation_payload(
+        state,
+        task_context=task,
+    )
+    device_verifier_signals = _collect_device_verifier_signals(
+        device_factory=device_factory,
+        device_id=device_id,
+        config=config,
+    )
+    if device_verifier_signals:
+        after_verifier_observation = {
+            **after_verifier_observation,
+            "device_signals": sanitize_context_payload(
+                device_verifier_signals,
+                consumer="trace_payload",
+                task_context=task,
+            ),
+        }
     verifier_result = verify_action_outcome(
-        before_state=state,
+        before_state={
+            **state,
+            "expected_outcome": state.get("expected_outcome"),
+        },
         after_screenshot=screenshot,
         after_app=current_app,
         action_result=action_result,
+        before_observation=before_verifier_observation,
+        after_observation=after_verifier_observation,
+    )
+    verifier_result_dict = sanitize_context_payload(
+        verifier_result.to_dict(),
+        consumer="trace_payload",
+        task_context=task,
+    )
+    verifier_evidence = sanitize_context_payload(
+        verifier_result.evidence,
+        consumer="trace_payload",
+        task_context=task,
     )
     emit_trace(
         config,
@@ -143,9 +534,18 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
             "current_app": current_app,
             "action": action_parsed,
             "action_result": action_result,
-            "verifier_result": verifier_result.to_dict(),
+            "before_observation": _bounded_observation_summary(before_verifier_observation, task_context=task),
+            "after_observation": after_observation.mark_provider_observation,
+            "device_signals": sanitize_context_payload(
+                device_verifier_signals,
+                consumer="trace_payload",
+                task_context=task,
+            ),
+            "verifier_result": verifier_result_dict,
         },
     )
+
+    deterministic_reflection = _reflection_from_verifier(verifier_result)
 
     # 2. Build reflection prompt with language selection
     if lang == "en":
@@ -159,107 +559,109 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
     result_str = str(
         sanitize_context_payload(action_result, consumer="reflect_prompt", task_context=task)
     ) if action_result else "None"
-
-    screen_info = MessageBuilder.build_screen_info(current_app)
-    if lang == "en":
-        reflect_text = (
-            f"Original task: {task}\n"
-            f"Current step: {step_count} / {max_steps}\n"
-            f"Action just executed: {action_str}\n"
-            f"Execution result: {result_str}\n"
-            f"Current screen info: {screen_info}\n\n"
-            f"Please observe the current screenshot, judge if the action succeeded, and give next-step advice."
-        )
-    else:
-        reflect_text = (
-            f"原始任务：{task}\n"
-            f"当前步数：{step_count} / {max_steps}\n"
-            f"刚执行的动作：{action_str}\n"
-            f"执行结果：{result_str}\n"
-            f"当前屏幕信息：{screen_info}\n\n"
-            f"请观察当前截图，判断动作是否生效，并给出下一步建议。"
-        )
-
-    reflect_messages = [
-        MessageBuilder.create_system_message(system_prompt),
-        MessageBuilder.create_user_message(
-            text=reflect_text,
-            image_base64=screenshot.base64_data,
-            image_mime_type=getattr(screenshot, "mime_type", "image/png"),
-        ),
-    ]
-
-    # 3. Model inference for reflection
-    try:
-        try:
-            response = model_client.request(
-                reflect_messages, output_mode="json_schema", validate_action=False
+    expected_outcome_text = expected_outcome_prompt_block(
+        state.get("expected_outcome"),
+        lang=lang,
+        task_context=task,
+    )
+    if deterministic_reflection is None:
+        verifier_signals = str(
+            sanitize_context_payload(
+                verifier_result.to_dict(),
+                consumer="reflect_prompt",
+                task_context=task,
             )
-        except TypeError as type_error:
-            if "output_mode" not in str(type_error) and "validate_action" not in str(type_error):
-                raise
-            response = model_client.request(reflect_messages)
-    except Exception as e:
-        error_message = f"Reflection failed: {type(e).__name__}"
-        if verbose:
-            print(error_message)
-        if verifier_result.hard_failure:
-            fallback_succeeded = False
-            fallback_verdict = "failed"
-            fallback_failure_cause = verifier_result.failure_cause or "unknown"
-        elif verifier_result.status == "success" and verifier_result.confidence >= 0.9:
-            fallback_succeeded = True
-            fallback_verdict = "succeeded"
-            fallback_failure_cause = None
+        )
+        before_summary = str(
+            _bounded_observation_summary(before_verifier_observation, task_context=task)
+        )
+        after_summary = str(
+            _bounded_observation_summary(after_verifier_observation, task_context=task)
+        )
+        screen_info = MessageBuilder.build_screen_info(current_app)
+        if lang == "en":
+            reflect_text = (
+                f"Original task: {task_for_prompt}\n"
+                f"Current step: {step_count} / {max_steps}\n"
+                f"Action just executed: {action_str}\n"
+                f"Execution result: {result_str}\n"
+                f"{expected_outcome_text}\n"
+                f"Deterministic verifier signals: {verifier_signals}\n"
+                f"Before-observation summary: {before_summary}\n"
+                f"After-observation summary: {after_summary}\n"
+                f"Current screen info: {screen_info}\n\n"
+                f"Output JSON with action_effect, task_progress, matched_postconditions, "
+                f"missing_postconditions, dynamic_change_only, evidence, next_strategy."
+            )
         else:
-            fallback_succeeded = False
-            fallback_verdict = "failed"
-            fallback_failure_cause = "model_reflection_failed"
-        emit_trace(config, state, "reflect", "reflect_error", {"message": error_message})
-        return {
-            "screenshot_b64": screenshot.base64_data,
-            "current_app": current_app,
-            "verifier_result": verifier_result.to_dict(),
-            "verifier_status": verifier_result.status,
-            "verifier_failure_cause": verifier_result.failure_cause,
-            "reflection": error_message,
-            "action_succeeded": fallback_succeeded,
-            "reflection_verdict": fallback_verdict,
-            "failure_cause": fallback_failure_cause,
-            "suggested_strategy": "continue",
-            "retry_count": int(state.get("retry_count") or 0) + (0 if fallback_succeeded else 1),
-            "finished": False,
-            "context_mode": context_mode,
-        }
+            reflect_text = (
+                f"原始任务：{task_for_prompt}\n"
+                f"当前步数：{step_count} / {max_steps}\n"
+                f"刚执行的动作：{action_str}\n"
+                f"执行结果：{result_str}\n"
+                f"{expected_outcome_text}\n"
+                f"确定性验证信号：{verifier_signals}\n"
+                f"动作前观测摘要：{before_summary}\n"
+                f"动作后观测摘要：{after_summary}\n"
+                f"当前屏幕信息：{screen_info}\n\n"
+                f"请输出 JSON，字段为 action_effect、task_progress、matched_postconditions、"
+                f"missing_postconditions、dynamic_change_only、evidence、next_strategy。"
+            )
+
+        reflect_messages = [
+            MessageBuilder.create_system_message(system_prompt),
+            MessageBuilder.create_user_message(
+                text=reflect_text,
+                image_base64=screenshot.base64_data,
+                image_mime_type=getattr(screenshot, "mime_type", "image/png"),
+            ),
+        ]
+
+        try:
+            try:
+                response = model_client.request(
+                    reflect_messages, output_mode="json_schema", validate_action=False
+                )
+            except TypeError as type_error:
+                if "output_mode" not in str(type_error) and "validate_action" not in str(type_error):
+                    raise
+                response = model_client.request(reflect_messages)
+            raw_action = response.action.strip()
+            parsed_reflection = parse_reflection_action(raw_action)
+            reflection = response.thinking.strip() or parsed_reflection.message
+        except Exception as e:
+            error_message = f"Reflection failed: {type(e).__name__}"
+            if verbose:
+                print(error_message)
+            emit_trace(config, state, "reflect", "reflect_error", {"message": error_message})
+            raw_action = ""
+            parsed_reflection = ReflectionResult("failed", "model_reflection_failed", "retry", error_message)
+            reflection = error_message
+    else:
+        raw_action = json.dumps(
+            {
+                "verdict": deterministic_reflection.verdict,
+                "failure_cause": deterministic_reflection.failure_cause or "none",
+                "suggested_strategy": deterministic_reflection.suggested_strategy or "continue",
+                "message": deterministic_reflection.message,
+            },
+            ensure_ascii=False,
+        )
+        parsed_reflection = deterministic_reflection
+        reflection = deterministic_reflection.message
 
     # 4. Parse reflection
-    raw_action = response.action.strip()
-    parsed_reflection = parse_reflection_action(raw_action)
+    reflection_state_value = _redacted_private_text(str(reflection or ""))
     action_succeeded = parsed_reflection.verdict == "succeeded"
-    if lang == "en":
-        task_finished = (
-            "Task completed" in raw_action
-            or "任务已完成" in raw_action
-            or "finished" in raw_action.lower()
-            or parsed_reflection.suggested_strategy == "finish"
-        )
-    else:
-        task_finished = (
-            "任务已完成" in raw_action
-            or "Task completed" in raw_action
-            or "finished" in raw_action.lower()
-            or parsed_reflection.suggested_strategy == "finish"
-        )
+    task_finished = parsed_reflection.suggested_strategy == "finish"
 
-    reflection = response.thinking.strip()
-    if not reflection:
-        reflection = parsed_reflection.message
     reflection_fields = merge_verifier_with_reflection(
         verifier_result,
         {
             "action_succeeded": action_succeeded,
             "reflection_verdict": parsed_reflection.verdict,
             "failure_cause": parsed_reflection.failure_cause,
+            "reflection_has_evidence": parsed_reflection.has_evidence,
         },
     )
     action_succeeded = bool(reflection_fields["action_succeeded"])
@@ -268,6 +670,18 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
     retry_count = int(state.get("retry_count") or 0)
     if final_verdict in {"failed", "partial"}:
         retry_count += 1
+    takeover_update = {}
+    if (
+        final_verdict in {"failed", "partial"}
+        and retry_count >= _takeover_threshold(config)
+        and not task_finished
+    ):
+        parsed_reflection.suggested_strategy = "takeover"
+        takeover_update = {
+            "pending_interrupt": "takeover",
+            "interrupt_message": "Repeated verification failures require human takeover",
+            "hitl_count": int(state.get("hitl_count") or 0) + 1,
+        }
     if verifier_result.hard_failure or final_verdict != "succeeded":
         task_finished = False
 
@@ -288,7 +702,11 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
         belief = build_screen_belief(
             current_app=current_app,
             step_count=step_count,
-            summary=parsed_reflection.message,
+            summary=(
+                f"verdict={final_verdict} "
+                f"cause={final_failure_cause or 'none'} "
+                f"strategy={parsed_reflection.suggested_strategy or 'none'}"
+            ),
             loading_or_blocked=loading,
             unsafe_or_sensitive=sensitive,
             confidence=confidence,
@@ -349,9 +767,10 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
             "suggested_strategy": parsed_reflection.suggested_strategy,
             "action_succeeded": action_succeeded,
             "finished": task_finished,
-            "verifier_result": verifier_result.to_dict(),
+            "verifier_result": verifier_result_dict,
             "verifier_status": verifier_result.status,
             "verifier_failure_cause": verifier_result.failure_cause,
+            "verifier_evidence": verifier_evidence,
             "context_mode": context_mode,
             "context_truncated": context_updates.get("context_truncated", False),
             "failure_memory_hit_count": context_updates.get("failure_memory_hit_count", 0),
@@ -362,15 +781,21 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
     return {
         "screenshot_b64": screenshot.base64_data,
         "current_app": current_app,
-        "reflection": reflection,
+        "screen_id": after_observation.snapshot.screen_id,
+        "screen_hash": after_observation.snapshot.screen_hash,
+        "observation": after_observation.to_dict(),
+        "mark_registry": after_observation.mark_registry.to_dict(),
+        "reflection": reflection_state_value,
         "action_succeeded": action_succeeded,
         "reflection_verdict": final_verdict,
         "failure_cause": final_failure_cause,
         "suggested_strategy": parsed_reflection.suggested_strategy,
-        "verifier_result": verifier_result.to_dict(),
+        "verifier_result": verifier_result_dict,
         "verifier_status": verifier_result.status,
         "verifier_failure_cause": verifier_result.failure_cause,
+        "verifier_evidence": verifier_evidence,
         "retry_count": retry_count,
         "finished": task_finished,
+        **takeover_update,
         **context_updates,
     }

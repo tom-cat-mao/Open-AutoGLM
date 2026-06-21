@@ -102,3 +102,19 @@ def test_should_continue_ends_on_error_finished_or_max_steps(base_state) -> None
     base_state["error"] = None
     base_state["step_count"] = base_state["max_steps"]
     assert should_continue(base_state) == "end"
+
+
+def test_should_continue_routes_takeover_after_terminal_guard(base_state) -> None:
+    base_state["pending_interrupt"] = "takeover"
+    assert should_continue(base_state) == "takeover"
+
+    base_state["finished"] = True
+    assert should_continue(base_state) == "end"
+
+
+def test_reflect_conditional_edges_include_takeover_route() -> None:
+    from phone_agent.graph.builder import create_agent_graph
+
+    graph = create_agent_graph()
+    edges = graph.get_graph().edges
+    assert any(edge.source == "reflect" and edge.target == "takeover" for edge in edges)

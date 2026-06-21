@@ -25,7 +25,8 @@ Environment Variables:
     PHONE_AGENT_OUTPUT_MODE: Model output mode (json_schema/tool_calls/auto)
     PHONE_AGENT_MAX_STEPS: Maximum steps per task (default: 100)
     PHONE_AGENT_DEVICE_ID: ADB device ID for multi-device setups
-    PHONE_AGENT_GROUNDING_PROVIDER: Mark provider (off/fake/locateanything/hybrid)
+    PHONE_AGENT_CONTEXT_MODE: Context harness mode (off/observe/inject, default: inject)
+    PHONE_AGENT_GROUNDING_PROVIDER: Mark provider (off/fake/locateanything/hybrid, default: hybrid)
     PHONE_AGENT_ACCESSIBILITY_MARKS: Include UiAutomator marks as device screen marks
     PHONE_AGENT_ACCESSIBILITY_MAX_MARKS: Maximum UiAutomator marks per screen
     PHONE_AGENT_LOCATEANYTHING_CONTEXT_MAX_CHARS: Optional short LocateAnything context budget
@@ -135,6 +136,8 @@ from phone_agent import PhoneAgent
 from phone_agent.agent import AgentConfig
 from phone_agent.config.apps import list_supported_apps
 from phone_agent.device_factory import DeviceType, get_device_factory, set_device_type
+from phone_agent.graph.context import DEFAULT_CONTEXT_MODE
+from phone_agent.grounding.factory import DEFAULT_GROUNDING_PROVIDER_NAME
 from phone_agent.model import ModelConfig
 
 
@@ -706,8 +709,16 @@ Examples:
         "--grounding-provider",
         type=str,
         choices=["off", "fake", "locateanything", "locateanything_mlx", "mlx", "accessibility", "accessibility_tree", "uiautomator", "hybrid"],
-        default=os.getenv("PHONE_AGENT_GROUNDING_PROVIDER"),
+        default=os.getenv("PHONE_AGENT_GROUNDING_PROVIDER", DEFAULT_GROUNDING_PROVIDER_NAME),
         help="Optional mark provider: off, fake, locateanything, accessibility, or hybrid",
+    )
+
+    parser.add_argument(
+        "--context-mode",
+        type=str,
+        choices=["off", "observe", "inject"],
+        default=os.getenv("PHONE_AGENT_CONTEXT_MODE", DEFAULT_CONTEXT_MODE),
+        help="Context harness mode: off, observe, or inject",
     )
 
     parser.add_argument(
@@ -976,6 +987,7 @@ def main():
         device_id=args.device_id,
         verbose=not args.quiet,
         lang=args.lang,
+        context_mode=args.context_mode,
         grounding_provider_name=args.grounding_provider,
         accessibility_marks=args.accessibility_marks,
         accessibility_timeout=args.accessibility_timeout,

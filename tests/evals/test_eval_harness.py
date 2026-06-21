@@ -65,8 +65,8 @@ def test_dry_run_eval_outputs_stable_json_shape(monkeypatch, tmp_path) -> None:
     assert output["summary"]["failure_cause_histogram"] == {"element_not_found": 1}
     assert output["summary"]["grounding_failure_histogram"] == {}
     assert output["summary"]["grounding_count"] == 0
-    assert output["summary"]["context_mode"] == "observe"
-    assert output["summary"]["context_strategy"] == "observe_only"
+    assert output["summary"]["context_mode"] == "inject"
+    assert output["summary"]["context_strategy"] == "inject_redacted_block"
     assert output["summary"]["prompt_version"] == "context_harness_v1"
     assert output["summary"]["selected_section_counts"] == {"screen_belief": 3}
     assert output["summary"]["messages_before"] == 6

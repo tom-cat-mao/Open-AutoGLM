@@ -101,8 +101,8 @@ Reflect 节点是 context 状态的核心写入者。当 `context_enabled(contex
 | 模式 | 标签 | 收集 | 构建 Block | 注入 Block | 策略名 |
 |------|------|------|-----------|-----------|--------|
 | **Off** | `context_mode="off"` | 否 | 否 | 否 | `"off"` |
-| **Observe**（默认） | `context_mode="observe"` | 是 | 否 | 否 | `"observe_only"` |
-| **Inject** | `context_mode="inject"` | 是 | 是 | 是 | `"inject_redacted_block"` |
+| **Observe** | `context_mode="observe"` | 是 | 否 | 否 | `"observe_only"` |
+| **Inject**（默认） | `context_mode="inject"` | 是 | 是 | 是 | `"inject_redacted_block"` |
 
 ### 3.1 Off 模式
 
@@ -136,7 +136,7 @@ Reflect 节点是 context 状态的核心写入者。当 `context_enabled(contex
 
 1. `config["configurable"]["context_mode"]`（graph config）
 2. `state["context_mode"]`（state 字段）
-3. `DEFAULT_CONTEXT_MODE`（默认 `"observe"`）
+3. `DEFAULT_CONTEXT_MODE`（默认 `"inject"`）
 
 `normalize_context_mode()` 负责归一化：空值回退默认，非法值回退默认。
 
@@ -908,7 +908,7 @@ model_parse_failed, unknown
 
 ```python
 class AgentConfig:
-    context_mode: str = DEFAULT_CONTEXT_MODE    # "observe"
+    context_mode: str = DEFAULT_CONTEXT_MODE    # "inject"
     prompt_version: str = PROMPT_VERSION         # "context_harness_v1"
 ```
 

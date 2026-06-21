@@ -1,5 +1,6 @@
 """Plan node: screenshot → build messages → model inference → parse action."""
 
+import json
 from typing import TYPE_CHECKING
 
 from langchain_core.runnables import RunnableConfig
@@ -15,10 +16,21 @@ from phone_agent.graph.context import (
     build_context_metrics,
     compact_messages_for_request,
     get_context_mode,
+    _redacted_private_text,
     sanitize_context_payload,
     select_plan_context,
 )
+from phone_agent.graph.expected_outcome import (
+    extract_provider_envelope,
+    normalize_expected_outcome,
+    sanitize_expected_outcome_dict,
+)
 from phone_agent.graph.observation import build_mark_provider_hints, build_observation
+from phone_agent.graph.screenshot_status import (
+    screenshot_failure_code,
+    screenshot_failure_message,
+    screenshot_is_sensitive,
+)
 from phone_agent.graph.trace import emit_trace
 from phone_agent.grounding.factory import build_mark_providers
 from phone_agent.grounding.provider import ScreenBinding
@@ -166,6 +178,10 @@ GROUNDING_ERROR_CODES = {
     "missing_provider_hash",
     "screen_binding_missing",
     "screenshot_unavailable",
+    "secure_screenshot_blocked",
+    "adb_screencap_failed",
+    "screenshot_pull_failed",
+    "invalid_screenshot",
 }
 
 VALIDATION_ERROR_CODES = {
@@ -220,6 +236,21 @@ def _failure_cause_for_layer(error_fields: dict, parse_error: str | None) -> str
     return "model_parse_failed"
 
 
+def _screenshot_error_fields(code: str, sensitive: bool = False) -> dict:
+    return {
+        "error_layer": "grounding",
+        "error_code": code,
+        "recoverable": True,
+        "retry_policy": "takeover" if sensitive or code == "secure_screenshot_blocked" else "reobserve",
+    }
+
+
+def _failure_cause_for_screenshot(code: str, sensitive: bool = False) -> str:
+    if sensitive or code == "secure_screenshot_blocked":
+        return "unsafe_or_sensitive"
+    return "context_lost"
+
+
 def _parse_and_ground_response(
     response,
     configurable: dict,
@@ -231,6 +262,7 @@ def _parse_and_ground_response(
     parse_error = None
     parse_metadata = getattr(response, "parse_metadata", {}) or {}
     intent_raw = None
+    raw_expected_outcome = None
     grounding_error = None
     grounding_observation: dict = {}
     structured_json_response = False
@@ -238,11 +270,21 @@ def _parse_and_ground_response(
         stripped_action = response.action.strip()
         structured_json_response = stripped_action.startswith("{")
         if stripped_action.startswith("{"):
-            action_parsed = adapt_json_action(stripped_action)
+            provider_payload = json.loads(stripped_action)
+            action_payload, raw_expected_outcome = extract_provider_envelope(provider_payload)
+            action_parsed = adapt_json_action(action_payload)
         else:
             raise ActionAdapterError(
                 "invalid_json", "structured action execution requires JSON or provider tool_calls"
             )
+    except json.JSONDecodeError as exc:
+        action_parsed = None
+        parse_error = "Model parse failed: invalid_json: payload is not valid JSON"
+        parse_metadata = {
+            **parse_metadata,
+            "parse_success": False,
+            "parse_error_code": "invalid_json",
+        }
     except ActionAdapterError as exc:
         action_parsed = None
         parse_error = f"Model parse failed: {exc.code}: {exc}"
@@ -321,7 +363,41 @@ def _parse_and_ground_response(
             raw_action=response.action,
             parse_metadata=parse_metadata,
         )
-    return action_parsed, parse_error, parse_metadata, intent_raw, grounding_error, grounding_observation
+    expected_outcome = normalize_expected_outcome(
+        raw_expected_outcome,
+        action=action_parsed,
+        intent=intent_raw,
+    )
+    expected_outcome_dict = sanitize_expected_outcome_dict(
+        expected_outcome,
+        task_context=configurable.get("task_context"),
+    )
+    parse_metadata = {
+        **parse_metadata,
+        "expected_outcome_present": raw_expected_outcome is not None,
+        "expected_outcome_kind": expected_outcome.kind,
+    }
+    return (
+        action_parsed,
+        parse_error,
+        parse_metadata,
+        intent_raw,
+        grounding_error,
+        grounding_observation,
+        expected_outcome_dict,
+    )
+
+
+def _action_for_history(action: dict | None) -> dict | None:
+    """Return a display-safe action copy for message history/state action_raw."""
+
+    if not isinstance(action, dict):
+        return action
+    safe = dict(action)
+    for key in ("text", "message"):
+        if isinstance(safe.get(key), str):
+            safe[key] = _redacted_private_text(safe[key])
+    return safe
 
 
 def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
@@ -344,6 +420,75 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
     # 1. Capture screen
     screenshot = device_factory.get_screenshot(device_id)
     current_app = device_factory.get_current_app(device_id)
+    screenshot_error = screenshot_failure_code(screenshot)
+    if screenshot_error:
+        sensitive = screenshot_is_sensitive(screenshot)
+        context_mode = get_context_mode(state, config)
+        failure_message = screenshot_failure_message(screenshot)
+        error_message = f"Screenshot unavailable: {screenshot_error}"
+        error_fields = _screenshot_error_fields(screenshot_error, sensitive=sensitive)
+        failure_cause = _failure_cause_for_screenshot(screenshot_error, sensitive=sensitive)
+        context_metrics = build_context_metrics(
+            {
+                **state,
+                "context_mode": context_mode,
+                "context_strategy": state.get("context_strategy") or (
+                    "inject_redacted_block"
+                    if context_mode == "inject"
+                    else ("observe_only" if context_mode == "observe" else "off")
+                ),
+            }
+        )
+        grounding_observation = {
+            "provider": "screenshot",
+            "success": False,
+            "failure_code": screenshot_error,
+            "message": failure_message,
+            "sensitive": sensitive,
+        }
+        emit_trace(
+            config,
+            state,
+            "plan",
+            "plan_error",
+            {
+                "message": error_message,
+                "failure_cause": failure_cause,
+                "grounding_error_code": screenshot_error,
+                "grounding_observation": grounding_observation,
+                **error_fields,
+                **context_metrics,
+            },
+        )
+        return {
+            "messages": [],
+            "step_count": step_count + 1,
+            "screenshot_b64": None,
+            "current_app": current_app,
+            "screen_width": int(getattr(screenshot, "width", 0) or state.get("screen_width") or 0),
+            "screen_height": int(getattr(screenshot, "height", 0) or state.get("screen_height") or 0),
+            "thinking": "",
+            "action_raw": "",
+            "action_parsed": None,
+            "intent_raw": None,
+            "grounding_error": screenshot_error,
+            "grounding_result": grounding_observation,
+            "grounding_provider": "screenshot",
+            "grounding_failure_code": screenshot_error,
+            "grounding_observation": grounding_observation,
+            "action_result": {
+                "success": False,
+                "should_finish": True,
+                "message": error_message,
+            },
+            "error": error_message,
+            "failure_cause": failure_cause,
+            **error_fields,
+            "finished": True,
+            "action_confirmed": False,
+            "context_mode": context_mode,
+            **context_metrics,
+        }
     screen_marks = configurable.get("screen_marks")
     accessibility_enabled = configurable.get("accessibility_marks")
     if accessibility_enabled is None:
@@ -663,9 +808,18 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
         }
 
     # 4. Parse action, optionally ground IntentIR, then validate canonical IR before safety/execution.
-    action_parsed, parse_error, parse_metadata, intent_raw, grounding_error, grounding_observation = _parse_and_ground_response(
+    parse_configurable = {**configurable, "task_context": task}
+    (
+        action_parsed,
+        parse_error,
+        parse_metadata,
+        intent_raw,
+        grounding_error,
+        grounding_observation,
+        expected_outcome,
+    ) = _parse_and_ground_response(
         response,
-        configurable,
+        parse_configurable,
         mark_registry,
         screen_binding,
     )
@@ -687,9 +841,17 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
         retry_messages = _build_parse_retry_messages(request_messages, parse_error)
         try:
             retry_response = _safe_request(model_client, retry_messages, output_mode=configured_output_mode)
-            retry_parsed, retry_error, retry_metadata, retry_intent, retry_grounding_error, retry_grounding_observation = _parse_and_ground_response(
+            (
+                retry_parsed,
+                retry_error,
+                retry_metadata,
+                retry_intent,
+                retry_grounding_error,
+                retry_grounding_observation,
+                retry_expected_outcome,
+            ) = _parse_and_ground_response(
                 retry_response,
-                configurable,
+                parse_configurable,
                 mark_registry,
                 screen_binding,
             )
@@ -700,6 +862,7 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
             intent_raw = retry_intent
             grounding_error = retry_grounding_error
             grounding_observation = retry_grounding_observation
+            expected_outcome = retry_expected_outcome
         except Exception as exc:
             parse_metadata = {
                 **parse_metadata,
@@ -719,6 +882,20 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
     grounding_candidates = grounding_observation.get("candidates") or []
     grounding_candidate_count = int(grounding_observation.get("candidate_count") or len(grounding_candidates) or 0)
     selected_grounding_candidate_id = grounding_observation.get("selected_candidate_id")
+    action_raw_payload: dict = {
+        "action": _action_for_history(action_parsed) if action_parsed is not None else None,
+        "parse_success": parse_error is None,
+    }
+    if expected_outcome is not None:
+        action_raw_payload["expected_outcome"] = expected_outcome
+    action_raw_safe = json.dumps(action_raw_payload, ensure_ascii=False)
+    thinking_safe = str(
+        sanitize_context_payload(
+            response.thinking,
+            consumer="trace_payload",
+            task_context=task,
+        )
+    )
 
     emit_trace(
         config,
@@ -727,8 +904,8 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
         "plan_result",
         {
             "current_app": current_app,
-            "thinking": response.thinking,
-            "action_raw": response.action,
+            "thinking": thinking_safe,
+            "action_raw": action_raw_safe,
             "action": action_parsed.get("action") if isinstance(action_parsed, dict) else None,
             "metadata": action_parsed.get("_metadata") if isinstance(action_parsed, dict) else None,
             "parse_success": parse_error is None,
@@ -745,6 +922,7 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
             "mark_provider_observation": observation.mark_provider_observation,
             "grounding_candidate_count": grounding_candidate_count,
             "selected_grounding_candidate_id": selected_grounding_candidate_id,
+            "expected_outcome": expected_outcome,
             "mark_registry": mark_registry.trace_summary(),
             "repair_attempted": parse_metadata.get("repair_attempted", False),
             "repair_success": parse_metadata.get("repair_success"),
@@ -765,8 +943,8 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
             "mark_registry": mark_registry.to_dict(),
             "screen_width": screenshot.width,
             "screen_height": screenshot.height,
-            "thinking": response.thinking,
-            "action_raw": response.action,
+            "thinking": thinking_safe,
+            "action_raw": action_raw_safe,
             "action_parsed": None,
             "intent_raw": intent_raw,
             "grounding_error": grounding_error,
@@ -780,6 +958,7 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
             "grounding_candidates": grounding_candidates,
             "grounding_candidate_count": grounding_candidate_count,
             "selected_grounding_candidate_id": selected_grounding_candidate_id,
+            "expected_outcome": expected_outcome,
             "action_result": {
                 "success": False,
                 "should_finish": True,
@@ -806,8 +985,8 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
         "mark_registry": mark_registry.to_dict(),
         "screen_width": screenshot.width,
         "screen_height": screenshot.height,
-        "thinking": response.thinking,
-        "action_raw": response.action,
+        "thinking": thinking_safe,
+        "action_raw": action_raw_safe,
         "action_parsed": action_parsed,
         "intent_raw": intent_raw,
         "grounding_error": grounding_error,
@@ -821,6 +1000,7 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
         "grounding_candidates": grounding_candidates,
         "grounding_candidate_count": grounding_candidate_count,
         "selected_grounding_candidate_id": selected_grounding_candidate_id,
+        "expected_outcome": expected_outcome,
         **error_fields,
         "action_confirmed": False,
         "context_mode": context_mode,

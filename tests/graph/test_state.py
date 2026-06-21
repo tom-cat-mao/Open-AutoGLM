@@ -45,7 +45,7 @@ def test_messages_reducer_ignores_empty_update() -> None:
 
 def test_context_defaults_are_json_serializable() -> None:
     payload = {
-        "context_mode": "observe",
+        "context_mode": "inject",
         "screen_belief": default_screen_belief(),
         "context_budget": default_context_budget(),
         "failure_memory": [],

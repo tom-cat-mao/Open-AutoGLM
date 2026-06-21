@@ -9,7 +9,7 @@ from dataclasses import asdict, dataclass
 from typing import Any
 
 CONTEXT_MODES = {"off", "observe", "inject"}
-DEFAULT_CONTEXT_MODE = "observe"
+DEFAULT_CONTEXT_MODE = "inject"
 DEFAULT_CONTEXT_BUDGET: dict[str, int] = {
     "screen_belief_summary_chars": 300,
     "summarized_history_chars": 800,

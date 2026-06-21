@@ -55,6 +55,8 @@ Thumbs.db
 /tmp/
 screenshots/
 .traces/
+bench_output/
+.trae/skills/
 .trae/autopilot/*.json
 .trae/autopilot/*.jsonl
 .trae/ralplan/*.json

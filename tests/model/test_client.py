@@ -1,3 +1,4 @@
+import json
 import importlib.util
 from pathlib import Path
 
@@ -234,24 +235,24 @@ def test_diagnose_model_api_redacts_sensitive_error(monkeypatch, capsys) -> None
     assert "[REDACTED]" in output
 
 
-def test_parse_response_prefers_xml_answer_over_inner_dsl_marker() -> None:
+def test_parse_response_prefers_xml_answer_over_inner_json() -> None:
     client = ModelClient()
 
     thinking, action = client._parse_response(
-        '<think>思考</think><answer>do(action="Tap", element=[1, 2])</answer>'
+        '<think>思考</think><answer>{"type":"do","action":"wait","duration":"1 seconds"}</answer>'
     )
 
     assert thinking == "思考"
-    assert action == 'do(action="Tap", element=[1, 2])'
+    assert action == '{"type":"do","action":"wait","duration":"1 seconds"}'
     assert "</answer>" not in action
 
 
 @pytest.mark.parametrize(
     ("content", "expected_action"),
     (
-        ('  do(action="Wait", duration="1 seconds")  ', 'do(action="Wait", duration="1 seconds")'),
-        ('```\nfinish(message="done")\n```', 'finish(message="done")'),
-        ('```python\ndo(action="Back")\n```', 'do(action="Back")'),
+        ('  {"type":"do","action":"wait","duration":"1 seconds"}  ', '{"type":"do","action":"wait","duration":"1 seconds"}'),
+        ('```\n{"type":"finish","message":"done"}\n```', '{"type":"finish","message":"done"}'),
+        ('```json\n{"type":"do","action":"back"}\n```', '{"type":"do","action":"back"}'),
     ),
 )
 def test_parse_response_normalizes_structured_text_and_code_fence(
@@ -270,8 +271,8 @@ def test_parse_response_normalizes_structured_text_and_code_fence(
     (
         "",
         "   ",
-        '<think>bad</think><answer>do(action="Tap")',
-        '</answer>do(action="Tap")',
+        '<think>bad</think><answer>{"type":"do","action":"wait"}',
+        '</answer>{"type":"do","action":"wait"}',
         '<think>bad</think><answer>   </answer>',
     ),
 )
@@ -297,6 +298,28 @@ def test_parse_response_with_metadata_adapts_json_schema() -> None:
     assert metadata["detected_format"] == "json_schema"
     assert metadata["adapter_used"] == "json_schema"
     assert metadata["parse_success"] is True
+
+
+def test_parse_response_with_metadata_accepts_expected_outcome_envelope() -> None:
+    client = ModelClient(ModelConfig(output_mode="json_schema"))
+
+    _thinking, action, metadata = client._parse_response_with_metadata(
+        json.dumps(
+            {
+                "action": {"type": "intent", "action": "tap", "target_mark_id": "m1"},
+                "expected_outcome": {
+                    "kind": "input_focused",
+                    "must_observe": ["搜索", "取消"],
+                },
+            },
+            ensure_ascii=False,
+        )
+    )
+
+    assert '"expected_outcome"' in action
+    assert '"target_mark_id": "m1"' in action
+    assert metadata["parse_success"] is True
+    assert metadata["expected_outcome_present"] is True
 
 
 def test_parse_response_with_metadata_adapts_tool_calls() -> None:
@@ -328,7 +351,7 @@ def test_json_schema_mode_rejects_text_dsl_response() -> None:
     client = ModelClient(ModelConfig(output_mode="json_schema"))
 
     with pytest.raises(ModelParseError) as exc_info:
-        client._parse_response_with_metadata('do(action="Tap", element=[1, 2])')
+        client._parse_response_with_metadata("legacy text action")
 
     assert exc_info.value.parse_metadata["parse_error_code"] == "invalid_json"
 
@@ -346,7 +369,7 @@ def test_tool_calls_mode_rejects_plain_text_without_tool_call() -> None:
     client = ModelClient(ModelConfig(output_mode="tool_calls"))
 
     with pytest.raises(ModelParseError) as exc_info:
-        client._parse_response_with_metadata('do(action="Tap", element=[1, 2])')
+        client._parse_response_with_metadata("legacy text action")
 
     assert exc_info.value.parse_metadata["parse_error_code"] == "unsupported_tool_call"
 
@@ -361,7 +384,7 @@ def test_auto_mode_detects_json_and_rejects_legacy_text_dsl() -> None:
     assert '"action": "Tap"' in json_action
     assert json_metadata["detected_format"] == "json_schema"
     with pytest.raises(ModelParseError) as exc_info:
-        client._parse_response_with_metadata('do(action="Tap", element=[1, 2])')
+        client._parse_response_with_metadata("legacy text action")
     assert exc_info.value.parse_metadata["parse_error_code"] == "invalid_json"
 
 
@@ -379,7 +402,7 @@ def test_parse_response_with_metadata_rejects_unsafe_text_dsl_metadata() -> None
     client = ModelClient(ModelConfig(output_mode="auto"))
 
     with pytest.raises(ModelParseError) as exc_info:
-        client._parse_response_with_metadata('do(action=__import__("os"))')
+        client._parse_response_with_metadata("legacy text action with unsafe payload")
 
     assert exc_info.value.parse_metadata["parse_success"] is False
     assert exc_info.value.parse_metadata["parse_error_code"] == "invalid_json"
@@ -444,12 +467,12 @@ def test_stream_consumer_handles_reasoning_content_without_polluting_action(caps
     raw_content, tool_calls, first_token, thinking_end = client._consume_stream(
         [
             Chunk(Delta(reasoning_content="先思考")),
-            Chunk(Delta(content='<answer>do(action="Home")</answer>')),
+            Chunk(Delta(content='<answer>{"type":"do","action":"home"}</answer>')),
         ],
         0,
     )
 
-    assert raw_content == '<answer>do(action="Home")</answer>'
+    assert raw_content == '<answer>{"type":"do","action":"home"}</answer>'
     assert tool_calls == {}
     assert first_token is not None
     assert thinking_end is not None
@@ -476,7 +499,7 @@ def test_stream_consumer_can_opt_in_to_stdout(capsys) -> None:
     client._consume_stream(
         [
             Chunk(Delta(reasoning_content="先思考")),
-            Chunk(Delta(content='<answer>do(action="Home")</answer>')),
+            Chunk(Delta(content='<answer>{"type":"do","action":"home"}</answer>')),
         ],
         0,
     )

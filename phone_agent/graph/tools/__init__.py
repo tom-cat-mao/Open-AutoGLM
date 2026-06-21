@@ -6,7 +6,7 @@ that can be used by LangGraph ToolNode or called directly.
 
 from typing import Any
 
-from phone_agent.actions.handler import ActionResult
+from phone_agent.actions.result import ActionResult
 
 from phone_agent.graph.tools.tap import tap
 from phone_agent.graph.tools.type_text import type_text

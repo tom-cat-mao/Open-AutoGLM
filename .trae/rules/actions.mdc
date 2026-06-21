@@ -27,18 +27,15 @@ All actions are plain dicts with a `_metadata` key:
 
 Provider-facing outputs must use `json_schema`, `tool_calls`, or `auto`; old text DSL model actions are rejected before execution.
 
-## parse_action() / Safe DSL Parser (handler.py)
+## Removed Text DSL
 
-`parse_action()` is retained only as an internal, non-execution safe parser/helper for legacy fixtures or developer utilities. It must not be used as the Plan → Execute model action entry point.
+`phone_agent/actions/handler.py`, `parse_action()`, and the old `do(...)` / `finish(...)` text DSL helpers have been deleted. They are not execution protocol, compatibility parser, fixture helper, or fallback path.
 
-Parsing rules:
-1. `do(...)` and `finish(...)` are parsed as Python expression AST calls.
-2. Keyword values must be `ast.literal_eval()` compatible literals.
-3. Positional arguments and non-literal expressions are rejected.
-4. `Type` / `Type_Name` text is no longer sliced by fragile string offsets; it follows the same literal-safe parser path.
-5. Fallback: raise `ValueError` and let graph/model layers fail closed.
-
-**Critical**: Never use `eval()`. Always use `ast.parse()` for new parsing logic.
+Current parsing rules:
+1. Provider-facing actions must be structured JSON, IntentIR, or aggregated `tool_calls`.
+2. `Action Format Adapter` maps provider output to canonical dicts with `_metadata="do"` or `_metadata="finish"`.
+3. Adapter / grounding / validation failures fail closed before execution.
+4. If a future developer utility needs to parse text-like action literals, it must be isolated from Plan -> Execute and use `ast.parse()` + `ast.literal_eval()`; `eval()` remains forbidden.
 
 ## Action Format Adapter (adapter.py)
 
@@ -95,7 +92,7 @@ def get_tool_map() -> dict[str, Any]:
 - Formula: `x = int(element[0] / 1000 * screen_width)`
 
 ### Tap with Confirmation
-- If `execute_node` sees `Tap` with a `"message"` key (e.g., `do(action="Tap", element=[x,y], message="支付")`), it does not execute the tap immediately.
+- If `execute_node` sees canonical `Tap` with a `"message"` key (from an IntentIR such as `{"type":"intent","action":"tap","target_mark_id":"m1","message":"支付"}`), it does not execute the tap immediately.
 - It sets `pending_execute = True`, `pending_interrupt="confirmation"` and `interrupt_message=action["message"]`.
 - The conditional edge routes to `confirm_node`, which uses LangGraph `interrupt()` for resumable Human-in-the-Loop.
 - After user confirmation (`interrupt_result=True`), `after_interrupt` routes to **execute** (dispatches the confirmed action) then reflect; on cancel, routes to `reflect` or `END`.
@@ -123,7 +120,7 @@ def get_tool_map() -> dict[str, Any]:
 1. [ ] Add or update a `@tool` function under `phone_agent/graph/tools/`
 2. [ ] Register the action name in `get_tool_map()` in `phone_agent/graph/tools/__init__.py`
 3. [ ] Return `ActionResult.__dict__` from the tool function
-4. [ ] Update system prompt in `prompts.py` (CN) and `prompts_en.py` (EN) if the model needs to emit the new action
+4. [ ] Update system prompt sections in `prompts_zh.py` and `prompts_en.py` if the model needs to emit the new action
 5. [ ] Update `phone_agent/actions/adapter.py` whitelists, aliases, field validation, and canonical mapping if JSON/tool_calls should support it
 6. [ ] If action uses coordinates, call `convert_relative_to_absolute()` from `phone_agent/graph/tools/coords.py`
 7. [ ] If action is sensitive, route through `execute_node` to `confirm_node` / `takeover_node` using `interrupt()`, not callbacks

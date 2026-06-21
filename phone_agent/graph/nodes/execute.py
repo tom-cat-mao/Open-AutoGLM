@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING
 
 from langchain_core.runnables import RunnableConfig
 
-from phone_agent.actions.handler import ActionResult, finish
+from phone_agent.actions.result import ActionResult
 from phone_agent.actions.gesture import compile_action_to_gesture
 from phone_agent.actions.safety import decide_safety
 from phone_agent.actions.validator import ActionValidationError, validate_action

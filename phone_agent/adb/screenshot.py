@@ -21,6 +21,10 @@ class Screenshot:
     height: int
     mime_type: str = "image/png"
     is_sensitive: bool = False
+    is_valid: bool = True
+    is_placeholder: bool = False
+    failure_code: str | None = None
+    failure_message: str | None = None
 
 
 def get_screenshot(device_id: str | None = None, timeout: int = 10) -> Screenshot:
@@ -35,8 +39,9 @@ def get_screenshot(device_id: str | None = None, timeout: int = 10) -> Screensho
         Screenshot object containing base64 data and dimensions.
 
     Note:
-        If the screenshot fails (e.g., on sensitive screens like payment pages),
-        a black fallback image is returned with is_sensitive=True.
+        If capture fails, the returned object is an invalid placeholder with
+        is_valid=False, is_placeholder=True, and a stable failure_code. Graph
+        nodes must treat it as unavailable and fail closed before model calls.
     """
     temp_path = os.path.join(tempfile.gettempdir(), f"screenshot_{uuid.uuid4()}.png")
     device_temp_path = f"/sdcard/tmp_{uuid.uuid4().hex}.png"
@@ -51,21 +56,34 @@ def get_screenshot(device_id: str | None = None, timeout: int = 10) -> Screensho
             timeout=timeout,
         )
 
-        # Check for screenshot failure (sensitive screen)
         output = result.stdout + result.stderr
         if "Status: -1" in output or "Failed" in output:
-            return _create_fallback_screenshot(is_sensitive=True)
+            return _create_fallback_screenshot(
+                is_sensitive=True,
+                failure_code="secure_screenshot_blocked",
+                failure_message="Android blocked screenshot capture for a secure screen",
+            )
+        if result.returncode != 0:
+            return _create_fallback_screenshot(
+                is_sensitive=False,
+                failure_code="adb_screencap_failed",
+                failure_message=f"screencap exited with status {result.returncode}",
+            )
 
         # Pull screenshot to local temp path
-        subprocess.run(
+        pull_result = subprocess.run(
             adb_prefix + ["pull", device_temp_path, temp_path],
             capture_output=True,
             text=True,
             timeout=5,
         )
 
-        if not os.path.exists(temp_path):
-            return _create_fallback_screenshot(is_sensitive=False)
+        if pull_result.returncode != 0 or not os.path.exists(temp_path):
+            return _create_fallback_screenshot(
+                is_sensitive=False,
+                failure_code="screenshot_pull_failed",
+                failure_message="ADB screenshot pull failed",
+            )
 
         # Read and encode image
         img = Image.open(temp_path)
@@ -85,7 +103,11 @@ def get_screenshot(device_id: str | None = None, timeout: int = 10) -> Screensho
 
     except Exception as e:
         print(f"Screenshot error: {e}")
-        return _create_fallback_screenshot(is_sensitive=False)
+        return _create_fallback_screenshot(
+            is_sensitive=False,
+            failure_code="screenshot_unavailable",
+            failure_message=type(e).__name__,
+        )
     finally:
         try:
             if os.path.exists(temp_path):
@@ -135,8 +157,13 @@ def _parse_jpeg_quality() -> int:
         return 80
 
 
-def _create_fallback_screenshot(is_sensitive: bool) -> Screenshot:
-    """Create a black fallback image when screenshot fails."""
+def _create_fallback_screenshot(
+    is_sensitive: bool,
+    *,
+    failure_code: str,
+    failure_message: str | None = None,
+) -> Screenshot:
+    """Create a structured invalid placeholder when screenshot capture fails."""
     default_width, default_height = 1080, 2400
 
     black_img = Image.new("RGB", (default_width, default_height), color="black")
@@ -150,4 +177,8 @@ def _create_fallback_screenshot(is_sensitive: bool) -> Screenshot:
         height=default_height,
         mime_type=mime_type,
         is_sensitive=is_sensitive,
+        is_valid=False,
+        is_placeholder=True,
+        failure_code=failure_code,
+        failure_message=failure_message or failure_code,
     )

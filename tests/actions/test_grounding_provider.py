@@ -118,6 +118,20 @@ def test_mark_provider_factory_invalid_max_size_falls_back_to_default(monkeypatc
     assert provider.max_size == 960
 
 
+def test_mark_providers_default_to_hybrid(monkeypatch) -> None:
+    monkeypatch.delenv("PHONE_AGENT_GROUNDING_PROVIDER", raising=False)
+
+    providers = build_mark_providers(
+        {
+            "grounding_model_path": "models/LocateAnything-3B-4bit",
+        }
+    )
+
+    assert len(providers) == 1
+    assert isinstance(providers[0], FallbackMarkProvider)
+    assert [provider.name for provider in providers[0].providers] == ["locateanything_mlx"]
+
+
 def test_mark_provider_factory_passes_locateanything_context_budget() -> None:
     provider = build_mark_provider(
         {

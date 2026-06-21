@@ -4,7 +4,7 @@ import time
 
 from langchain_core.tools import tool
 
-from phone_agent.actions.handler import ActionResult
+from phone_agent.actions.result import ActionResult
 
 
 @tool

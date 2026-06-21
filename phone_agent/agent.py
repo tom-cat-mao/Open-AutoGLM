@@ -20,6 +20,7 @@ from phone_agent.graph.context import (
 )
 from phone_agent.graph.state import AgentState
 from phone_agent.graph.trace import JsonlTraceWriter
+from phone_agent.grounding.factory import DEFAULT_GROUNDING_PROVIDER_NAME
 
 
 @dataclass
@@ -37,7 +38,7 @@ class AgentConfig:
     trace_strict: bool = False
     context_mode: str = DEFAULT_CONTEXT_MODE
     prompt_version: str = PROMPT_VERSION
-    grounding_provider_name: str | None = None
+    grounding_provider_name: str | None = DEFAULT_GROUNDING_PROVIDER_NAME
     accessibility_marks: bool = False
     accessibility_timeout: float = 3.0
     accessibility_max_marks: int = 80
@@ -90,6 +91,7 @@ class RunResult:
     repeated_failure_count: int = 0
     verifier_status: str | None = None
     verifier_failure_cause: str | None = None
+    verifier_evidence: dict[str, Any] | None = None
     grounding_provider: str | None = None
     grounding_latency_ms: int | None = None
     grounding_failure_code: str | None = None
@@ -237,6 +239,7 @@ class PhoneAgent:
             "grounding_candidates": [],
             "grounding_candidate_count": 0,
             "selected_grounding_candidate_id": None,
+            "expected_outcome": None,
             "error_layer": None,
             "error_code": None,
             "recoverable": None,
@@ -273,6 +276,7 @@ class PhoneAgent:
             "verifier_result": None,
             "verifier_status": None,
             "verifier_failure_cause": None,
+            "verifier_evidence": None,
             "pending_interrupt": None,
             "interrupt_message": None,
             "interrupt_result": None,
@@ -355,6 +359,7 @@ class PhoneAgent:
             retry_count=int(state.get("retry_count") or 0),
             verifier_status=state.get("verifier_status"),
             verifier_failure_cause=state.get("verifier_failure_cause"),
+            verifier_evidence=state.get("verifier_evidence"),
             grounding_provider=state.get("grounding_provider"),
             grounding_latency_ms=state.get("grounding_latency_ms"),
             grounding_failure_code=state.get("grounding_failure_code"),

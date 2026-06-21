@@ -16,7 +16,7 @@ globs: "phone_agent/**/*.py, main.py, examples/**/*.py, scripts/**/*.py"
 | Element | Convention | Example |
 |---|---|---|
 | Classes | PascalCase | `PhoneAgent`, `ModelConfig`, `DeviceFactory` |
-| Functions/Methods | snake_case | `parse_action()`, `dispatch_tool()` |
+| Functions/Methods | snake_case | `adapt_json_action()`, `dispatch_tool()` |
 | Constants | UPPER_CASE | `APP_PACKAGES`, `TIMING_CONFIG` |
 | Private methods | `_prefix` | `_strip_and_append()` |
 | Dataclasses | PascalCase | `StepResult`, `ActionResult`, `ModelResponse` |
@@ -53,7 +53,7 @@ import time
 from openai import OpenAI
 
 # Local (absolute imports)
-from phone_agent.actions import ActionResult, parse_action
+from phone_agent.actions import ActionResult, adapt_json_action
 from phone_agent.config import get_system_prompt
 from phone_agent.graph.tools import dispatch_tool
 ```
@@ -80,7 +80,7 @@ from phone_agent.graph.tools import dispatch_tool
 - Place in `tests/` directory, mirror `phone_agent/` structure
 - Use `pytest` framework
 - Mock `ModelClient`, `DeviceFactory`, and device-level ADB calls; test `dispatch_tool()` with tool functions directly
-- Test `parse_action()` thoroughly (many edge cases with special characters)
+- Test `adapt_json_action()` / `adapt_tool_calls()` thoroughly (schema, aliases, unsafe fields, grounding-required cases)
 - Test `convert_relative_to_absolute()` with boundary values
 - Test `MessageBuilder` message construction
 

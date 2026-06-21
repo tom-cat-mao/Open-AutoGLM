@@ -12,12 +12,12 @@
 - **图拓扑**: `plan → execute → [confirm|takeover|reflect|replan|end]`
 - **结构化 API**: 已提供 `PhoneAgent.run_structured()` / `RunResult`，`run()` 继续保持字符串返回兼容
 - **可观测性**: 已提供默认本地 JSONL trace，`RunResult` / eval JSON 可通过 `trace_id` 与 `trace_path` 关联 trace 文件；默认脱敏敏感截图、prompt/API key 与隐私文本
-- **短期 Context Harness**: 已支持 `context_mode=off|observe|inject`，默认 `observe`；记录 `screen_belief`、`action_outcome_summary`、`failure_memory`、`summarized_history`、`short_term_memory`、`action_ledger` 与 context 指标；仅 `inject` 模式通过单一 `build_plan_context_block()` 从 raw state 字段重建并 regex 替换敏感文本后注入 Plan；state 写入路径只做 regex 替换、不 stub，stub 策略仅在 `phone_agent/checkpoint/serde.py::RedactingSerializer` 的 checkpoint egress 触发；request-only compaction 不改写 `state["messages"]`，保留最新截图并裁剪旧请求文本
+- **短期 Context Harness**: 已支持 `context_mode=off|observe|inject`，默认 `inject`；记录 `screen_belief`、`action_outcome_summary`、`failure_memory`、`summarized_history`、`short_term_memory`、`action_ledger` 与 context 指标；inject 模式通过单一 `build_plan_context_block()` 从 raw state 字段重建并 regex 替换敏感文本后注入 Plan；state 写入路径只做 regex 替换、不 stub，stub 策略仅在 `phone_agent/checkpoint/serde.py::RedactingSerializer` 的 checkpoint egress 触发；request-only compaction 不改写 `state["messages"]`，保留最新截图并裁剪旧请求文本
 - **策略反思**: 已支持结构化 `reflection_verdict`、`failure_cause`、`suggested_strategy`，下一轮 plan 可读取失败原因和建议策略
 - **评测地基**: 已提供 `evals/run_eval.py --dry-run` smoke harness，以及 `bench/grounding/` LocateAnything benchmark 体系；当前支持 post-training raw JSONL 转 manifest、固定 suite、prediction JSONL、summary JSON、离线复评与 target type / area bucket 分组指标
 - **收益验证**: eval 已输出 `context_mode`、`context_strategy`、`prompt_version`、`selected_sections`、`messages_before/after`、`message_chars_before/after`、`approx_tokens_before/after`、`context_block_chars`、`context_truncated`、`failure_memory_hit_count`、`repeated_failure_count`，支持 off/observe/inject 对比
 - **输出适配**: `ModelConfig.output_mode=json_schema|tool_calls|auto`；旧 text DSL 不再作为动作执行协议；JSON、已聚合 OpenAI `tool_calls` 与 IntentIR 统一归一到 canonical action，parse/adapter/validation failure fail-closed，不绕过 HITL
-- **本地 Grounding**: LocateAnything-3B-4bit (MLX) 与 Android UiAutomator accessibility tree 均已收敛为 MarkRegistry mark 生成层；推荐 `PHONE_AGENT_GROUNDING_PROVIDER=hybrid` 先用 accessibility tree 的结构化 bounds/text/class/clickable 信息，失败时再 fallback 到 LocateAnything；主 VLM 的屏幕目标点击类动作只输出 `target_mark_id`，不再通过 `target_text_hint` 直接生成 ActionIR；所有结果仍进入 canonical ActionIR/Safety/HITL/Executor；LocateAnything 默认输入图最长边为 `max_size=960`，默认不注入额外 context，必须经 `apply_chat_template(..., num_images=1)`，可通过 bounded `locateanything_context_max_chars` 灰度短 context；multi-box 不得 first-box 执行，可注册多个 marks 或 fail-closed 为歧义
+- **本地 Grounding**: LocateAnything-3B-4bit (MLX) 与 Android UiAutomator accessibility tree 均已收敛为 MarkRegistry mark 生成层；默认 `PHONE_AGENT_GROUNDING_PROVIDER=hybrid` 先用 accessibility tree 的结构化 bounds/text/class/clickable 信息，失败时再 fallback 到 LocateAnything；主 VLM 的屏幕目标点击类动作只输出 `target_mark_id`，不再通过 `target_text_hint` 直接生成 ActionIR；截图无效或 secure screenshot blocked 会 fail-closed，不把黑图继续发给模型；所有结果仍进入 canonical ActionIR/Safety/HITL/Executor；LocateAnything 默认输入图最长边为 `max_size=960`，默认不注入额外 context，必须经 `apply_chat_template(..., num_images=1)`，可通过 bounded `locateanything_context_max_chars` 灰度短 context；multi-box 不得 first-box 执行，可注册多个 marks 或 fail-closed 为歧义
 
 ---
 
@@ -127,7 +127,7 @@ PHONE_AGENT_ACCESSIBILITY_MARKS=true \
 
 **目标**: 在保留现有 LangGraph `StateGraph` 的前提下，将 prompt contract、context selector、request-only compaction、trace/eval 指标收敛为可测试、可回滚、隐私安全的请求构造层。
 
-**当前状态**: Phase 14A-14E 已落地并在后续 hardening 中收敛；后续引入 consumer-aware 脱敏重构：state 写入路径只 regex 替换、不 stub，`build_plan_context_block()` 收敛为 inject 模式唯一 builder，从 raw state 字段重建；stub 策略仅在 `phone_agent/checkpoint/serde.py::RedactingSerializer` 的 checkpoint egress 触发；`sanitize_context_payload()` 接受 `consumer=` 参数，`inject: bool` 保留为向后兼容别名。默认 `context_mode="observe"` 不改变行为；`inject` 仍为显式 opt-in；`prompt_version` 当前仅支持 `context_harness_v1`，旧 text DSL prompt 回滚路径已删除。
+**当前状态**: Phase 14A-14E 已落地并在后续 hardening 中收敛；后续引入 consumer-aware 脱敏重构：state 写入路径只 regex 替换、不 stub，`build_plan_context_block()` 收敛为 inject 模式唯一 builder，从 raw state 字段重建；stub 策略仅在 `phone_agent/checkpoint/serde.py::RedactingSerializer` 的 checkpoint egress 触发；`sanitize_context_payload()` 接受 `consumer=` 参数，`inject: bool` 保留为向后兼容别名。默认 `context_mode="inject"` 会注入脱敏、裁剪后的短期 context；可显式切到 `observe/off`；`prompt_version` 当前仅支持 `context_harness_v1`，旧 text DSL prompt 回滚路径已删除。
 
 **已落地方案**:
 - `phone_agent/config/prompts_zh.py` / `prompts_en.py`: 将 prompt 拆为 System Contract、Action Schema、Task Policies、Context Usage Rules 与单一 Output Contract，覆盖 `json_schema|tool_calls|auto`。
@@ -171,7 +171,7 @@ PHONE_AGENT_ACCESSIBILITY_MARKS=true \
 **已落地方案**:
 - `phone_agent/model/client.py`: response normalizer、Markdown code fence/空白清理、`output_mode`、streaming `tool_calls` delta 聚合、parse metadata；旧 text DSL 响应被拒绝。
 - `phone_agent/actions/adapter.py`: provider-facing JSON / 已聚合 `tool_calls` 到 canonical action 的白名单 adapter，提供 `invalid_json`、`unknown_action`、`missing_field`、`unsafe_value`、`unsupported_tool_call` 等稳定错误码。
-- `phone_agent/actions/handler.py`: `parse_action()` 仅保留为内部非执行 safe parser/helper，不再作为 plan→execute 的模型动作入口。
+- `phone_agent/actions/result.py`: `ActionResult` 独立为执行结果类型；旧 `phone_agent/actions/handler.py` 与 `parse_action()` / `do()` / `finish()` text DSL helper 已删除。
 - `plan_node` / `execute_node`: parse/adapter/validation/grounding/execution failure 返回 `action_parsed=None` 或 terminal failed `ActionResult`，不会包装成成功 `finish`，也不会 dispatch 未验证 tool。
 - `trace`: 记录 configured mode、detected format、adapter used、parse success/error code；`parse_error` 与隐私文本默认脱敏。
 
@@ -248,7 +248,7 @@ provider output
 
 **目标**: 在不提前进入长期记忆的前提下，先建立可观测、可评测、可回滚的短期 context 能力。
 
-**当前状态**: Phase 11A/11B/11C 已落地。默认 `context_mode="observe"`，只记录 context state、trace/eval 指标，不向 Plan 注入；仅显式设置 `inject` 时通过 `build_plan_context_block()` 从 raw state 字段重建并 regex 替换敏感文本后注入；state 写入路径只做 regex 替换、不 stub，stub 策略仅在 checkpoint egress 触发。
+**当前状态**: Phase 11A/11B/11C 已落地。默认 `context_mode="inject"`，通过 `build_plan_context_block()` 从 raw state 字段重建并 regex 替换敏感文本后注入；state 写入路径只做 regex 替换、不 stub，stub 策略仅在 checkpoint egress 触发。
 
 **已落地方案**:
 - `phone_agent/graph/context.py`: context mode、failure taxonomy、consumer-aware 脱敏（`sanitize_context_payload(consumer=...)` 按 `CONSUMER_POLICY` 选择 regex-only 或 stub）、预算裁剪、context block 构造与 metrics。
@@ -256,6 +256,22 @@ provider output
 - `plan_node`: observe 不注入，inject 才注入 context block。
 - `execute_node` / `reflect_node`: 生成 action outcome、screen belief、failure memory 与 history summary；写入路径只做 regex 替换、不 stub。
 - `RunResult` / eval: 输出 context 可比指标，支持 `--context-mode off|observe|inject`。
+
+### ExpectedOutcome 与 Postcondition Verifier 补强
+
+**当前状态**: 已落地 `ExpectedOutcome` sibling contract 与 deterministic postcondition verifier 补强。Plan 支持 provider envelope：`action` 仍走 canonical ActionIR 执行链路，`expected_outcome` 只作为验证合同写入 state/trace；旧 action JSON 保持兼容，真实 `ModelClient` JSON schema/auto 路径会保留 envelope 供 Plan 拆分。Reflect 会基于动作后的截图/current_app 重新构建 after observation，并把动作前/动作后的脱敏 observation summary、focused/editable/keyboard/top activity 等只读信号交给 verifier；`screen_changed` 不再作为 Tap/Type/Search/Video 成功条件，只记录为弱信号；动态首页的广告、banner、推荐流、热词、计数器变化默认视为噪声。默认 Type/Tap outcome 采用隐私优先策略：不持久化原始输入文本，不把目标 hint 默认为成功条件；provider 显式提供的自由文本 outcome 在 state/trace 中以 stub/hash summary 保存。
+
+**关键文件**:
+- `phone_agent/graph/expected_outcome.py`: 定义 `ExpectedOutcome`、provider envelope 拆分、独立 normalization、trace-safe summary 和保守默认 outcome。
+- `phone_agent/graph/verifier.py`: deterministic verifier 检查 Launch app match、文本/页面/目标出现、loading 消失、input focused/editable/keyboard signals 等后置条件；输出 `matched_postconditions`、`missing_postconditions`、`weak_signals`、`dynamic_change_only`。
+- `phone_agent/graph/nodes/plan.py`: 将 `expected_outcome` 作为 sibling state 字段存储，不写入 `action_parsed`。
+- `phone_agent/graph/nodes/reflect.py`: 重建 after observation，并从 state 中抽取 before observation summary；deterministic verifier 高置信时直接映射 reflection；unknown/低置信时才发 isolated verifier request 并注入 ExpectedOutcome、before/after observation summary 与 verifier signals；不追加到 `state["messages"]`。
+- `phone_agent/model/client.py`: JSON schema/auto 模式允许 provider envelope，先校验 nested `action`，再保留原 envelope 给 Plan。
+
+**验证重点**:
+- `ExpectedOutcome` 不是执行授权，不进入 Validator/Safety/Executor；入 state/trace 前做 regex redaction。
+- `screen_changed` 只作为 weak signal，不能覆盖 postcondition failure。
+- Launch 等确定性 postcondition 命中时可高置信成功；Type/Tap 默认 outcome 保持隐私优先和保守 unknown，只有 provider 显式给出可验证 outcome 或 after observation 提供 focused/editable/keyboard/top activity 等证据时才提升置信；`verifier_evidence` 只保留 stubbed/redacted matched/missing postconditions。
 
 **默认预算与隐私**:
 - failure memory 最近 3 条，action outcome 最近 1 条。
@@ -626,7 +642,7 @@ CREATE TABLE skills (
 
 ## 不做: Prompt 外部化
 
-**理由**: Prompt 与模型输出格式（`do(action=...)`）强耦合，外部化（YAML/JSON）增加复杂度但无实际收益。当前没有多租户、A/B 测试需求。唯一值得做的是合并 `prompts_zh.py` 和 `prompts_en.py` 减少重复，但这是代码整洁而非架构升级。
+**理由**: Prompt 已收敛为 `context_harness_v1` 的结构化 JSON/tool_calls 输出契约；当前代码内 prompt sections 与 adapter/validator/grounding 安全边界强绑定，外部化（YAML/JSON）会增加同步成本但无实际收益。当前没有多租户、A/B 测试需求。唯一值得做的是合并 `prompts_zh.py` 和 `prompts_en.py` 减少重复，但这是代码整洁而非架构升级。
 
 ---
 
