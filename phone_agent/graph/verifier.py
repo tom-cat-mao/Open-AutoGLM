@@ -4,8 +4,10 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 import hashlib
+import re
 from typing import Any, Literal
 
+from phone_agent.config.apps import APP_PACKAGES, normalize_app_name
 from phone_agent.graph.context import sanitize_context_payload
 from phone_agent.graph.expected_outcome import normalize_expected_outcome
 from phone_agent.graph.marks import build_screen_id
@@ -59,6 +61,7 @@ def verify_action_outcome(
     evidence: dict[str, Any] = {
         "matched_postconditions": [],
         "missing_postconditions": [],
+        "progress_signals": {},
         "weak_signals": {},
         "dynamic_change_only": False,
     }
@@ -73,6 +76,22 @@ def verify_action_outcome(
         )
     if isinstance(action, dict) and action.get("action") == "Launch":
         target = str(action.get("app") or "")
+        target_package = _package_for_app_name(target)
+        after_package = _package_for_app_name(str(after_app or ""))
+        after_component = " ".join(
+            str(value or "")
+            for value in (
+                after_app,
+                _find_string_key(after_observation, {"top_activity", "focused_window", "current_window"}),
+            )
+        )
+        if target_package and (target_package == after_package or target_package in after_component):
+            return VerifierResult(
+                status="success",
+                confidence=0.95,
+                signals={**signals, "launch_matched": True, "launch_match_type": "package"},
+                evidence={**evidence, "matched_postconditions": ["app_opened"]},
+            )
         if target and target == after_app:
             return VerifierResult(
                 status="success",
@@ -96,6 +115,16 @@ def verify_action_outcome(
     if focus_signals:
         signals = {**signals, **focus_signals}
         evidence["weak_signals"] = {**evidence["weak_signals"], **focus_signals}
+    progress_signals = _progress_signals(
+        action=action if isinstance(action, dict) else {},
+        expected_kind=expected.kind,
+        observation=after_observation,
+        text_blob=text_blob,
+        focus_signals=focus_signals,
+    )
+    if progress_signals:
+        signals = {**signals, **progress_signals}
+        evidence["progress_signals"] = progress_signals
     matched, missing = _match_expected_text(expected.must_observe, text_blob)
     forbidden = _match_forbidden_text(expected.must_not_observe, text_blob)
     evidence["matched_postconditions"] = matched
@@ -111,6 +140,15 @@ def verify_action_outcome(
             )
         if expected.kind == "input_focused":
             if missing or forbidden:
+                if progress_signals:
+                    evidence["missing_postconditions"] = missing + forbidden
+                    return VerifierResult(
+                        status="unknown",
+                        confidence=0.45,
+                        signals=signals,
+                        failure_cause="element_not_found",
+                        evidence=evidence,
+                    )
                 return VerifierResult(
                     status="failure",
                     confidence=0.75,
@@ -137,6 +175,14 @@ def verify_action_outcome(
                     evidence=evidence,
                 )
         if missing or forbidden:
+            if expected.kind in {"page_opened", "target_appeared"} and progress_signals:
+                return VerifierResult(
+                    status="unknown",
+                    confidence=0.45,
+                    signals=signals,
+                    failure_cause=_failure_cause_for_expected_kind(expected.kind),
+                    evidence=evidence,
+                )
             return VerifierResult(
                 status="failure",
                 confidence=0.75,
@@ -159,6 +205,16 @@ def verify_action_outcome(
                 signals=signals,
                 evidence=evidence,
             )
+        if expected.kind == "text_present" and progress_signals.get("typed_text_present"):
+            return VerifierResult(
+                status="success",
+                confidence=0.9,
+                signals=signals,
+                evidence={
+                    **evidence,
+                    "matched_postconditions": ["typed_text_present"],
+                },
+            )
         if expected.kind in {"page_opened", "target_appeared"} and before_text_blob and before_text_blob != text_blob:
             evidence["weak_signals"] = {**evidence["weak_signals"], "ui_tree_changed": True}
     before_hash = before_state.get("screen_hash") or before_state.get("screen_id")
@@ -172,9 +228,10 @@ def verify_action_outcome(
         evidence["weak_signals"] = {"screen_changed": True}
         evidence["dynamic_change_only"] = expected.kind not in {"content_shifted"}
         if expected.kind == "content_shifted":
+            evidence["missing_postconditions"] = ["content_shift_unverified"]
             return VerifierResult(
-                status="success",
-                confidence=0.75,
+                status="unknown",
+                confidence=0.25,
                 signals={**signals, "screen_changed": True},
                 evidence=evidence,
             )
@@ -259,6 +316,72 @@ def _focus_signals(observation: dict[str, Any] | None) -> dict[str, Any]:
     if top_activity:
         signals["top_activity"] = top_activity
     return signals
+
+
+def _progress_signals(
+    *,
+    action: dict[str, Any],
+    expected_kind: str,
+    observation: dict[str, Any] | None,
+    text_blob: str,
+    focus_signals: dict[str, Any],
+) -> dict[str, Any]:
+    signals: dict[str, Any] = {}
+    action_name = str(action.get("action") or "") if isinstance(action, dict) else ""
+    if focus_signals.get("editable_present"):
+        signals["editable_present"] = True
+    if focus_signals.get("focused_editable"):
+        signals["focused_editable"] = True
+    if focus_signals.get("keyboard_visible"):
+        signals["keyboard_visible"] = True
+    top_activity = str(focus_signals.get("top_activity") or "").lower()
+    if "search" in top_activity or "搜索" in top_activity:
+        signals["search_activity"] = True
+    if _contains_search_button(observation):
+        signals["search_button_present"] = True
+    action_text = action.get("text") if isinstance(action, dict) else None
+    if isinstance(action_text, str) and action_text:
+        normalized_text = action_text.lower()
+        if normalized_text in text_blob:
+            signals["typed_text_present"] = True
+    if expected_kind == "input_focused" and "input" in text_blob:
+        signals["input_hint_present"] = True
+    strong_reasons: list[str] = []
+    if expected_kind == "input_focused" and (
+        signals.get("focused_editable") or signals.get("keyboard_visible")
+    ):
+        strong_reasons.append("input_focus_signal")
+    if action_name in {"Type", "Type_Name"} and expected_kind == "text_present" and signals.get("typed_text_present"):
+        strong_reasons.append("typed_text_present")
+    if action_name in {"Type", "Type_Name"} and expected_kind == "input_focused" and signals.get("typed_text_present"):
+        strong_reasons.append("typed_text_present")
+    strong = bool(strong_reasons)
+    if strong:
+        signals["strong_progress"] = True
+        signals["strong_progress_reasons"] = strong_reasons
+    return signals
+
+
+def _package_for_app_name(app_name: str) -> str | None:
+    canonical = normalize_app_name(app_name)
+    if canonical:
+        return APP_PACKAGES.get(canonical)
+    return APP_PACKAGES.get(app_name)
+
+
+def _contains_search_button(value: Any) -> bool:
+    if isinstance(value, dict):
+        role = str(value.get("role") or value.get("class") or value.get("class_name") or "").lower()
+        text = " ".join(
+            str(value.get(key) or "")
+            for key in ("text", "text_summary", "label", "content_desc", "content-description", "visible_text", "value")
+        ).lower()
+        if ("button" in role or "textview" in role) and ("search" in text or "搜索" in text):
+            return True
+        return any(_contains_search_button(item) for item in value.values())
+    if isinstance(value, list):
+        return any(_contains_search_button(item) for item in value)
+    return False
 
 
 def _find_truthy_key(value: Any, keys: set[str]) -> bool | None:
@@ -373,11 +496,31 @@ def _match_forbidden_text(forbidden: list[str], text_blob: str) -> list[str]:
 
 
 def _text_blob_contains_hash(text_blob: str, digest: str) -> bool:
-    for line in text_blob.splitlines():
-        text = line.strip()
-        if text and hashlib.sha256(text.encode("utf-8")).hexdigest()[:12] == digest:
+    for text in _hashable_text_segments(text_blob):
+        if hashlib.sha256(text.encode("utf-8")).hexdigest()[:12] == digest:
             return True
     return False
+
+
+def _hashable_text_segments(text_blob: str) -> list[str]:
+    segments: set[str] = set()
+    for line in text_blob.splitlines():
+        text = line.strip()
+        if not text:
+            continue
+        segments.add(text)
+        compact = "".join(text.split())
+        if compact:
+            segments.add(compact)
+        for token in re.split(r"[\s|:：,，/\\[\\]()（）【】{}<>《》\"'、]+", text):
+            token = token.strip()
+            if token:
+                segments.add(token)
+        for ngram_size in (2, 3, 4):
+            if len(compact) >= ngram_size:
+                for index in range(0, len(compact) - ngram_size + 1):
+                    segments.add(compact[index : index + ngram_size])
+    return list(segments)
 
 
 def _failure_cause_for_expected_kind(kind: str) -> str:

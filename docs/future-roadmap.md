@@ -259,11 +259,11 @@ provider output
 
 ### ExpectedOutcome 与 Postcondition Verifier 补强
 
-**当前状态**: 已落地 `ExpectedOutcome` sibling contract 与 deterministic postcondition verifier 补强。Plan 支持 provider envelope：`action` 仍走 canonical ActionIR 执行链路，`expected_outcome` 只作为验证合同写入 state/trace；旧 action JSON 保持兼容，真实 `ModelClient` JSON schema/auto 路径会保留 envelope 供 Plan 拆分。Reflect 会基于动作后的截图/current_app 重新构建 after observation，并把动作前/动作后的脱敏 observation summary、focused/editable/keyboard/top activity 等只读信号交给 verifier；`screen_changed` 不再作为 Tap/Type/Search/Video 成功条件，只记录为弱信号；动态首页的广告、banner、推荐流、热词、计数器变化默认视为噪声。默认 Type/Tap outcome 采用隐私优先策略：不持久化原始输入文本，不把目标 hint 默认为成功条件；provider 显式提供的自由文本 outcome 在 state/trace 中以 stub/hash summary 保存。
+**当前状态**: 已落地 `ExpectedOutcome` sibling contract 与 deterministic postcondition verifier 补强。Plan 支持 provider envelope：`action` 仍走 canonical ActionIR 执行链路，`expected_outcome` 作为运行态 verifier contract 写入 state，但只保存 hash/哨兵结构；verifier 对当轮 UI 文本做现场 hash/片段 hash 匹配。外发/持久化路径（`action_raw`、trace、report、checkpoint）使用单独的 stub/hash summary；旧 action JSON 保持兼容，真实 `ModelClient` JSON schema/auto 路径会保留 envelope 供 Plan 拆分。Reflect 会基于动作后的截图/current_app 重新构建 after observation，并把动作前/动作后的脱敏 observation summary、focused/editable/keyboard/top activity 等只读信号交给 verifier；Reflect 默认只用 accessibility/device marks，不触发 LocateAnything fallback，除非显式开启 `reflect_enable_vlm_grounding`。`screen_changed` 不再作为 Tap/Type/Search/Video/Swipe 成功条件，只记录为弱信号；动态首页的广告、banner、推荐流、热词、计数器变化默认视为噪声。默认 Type/Tap outcome 采用隐私优先策略：不把目标 hint 默认为成功条件；provider 显式提供的自由文本 outcome 在运行态和 trace/report/checkpoint 均不保留原文。
 
 **关键文件**:
-- `phone_agent/graph/expected_outcome.py`: 定义 `ExpectedOutcome`、provider envelope 拆分、独立 normalization、trace-safe summary 和保守默认 outcome。
-- `phone_agent/graph/verifier.py`: deterministic verifier 检查 Launch app match、文本/页面/目标出现、loading 消失、input focused/editable/keyboard signals 等后置条件；输出 `matched_postconditions`、`missing_postconditions`、`weak_signals`、`dynamic_change_only`。
+- `phone_agent/graph/expected_outcome.py`: 定义 `ExpectedOutcome`、provider envelope 拆分、独立 normalization、runtime hash/哨兵 contract、trace-safe summary 和保守默认 outcome。
+- `phone_agent/graph/verifier.py`: deterministic verifier 检查 Launch app match、文本/页面/目标出现、loading 消失、input focused/editable/keyboard signals 等后置条件；输出 `matched_postconditions`、`missing_postconditions`、`progress_signals`、`weak_signals`、`dynamic_change_only`。
 - `phone_agent/graph/nodes/plan.py`: 将 `expected_outcome` 作为 sibling state 字段存储，不写入 `action_parsed`。
 - `phone_agent/graph/nodes/reflect.py`: 重建 after observation，并从 state 中抽取 before observation summary；deterministic verifier 高置信时直接映射 reflection；unknown/低置信时才发 isolated verifier request 并注入 ExpectedOutcome、before/after observation summary 与 verifier signals；不追加到 `state["messages"]`。
 - `phone_agent/model/client.py`: JSON schema/auto 模式允许 provider envelope，先校验 nested `action`，再保留原 envelope 给 Plan。
@@ -271,7 +271,7 @@ provider output
 **验证重点**:
 - `ExpectedOutcome` 不是执行授权，不进入 Validator/Safety/Executor；入 state/trace 前做 regex redaction。
 - `screen_changed` 只作为 weak signal，不能覆盖 postcondition failure。
-- Launch 等确定性 postcondition 命中时可高置信成功；Type/Tap 默认 outcome 保持隐私优先和保守 unknown，只有 provider 显式给出可验证 outcome 或 after observation 提供 focused/editable/keyboard/top activity 等证据时才提升置信；`verifier_evidence` 只保留 stubbed/redacted matched/missing postconditions。
+- Launch 等确定性 postcondition 命中时可高置信成功；Launch 使用包名/组件匹配而非 display name；Type/Tap 默认 outcome 保持隐私优先和保守 unknown，只有 provider 显式给出可验证 outcome 或 after observation 提供 focused/editable/keyboard/top activity、输入文本、Search/搜索按钮等证据时才提升置信或记录正向进展；只有按 action/outcome 绑定的 `strong_progress` 会阻止机械 takeover；`verifier_evidence` 只保留 stubbed/redacted matched/missing postconditions 与 progress/weak signals。
 
 **默认预算与隐私**:
 - failure memory 最近 3 条，action outcome 最近 1 条。

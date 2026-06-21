@@ -1,5 +1,6 @@
 """Device control utilities for Android automation."""
 
+import re
 import subprocess
 import time
 
@@ -38,6 +39,47 @@ def get_current_app(device_id: str | None = None) -> str:
                     return app_name
 
     return "System Home"
+
+
+def get_focused_window_or_app(device_id: str | None = None) -> str | None:
+    """Return the focused package/activity component for verifier diagnostics."""
+
+    output = _run_adb_shell_text(device_id, ["dumpsys", "window"], timeout=5)
+    if not output:
+        return None
+    for line in output.splitlines():
+        if "mCurrentFocus" in line:
+            component = _extract_component(line)
+            if component:
+                return component
+    for line in output.splitlines():
+        if "mFocusedApp" in line:
+            component = _extract_component(line)
+            if component:
+                return component
+    return None
+
+
+def get_top_activity(device_id: str | None = None) -> str | None:
+    """Return the current focused package/activity when available."""
+
+    focused = get_focused_window_or_app(device_id)
+    if not focused:
+        return None
+    return focused
+
+
+def is_keyboard_visible(device_id: str | None = None) -> bool:
+    """Return whether Android reports the soft keyboard/IME as visible."""
+
+    output = _run_adb_shell_text(device_id, ["dumpsys", "input_method"], timeout=5)
+    if not output:
+        return False
+    truthy_patterns = (
+        r"\bmInputShown=true\b",
+        r"\bmWindowVisible=true\b",
+    )
+    return any(re.search(pattern, output) for pattern in truthy_patterns)
 
 
 def tap(
@@ -289,7 +331,7 @@ def dump_uiautomator_xml(device_id: str | None = None, timeout: float | None = N
         )
     except subprocess.TimeoutExpired as exc:
         raise TimeoutError("UiAutomator dump timed out") from exc
-    output = (result.stdout or "") + (result.stderr or "")
+    output = result.stdout or ""
     marker = "<?xml"
     start = output.find(marker)
     end = output.find("</hierarchy>", start)
@@ -367,6 +409,38 @@ def _has_inject_events_error(result: subprocess.CompletedProcess) -> bool:
             output += stream.encode("utf-8", errors="ignore")
     normalized = output.lower()
     return b"inject_events" in normalized or b"inject events" in normalized
+
+
+def _run_adb_shell_text(
+    device_id: str | None,
+    args: list[str],
+    *,
+    timeout: float = 5,
+) -> str:
+    adb_prefix = _get_adb_prefix(device_id)
+    try:
+        result = subprocess.run(
+            adb_prefix + ["shell", *args],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        return ""
+    if result.returncode != 0:
+        return ""
+    return result.stdout or ""
+
+
+def _extract_component(line: str) -> str | None:
+    if "null" in line.lower():
+        return None
+    match = re.search(r"([A-Za-z0-9_.]+)/([A-Za-z0-9_.$]+)", line)
+    if not match:
+        return None
+    return match.group(0)[:200]
 
 
 def _get_adb_prefix(device_id: str | None) -> list:

@@ -66,6 +66,24 @@ class DeviceFactory:
         """Get current app name."""
         return self.module.get_current_app(device_id)
 
+    def get_focused_window_or_app(self, device_id: str | None = None) -> str | None:
+        """Get the focused Android window/app diagnostic line."""
+        if not hasattr(self.module, "get_focused_window_or_app"):
+            return None
+        return self.module.get_focused_window_or_app(device_id)
+
+    def get_top_activity(self, device_id: str | None = None) -> str | None:
+        """Get the focused package/activity component when available."""
+        if not hasattr(self.module, "get_top_activity"):
+            return None
+        return self.module.get_top_activity(device_id)
+
+    def is_keyboard_visible(self, device_id: str | None = None) -> bool:
+        """Return whether the Android soft keyboard/IME is visible."""
+        if not hasattr(self.module, "is_keyboard_visible"):
+            return False
+        return bool(self.module.is_keyboard_visible(device_id))
+
     def tap(
         self, x: int, y: int, device_id: str | None = None, delay: float | None = None
     ):

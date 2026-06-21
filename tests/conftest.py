@@ -72,6 +72,18 @@ class FakeDeviceFactory:
     def restore_keyboard(self, ime: str, device_id: str | None = None) -> None:
         self._record("restore_keyboard", ime, device_id)
 
+    def get_focused_window_or_app(self, device_id: str | None = None) -> str | None:
+        self._record("get_focused_window_or_app", device_id)
+        return None
+
+    def get_top_activity(self, device_id: str | None = None) -> str | None:
+        self._record("get_top_activity", device_id)
+        return None
+
+    def is_keyboard_visible(self, device_id: str | None = None) -> bool:
+        self._record("is_keyboard_visible", device_id)
+        return False
+
 
 @pytest.fixture
 def fake_device() -> FakeDeviceFactory:

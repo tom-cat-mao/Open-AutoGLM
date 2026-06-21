@@ -443,7 +443,7 @@ def test_plan_node_stores_expected_outcome_as_sibling_contract(base_state, fake_
     assert "expected_outcome" not in result["action_parsed"]
 
 
-def test_plan_expected_outcome_stub_still_verifies_by_hash(base_state, fake_device) -> None:
+def test_plan_expected_outcome_runtime_contract_verifies_plain_text(base_state, fake_device) -> None:
     plan_model = FakeModelClient(
         FakeModelResponse(
             "",
@@ -463,7 +463,7 @@ def test_plan_expected_outcome_stub_still_verifies_by_hash(base_state, fake_devi
         base_state,
         {"configurable": {"model_client": plan_model, "device_factory": fake_device, "output_mode": "json_schema"}},
     )
-    assert planned["expected_outcome"]["must_observe"][0]["redacted"] is True
+    assert planned["expected_outcome"]["must_observe"][0].startswith("sha256:")
 
     reflect_state = {**base_state, **planned, "action_result": {"success": True, "message": "ok"}}
     reflect_model = FakeModelClient(
@@ -518,7 +518,7 @@ def test_plan_node_redacts_expected_outcome_from_action_raw(base_state, fake_dev
 
     serialized = json.dumps(result, ensure_ascii=False)
     assert "13800138000" not in serialized
-    assert result["expected_outcome"]["must_observe"][0]["private_text_unverifiable"] is True
+    assert result["expected_outcome"]["must_observe"] == ["private_text_unverifiable"]
 
 
 def test_plan_node_action_raw_rebuilds_envelope_without_non_regex_private_text(base_state, fake_device) -> None:
@@ -545,7 +545,8 @@ def test_plan_node_action_raw_rebuilds_envelope_without_non_regex_private_text(b
         {"configurable": {"model_client": model, "device_factory": fake_device, "output_mode": "json_schema"}},
     )
 
-    assert private_phrase not in json.dumps(result, ensure_ascii=False)
+    assert result["expected_outcome"]["must_observe"][0].startswith("sha256:")
+    assert result["expected_outcome"]["target_text_hint"].startswith("sha256:")
     action_raw = json.loads(result["action_raw"])
     assert action_raw["expected_outcome"]["must_observe"][0]["redacted"] is True
 
@@ -1011,7 +1012,7 @@ def test_expected_outcome_and_verifier_evidence_are_regex_redacted(base_state, f
     serialized_trace = writer.path.read_text(encoding="utf-8")
     assert "13800138000" not in serialized_result
     assert "13800138000" not in serialized_trace
-    assert "<redacted>" in serialized_result
+    assert '"redacted": true' in serialized_result
 
 
 def test_reflect_result_stubs_non_regex_vlm_private_text(base_state, fake_device) -> None:
@@ -1344,6 +1345,65 @@ def test_reflect_node_screen_change_is_only_weak_signal(base_state, fake_device)
     assert result["verifier_evidence"]["missing_postconditions"] == ["after_observation_unavailable"]
 
 
+def test_reflect_node_swipe_hash_change_is_not_success(base_state, fake_device) -> None:
+    base_state["screen_hash"] = "before-screen"
+    base_state["action_parsed"] = {"_metadata": "do", "action": "Swipe", "start": [500, 800], "end": [500, 200]}
+    base_state["expected_outcome"] = {
+        "kind": "content_shifted",
+        "must_observe": [],
+        "must_not_observe": [],
+        "target_mark_id": None,
+        "target_text_hint": None,
+        "timeout_hint": None,
+        "dynamic_regions": ["banner", "recommendation_feed"],
+    }
+    model = FakeModelClient(
+        FakeModelResponse("ok", '{"verdict":"succeeded","failure_cause":"none","suggested_strategy":"continue","message":"ok"}')
+    )
+
+    result = reflect_node(
+        base_state,
+        {"configurable": {"model_client": model, "device_factory": fake_device, "verbose": False}},
+    )
+
+    assert result["verifier_status"] == "unknown"
+    assert result["reflection_verdict"] == "failed"
+    assert result["verifier_evidence"]["weak_signals"]["screen_changed"] is True
+    assert result["verifier_evidence"]["missing_postconditions"] == ["content_shift_unverified"]
+
+
+def test_reflect_node_launch_matches_package_alias(base_state, fake_device) -> None:
+    base_state["action_parsed"] = {"_metadata": "do", "action": "Launch", "app": "设置"}
+    base_state["expected_outcome"] = {
+        "kind": "app_opened",
+        "must_observe": ["sha256:aa"],
+        "must_not_observe": [],
+        "target_mark_id": None,
+        "target_text_hint": None,
+        "timeout_hint": None,
+        "dynamic_regions": [],
+    }
+    model = FakeModelClient(
+        FakeModelResponse("ok", '{"verdict":"failed","failure_cause":"unknown","suggested_strategy":"retry","message":"not sure"}')
+    )
+
+    result = reflect_node(
+        base_state,
+        {
+            "configurable": {
+                "model_client": model,
+                "device_factory": fake_device,
+                "verbose": False,
+                "top_activity": "com.android.settings/.Settings",
+            }
+        },
+    )
+
+    assert result["verifier_status"] == "success"
+    assert result["reflection_verdict"] == "succeeded"
+    assert result["verifier_result"]["signals"]["launch_matched"] is True
+
+
 def test_private_expected_text_does_not_hash_match_different_private_text(base_state, fake_device) -> None:
     plan_model = FakeModelClient(
         FakeModelResponse(
@@ -1364,7 +1424,7 @@ def test_private_expected_text_does_not_hash_match_different_private_text(base_s
         base_state,
         {"configurable": {"model_client": plan_model, "device_factory": fake_device, "output_mode": "json_schema"}},
     )
-    assert planned["expected_outcome"]["must_observe"][0]["private_text_unverifiable"] is True
+    assert planned["expected_outcome"]["must_observe"] == ["private_text_unverifiable"]
 
     reflect_state = {**base_state, **planned, "action_result": {"success": True, "message": "ok"}}
     reflect_model = FakeModelClient(
@@ -1434,7 +1494,47 @@ def test_reflect_node_type_text_postcondition_success(base_state, fake_device) -
     assert result["verifier_status"] == "success"
     assert result["reflection_verdict"] == "succeeded"
     assert result["action_succeeded"] is True
-    assert result["verifier_evidence"]["matched_postconditions"] == ["hello"]
+    assert result["verifier_evidence"]["matched_postconditions"][0]["redacted"] is True
+    assert result["verifier_evidence"]["matched_postconditions"][0]["sha256"] == "2cf24dba5fb0"
+
+
+def test_reflect_node_hash_matches_text_segment(base_state, fake_device) -> None:
+    base_state["action_parsed"] = {"_metadata": "do", "action": "Tap", "element": [500, 120]}
+    base_state["expected_outcome"] = {
+        "kind": "target_appeared",
+        "must_observe": ["sha256:44ce7ae909bb"],
+        "must_not_observe": [],
+        "target_mark_id": "search",
+        "target_text_hint": "sha256:44ce7ae909bb",
+        "timeout_hint": None,
+        "dynamic_regions": [],
+    }
+    model = FakeModelClient(
+        FakeModelResponse("ok", '{"verdict":"failed","failure_cause":"unknown","suggested_strategy":"retry","message":"not sure"}')
+    )
+
+    result = reflect_node(
+        base_state,
+        {
+            "configurable": {
+                "model_client": model,
+                "device_factory": fake_device,
+                "verbose": False,
+                "after_screen_marks": [
+                    {
+                        "mark_id": "after_search_button",
+                        "bbox": [100, 100, 900, 180],
+                        "role": "Button",
+                        "text_summary": "搜索按钮",
+                    }
+                ],
+                "grounding_provider_name": "off",
+            }
+        },
+    )
+
+    assert result["verifier_status"] == "success"
+    assert result["verifier_evidence"]["matched_postconditions"] == ["sha256:44ce7ae909bb"]
 
 
 def test_reflect_node_input_focused_requires_focus_or_keyboard_signal(base_state, fake_device) -> None:
@@ -1477,6 +1577,164 @@ def test_reflect_node_input_focused_requires_focus_or_keyboard_signal(base_state
     assert result["verifier_evidence"]["missing_postconditions"] == [
         "focused_editable_or_keyboard_visible"
     ]
+
+
+def test_reflect_node_search_page_progress_prevents_takeover(base_state, fake_device) -> None:
+    base_state["retry_count"] = 2
+    base_state["action_parsed"] = {"_metadata": "do", "action": "Type", "text": "逗比的雀巢"}
+    base_state["expected_outcome"] = {
+        "kind": "input_focused",
+        "must_observe": ["搜索", "取消"],
+        "must_not_observe": [],
+        "target_mark_id": "search",
+        "target_text_hint": "搜索",
+        "timeout_hint": None,
+        "dynamic_regions": ["hot_words"],
+    }
+    model = FakeModelClient(
+        FakeModelResponse(
+            "not enough",
+            '{"verdict":"partial","failure_cause":"unknown","suggested_strategy":"continue","message":"progress"}',
+        )
+    )
+
+    result = reflect_node(
+        base_state,
+        {
+            "configurable": {
+                "model_client": model,
+                "device_factory": fake_device,
+                "verbose": False,
+                "verifier_takeover_threshold": 3,
+                "top_activity": "tv.danmaku.bili/com.bilibili.search2.main.BiliMainSearchActivity",
+                "after_screen_marks": [
+                    {
+                        "mark_id": "search_box",
+                        "bbox": [50, 60, 780, 160],
+                        "role": "EditText",
+                        "text_summary": "逗比的雀巢",
+                    },
+                    {
+                        "mark_id": "search_button",
+                        "bbox": [800, 60, 950, 160],
+                        "role": "Button",
+                        "text_summary": "Search",
+                    },
+                ],
+                "grounding_provider_name": "off",
+            }
+        },
+    )
+
+    assert result["verifier_status"] == "unknown"
+    assert result["retry_count"] == 0
+    assert result["suggested_strategy"] == "continue"
+    assert result.get("pending_interrupt") is None
+    assert result["verifier_evidence"]["progress_signals"]["typed_text_present"] is True
+    assert result["verifier_evidence"]["progress_signals"]["search_button_present"] is True
+    assert result["verifier_evidence"]["progress_signals"]["search_activity"] is True
+    assert result["verifier_evidence"]["progress_signals"]["strong_progress"] is True
+
+
+def test_reflect_node_search_chrome_without_typed_text_still_takeover(base_state, fake_device) -> None:
+    base_state["retry_count"] = 2
+    base_state["action_parsed"] = {"_metadata": "do", "action": "Type", "text": "逗比的雀巢"}
+    base_state["expected_outcome"] = {
+        "kind": "input_focused",
+        "must_observe": ["搜索"],
+        "must_not_observe": [],
+        "target_mark_id": "search",
+        "target_text_hint": "搜索",
+        "timeout_hint": None,
+        "dynamic_regions": ["hot_words"],
+    }
+    model = FakeModelClient(
+        FakeModelResponse(
+            "not enough",
+            '{"verdict":"partial","failure_cause":"unknown","suggested_strategy":"continue","message":"weak progress"}',
+        )
+    )
+
+    result = reflect_node(
+        base_state,
+        {
+            "configurable": {
+                "model_client": model,
+                "device_factory": fake_device,
+                "verbose": False,
+                "verifier_takeover_threshold": 3,
+                "top_activity": "tv.danmaku.bili/com.bilibili.search2.main.BiliMainSearchActivity",
+                "after_screen_marks": [
+                    {
+                        "mark_id": "search_box",
+                        "bbox": [50, 60, 780, 160],
+                        "role": "EditText",
+                        "text_summary": "搜索",
+                    },
+                    {
+                        "mark_id": "search_button",
+                        "bbox": [800, 60, 950, 160],
+                        "role": "Button",
+                        "text_summary": "Search",
+                    },
+                ],
+                "grounding_provider_name": "off",
+            }
+        },
+    )
+
+    assert result["verifier_status"] == "unknown"
+    assert result["retry_count"] == 3
+    assert result["suggested_strategy"] == "takeover"
+    assert result["pending_interrupt"] == "takeover"
+    assert result["verifier_evidence"]["progress_signals"]["search_button_present"] is True
+    assert "strong_progress" not in result["verifier_evidence"]["progress_signals"]
+
+
+def test_reflect_node_keyboard_residue_does_not_suppress_page_takeover(base_state, fake_device) -> None:
+    base_state["retry_count"] = 2
+    base_state["action_parsed"] = {"_metadata": "do", "action": "Tap", "element": [500, 500]}
+    base_state["expected_outcome"] = {
+        "kind": "target_appeared",
+        "must_observe": ["sha256:0123456789ab"],
+        "must_not_observe": [],
+        "target_mark_id": "result",
+        "target_text_hint": "sha256:0123456789ab",
+        "timeout_hint": None,
+        "dynamic_regions": [],
+    }
+    model = FakeModelClient(
+        FakeModelResponse(
+            "not enough",
+            '{"verdict":"partial","failure_cause":"wrong_page","suggested_strategy":"continue","message":"keyboard residue"}',
+        )
+    )
+
+    result = reflect_node(
+        base_state,
+        {
+            "configurable": {
+                "model_client": model,
+                "device_factory": fake_device,
+                "verbose": False,
+                "verifier_takeover_threshold": 3,
+                "keyboard_visible": True,
+                "after_screen_marks": [
+                    {
+                        "mark_id": "search_box",
+                        "bbox": [50, 60, 780, 160],
+                        "role": "EditText",
+                        "text_summary": "old query",
+                    }
+                ],
+                "grounding_provider_name": "off",
+            }
+        },
+    )
+
+    assert result["retry_count"] == 3
+    assert result["pending_interrupt"] == "takeover"
+    assert "strong_progress" not in result["verifier_evidence"]["progress_signals"]
 
 
 def test_reflect_node_vlm_success_with_missing_postconditions_does_not_succeed(base_state, fake_device) -> None:
@@ -1645,7 +1903,8 @@ def test_reflect_node_does_not_use_stale_before_observation_for_postcondition(ba
 
     assert result["verifier_status"] == "failure"
     assert result["reflection_verdict"] == "failed"
-    assert result["verifier_evidence"]["missing_postconditions"] == ["hello"]
+    assert result["verifier_evidence"]["missing_postconditions"][0]["redacted"] is True
+    assert result["verifier_evidence"]["missing_postconditions"][0]["sha256"] == "2cf24dba5fb0"
 
 
 def test_reflect_node_metadata_only_mark_id_does_not_satisfy_postcondition(base_state, fake_device) -> None:
@@ -1688,7 +1947,7 @@ def test_reflect_node_metadata_only_mark_id_does_not_satisfy_postcondition(base_
 
     assert result["verifier_status"] == "failure"
     assert result["reflection_verdict"] == "failed"
-    assert result["verifier_evidence"]["missing_postconditions"] == ["search"]
+    assert result["verifier_evidence"]["missing_postconditions"][0]["redacted"] is True
 
 
 def test_reflect_node_does_not_assume_success_when_verifier_unknown_and_model_fails(base_state, fake_device) -> None:
@@ -1794,11 +2053,53 @@ def test_reflect_prompt_sanitizes_action_and_result_text(base_state, fake_device
     )
 
     text = model.messages[-1]["content"][-1]["text"]
-    assert "原始任务：给 <matches_task_value> 发短信" in text
+    assert "原始任务：" in text
     assert "13800138000" not in text
     derived_text = text.split("刚执行的动作：", 1)[1]
     assert "13900139000" not in text
-    assert "<redacted>" in text
+    assert "redacted" in text
+
+
+def test_reflect_prompt_stubs_non_regex_action_and_ui_text(base_state, fake_device) -> None:
+    private_phrase = "张三家庭住址"
+    base_state["task"] = "输入地址"
+    base_state["action_parsed"] = {"_metadata": "do", "action": "Tap", "message": private_phrase}
+    base_state["expected_outcome"] = {
+        "kind": "target_appeared",
+        "must_observe": ["sha256:000000000000"],
+        "must_not_observe": [],
+        "target_mark_id": None,
+        "target_text_hint": "sha256:000000000000",
+        "timeout_hint": None,
+        "dynamic_regions": [],
+    }
+    model = FakeModelClient(
+        FakeModelResponse("ok", '{"verdict":"failed","failure_cause":"unknown","suggested_strategy":"retry","message":"not sure"}')
+    )
+
+    reflect_node(
+        base_state,
+        {
+            "configurable": {
+                "model_client": model,
+                "device_factory": fake_device,
+                "verbose": False,
+                "after_screen_marks": [
+                    {
+                        "mark_id": "after_input",
+                        "bbox": [100, 100, 900, 180],
+                        "role": "EditText",
+                        "text_summary": private_phrase,
+                    }
+                ],
+                "grounding_provider_name": "off",
+            }
+        },
+    )
+
+    text = model.messages[-1]["content"][-1]["text"]
+    assert private_phrase not in text
+    assert "redacted" in text
 
 
 def test_reflect_prompt_includes_before_after_observation_summaries(base_state, fake_device) -> None:
@@ -1850,6 +2151,8 @@ def test_reflect_prompt_includes_before_after_observation_summaries(base_state, 
     assert "before_search" in text
     assert "动作后观测摘要" in text
     assert "after_search" in text
+    assert "首页推荐" not in text
+    assert "搜索" not in text
     assert result["finished"] is False
     assert base_state["messages"][0]["content"][1]["type"] == "image_url"
 

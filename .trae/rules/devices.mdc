@@ -58,6 +58,11 @@ device_factory.tap(x, y, device_id)
   - Switch to ADB keyboard before typing
   - Type via `adb shell am broadcast ... ADB_INPUT_TEXT --es msg 'text'`
   - Restore original keyboard after typing
+- **Read-only verifier signals**:
+  - `get_focused_window_or_app()` reads `adb shell dumpsys window` and returns the focused window/app line (`mCurrentFocus` preferred, `mFocusedApp` fallback).
+  - `get_top_activity()` derives the focused package/activity component for page-level verifier hints.
+  - `is_keyboard_visible()` reads `adb shell dumpsys input_method`; only `mInputShown=true` or `mWindowVisible=true` count as strong keyboard visibility.
+  - These helpers are diagnostic only; failures/timeouts must degrade to missing signals, not crash the graph or authorize execution.
 - **App launch**: `adb shell am start -n {package}/{activity}`
 - **TCP/IP**: `adb tcpip <port>` for wireless debugging
 

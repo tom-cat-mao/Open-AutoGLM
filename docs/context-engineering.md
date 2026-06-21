@@ -152,6 +152,7 @@ Reflect 节点是 context 状态的核心写入者。当 `context_enabled(contex
 - 运行时内存中的 state 保持可读文本（regex 脱敏后）
 - 只有写入 checkpoint 时才对敏感键做 stub 替换
 - 不同消费者看到不同粒度的脱敏结果
+- `expected_outcome` 是 verifier 运行态合同：state 中只保留 hash/哨兵结构，不保留 provider 自由文本；verifier 对当轮 UI 文本做现场 hash/片段 hash 匹配。`action_raw`、trace、report、checkpoint 同样使用 stub/hash summary，避免原文进入外发或持久化路径。
 
 ### 4.2 Consumer 策略表
 

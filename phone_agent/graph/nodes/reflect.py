@@ -288,6 +288,8 @@ def _build_after_observation(
             )
 
     provider_configurable = dict(configurable)
+    if not provider_configurable.get("reflect_enable_vlm_grounding"):
+        provider_configurable["grounding_provider_name"] = "accessibility"
     if (
         provider_configurable.get("accessibility_tree_dump") is None
         and not provider_configurable.get("skip_accessibility_provider")
@@ -410,18 +412,14 @@ def _collect_device_verifier_signals(
 
 
 def _verifier_observation_payload(observation, *, task_context: str | None = None) -> dict:
-    """Build regex-redacted after-observation text for verifier only."""
+    """Build after-observation text for in-memory verifier matching only."""
 
     marks = []
     for mark in observation.mark_registry.marks.values():
         row = {
             "mark_id": mark.mark_id,
             "role": mark.role,
-            "text_summary": sanitize_context_payload(
-                mark.text_summary or "",
-                consumer="trace_payload",
-                task_context=task_context,
-            ),
+            "text_summary": mark.text_summary or "",
         }
         marks.append(row)
     return {
@@ -431,6 +429,63 @@ def _verifier_observation_payload(observation, *, task_context: str | None = Non
     }
 
 
+def _sanitize_verifier_observation_payload(payload: dict, *, task_context: str | None = None) -> dict:
+    """Return prompt/trace-safe verifier observation without raw UI text."""
+
+    if not isinstance(payload, dict):
+        return {}
+    safe = sanitize_context_payload(payload, consumer="checkpoint", task_context=task_context)
+    if not isinstance(safe, dict):
+        return {}
+    marks = safe.get("marks")
+    if isinstance(marks, list):
+        safe["marks"] = marks[:20]
+    return safe
+
+
+SAFE_VERIFIER_EVIDENCE_STRINGS = {
+    "after_observation_unavailable",
+    "app_opened",
+    "content_shift_unverified",
+    "focused_editable_or_keyboard_visible",
+    "input_focused",
+    "input_progress",
+    "postcondition_unverified",
+    "private_text_unverifiable",
+    "typed_text_present",
+}
+
+
+def _sanitize_verifier_evidence(evidence: dict, *, task_context: str | None = None) -> dict:
+    """Sanitize verifier evidence while preserving stable machine codes."""
+
+    safe = sanitize_context_payload(evidence, consumer="trace_payload", task_context=task_context)
+    if not isinstance(safe, dict):
+        return {}
+    for key in ("matched_postconditions", "missing_postconditions"):
+        value = evidence.get(key) if isinstance(evidence, dict) else None
+        if isinstance(value, list):
+            safe[key] = [_sanitize_postcondition_item(item) for item in value]
+    return safe
+
+
+def _sanitize_postcondition_item(item):
+    if not isinstance(item, str):
+        return sanitize_context_payload(item, consumer="trace_payload")
+    if item in SAFE_VERIFIER_EVIDENCE_STRINGS or item.startswith("sha256:") or item.startswith("forbidden:sha256:"):
+        return item
+    return _redacted_private_text(item)
+
+
+def _sanitize_verifier_result_dict(verifier_result, *, task_context: str | None = None) -> dict:
+    data = verifier_result.to_dict()
+    if isinstance(data.get("evidence"), dict):
+        data["evidence"] = _sanitize_verifier_evidence(data["evidence"], task_context=task_context)
+    if isinstance(data.get("signals"), dict):
+        data["signals"] = sanitize_context_payload(data["signals"], consumer="checkpoint", task_context=task_context)
+    return data
+
+
 def _takeover_threshold(config: RunnableConfig) -> int:
     configurable = config.get("configurable", {})
     try:
@@ -438,6 +493,12 @@ def _takeover_threshold(config: RunnableConfig) -> int:
     except (TypeError, ValueError):
         return DEFAULT_TAKEOVER_RETRY_THRESHOLD
     return max(1, value)
+
+
+def _has_positive_verifier_progress(verifier_result) -> bool:
+    evidence = getattr(verifier_result, "evidence", None) or {}
+    progress = evidence.get("progress_signals") if isinstance(evidence, dict) else None
+    return bool(isinstance(progress, dict) and progress.get("strong_progress"))
 
 
 def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
@@ -456,9 +517,7 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
     action_parsed = state.get("action_parsed")
     action_result = state.get("action_result")
     task = state["task"]
-    task_for_prompt = str(
-        sanitize_context_payload(task, consumer="reflect_prompt", task_context=task)
-    )
+    task_for_prompt = str(sanitize_context_payload(task, "task", consumer="checkpoint", task_context=task))
     step_count = state["step_count"]
     max_steps = state["max_steps"]
     context_mode = get_context_mode(state, config)
@@ -498,11 +557,7 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
     if device_verifier_signals:
         after_verifier_observation = {
             **after_verifier_observation,
-            "device_signals": sanitize_context_payload(
-                device_verifier_signals,
-                consumer="trace_payload",
-                task_context=task,
-            ),
+            "device_signals": device_verifier_signals,
         }
     verifier_result = verify_action_outcome(
         before_state={
@@ -515,14 +570,20 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
         before_observation=before_verifier_observation,
         after_observation=after_verifier_observation,
     )
-    verifier_result_dict = sanitize_context_payload(
-        verifier_result.to_dict(),
-        consumer="trace_payload",
+    verifier_result_dict = _sanitize_verifier_result_dict(
+        verifier_result,
         task_context=task,
     )
-    verifier_evidence = sanitize_context_payload(
+    verifier_evidence = _sanitize_verifier_evidence(
         verifier_result.evidence,
-        consumer="trace_payload",
+        task_context=task,
+    )
+    safe_before_verifier_observation = _sanitize_verifier_observation_payload(
+        before_verifier_observation,
+        task_context=task,
+    )
+    safe_after_verifier_observation = _sanitize_verifier_observation_payload(
+        after_verifier_observation,
         task_context=task,
     )
     emit_trace(
@@ -534,11 +595,11 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
             "current_app": current_app,
             "action": action_parsed,
             "action_result": action_result,
-            "before_observation": _bounded_observation_summary(before_verifier_observation, task_context=task),
+            "before_observation": safe_before_verifier_observation,
             "after_observation": after_observation.mark_provider_observation,
             "device_signals": sanitize_context_payload(
                 device_verifier_signals,
-                consumer="trace_payload",
+                consumer="checkpoint",
                 task_context=task,
             ),
             "verifier_result": verifier_result_dict,
@@ -554,10 +615,10 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
         system_prompt = REFLECT_SYSTEM_PROMPT_CN
 
     action_str = str(
-        sanitize_context_payload(action_parsed, consumer="reflect_prompt", task_context=task)
+        sanitize_context_payload(action_parsed, consumer="checkpoint", task_context=task)
     ) if action_parsed else "None"
     result_str = str(
-        sanitize_context_payload(action_result, consumer="reflect_prompt", task_context=task)
+        sanitize_context_payload(action_result, consumer="checkpoint", task_context=task)
     ) if action_result else "None"
     expected_outcome_text = expected_outcome_prompt_block(
         state.get("expected_outcome"),
@@ -566,18 +627,10 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
     )
     if deterministic_reflection is None:
         verifier_signals = str(
-            sanitize_context_payload(
-                verifier_result.to_dict(),
-                consumer="reflect_prompt",
-                task_context=task,
-            )
+            _sanitize_verifier_result_dict(verifier_result, task_context=task)
         )
-        before_summary = str(
-            _bounded_observation_summary(before_verifier_observation, task_context=task)
-        )
-        after_summary = str(
-            _bounded_observation_summary(after_verifier_observation, task_context=task)
-        )
+        before_summary = str(safe_before_verifier_observation)
+        after_summary = str(safe_after_verifier_observation)
         screen_info = MessageBuilder.build_screen_info(current_app)
         if lang == "en":
             reflect_text = (
@@ -677,13 +730,18 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
     final_verdict = reflection_fields["reflection_verdict"]
     final_failure_cause = reflection_fields.get("failure_cause")
     retry_count = int(state.get("retry_count") or 0)
+    has_positive_progress = _has_positive_verifier_progress(verifier_result)
     if final_verdict in {"failed", "partial"}:
-        retry_count += 1
+        if has_positive_progress:
+            retry_count = 0
+        else:
+            retry_count += 1
     takeover_update = {}
     if (
         final_verdict in {"failed", "partial"}
         and retry_count >= _takeover_threshold(config)
         and not task_finished
+        and not has_positive_progress
     ):
         parsed_reflection.suggested_strategy = "takeover"
         takeover_update = {

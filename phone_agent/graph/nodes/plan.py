@@ -23,6 +23,7 @@ from phone_agent.graph.context import (
 from phone_agent.graph.expected_outcome import (
     extract_provider_envelope,
     normalize_expected_outcome,
+    runtime_expected_outcome_dict,
     sanitize_expected_outcome_dict,
 )
 from phone_agent.graph.observation import build_mark_provider_hints, build_observation
@@ -368,7 +369,11 @@ def _parse_and_ground_response(
         action=action_parsed,
         intent=intent_raw,
     )
-    expected_outcome_dict = sanitize_expected_outcome_dict(
+    expected_outcome_dict = runtime_expected_outcome_dict(
+        expected_outcome,
+        task_context=configurable.get("task_context"),
+    )
+    expected_outcome_trace = sanitize_expected_outcome_dict(
         expected_outcome,
         task_context=configurable.get("task_context"),
     )
@@ -385,6 +390,7 @@ def _parse_and_ground_response(
         grounding_error,
         grounding_observation,
         expected_outcome_dict,
+        expected_outcome_trace,
     )
 
 
@@ -827,6 +833,7 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
         grounding_error,
         grounding_observation,
         expected_outcome,
+        expected_outcome_trace,
     ) = _parse_and_ground_response(
         response,
         parse_configurable,
@@ -859,6 +866,7 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
                 retry_grounding_error,
                 retry_grounding_observation,
                 retry_expected_outcome,
+                retry_expected_outcome_trace,
             ) = _parse_and_ground_response(
                 retry_response,
                 parse_configurable,
@@ -873,6 +881,7 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
             grounding_error = retry_grounding_error
             grounding_observation = retry_grounding_observation
             expected_outcome = retry_expected_outcome
+            expected_outcome_trace = retry_expected_outcome_trace
         except Exception as exc:
             parse_metadata = {
                 **parse_metadata,
@@ -897,7 +906,7 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
         "parse_success": parse_error is None,
     }
     if expected_outcome is not None:
-        action_raw_payload["expected_outcome"] = expected_outcome
+        action_raw_payload["expected_outcome"] = expected_outcome_trace
     action_raw_safe = json.dumps(action_raw_payload, ensure_ascii=False)
     thinking_safe = str(
         sanitize_context_payload(
@@ -932,7 +941,7 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
             "mark_provider_observation": observation.mark_provider_observation,
             "grounding_candidate_count": grounding_candidate_count,
             "selected_grounding_candidate_id": selected_grounding_candidate_id,
-            "expected_outcome": expected_outcome,
+            "expected_outcome": expected_outcome_trace,
             "mark_registry": mark_registry.trace_summary(),
             "repair_attempted": parse_metadata.get("repair_attempted", False),
             "repair_success": parse_metadata.get("repair_success"),

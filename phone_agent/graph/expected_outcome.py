@@ -135,7 +135,12 @@ def sanitize_expected_outcome_dict(
 
     if outcome is None:
         return None
-    raw = outcome.to_dict() if isinstance(outcome, ExpectedOutcome) else outcome
+    if isinstance(outcome, ExpectedOutcome):
+        raw = outcome.to_dict()
+    elif isinstance(outcome, dict):
+        raw = dict(outcome)
+    else:
+        return None
     if not isinstance(raw, dict):
         return None
     for key in ("must_observe", "must_not_observe", "dynamic_regions"):
@@ -147,6 +152,23 @@ def sanitize_expected_outcome_dict(
     if not isinstance(sanitized, dict):
         return None
     return sanitized
+
+
+def runtime_expected_outcome_dict(
+    outcome: ExpectedOutcome | dict[str, Any] | None,
+    *,
+    task_context: str | None = None,
+) -> dict[str, Any] | None:
+    """Return the verifier/runtime contract without raw provider text.
+
+    The verifier can match sha256 stubs against observed UI text on the fly.
+    Regex-redacted private values become ``private_text_unverifiable``.
+    """
+
+    sanitized = sanitize_expected_outcome_dict(outcome, task_context=task_context)
+    if sanitized is None:
+        return None
+    return normalize_expected_outcome(sanitized).to_dict()
 
 
 def _stub_text_list(value: Any) -> list[dict[str, Any]]:
@@ -217,11 +239,8 @@ def expected_outcome_prompt_block(
 ) -> str:
     """Render a compact expected outcome block for verifier prompts."""
 
-    if isinstance(outcome, ExpectedOutcome):
-        summary = outcome.trace_summary(task_context=task_context)
-    elif isinstance(outcome, dict):
-        summary = sanitize_context_payload(outcome, consumer="reflect_prompt", task_context=task_context)
-    else:
+    summary = sanitize_expected_outcome_dict(outcome, task_context=task_context)
+    if summary is None:
         summary = ExpectedOutcome().trace_summary(task_context=task_context)
     if lang == "en":
         return f"Expected postconditions (not execution authorization): {summary}"
@@ -236,6 +255,9 @@ def _normalize_string_list(value: Any, default: list[str]) -> list[str]:
         if isinstance(item, str):
             text = item.strip()
             if text:
+                if text in {"<redacted>", "<matches_task_value>"}:
+                    result.append("private_text_unverifiable")
+                    continue
                 result.append(text[:MAX_TEXT_CHARS])
         elif isinstance(item, dict):
             if item.get("private_text_unverifiable") is True:
@@ -259,6 +281,8 @@ def _normalize_optional_string(value: Any, default: str | None) -> str | None:
     if not isinstance(value, str):
         return default
     text = value.strip()
+    if text in {"<redacted>", "<matches_task_value>"}:
+        return "private_text_unverifiable"
     return text[:MAX_TEXT_CHARS] if text else default
 
 

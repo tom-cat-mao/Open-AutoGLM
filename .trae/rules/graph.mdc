@@ -24,7 +24,7 @@ notes: "Autopilot implementation completed; final Critic ITERATE findings addres
 
 ## 已完成 Phase
 
-- Phase V1-V5 已完成：新增 `ExpectedOutcome` sibling verification contract、provider envelope 解析、动作后 observation 重建、deterministic postcondition verifier、unknown/低置信时的 isolated verifier request、trace-safe verifier evidence、targeted regression tests 与 README/docs/AGENTS 同步。旧 action JSON 兼容；真实 `ModelClient` JSON schema/auto 路径保留 envelope 供 Plan 拆分；`ExpectedOutcome` 不进入 canonical ActionIR / Validator / Safety / Executor；`screen_changed` 仅作为 weak signal，不再单独证明 Tap/Type/Search/Video 成功；`input_focused` 会结合 focused/editable/keyboard/top activity 等只读信号；VLM verifier request 携带 before/after observation summary 且不追加 `state["messages"]`；provider-supplied `expected_outcome` 自由文本与 `verifier_evidence` 入 state/trace 前以 stub/hash summary 保存。
+- Phase V1-V5 已完成：新增 `ExpectedOutcome` sibling verification contract、provider envelope 解析、动作后 observation 重建、deterministic postcondition verifier、unknown/低置信时的 isolated verifier request、trace-safe verifier evidence、targeted regression tests 与 README/docs/AGENTS 同步。旧 action JSON 兼容；真实 `ModelClient` JSON schema/auto 路径保留 envelope 供 Plan 拆分；`ExpectedOutcome` 不进入 canonical ActionIR / Validator / Safety / Executor；state 内保存 runtime hash/哨兵 contract，`action_raw`/trace/report/checkpoint 使用 stub/hash summary；`screen_changed` 仅作为 weak signal，不再单独证明 Tap/Type/Search/Video/Swipe 成功；`input_focused` 会结合 focused/editable/keyboard/top activity、输入文本、Search/搜索按钮等只读信号；VLM verifier request 使用 stub/hash before/after observation summary 且不追加 `state["messages"]`；只有按 action/outcome 绑定的 `strong_progress` 会阻止机械 takeover；Reflect 默认 accessibility-only，不触发 LocateAnything fallback，除非显式开启。
 
 ## RALPLAN-DR 摘要
 
