@@ -633,7 +633,16 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
             error_message = f"Reflection failed: {type(e).__name__}"
             if verbose:
                 print(error_message)
-            emit_trace(config, state, "reflect", "reflect_error", {"message": error_message})
+            emit_trace(
+                config,
+                state,
+                "reflect",
+                "reflect_error",
+                {
+                    "message": error_message,
+                    "parse_metadata": getattr(e, "parse_metadata", {}) or {},
+                },
+            )
             raw_action = ""
             parsed_reflection = ReflectionResult("failed", "model_reflection_failed", "retry", error_message)
             reflection = error_message

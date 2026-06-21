@@ -11,6 +11,7 @@ from phone_agent.grounding.factory import build_mark_provider, build_mark_provid
 from phone_agent.grounding.locateanything import LocateAnythingMLXProvider
 from phone_agent.grounding.parser import GroundingParseError, calibrate_bbox_from_resized_input, parse_box_response
 from phone_agent.grounding.provider import MarkCandidate, MarkProviderHint, MarkProviderResult, ScreenBinding
+from phone_agent.graph.marks import MarkRegistry
 
 
 class Screenshot:
@@ -164,6 +165,143 @@ def test_description_only_intent_requires_mark_id() -> None:
         )
 
     assert exc_info.value.code == "mark_required"
+
+
+def test_mark_prompt_preserves_non_sensitive_ui_text_and_geometry() -> None:
+    registry = MarkRegistry.from_marks(
+        "screen-1",
+        [
+            {
+                "mark_id": "ax_2",
+                "screen_id": "screen-1",
+                "bbox": [25, 53, 140, 98],
+                "role": "ViewGroup",
+                "text_summary": "我的",
+            },
+            {
+                "mark_id": "ax_3",
+                "screen_id": "screen-1",
+                "bbox": [174, 57, 745, 95],
+                "role": "LinearLayout",
+                "text_summary": "搜索 食贫道",
+            },
+        ],
+    )
+
+    prompt = registry.prompt_block()
+
+    assert "搜索" in prompt
+    assert "食贫道" not in prompt
+    assert "我的" in prompt
+    assert "bbox=[174.0, 57.0, 745.0, 95.0]" in prompt
+    assert "center=[459.5, 76.0]" in prompt
+    assert "position=top-center-wide" in prompt
+    assert "redacted" not in prompt
+    assert "sha256" not in prompt
+
+
+def test_mark_prompt_hides_private_content_text() -> None:
+    registry = MarkRegistry.from_marks(
+        "screen-1",
+        [
+            {
+                "mark_id": "m1",
+                "screen_id": "screen-1",
+                "bbox": [100, 100, 300, 200],
+                "role": "TextView",
+                "text_summary": "张三",
+            }
+        ],
+    )
+
+    prompt = registry.prompt_block()
+
+    assert "张三" not in prompt
+    assert "<private_or_content_text>" in prompt
+
+
+def test_mark_prompt_still_redacts_sensitive_ui_text() -> None:
+    registry = MarkRegistry.from_marks(
+        "screen-1",
+        [
+            {
+                "mark_id": "m1",
+                "screen_id": "screen-1",
+                "bbox": [100, 100, 900, 180],
+                "role": "TextView",
+                "text_summary": "联系人 13800138000",
+            }
+        ],
+    )
+
+    prompt = registry.prompt_block()
+
+    assert "13800138000" not in prompt
+    assert "<redacted>" in prompt
+
+
+def test_mark_grounding_rejects_target_text_mismatch() -> None:
+    registry = MarkRegistry.from_marks(
+        "screen-1",
+        [
+            {
+                "mark_id": "profile",
+                "screen_id": "screen-1",
+                "bbox": [25, 53, 140, 98],
+                "role": "ViewGroup",
+                "text_summary": "我的",
+            },
+            {
+                "mark_id": "search",
+                "screen_id": "screen-1",
+                "bbox": [174, 57, 745, 95],
+                "role": "LinearLayout",
+                "text_summary": "搜索",
+            },
+        ],
+    )
+
+    with pytest.raises(GroundingError) as exc_info:
+        ground_intent_to_action(
+            {
+                "_metadata": "intent",
+                "action": "tap",
+                "target_mark_id": "profile",
+                "target_text_hint": "搜索",
+            },
+            mark_registry=registry,
+            screen_id="screen-1",
+        )
+
+    assert exc_info.value.code == "mark_semantic_mismatch"
+
+
+def test_mark_grounding_allows_search_like_wide_top_target() -> None:
+    registry = MarkRegistry.from_marks(
+        "screen-1",
+        [
+            {
+                "mark_id": "search_bar",
+                "screen_id": "screen-1",
+                "bbox": [174, 57, 745, 95],
+                "role": "LinearLayout",
+                "text_summary": "推荐热词",
+            }
+        ],
+    )
+
+    action = ground_intent_to_action(
+        {
+            "_metadata": "intent",
+            "action": "tap",
+            "target_mark_id": "search_bar",
+            "target_text_hint": "搜索",
+        },
+        mark_registry=registry,
+        screen_id="screen-1",
+    )
+
+    assert action == {"_metadata": "do", "action": "Tap", "element": [459.5, 76.0]}
 
 
 def test_fake_mark_provider_returns_mark_candidates() -> None:

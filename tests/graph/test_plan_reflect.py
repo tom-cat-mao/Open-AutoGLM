@@ -223,6 +223,31 @@ def test_plan_node_parse_retry_recovers_format_only(base_state, fake_device) -> 
     assert "error" not in result
 
 
+def test_plan_node_wrong_page_parse_failure_falls_back_to_back(base_state, fake_device) -> None:
+    model = FakeModelClient(FakeModelResponse("think", "not an action"))
+    base_state["failure_cause"] = "wrong_page"
+    base_state["suggested_strategy"] = "go_back"
+
+    result = plan_node(
+        base_state,
+        {
+            "configurable": {
+                "model_client": model,
+                "device_factory": fake_device,
+                "output_mode": "json_schema",
+                "verbose": False,
+            }
+        },
+    )
+
+    assert model.calls == 2
+    assert result["action_parsed"] == {"_metadata": "do", "action": "Back"}
+    assert result["finished"] is False
+    assert result["error"] is None
+    assert result["parse_metadata"]["deterministic_recovery_action"] == "Back"
+    assert result["parse_metadata"]["deterministic_recovery_reason"] == "wrong_page_go_back"
+
+
 def test_plan_node_retries_real_model_parse_error(base_state, fake_device) -> None:
     class ErrorThenOkModel:
         def __init__(self) -> None:
@@ -1070,6 +1095,55 @@ def test_plan_trace_parse_metadata_matches_legacy_dsl_parse_failure(
     assert plan_result["payload"]["parse_success"] is False
     assert plan_result["payload"]["parse_metadata"]["parse_success"] is False
     assert plan_result["payload"]["parse_metadata"]["parse_error_code"] == "invalid_json"
+
+
+def test_plan_trace_can_include_raw_model_response_when_enabled(
+    base_state, fake_device, tmp_path
+) -> None:
+    import json
+
+    from phone_agent.graph.trace import JsonlTraceWriter
+
+    writer = JsonlTraceWriter(
+        trace_id="raw-model-response",
+        trace_dir=tmp_path,
+        allow_raw_debug=True,
+    )
+
+    class RawFailureModel:
+        def request(self, *_args, **_kwargs):
+            raise ModelParseError(
+                "invalid_json",
+                {
+                    "provider": "openai_compatible",
+                    "configured_mode": "json_schema",
+                    "detected_format": "unknown",
+                    "adapter_used": "none",
+                    "parse_success": False,
+                    "parse_error_code": "invalid_json",
+                    "raw_model_response": "legacy text action",
+                    "raw_model_response_length": len("legacy text action"),
+                },
+            )
+
+    plan_node(
+        base_state,
+        {
+            "configurable": {
+                "model_client": RawFailureModel(),
+                "device_factory": fake_device,
+                "trace_writer": writer,
+                "verbose": False,
+                "parse_retry": 0,
+            }
+        },
+    )
+
+    records = [json.loads(line) for line in writer.path.read_text(encoding="utf-8").splitlines()]
+    plan_error = next(item for item in records if item["event"] == "plan_error")
+    metadata = plan_error["payload"]["parse_metadata"]
+    assert metadata["raw_model_response"] == "legacy text action"
+    assert metadata["raw_model_response_length"] == len("legacy text action")
 
 
 def test_reflect_node_cn_and_en_task_finished_detection(

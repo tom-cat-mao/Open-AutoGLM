@@ -1,7 +1,7 @@
 """Plan node: screenshot → build messages → model inference → parse action."""
 
 import json
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from langchain_core.runnables import RunnableConfig
 
@@ -398,6 +398,16 @@ def _action_for_history(action: dict | None) -> dict | None:
         if isinstance(safe.get(key), str):
             safe[key] = _redacted_private_text(safe[key])
     return safe
+
+
+def _recovery_action_for_parse_failure(state: "AgentState", parse_metadata: dict) -> dict[str, Any] | None:
+    if parse_metadata.get("parse_error_code") not in {"invalid_json", "parse_error"}:
+        return None
+    if state.get("failure_cause") != "wrong_page":
+        return None
+    if state.get("suggested_strategy") != "go_back":
+        return None
+    return {"_metadata": "do", "action": "Back"}
 
 
 def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
@@ -932,6 +942,56 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
     )
 
     if parse_error:
+        recovery_action = _recovery_action_for_parse_failure(state, parse_metadata)
+        if recovery_action is not None:
+            recovery_raw = json.dumps(
+                {
+                    "action": recovery_action,
+                    "parse_success": False,
+                    "recovery_from": parse_metadata.get("parse_error_code"),
+                },
+                ensure_ascii=False,
+            )
+            return {
+                "messages": new_messages,
+                "step_count": step_count + 1,
+                "screenshot_b64": screenshot.base64_data,
+                "current_app": current_app,
+                "screen_id": observation.snapshot.screen_id,
+                "screen_hash": observation.snapshot.screen_hash,
+                "observation": observation.to_dict(),
+                "mark_registry": mark_registry.to_dict(),
+                "screen_width": screenshot.width,
+                "screen_height": screenshot.height,
+                "thinking": thinking_safe,
+                "action_raw": recovery_raw,
+                "action_parsed": recovery_action,
+                "intent_raw": intent_raw,
+                "grounding_error": grounding_error,
+                "grounding_result": grounding_observation or None,
+                "grounding_provider": grounding_observation.get("provider"),
+                "grounding_latency_ms": grounding_observation.get("latency_ms"),
+                "grounding_failure_code": grounding_error,
+                "grounding_screen_hash": grounding_observation.get("raw_screenshot_hash") or observation.snapshot.screen_hash,
+                "grounding_observation": grounding_observation or None,
+                "mark_provider_observation": observation.mark_provider_observation,
+                "grounding_candidates": grounding_candidates,
+                "grounding_candidate_count": grounding_candidate_count,
+                "selected_grounding_candidate_id": selected_grounding_candidate_id,
+                "expected_outcome": expected_outcome,
+                "failure_cause": "model_parse_failed",
+                **error_fields,
+                "parse_metadata": {
+                    **parse_metadata,
+                    "deterministic_recovery_action": "Back",
+                    "deterministic_recovery_reason": "wrong_page_go_back",
+                },
+                "finished": False,
+                "error": None,
+                "action_confirmed": False,
+                "context_mode": context_mode,
+                **context_metrics,
+            }
         return {
             "messages": new_messages,
             "step_count": step_count + 1,

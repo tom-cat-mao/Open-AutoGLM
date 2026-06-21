@@ -35,6 +35,7 @@ class AgentConfig:
     trace_enabled: bool = True
     trace_dir: str = ".traces"
     trace_redact: bool = True
+    trace_raw_model_response: bool = False
     trace_strict: bool = False
     context_mode: str = DEFAULT_CONTEXT_MODE
     prompt_version: str = PROMPT_VERSION
@@ -296,6 +297,7 @@ class PhoneAgent:
             trace_id=trace_id,
             trace_dir=self.agent_config.trace_dir,
             redact=self.agent_config.trace_redact,
+            allow_raw_debug=self.agent_config.trace_raw_model_response,
             strict=self.agent_config.trace_strict,
         )
 

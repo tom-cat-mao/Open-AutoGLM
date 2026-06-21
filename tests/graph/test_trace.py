@@ -57,6 +57,16 @@ def test_sanitize_redacts_parse_error_text() -> None:
     assert sanitized["parse_error"]["redacted"] is True
 
 
+def test_sanitize_raw_model_response_requires_unredacted_trace() -> None:
+    payload = {"parse_metadata": {"raw_model_response": "not json 13800138000"}}
+
+    redacted = sanitize_for_trace(payload)
+    unredacted = sanitize_for_trace(payload, allow_raw_debug=True)
+
+    assert redacted["parse_metadata"]["raw_model_response"]["redacted"] is True
+    assert unredacted["parse_metadata"]["raw_model_response"] == "not json 13800138000"
+
+
 def test_sanitize_keeps_context_metrics_but_not_raw_context_block() -> None:
     payload = {
         "prompt_version": "context_harness_v1",

@@ -44,6 +44,7 @@ class ModelConfig:
     lang: str = "cn"  # Language for UI messages: 'cn' or 'en'
     output_mode: OutputMode = "json_schema"
     stream_stdout: bool = False
+    trace_raw_model_response: bool = False
 
     def __post_init__(self) -> None:
         """Validate runtime configuration values not enforced by type hints."""
@@ -332,6 +333,7 @@ class ModelClient:
             "parse_success": False,
             "parse_error_code": None,
         }
+        self._attach_raw_response_metadata(metadata, content, tool_calls)
         try:
             if effective_output_mode == "tool_calls":
                 if not tool_calls:
@@ -428,6 +430,20 @@ class ModelClient:
         except ValueError as exc:
             metadata["parse_error_code"] = "parse_error"
             raise ModelParseError(str(exc), metadata) from exc
+
+    def _attach_raw_response_metadata(
+        self,
+        metadata: dict[str, Any],
+        content: str,
+        tool_calls: list[dict[str, Any]] | None,
+    ) -> None:
+        """Attach raw model output only when explicit local debugging is enabled."""
+        if not self.config.trace_raw_model_response:
+            return
+        metadata["raw_model_response"] = content
+        metadata["raw_model_response_length"] = len(content)
+        if tool_calls is not None:
+            metadata["raw_model_tool_calls"] = tool_calls
 
     def _parse_response(self, content: str) -> tuple[str, str]:
         """

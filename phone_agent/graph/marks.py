@@ -17,6 +17,46 @@ SAFE_METADATA_RE = re.compile(r"[^A-Za-z0-9_.:-]+")
 MAX_MARK_METADATA_CHARS = 32
 PERCEPTUAL_HASH_THRESHOLD = 8
 MARK_CONFIDENCE_THRESHOLD = 0.3
+PROMPT_SAFE_UI_TERMS = {
+    "搜索",
+    "搜一搜",
+    "首页",
+    "我的",
+    "推荐",
+    "热门",
+    "视频",
+    "直播",
+    "番剧",
+    "影视",
+    "关注",
+    "动态",
+    "消息",
+    "会员",
+    "频道",
+    "取消",
+    "返回",
+    "关闭",
+    "确定",
+    "完成",
+    "发布",
+    "打开",
+    "设置",
+    "刷新",
+    "历史",
+    "收藏",
+    "点赞",
+    "评论",
+    "分享",
+    "search",
+    "home",
+    "profile",
+    "me",
+    "cancel",
+    "back",
+    "close",
+    "ok",
+    "done",
+}
 
 
 @dataclass(frozen=True)
@@ -35,6 +75,11 @@ class Mark:
     def to_trace_dict(self) -> dict[str, Any]:
         data = asdict(self)
         data["text_summary"] = sanitize_context_payload(self.text_summary or "", "message", consumer="checkpoint")
+        return data
+
+    def to_prompt_dict(self) -> dict[str, Any]:
+        data = asdict(self)
+        data["text_summary"] = _sanitize_mark_text_for_prompt(self.text_summary or "")
         return data
 
 
@@ -121,10 +166,12 @@ class MarkRegistry:
             title = "** 屏幕标记（使用 target_mark_id，不要猜坐标） **"
         rows = []
         for mark in self.marks.values():
-            summary = mark.to_trace_dict()
+            summary = mark.to_prompt_dict()
             rows.append(
                 f"- {mark.mark_id}: role={summary.get('role') or 'unknown'} "
                 f"source={summary.get('source')} confidence={summary.get('confidence')} "
+                f"bbox={list(mark.bbox)} center={list(mark.center)} "
+                f"position={_mark_position_label(mark)} "
                 f"text_summary={summary.get('text_summary')}"
             )
         return title + "\n" + "\n".join(rows)
@@ -216,6 +263,61 @@ def _coerce_mark(screen_id: str, item: dict[str, Any], index: int) -> Mark:
         role=_safe_mark_metadata(item.get("role"), default="") or None,
         text_summary=str(item.get("text_summary") or item.get("text") or item.get("label") or "") or None,
     )
+
+
+def _mark_position_label(mark: Mark) -> str:
+    x, y = mark.center
+    if y < 160:
+        vertical = "top"
+    elif y > 840:
+        vertical = "bottom"
+    else:
+        vertical = "middle"
+    if x < 250:
+        horizontal = "left"
+    elif x > 750:
+        horizontal = "right"
+    else:
+        horizontal = "center"
+    width = max(0.0, mark.bbox[2] - mark.bbox[0])
+    height = max(0.0, mark.bbox[3] - mark.bbox[1])
+    shape = "wide" if width >= 350 and width >= height * 3 else "compact"
+    return f"{vertical}-{horizontal}-{shape}"
+
+
+def _sanitize_mark_text_for_prompt(value: str) -> str:
+    text = str(sanitize_context_payload(value or "", "text_summary", consumer="inject")).strip()
+    if not text:
+        return ""
+    if "<redacted>" in text:
+        return text
+    safe_text = _prompt_safe_ui_text(text)
+    if safe_text:
+        return safe_text
+    return "<private_or_content_text>"
+
+
+def _prompt_safe_ui_text(text: str) -> str:
+    normalized = " ".join(text.split()).casefold()
+    if not normalized:
+        return ""
+    if len(normalized) > 80:
+        return ""
+    matched = [term for term in PROMPT_SAFE_UI_TERMS if term.casefold() in normalized]
+    if not matched:
+        return ""
+    if _looks_like_resource_id(normalized):
+        return " ".join(sorted(matched, key=len, reverse=True)[:3])
+    ascii_words = re.findall(r"[a-zA-Z][a-zA-Z_-]{1,24}", normalized)
+    if ascii_words and all(word in PROMPT_SAFE_UI_TERMS for word in ascii_words):
+        return text
+    if normalized in {term.casefold() for term in PROMPT_SAFE_UI_TERMS}:
+        return text
+    return " ".join(sorted(matched, key=len, reverse=True)[:3])
+
+
+def _looks_like_resource_id(text: str) -> bool:
+    return ":id/" in text or "/" in text or "." in text
 
 
 def _safe_mark_id(value: Any) -> str:

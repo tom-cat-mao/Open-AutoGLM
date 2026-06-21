@@ -42,5 +42,5 @@ globs: "phone_agent/**/*.py"
 - `run_locateanything.py`：读取 manifest 或 post-training raw JSONL，运行 LocateAnything，输出 predictions JSONL 与 summary JSON。
 - `score_predictions.py`：固定 manifest 后复评已有 predictions。
 - post-training 数据 bbox 是 0-1 normalized xyxy；benchmark manifest 统一使用 0-1000 normalized xyxy。
-- 真实 LocateAnything 依赖 Apple Silicon + Metal + `mlx-vlm`。沙箱、headless 或虚拟化环境可能无法访问 Metal；出现 `No Metal device available` 时应在可访问 GPU 的本机 shell 运行同一命令。
+- 真实 LocateAnything 依赖 Apple Silicon + Metal + `mlx-vlm`。沙箱、headless 或虚拟化环境可能无法访问 Metal；出现 `No Metal device available`、`Operation not permitted` 或设备/GPU访问失败时，必须用 TraeCLI 2.0 工具参数 `sandbox_permissions="require_escalated"` 和用户可读 `justification` 重跑同一命令，不能只用自然语言提示用户手动提权；非破坏性复跑可使用窄 `prefix_rule`，例如 `[".venv/bin/python", "-m", "bench.grounding.run_locateanything"]`。
 - `bench_output/` 是本地结果目录，默认不作为源码提交对象。

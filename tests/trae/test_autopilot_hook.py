@@ -229,6 +229,28 @@ def test_autopilot_docs_and_hook_use_consistent_agents() -> None:
             assert keyword in text, f"{keyword} missing from {path}"
 
 
+def test_traecli_escalation_protocol_is_documented() -> None:
+    paths = [
+        ROOT / ".trae" / "traecli.yaml",
+        ROOT / ".trae" / "skills" / "phone-agent-live-diagnosis" / "SKILL.md",
+        ROOT / ".trae" / "rules" / "tools.mdc",
+    ]
+    required = [
+        'sandbox_permissions="require_escalated"',
+        "justification",
+        "prefix_rule",
+        "Operation not permitted",
+    ]
+    for path in paths:
+        text = path.read_text(encoding="utf-8")
+        for keyword in required:
+            assert keyword in text, f"{keyword} missing from {path}"
+
+    skill_text = paths[1].read_text(encoding="utf-8")
+    assert "Do not merely tell the user" in skill_text
+    assert "No Metal device available" in paths[2].read_text(encoding="utf-8")
+
+
 def test_subagent_tracking_suppresses_stop(tmp_path: Path, capsys) -> None:
     state = {
         "status": "active",

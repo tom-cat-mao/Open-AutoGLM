@@ -354,6 +354,21 @@ def test_json_schema_mode_rejects_text_dsl_response() -> None:
         client._parse_response_with_metadata("legacy text action")
 
     assert exc_info.value.parse_metadata["parse_error_code"] == "invalid_json"
+    assert "raw_model_response" not in exc_info.value.parse_metadata
+
+
+def test_trace_raw_model_response_opt_in_records_parse_failure_text() -> None:
+    client = ModelClient(
+        ModelConfig(output_mode="json_schema", trace_raw_model_response=True)
+    )
+
+    with pytest.raises(ModelParseError) as exc_info:
+        client._parse_response_with_metadata("legacy text action")
+
+    metadata = exc_info.value.parse_metadata
+    assert metadata["parse_error_code"] == "invalid_json"
+    assert metadata["raw_model_response"] == "legacy text action"
+    assert metadata["raw_model_response_length"] == len("legacy text action")
 
 
 def test_json_schema_mode_rejects_direct_coordinate_tap() -> None:

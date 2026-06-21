@@ -18,6 +18,11 @@ from phone_agent.graph.trace import JsonlTraceWriter, sanitize_for_trace
 from phone_agent.model import ModelConfig
 
 DEFAULT_TASKS_PATH = Path(__file__).with_name("tasks.json")
+DEFAULT_MODEL_USER_AGENT = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/125.0.0.0 Safari/537.36 Open-AutoGLM/0.1"
+)
 
 
 @dataclass
@@ -123,6 +128,14 @@ def run_agent_task(task: EvalTask, args: argparse.Namespace) -> RunResult:
             base_url=args.base_url,
             model_name=args.model,
             api_key=args.apikey,
+            timeout=args.model_timeout,
+            max_retries=args.model_max_retries,
+            default_headers=build_model_headers(args),
+            stream=args.stream,
+            extra_body=args.model_extra_body_dict,
+            thinking_mode=args.thinking_mode,
+            thinking_param=args.thinking_param,
+            trace_raw_model_response=args.trace_raw_model_response,
             lang=args.lang,
             output_mode=args.output_mode,
         ),
@@ -133,10 +146,80 @@ def run_agent_task(task: EvalTask, args: argparse.Namespace) -> RunResult:
             verbose=not args.quiet,
             trace_enabled=not args.no_trace,
             trace_dir=args.trace_dir,
+            trace_raw_model_response=args.trace_raw_model_response,
             context_mode=args.context_mode,
+            grounding_provider_name=args.grounding_provider,
+            accessibility_timeout=args.accessibility_timeout,
+            accessibility_max_marks=args.accessibility_max_marks,
+            locateanything_context_max_chars=args.locateanything_context_max_chars,
         ),
     )
     return agent.run_structured(task.task)
+
+
+def parse_bool(value: str | None, default: bool = False) -> bool:
+    """Parse boolean env-style values."""
+
+    if value is None:
+        return default
+    return value.lower() in {"1", "true", "yes", "on"}
+
+
+def parse_json_object(value: str | None, name: str) -> dict[str, Any]:
+    """Parse a JSON object from CLI/env text."""
+
+    if not value:
+        return {}
+    parsed = json.loads(value)
+    if not isinstance(parsed, dict):
+        raise ValueError(f"{name} must be a JSON object")
+    return parsed
+
+
+def parse_env_headers(value: str | None) -> dict[str, str]:
+    """Parse optional OpenAI-compatible HTTP headers from env text."""
+
+    if not value:
+        return {}
+    stripped = value.strip()
+    if not stripped:
+        return {}
+    if stripped.startswith("{"):
+        parsed = json.loads(stripped)
+        if not isinstance(parsed, dict):
+            raise ValueError("PHONE_AGENT_HTTP_HEADERS JSON must be an object")
+        return {str(k).strip(): str(v).strip() for k, v in parsed.items() if str(k).strip()}
+    headers: dict[str, str] = {}
+    for item in stripped.replace("\n", ",").split(","):
+        if not item.strip():
+            continue
+        if ":" in item:
+            key, value_item = item.split(":", 1)
+        elif "=" in item:
+            key, value_item = item.split("=", 1)
+        else:
+            raise ValueError("PHONE_AGENT_HTTP_HEADERS entries must use Header=Value or Header:Value")
+        key = key.strip()
+        if key:
+            headers[key] = value_item.strip()
+    return headers
+
+
+def build_model_headers(args: argparse.Namespace) -> dict[str, str]:
+    """Build model request headers to match main.py runtime behavior."""
+
+    headers = parse_env_headers(os.getenv("PHONE_AGENT_HTTP_HEADERS"))
+    user_agent = args.user_agent or os.getenv("PHONE_AGENT_USER_AGENT") or DEFAULT_MODEL_USER_AGENT
+    if user_agent:
+        headers["User-Agent"] = user_agent
+    cf_client_id = os.getenv("PHONE_AGENT_CF_ACCESS_CLIENT_ID")
+    cf_client_secret = os.getenv("PHONE_AGENT_CF_ACCESS_CLIENT_SECRET")
+    if bool(cf_client_id) != bool(cf_client_secret):
+        raise ValueError("PHONE_AGENT_CF_ACCESS_CLIENT_ID and PHONE_AGENT_CF_ACCESS_CLIENT_SECRET must be configured together")
+    if cf_client_id and cf_client_secret:
+        headers["CF-Access-Client-Id"] = cf_client_id
+        headers["CF-Access-Client-Secret"] = cf_client_secret
+    return headers
 
 
 def result_record(task: EvalTask, result: RunResult) -> dict[str, Any]:
@@ -261,6 +344,46 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model", default="autoglm-phone-9b", help="Model name")
     parser.add_argument("--apikey", default="EMPTY", help="Model API key")
     parser.add_argument(
+        "--user-agent",
+        default=os.getenv("PHONE_AGENT_USER_AGENT"),
+        help="Optional User-Agent header for model API requests",
+    )
+    parser.add_argument(
+        "--model-timeout",
+        type=float,
+        default=float(os.getenv("PHONE_AGENT_MODEL_TIMEOUT", "60")),
+        help="Model API timeout in seconds",
+    )
+    parser.add_argument(
+        "--model-max-retries",
+        type=int,
+        default=int(os.getenv("PHONE_AGENT_MODEL_MAX_RETRIES", "2")),
+        help="Model API max retries",
+    )
+    parser.add_argument(
+        "--stream",
+        action="store_true",
+        default=parse_bool(os.getenv("PHONE_AGENT_STREAM"), False),
+        help="Enable streaming model responses",
+    )
+    parser.add_argument(
+        "--model-extra-body",
+        default=os.getenv("PHONE_AGENT_MODEL_EXTRA_BODY"),
+        help="Extra JSON object merged into model API request body",
+    )
+    parser.add_argument(
+        "--thinking-mode",
+        choices=["auto", "on", "off"],
+        default=os.getenv("PHONE_AGENT_THINKING_MODE", "auto"),
+        help="Provider thinking mode control",
+    )
+    parser.add_argument(
+        "--thinking-param",
+        choices=["enable_thinking", "chat_template_kwargs"],
+        default=os.getenv("PHONE_AGENT_THINKING_PARAM", "enable_thinking"),
+        help="How to pass thinking mode to the provider",
+    )
+    parser.add_argument(
         "--output-mode",
         choices=["json_schema", "tool_calls", "auto"],
         default=os.getenv("PHONE_AGENT_OUTPUT_MODE", "json_schema"),
@@ -279,11 +402,63 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_CONTEXT_MODE,
         help="Context harness mode",
     )
+    parser.add_argument(
+        "--grounding-provider",
+        choices=[
+            "off",
+            "fake",
+            "locateanything",
+            "locateanything_mlx",
+            "mlx",
+            "accessibility",
+            "accessibility_tree",
+            "uiautomator",
+            "hybrid",
+            "accessibility_locateanything",
+            "uiautomator_locateanything",
+        ],
+        default=os.getenv("PHONE_AGENT_GROUNDING_PROVIDER", "hybrid"),
+        help="Grounding mark provider",
+    )
+    parser.add_argument(
+        "--accessibility-timeout",
+        type=float,
+        default=float(os.getenv("PHONE_AGENT_ACCESSIBILITY_TIMEOUT", "3.0")),
+        help="UiAutomator accessibility dump timeout",
+    )
+    parser.add_argument(
+        "--accessibility-max-marks",
+        type=int,
+        default=int(os.getenv("PHONE_AGENT_ACCESSIBILITY_MAX_MARKS", "80")),
+        help="Maximum accessibility marks per screen",
+    )
+    parser.add_argument(
+        "--locateanything-context-max-chars",
+        type=int,
+        default=int(os.getenv("PHONE_AGENT_LOCATEANYTHING_CONTEXT_MAX_CHARS", "0")),
+        help="Bounded LocateAnything context budget",
+    )
     parser.add_argument("--trace-dir", default=".traces", help="Local JSONL trace dir")
     parser.add_argument("--no-trace", action="store_true", help="Disable agent tracing")
+    parser.add_argument(
+        "--trace-raw-model-response",
+        action="store_true",
+        default=parse_bool(os.getenv("PHONE_AGENT_TRACE_RAW_MODEL_RESPONSE"), False),
+        help="Write raw model response text into local trace metadata for debugging",
+    )
     args = parser.parse_args()
     if args.output_mode not in {"json_schema", "tool_calls", "auto"}:
         parser.error("--output-mode must be one of: json_schema, tool_calls, auto")
+    if args.model_timeout <= 0:
+        parser.error("--model-timeout must be positive")
+    if args.model_max_retries < 0:
+        parser.error("--model-max-retries must be non-negative")
+    try:
+        args.model_extra_body_dict = parse_json_object(
+            args.model_extra_body, "--model-extra-body / PHONE_AGENT_MODEL_EXTRA_BODY"
+        )
+    except ValueError as exc:
+        parser.error(str(exc))
     return args
 
 

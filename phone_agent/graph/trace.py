@@ -42,6 +42,10 @@ PRIVATE_TEXT_KEYS = {
     "target_text_hint",
     "text_hint",
 }
+RAW_DEBUG_KEYS = {
+    "raw_model_response",
+    "raw_model_tool_calls",
+}
 
 
 def _redacted_text(value: str) -> dict[str, Any]:
@@ -52,22 +56,33 @@ def _redacted_text(value: str) -> dict[str, Any]:
     }
 
 
-def sanitize_for_trace(value: Any, redact: bool = True, key: str | None = None) -> Any:
+def sanitize_for_trace(
+    value: Any,
+    redact: bool = True,
+    key: str | None = None,
+    allow_raw_debug: bool = False,
+) -> Any:
     """Return a JSON-safe value with sensitive fields redacted."""
     normalized_key = key.lower() if key else ""
+    if normalized_key in RAW_DEBUG_KEYS:
+        if allow_raw_debug:
+            return value
+        if isinstance(value, str):
+            return _redacted_text(value)
+        return "<redacted>"
     if normalized_key in SENSITIVE_KEYS:
         return "<redacted>"
     if normalized_key in PRIVATE_TEXT_KEYS and isinstance(value, str):
         return _redacted_text(value)
     if isinstance(value, dict):
         return {
-            str(k): sanitize_for_trace(v, redact, str(k))
+            str(k): sanitize_for_trace(v, redact, str(k), allow_raw_debug)
             for k, v in value.items()
         }
     if isinstance(value, list):
-        return [sanitize_for_trace(item, redact, key) for item in value]
+        return [sanitize_for_trace(item, redact, key, allow_raw_debug) for item in value]
     if isinstance(value, tuple):
-        return [sanitize_for_trace(item, redact, key) for item in value]
+        return [sanitize_for_trace(item, redact, key, allow_raw_debug) for item in value]
     if not redact:
         return value
     return value
@@ -81,11 +96,13 @@ class JsonlTraceWriter:
         trace_id: str | None = None,
         trace_dir: str | Path = ".traces",
         redact: bool = True,
+        allow_raw_debug: bool = False,
         strict: bool = False,
     ) -> None:
         self.trace_id = trace_id or str(uuid.uuid4())
         self.trace_dir = Path(trace_dir)
-        self.redact = True
+        self.redact = redact
+        self.allow_raw_debug = allow_raw_debug
         self.strict = strict
         self.path = self.trace_dir / f"{self.trace_id}.jsonl"
         self.enabled = True
@@ -114,7 +131,11 @@ class JsonlTraceWriter:
                 "node": node,
                 "event": event,
                 "timestamp": time.time(),
-                "payload": sanitize_for_trace(payload or {}, self.redact),
+                "payload": sanitize_for_trace(
+                    payload or {},
+                    self.redact,
+                    allow_raw_debug=self.allow_raw_debug,
+                ),
             }
             with self.path.open("a", encoding="utf-8") as file:
                 file.write(json.dumps(record, ensure_ascii=False) + "\n")

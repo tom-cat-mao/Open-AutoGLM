@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from phone_agent.actions.adapter import ActionAdapterError, _canonical_action_name
@@ -126,6 +127,7 @@ def ground_intent_to_action(
             raise GroundingError("stale_mark", "mark belongs to another screen")
         if mark.confidence < MARK_CONFIDENCE_THRESHOLD:
             raise GroundingError("low_confidence", "mark confidence is below threshold")
+        _validate_mark_semantics(intent, mark)
         sensitivity = _mark_sensitivity(intent, mark)
         if sensitivity == "takeover":
             try:
@@ -245,3 +247,74 @@ def _mark_sensitivity(intent: dict[str, Any], mark: Any) -> str | None:
     if any(term.lower() in haystack for term in CONFIRM_TERMS):
         return "confirm"
     return None
+
+
+def _validate_mark_semantics(intent: dict[str, Any], mark: Any) -> None:
+    expected_terms = _semantic_terms(intent.get("target_text_hint"))
+    expected_role_terms = _semantic_terms(intent.get("target_role"))
+    if not expected_terms and not expected_role_terms:
+        return
+
+    haystack = _semantic_haystack(mark)
+    if expected_role_terms and not any(term in haystack for term in expected_role_terms):
+        raise GroundingError("mark_semantic_mismatch", "mark role does not match target_role")
+
+    if expected_terms:
+        if any(term in haystack for term in expected_terms):
+            return
+        if _search_like_terms(expected_terms) and _mark_looks_like_search_target(mark, haystack):
+            return
+        raise GroundingError("mark_semantic_mismatch", "mark text does not match target_text_hint")
+
+
+def _semantic_haystack(mark: Any) -> str:
+    return " ".join(
+        str(value or "").casefold()
+        for value in (
+            getattr(mark, "role", None),
+            getattr(mark, "text_summary", None),
+            getattr(mark, "source", None),
+        )
+    )
+
+
+def _semantic_terms(value: Any) -> list[str]:
+    text = str(value or "").casefold()
+    if not text.strip():
+        return []
+    raw_tokens = [token for token in re.split(r"[^0-9a-zA-Z\u4e00-\u9fff]+", text) if token]
+    terms: list[str] = []
+    for token in raw_tokens:
+        if len(token) >= 2:
+            terms.append(token)
+        if any("\u4e00" <= char <= "\u9fff" for char in token):
+            terms.extend(token[index : index + 2] for index in range(0, max(0, len(token) - 1)))
+    return _unique_terms(terms)
+
+
+def _unique_terms(terms: list[str]) -> list[str]:
+    result: list[str] = []
+    for term in terms:
+        if len(term) >= 2 and term not in result:
+            result.append(term)
+    return result[:12]
+
+
+def _search_like_terms(terms: list[str]) -> bool:
+    search_terms = {"搜索", "搜一", "搜素", "search", "query", "input", "输入"}
+    return any(term in search_terms for term in terms)
+
+
+def _mark_looks_like_search_target(mark: Any, haystack: str) -> bool:
+    if any(term in haystack for term in ("search", "搜索", "edittext", "input")):
+        return True
+    bbox = getattr(mark, "bbox", None)
+    if not isinstance(bbox, (list, tuple)) or len(bbox) != 4:
+        return False
+    try:
+        width = float(bbox[2]) - float(bbox[0])
+        height = float(bbox[3]) - float(bbox[1])
+        center_y = (float(bbox[1]) + float(bbox[3])) / 2
+    except (TypeError, ValueError):
+        return False
+    return width >= 350 and height <= 100 and center_y <= 180
