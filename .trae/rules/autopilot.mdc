@@ -1,7 +1,7 @@
 ---
 description: Autopilot pipeline：与 RALPLAN 联动的持续执行状态机协议
 alwaysApply: false
-globs: ".trae/commands/autopilot.md,.trae/hooks/autopilot.py,.trae/rules/autopilot.mdc,.trae/rules/ralplan.mdc,.trae/rules/graph.mdc,.trae/traecli.yaml"
+globs: ".trae/commands/autopilot.md,.trae/hooks/autopilot.py,.trae/rules/autopilot.mdc,.trae/rules/ralplan.mdc,.trae/rules/graph.mdc,.trae/traecli.toml"
 ---
 
 # Autopilot Pipeline
@@ -109,7 +109,7 @@ Autopilot 监听 `subagent_start` / `subagent_stop`，subagent 活跃窗口内�
 
 - Critic 未 `APPROVE` 前不得修改业务代码，除非用户显式 `--direct`。
 - 不把 Autopilot runtime state 写进 `.trae/rules/*.mdc`。
-- 不修改 `.trae/traecli.yaml`；项目级 agents 通过 `.trae/agents/*.md` 自动发现，若不可用需回到 RALPLAN 重新批准。
+- 不修改 `.trae/traecli.toml`；项目级 agents 通过 `.trae/agents/*.md` 自动发现，若不可用需回到 RALPLAN 重新批准。
 - 不主动 commit；完成后只汇总变更和验证结果。
 - 测试临时产物可清理，已有用户/项目改动不得过度清理。
 

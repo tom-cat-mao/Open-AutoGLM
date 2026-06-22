@@ -57,7 +57,7 @@ screenshots/
 .traces/
 bench_output/
 outputs/
-.trae/skills/
+.trae/skills/**/__pycache__/
 .trae/autopilot/*.json
 .trae/autopilot/*.jsonl
 .trae/ralplan/*.json
@@ -73,3 +73,12 @@ app_package_name.py
 .qoder/
 .env
 models/
+.omx/
+.codex/*
+!.codex/agents/
+!.codex/agents/**
+!.codex/skills/
+!.codex/skills/**
+.codex/skills/.system/**
+!.codex/prompts/
+!.codex/prompts/**

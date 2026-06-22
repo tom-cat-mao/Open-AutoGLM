@@ -15,7 +15,7 @@ $ARGUMENTS
 
 1. 读取 `.trae/rules/autopilot.mdc`、`.trae/rules/ralplan.mdc`、`.trae/rules/graph.mdc`。
 2. 若未显式 `--use-current-plan`、`--direct`、`--planning=direct` 或 `--planning=false`，默认先执行 RALPLAN。
-3. 保持 TraeCLI-native：不迁移 `.omc` runtime，不修改 `.trae/traecli.yaml`，runtime state 仍在 `.trae/autopilot/state.json`，mode registry 仍在 `.trae/modes/state.json`。
+3. 保持 TraeCLI-native：不迁移 `.omc` runtime，不修改 `.trae/traecli.toml`，runtime state 仍在 `.trae/autopilot/state.json`，mode registry 仍在 `.trae/modes/state.json`。
 4. 尊重 RALPLAN handoff、mode registry 与 subagent tracking；不抢占其他 active mode。
 5. 不主动 commit，不清理用户已有改动，不修改本任务批准范围外的业务代码。
 6. 每个 stage 完成后，必须单独输出完成信号行：

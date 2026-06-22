@@ -1,7 +1,7 @@
 ---
 description: RALPLAN 共识规划协议：Planner → Architect → Critic，pending approval 前严禁执行
 alwaysApply: false
-globs: ".trae/commands/ralplan.md,.trae/hooks/ralplan.py,.trae/rules/ralplan.mdc,.trae/rules/graph.mdc,.trae/agents/*.md,.trae/traecli.yaml"
+globs: ".trae/commands/ralplan.md,.trae/hooks/ralplan.py,.trae/rules/ralplan.mdc,.trae/rules/graph.mdc,.trae/agents/*.md,.trae/traecli.toml"
 ---
 
 # RALPLAN-DR Consensus Planning

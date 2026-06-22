@@ -25,7 +25,7 @@ RALPLAN -> execution -> RALPH/verification -> qa -> complete
 
 - 读取 `.trae/rules/autopilot.mdc` 获取 pipeline 协议。
 - RALPLAN 产物以 `.trae/rules/graph.mdc` 为准，不使用 `.omc/plans`。
-- TraeCLI-native：不迁移 `.omc` runtime，不修改 `.trae/traecli.yaml`，不引入第二套 runtime state。
+- TraeCLI-native：不迁移 `.omc` runtime，不修改 `.trae/traecli.toml`，不引入第二套 runtime state。
 - 尊重 RALPLAN handoff、mode registry 与 subagent tracking；hook 只从 assistant transcript 识别 completion signal。
 - 每个 stage 完成后单独输出 `AUTOPILOT_SIGNAL: <SIGNAL>`。
 - RALPLAN stage 复用并串行调用 `planner` → `architect` → `critic`，Critic APPROVE 前不得实现。
