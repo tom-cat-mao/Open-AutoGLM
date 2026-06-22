@@ -7,241 +7,218 @@ globs: ".trae/commands/ralplan.md,.trae/commands/autopilot.md,.trae/hooks/ralpla
 # RALPLAN Status
 
 ```yaml
-status: critic_approved
+status: iterate_after_review
 design_status: critic_approved
-execution_status: completed
-iteration: 2
+execution_status: partial
+iteration: 1
 planner_mode: null
-revision_scope: null
-last_planner_update: "Final targeted revision: clarified invalid structure-mode behavior, screen_structures alias precedence, raw hint leak surfaces, and visual merge tie-breakers."
-last_architect_review: "Final Architect found no blockers; requested one config invalid-value clarification plus wire-format/test/merge precision minors."
+revision_scope: "docs synchronized to actual code state; implementation blockers remain"
+last_planner_update: "Finalized approved Hybrid Accessibility Grounding Hardening roadmap after targeted revision."
+last_architect_review: "Second Architect found no blockers; factory metadata carrier, sanitizer requirements, privacy scope, and malformed XML fail-closed behavior are executable."
 last_critic_verdict: APPROVE
 approved_for_execution: true
-notes: "Autopilot execution implemented LocateAnything structured visual marks sidecars with opt-in structure modes, composite Observation/ObjectRegistry integration, visual selector fail-closed rules, privacy summaries, tests, and docs."
+notes: "Autopilot implemented the main Hybrid Accessibility Grounding Hardening pieces, but multi-agent review found remaining blockers: hint-mismatched provider marks can still enter executable marks, diagnostic code fields need strict sanitizers, hybrid wrapper does not surface child parse_summary, and accessibility failure codes need taxonomy sync."
 ```
 
 # Roadmap
 
-## 已完成 Phase 摘要
+## 已完成 Phase
 
-- 已完成 ExpectedOutcome、Context Harness、structured JSON/tool_calls adapter、MarkRegistry grounding、AccessibilityTree hybrid provider、ScreenStructure/ObjectRegistry、object selector grounding、trace/checkpoint redaction 等基础能力。
-- 当前代码事实：Accessibility provider 可输出 `MarkCandidate` 与 `structure_kind=accessibility` sidecar；LocateAnything 在默认 `off` 模式仍保持原有 single-hint grounding 行为，在显式 `locateanything_structure_mode=target|screen` 时可输出 `structure_kind=visual` sidecar。Observation 保留 composite `screen_structures`，并构建 provenance-aware `ObjectRegistry`。
-- 本轮计划已由 Autopilot 执行；后续变更需继续遵守视觉结构不是 Android 控件树真值、atomic `target_mark_id` 是唯一执行边界、raw hint/OCR 不得出 trace/checkpoint/prompt/report。
+- ExpectedOutcome、Context Harness、structured JSON/tool_calls adapter、ActionIR Validator/Repair/Safety Gate、trace/checkpoint redaction、MarkRegistry grounding、AccessibilityTree hybrid provider、ScreenStructure/ObjectRegistry、object selector grounding、LocateAnything structured visual sidecar 已完成或已进入代码事实。
+- 当前代码事实核对：`BOUNDS_RE` 已支持负坐标；`dump_uiautomator_xml()` 已只读取 stdout 并使用 `errors="replace"`；hybrid 默认通过 `build_mark_providers()` 生成 `AccessibilityTreeProvider -> LocateAnythingMLXProvider` 的 `FallbackMarkProvider`；plan/reflect 在 hybrid 模式下会跳过直接 accessibility base-mark 注入。
+- 本次 roadmap 清理旧视觉结构计划，只保留最小历史摘要；新的规划聚焦 hybrid/accessibility grounding 的生产硬化和观测闭环，避免重复实施已完成修复。
+- 最新多 agent 审查结论：signed/whitespace bounds、stdout-only XML、hybrid_factory/synthetic skip row 是真实修复；但 default hybrid 仍会把 hint-mismatched tree marks 放进最终 executable `marks`，`fallback_chain`/`hybrid_factory`/`parse_summary` 的 code 字段 sanitizer 还不是 strict schema，child provider `parse_summary` 未透传到顶层 hybrid result，新增 accessibility failure codes 还未进入 Plan grounding taxonomy。
 
 ## RALPLAN-DR 摘要
 
 ### Principles
 
-1. **Do not pretend vision boxes are an accessibility tree**: LocateAnything 视觉输出可以生成视觉对象候选和几何关系，但不能伪造成真实 Android 控件树的 parent/child、clickable/focusable、collection state 或 resource id。
-2. **Preserve atomic mark execution**: `target_mark_id` 仍是 Tap/Double Tap/Long Press 的唯一执行边界；视觉对象、group、ordinal 只能在当前 observation 内编译到唯一 atomic mark 后执行。
-3. **Structure as sidecar, not executor input**: LocateAnything 的结构化结果若存在，必须走 `MarkProviderResult.screen_structure` 或新的 trace-safe visual sidecar，再由 Observation/ObjectRegistry 构建 prompt，不进入 Validator/Safety/Executor。
-4. **Confidence-tiered selector semantics**: Accessibility-backed objects 可支持强 object/list/ordinal selector；pure-vision objects 默认只支持弱视觉 evidence，只有满足唯一性、几何稳定性和 text/OCR/context 绑定时才允许 selector 编译。
-5. **Fail closed on ambiguity**: 多框、重复视觉对象、低置信、无结构 sidecar、screen/hash mismatch、LA 输出格式异常时不得回退 raw coordinate；只能保留 Screen Marks、reobserve、takeover 或 grounding failure。
+1. **Fix only remaining risks**: 已经落地的 signed bounds、stdout-only XML 和 hybrid base-mark gating 不再重复规划；本轮只补仍可能导致真实设备错点、漏 mark 或不可诊断的边界。
+2. **Tree-first, fail-closed**: Accessibility tree 仍是 hybrid 第一层；解析失败、hint 不匹配、provider 缺失或多候选歧义不能回退到主 VLM raw coordinate。
+3. **Observability before fallback guessing**: hybrid factory、fallback chain、XML parse、bounds normalize、screen structure summary 必须给出脱敏的 failure code 与 evidence count，便于定位“为什么没点到”；新增诊断字段只允许 code/count/bool/hash/length，不承载 raw XML、raw hint 或 raw private text。
+4. **Parser tolerance without semantic invention**: 解析器可容忍负数、空白、控制字符和部分 XML 噪声，但不得伪造 clickable/focusable/resource id 等 Android 控件真值。
+5. **Regression tests reflect real device shapes**: 横竖屏、foldable/负坐标、空白 bounds、WebView/Flutter tree partial、无 dump callback、stderr XML、动态列表噪声都要用 fixture 固化。
 
 ### Decision Drivers
 
-1. 当前 fallback 的 LA mark 已能进入 MarkRegistry，但只出现在 Screen Marks，无法表达“第 N 个视觉结果/卡片/按钮组”等结构化目标。
-2. 外部资料显示 LocateAnything 支持 GUI grounding、dense detection、OCR/text localization、layout grounding，并输出 0-1000 normalized `<box>`；但官方输出仍是 boxes/points，不是 Android accessibility tree。
-3. GUI agent 研究趋势是 hybrid：a11y tree/HTML 适合语义和层级，visual grounding/SoM/UGround/LocateAnything 适合 tree 缺失和视觉目标；纯视觉可行但需要额外几何分组、OCR/描述和严格不确定性控制。
+1. 真实设备上 UiAutomator bounds 可能包含负坐标或被 ROM/工具链格式化；当前 regex 已支持负数，但不支持内部空白，仍可能丢节点。
+2. XML dump 可能包含控制字符、未转义字符、截断 hierarchy 或 stderr 噪声；当前 stdout-only 已正确，但 parser 仍是整体 `ET.fromstring()` fail-closed，缺少可诊断的 parse summary。
+3. hybrid factory 在缺少 accessibility dump callback 时会直接构建 LocateAnything fallback；这是可运行的降级，但当前缺少明确 metadata/trace，用户难以知道 tree-first 为什么没发生。
+4. Fallback provider 已有 hint-aware usable gate，但 failure taxonomy、candidate retained counts、structure retained counts 与 plan/reflect trace 的汇总仍需要更系统的生产级回归保护。
 
 ### Research Evidence Notes
 
 | Source | Evidence used |
 |---|---|
-| SmartSearch broad query: `visual grounding UI element detection structured object hierarchy accessibility tree object registry Android GUI agents LocateAnything` | LocateAnything 是 GUI grounding/dense localization 模型，适合补足 accessibility tree 缺失；robust agents 常融合 a11y tree、visual boxes 与 registry。 |
-| NVIDIA LocateAnything page fetched to `/private/tmp/locateanything-nvidia.md` | LocateAnything 通过 Parallel Box Decoding 输出 bbox/point；训练数据覆盖 GUI grounding、OCR、layout grounding；GUI grounding 在 ScreenSpot-Pro 有强表现。 |
-| HuggingFace `nvidia/LocateAnything-3B` fetched to `/private/tmp/locateanything-hf.md` | 官方任务包括 GUI grounding、text localization、document layout；输出格式是 `<box> x1,y1,x2,y2 </box>` 或 point，坐标 normalized 0-1000。 |
-| SmartSearch query: `Set-of-Mark prompting GUI agents visual grounding structured UI elements accessibility tree` | SoM/visual grounding 提供可选择视觉锚点，但结构化层级通常来自 HTML/a11y tree 或额外候选生成，不等价于真实控件树。 |
-| UGround paper fetched to `/private/tmp/u-ground-paper.md` | 纯视觉 GUI grounding 可行，但其核心是 screenshot + referring expression -> coordinates；结构关系来自描述/训练数据和几何，不是平台控件树。 |
-| Context7 `/blaizzy/mlx-vlm` docs | `apply_chat_template(..., num_images=...)` 后调用 `generate(...)` 是 mlx-vlm 推荐路径；当前 LocateAnything provider 的模板路径应保留。 |
-| Context7 Android Developers docs | Android node fields如 text/clickable/focusable 由平台结构提供；RecyclerView collection info 甚至可能不默认填充，不能假设视觉 provider 能提供这些真值。 |
+| Local code inspection | `phone_agent/grounding/accessibility.py` 已有 signed `BOUNDS_RE` 和 normalization；`phone_agent/adb/device.py` 已只信 stdout；tests 已覆盖 negative bounds、stderr XML、hybrid skip direct base marks。 |
+| Smart Search query: `Android uiautomator dump XML bounds whitespace negative coordinates AccessibilityNodeInfo getBoundsInScreen` | 工程资料支持 bounds 来自 screen-relative rect，负数/越界在滚动、foldable、多窗口等场景可能出现；推荐 regex 同时支持 `-` 和 `\s*`。 |
+| Context7 Android Developers `/websites/developer_android` | Android 文档源可用；bounds 是 screen-coordinate Rect 语义，平台字段必须来自 accessibility node，不应由视觉或 parser 伪造。 |
+| Project memory: hybrid grounding review | 旧 review 指出 signed bounds、stdout/stderr 隔离、factory silent fallback、hint-aware fallback gating 是核心风险；当前前两项已修，后两项仍需观测和回归加固。 |
 
 ### Viable Options
 
 | Option | Pros | Cons | Verdict |
 |---|---|---|---|
-| A. Do nothing: keep LA fallback as flat Screen Marks only | 最安全，当前主链路已可执行；无额外延迟 | LA fallback 仍无法表达视觉列表/卡片/ordinal；tree 缺失时 Screen Objects 缺失 | Baseline only |
-| B. Let LA emit fake Accessibility-like ScreenStructure | 最快接入现有 ObjectRegistry | 会把视觉 guesses 伪装成真实控件树，误导 staleness/HITL/selector；状态字段不可信 | Reject |
-| C. Add VisualStructure sidecar and reuse ObjectRegistry with explicit provenance/confidence | 能让 LA fallback 参与 Screen Objects；保留 provenance 和 fail-closed；可渐进支持 OCR/layout/grouping | 需要新 sidecar schema、confidence tier、prompt/trace/tests；实现复杂度中等 | Selected |
-| D. Use LA dense multi-category detection to fully replace accessibility tree | tree 缺失时覆盖更多目标；跨平台潜力大 | 延迟高；需要 prompt/task taxonomy；无法提供真实 clickable/focusable/resource id；容易产生大量噪声 | Future research |
-| E. Overlay SoM labels from LA boxes and ask main VLM choose visual marks | 与 GUI agent 文献一致；对视觉目标友好 | 需要图像标注/重发截图；当前 prompt/image compaction和隐私路径要扩展；仍无 object registry 语义 | Later phase |
+| A. Full rewrite of grounding pipeline | 可统一清理历史接口 | 风险高，容易破坏已完成 visual/object work；与“根据已找到问题硬化”不匹配 | Reject |
+| B. Minimal bug patch only | 快速修空白 bounds 等单点 | 不能解决 silent fallback、trace 不可诊断和真实设备回归覆盖不足 | Too narrow |
+| C. Hardening phase: tolerant parser + provider observability + fallback taxonomy + focused tests | 聚焦已发现问题；保留现有架构；可验收；不改变执行边界 | 需要跨 adb/grounding/graph/tests/docs 小范围同步 | Selected |
+| D. Benchmark-first large evaluation phase | 能量化 grounding 质量 | 在解析和观测缺口没补齐前，benchmark 失败原因仍不清楚 | Follow-up |
 
 ### Selected Approach
 
-选择 **C. VisualStructure sidecar + provenance-aware ObjectRegistry integration**。
-
-### Concrete Decisions For Open Questions
-
-| Question | Decision |
-|---|---|
-| LA visual structure should run when? | Default `off`. In `target` mode, run only when hybrid fallback reaches LocateAnything because accessibility is missing, failed, or not usable for hints. In `screen` mode, run only when explicitly enabled for diagnostics/evaluation; do not run when accessibility already produced usable objects unless `locateanything_structure_mode=screen` is explicitly configured. |
-| Composite topology digest | Keep accessibility `structure_topology_digest` as the strong staleness digest. Add separate `visual_structure_digest` and `composite_structure_digest`; visual digest must not invalidate accessibility object staleness by itself. Resolver uses source-specific digest checks. |
-| Visual objects and `object_filter.source` | `object_filter.source` may match existing object `source`, but visual provenance must be exposed as `source_kind=visual` in object metadata/prompt/resolver. Do not add raw provider/backend fields to object_filter. |
-| Conflict strategy | Deterministic preserve-both. Accessibility objects keep existing object IDs/order. Visual objects are appended after accessibility objects with `source_kind=visual`; duplicate/overlapping visual boxes become non-executable evidence unless no accessibility object overlaps and uniqueness checks pass. |
+选择 **C. Hybrid Accessibility Grounding Hardening**。
 
 目标运行策略：
 
 ```text
-Hybrid Observation
-  -> Accessibility provider produces accessibility ScreenStructure when available
-  -> LocateAnything fallback may additionally produce VisualStructure from boxes/OCR/layout prompts
-  -> Observation keeps a composite structure set: accessibility first, visual second, never silently first-only
-  -> ObjectRegistry builds objects from composite structures with source/tier/eligibility provenance
-  -> Prompt shows Screen Objects with source/confidence/tier and Screen Marks
-  -> Grounding resolver allows visual object selectors only when uniqueness and binding checks pass
-  -> Executor still receives only canonical ActionIR using atomic mark center
+Plan/Reflect Observation
+  -> Build hybrid provider with explicit tree availability metadata
+  -> Dump UiAutomator XML from stdout only, with timeout/truncation/error code
+  -> Parse XML tolerantly enough for real device bounds/text noise
+  -> Preserve accessibility marks/structure only when screen binding is valid
+  -> Run LocateAnything only when tree is unavailable or hint-unusable, unless visual screen mode is explicitly enabled
+  -> Emit sanitized fallback_chain + candidate/structure counts; accessibility provider emits parse_summary, but default hybrid parse_summary propagation is still a follow-up
+  -> Resolver still compiles only to unique atomic target_mark_id
 ```
 
 ### ADR
 
-- **Decision**: 不让 LocateAnything 伪造 Android 控件树；新增或扩展 sidecar，使 LA 输出成为 `visual` provenance 的结构化对象候选，再通过现有 Observation/ObjectRegistry/grounding resolver 使用。
-- **Drivers**: LA 官方能力是 GUI/text/layout grounding boxes；本地代码已经有 `MarkProviderResult.screen_structure` 接入点；用户需要 LA fallback 也改善 mark 呈现；安全边界要求不把视觉猜测当真实控件状态。
-- **Alternatives**: 保持 flat marks；fake tree；dense detection replace tree；SoM overlay first。
-- **Why chosen**: 在可控改动内最大化复用现有 ObjectRegistry，同时保持真实性、可追踪性和 fail-closed。
-- **Consequences**: Screen Objects 会出现 accessibility-backed 和 visual-backed 两类 object；Observation 不再能只保留第一个 structure；resolver、prompt、checkpoint、trace、tests 必须显式区分 source/kind/tier/eligibility；视觉对象默认更保守。
-- **Follow-ups**: 后续可引入 OCR provider、LA dense categories、SoM overlay、tracking/re-id、真实设备 benchmark。
+- **Decision**: 建立一个小而完整的 hardening phase，覆盖 accessibility XML/bounds 容错、hybrid factory 降级可观测、fallback failure taxonomy、plan/reflect trace summary、回归测试和文档同步；审查后文档先按实际代码状态标注未闭环项。
+- **Drivers**: 已发现问题集中在真实设备边界和诊断盲区；核心 ActionIR/visual sidecar 架构不应重做。
+- **Alternatives**: 单点修复；全量重构；先做 benchmark。
+- **Why chosen**: 改动面可控，直接对应已发现问题，能提高线上问题归因质量，且不改变 executor 安全边界。
+- **Consequences**: 会新增少量 failure code、metadata summary 和 fixture；默认行为应保持兼容，但 trace/report 中会出现更明确的 hybrid/accessibility 诊断字段。当前实现尚未完全兑现 default hybrid 的 parser-level 诊断闭环。
+- **Follow-ups**: 先修复 executable mark 过滤、strict diagnostic sanitizer、hybrid child parse_summary 汇总和 accessibility error taxonomy；之后再考虑真实设备 benchmark、wrong-target regression dashboard、更多 ROM/device corpus。
 
-## 当前规划 Phase: LocateAnything Structured Visual Marks
+## 当前规划 Phase: Hybrid Accessibility Grounding Hardening
 
-### Step 1 - Define Composite Structure Contract
+### Step 1 - Bounds And XML Parser Tolerance
 
-- **根因**: 现有 `ScreenStructure` 暗含 accessibility node 语义；直接复用会混淆真实控件状态和视觉推断。
-- **修改文件候选**: `phone_agent/grounding/provider.py`, `phone_agent/grounding/accessibility.py`, `phone_agent/grounding/fallback.py`, `phone_agent/graph/objects.py`, `phone_agent/graph/observation.py`, `phone_agent/graph/state.py`, `phone_agent/checkpoint/serde.py`, `.trae/rules/graph.mdc`。
+- **根因**: 真实设备 XML bounds 可能包含负数、内部空白、越界坐标；XML 本身可能有控制字符或局部无效字符。当前 signed bounds 已修，但 `BOUNDS_RE` 仍要求无空白，`ET.fromstring()` 出错时缺少细粒度诊断。
+- **修改文件候选**: `phone_agent/grounding/accessibility.py`, `tests/actions/test_grounding_provider.py`, `tests/graph/test_objects.py`。
 - **计划**:
-  1. 扩展 sidecar wire format：`MarkProviderResult.screen_structures: list[dict]` 是主字段，兼容保留 `screen_structure` 作为单结构别名；Observation 统一转换为 structure list，再构建 composite summary。
-  2. 每个 structure dict 允许 `structure_kind: accessibility | visual`、`source_provider`、`confidence_tier`、`node_provenance`、`structure_version`、`structure_digest`；composite 层只在 Observation summary/state 中生成，不要求 provider 伪造 composite。
-  3. Wire-format alias precedence 固定：若 provider 同时返回 `screen_structures` 与 legacy `screen_structure`，以 `screen_structures` 为准；legacy `screen_structure` 只 normalize 为 one-item list；相同 `source_provider + structure_kind + structure_digest` 的重复 structure 不重复 emit。
-  4. Accessibility provider 也必须显式写入 `structure_kind=accessibility`、`source_provider=accessibility_tree`；checkpoint/state summary 必须保留 `structure_kind/source_provider`，不能把 provenance 压掉。
-  5. Fallback provider 必须聚合 child provider 的 `screen_structures`，不能只保留第一个 `collected_structure`；accessibility structure + LA visual structure 都必须 surviving 到返回结果。
-  6. 对 visual node 只允许 bbox、role/type guess、text_stub/hash、visual_order、parent/group id、confidence、source、sensitivity_tags；禁止伪造 clickable/focusable/focused/resource_id_hash/collection truth。
-  7. Observation 必须支持多 structure sidecars 或 composite structure set；合并顺序固定为 accessibility first、visual second；冲突策略为 preserve-both with visual-as-evidence，不允许 `provider_structures[0]` 静默丢掉后续 sidecar。
-  8. `_screen_structure_from_dict()` 不得把缺失 visual fields coercion 成 accessibility defaults；visual fields 缺失时应保持 unknown/null，并在 summary 中标记 `structure_kind=visual`。
+  1. 将 bounds regex 扩展为容忍空白的 signed pattern：`\[\s*(-?\d+)\s*,\s*(-?\d+)\s*\]\s*\[\s*(-?\d+)\s*,\s*(-?\d+)\s*\]`。
+  2. 保持 `_normalize_bounds()` 对越界值 clamp 到 0-1000，不改变坐标执行边界。
+  3. 新增 XML pre-parse 清洗只处理非法控制字符和 BOM；不做未转义 `&`、缺失闭合标签或层级错乱的字符串修复，不伪造节点。
+  4. `parse_uiautomator_marks()` 与 `parse_uiautomator_structure()` 对 parse failure 返回空/None，但同时提供内部 helper 可产出 canonical `parse_summary`：`xml_status`、`raw_node_count`、`mark_count`、`structure_node_count`、`bounds_parse_fail_count`、`filtered_zero_area_count`、`interactive_candidate_count`。`raw_node_count` 仅表示解析后、mark 过滤前的 XML node 数；若 XML 未能解析，计数为 0 或省略，但必须有 `xml_status=accessibility_xml_parse_error`。
 - **验收标准**:
-  - visual sidecar 不能被序列化成看不出来源的 accessibility tree。
-  - accessibility sidecar 也能在 state/trace/checkpoint summary 中看到 `structure_kind=accessibility`。
-  - 多 provider 同时返回 sidecar 时，Observation summary 显示 structure count、kind distribution、merge order 和 conflict count。
-  - Fallback fixture 覆盖：accessibility 返回 structure 且 marks 对 hint 不 usable，LA 继续运行并返回 visual structure，最终 result/observation 同时保留两者。
-  - Fallback fixture 覆盖：accessibility usable 时默认不调用 LA target structure；`screen` mode 显式打开时才允许 supplemental visual sidecar。
-  - trace/checkpoint/prompt 不含 raw LA hint、raw OCR/private text、原始截图。
-  - 旧 accessibility sidecar 行为不退化。
+  - fixture 覆盖 `bounds="[ -10, 20 ][ 1080, 2400 ]"`、负数、越界、空白、无效 bounds、零面积 bounds。
+  - XML 控制字符不会导致整个 provider 未捕获异常；未转义 ampersand、截断 hierarchy、缺失闭合标签按 `accessibility_xml_parse_error` fail-closed 记录，不做 repair。
+  - 不新增 raw text 泄漏；summary 只含计数和 failure code。
 
-### Step 2 - Extend LocateAnything Provider With Optional Structured Modes
+### Step 2 - Accessibility Provider Parse Summary
 
-- **根因**: 当前 LA 每个 hint 只输出一个或多个 bbox；要形成结构，必须有更明确的视觉候选生成策略。
-- **修改文件候选**: `phone_agent/grounding/locateanything.py`, `phone_agent/grounding/parser.py`, `phone_agent/grounding/factory.py`, `phone_agent/agent.py`, `main.py`, `evals/run_eval.py`, `tests/actions/test_grounding_provider.py`, `tests/graph/test_agent_run_result.py`, `README.md`, `docs/future-roadmap.md`。
+- **根因**: 当前 provider 失败时只看到 no marks 或 provider error，无法判断是 dump 空、XML 截断、parse error、bounds 全失败、还是节点均不可用。
+- **修改文件候选**: `phone_agent/grounding/accessibility.py`, `phone_agent/grounding/provider.py`, `phone_agent/graph/observation.py`, `tests/actions/test_grounding_provider.py`, `tests/graph/test_state.py`。
 - **计划**:
-  1. 保留默认 single-hint grounding 行为不变。
-  2. 新增 opt-in `locateanything_structure_mode=off|target|screen`，默认 `off`；`target` 只为当前 hints 生成 visual object；`screen` 使用 bounded category prompts 生成屏幕级候选。
-  3. Config precedence 固定：explicit graph config / AgentConfig > env `PHONE_AGENT_LOCATEANYTHING_STRUCTURE_MODE` > default `off`。
-  4. Invalid-value behavior 固定：explicit config / AgentConfig 的非法 `locateanything_structure_mode` 必须 raise config error；env 非法值回落 `off`，并在 provider/plan trace 记录 `invalid_structure_mode`；任何非法值都不得静默开启视觉结构模式。
-  5. Provider factory 传递 `structure_mode`、`max_visual_candidates`、`visual_category_budget`、`max_structure_calls`；CLI/eval/API 暴露同名配置并更新 README env table。
-  6. 支持 LA 官方任务模板：GUI grounding box/point、text grounding、detect all instances；所有 prompt 仍通过 `apply_chat_template(..., num_images=1)`。
-  7. `target` mode return semantics：单候选仍可作为 executable atomic mark；多候选只能进入 candidates/visual sidecar，不能被默认执行，除非 resolver 后续证明唯一 eligible object。
-  8. `screen` mode return semantics：screen-level candidates 默认只用于 visual sidecar 和 prompt evidence，不作为 immediate executable marks；需要 `max_visual_candidates`、timeout、provider latency budget 和 `visual_structure_partial` failure code。
-  9. `screen` mode category prompts 必须 bounded：固定 categories allowlist、每类候选上限、总 LA calls 上限、总候选上限；禁止开放式无限 dense query。
-  10. 多候选默认进入 candidates；只有结构模式显式允许时才进入 visual sidecar，否则保持现有 `grounding_ambiguous` fail-closed。
+  1. `AccessibilityTreeProvider` metadata 增加脱敏 `parse_summary`：`xml_status`、`raw_node_count`、`mark_count`、`structure_node_count`、`bounds_parse_fail_count`、`filtered_zero_area_count`、`interactive_candidate_count`。
+  2. failure code 细分为 `accessibility_dump_empty`、`accessibility_xml_parse_error`、`accessibility_no_interactive_marks`、`accessibility_structure_missing`。
+  3. Observation 的 `mark_provider_observation.providers[].metadata` 保留 bounded parse summary，不保留 XML、raw text、resource id 原文。
+  4. parse summary 不影响 Safety/Executor，只用于 trace、diagnosis 和 fallback gate。
+  5. 隐私范围明确：本 phase 只约束新加的 `parse_summary`、`fallback_chain`、`hybrid_factory`、compact observation summary 必须 code/count/bool/hash/length-only；现有 `MarkCandidate.text_summary`、`MarkRegistry.prompt_block()` 和 Screen Objects 的 prompt-safe 文本契约保持不变，除非另起 phase。
 - **验收标准**:
-  - 默认配置与当前 tests/行为完全兼容。
-  - `target` mode 生成 `visual` object sidecar，但不自动授权执行。
-  - `screen` mode 有 max candidates、timeout、latency 和 failure code 限制。
-  - provider result summary 区分 executable marks、non-executable candidates、visual sidecar candidates。
-  - 单测覆盖 config > env > default 优先级、显式非法值 raise、env 非法值回落 off 且 trace `invalid_structure_mode`、factory 参数透传、CLI/eval config 传递。
+  - plan/reflect trace 可区分“dump 成功但无可点击节点”和“XML parse 失败”。
+  - 新增 diagnostic metadata 通过 `sanitize_context_payload` 或同等约束，不出现手机号、邮箱、验证码、raw XML、raw hint、raw resource id、raw OCR/private text。
+  - 测试明确证明新增 diagnostic metadata raw-text-free；同时证明现有 prompt-safe `text_summary` 行为不被本 phase 回归。
+  - 旧调用方不读 metadata 时行为不变。
 
-### Step 3 - Build Visual ObjectRegistry Integration
+### Step 3 - Hybrid Factory Degradation Visibility
 
-- **根因**: LA boxes 没有 parent/child，只能通过几何和文本/role evidence 推断 group/list/ordinal；必须降低置信等级。
-- **修改文件候选**: `phone_agent/graph/objects.py`, `phone_agent/graph/observation.py`, `tests/graph/test_objects.py`。
+- **根因**: `build_mark_providers()` 在 hybrid 模式缺少 `accessibility_tree_dump` 时仍会构建 LocateAnything fallback，这是合理降级，但当前不够显式，容易误以为 tree-first 已执行。
+- **修改文件候选**: `phone_agent/grounding/factory.py`, `phone_agent/grounding/fallback.py`, `phone_agent/graph/nodes/plan.py`, `phone_agent/graph/nodes/reflect.py`, `tests/actions/test_grounding_provider.py`, `tests/graph/test_plan_reflect.py`。
 - **计划**:
-  1. `build_object_registry()` 根据 structure kind 选择策略：accessibility 用现有强规则；visual 用 bbox geometry、source order、role guess、text hash 生成弱对象。
-  2. visual objects 允许 `object_type` 为 `visual_target|visual_text|visual_control|visual_group|visual_card`；`list_id/ordinal` 只有在重复 bbox rows/columns 清晰且 count bounded 时生成。
-  3. Deterministic merge tie-breakers 固定：accessibility objects keep existing order；visual objects append after accessibility；visual sort key is provider order、category allowlist order、visual candidate index、bbox top-left `(y1, x1)`、then `mark_id`；overlapping visual/accessibility objects with IoU >= 0.5 are counted as conflicts and visual object becomes non-executable evidence unless no accessibility object overlaps and uniqueness checks pass。
-  4. `ScreenObject` 增加 `source_kind`、`source_provider`、`confidence_tier`、`executable_selector`、`selector_confidence`、`selector_reasons`、`sensitivity_tags`。
-  5. Screen Objects prompt 增加 `source=visual`、`confidence_tier=weak`、`eligible=false|true`，明确 visual ordinal 是 geometric order，不是 accessibility collection truth。
-  6. `phone_agent/graph/marks.py` 保持 atomic mark schema；不得把 visual object metadata 塞进 Mark。
+  1. 选择明确 carrier：给 `FallbackMarkProvider` 增加可选 `composition_metadata: dict[str, Any]` init 参数；factory 在 hybrid 分支构造该 metadata。
+  2. `FallbackMarkProvider.provide_marks()` 在每个返回的 `MarkProviderResult.metadata` 中合并 `hybrid_factory`，schema 固定为 `hybrid_mode: true`、`accessibility_child_enabled: bool`、`accessibility_child_skip_reason: null|accessibility_dump_callback_missing|skip_accessibility_provider`、`provider_order: list[str]`。
+  3. 同时在 `fallback_chain` 最前面追加一个 synthetic skip row 仅当 accessibility child 未构建：`provider=accessibility_tree`、`success=false`、`mark_count=0`、`candidate_count=0`、`structure_count=0`、`usable=false`、`skip_reason=<reason>`、`failure_code=<reason>`、`latency_ms=0`；这样 observation/trace 不需要额外路径也能解释 tree layer 未运行。
+  4. `phone_agent/graph/observation.py::_safe_fallback_chain()` 必须显式保留并 sanitize `structure_count`、`skip_reason`；`hybrid_factory` summary 只保留上述 bounded schema。
+  5. 如果 explicit config 请求 hybrid 且 dump callback 缺失，保留 LA fallback 但在 `hybrid_factory` 和 synthetic fallback row 标记 `accessibility_dump_callback_missing`；不得静默伪装成完整 hybrid。
+  6. plan/reflect 注入 dump callback 的路径保持现有 DeviceFactory DI，不把 `device_factory` 暴露到 tool schema。
+  7. direct `build_mark_provider()` 与 plural `build_mark_providers()` 的行为在 README/代码注释中区分：默认 graph path 使用 plural，single provider path 不应承诺 hybrid composition。
 - **验收标准**:
-  - LA fallback 产生的 visual objects 能出现在 Screen Objects block，但标注 weak/provenance。
-  - 几何重复卡片 fixture 可生成稳定 visual ordinal；重叠/重复/低置信时不生成 selector-capable object。
-  - Screen Marks 仍包含 LA atomic marks。
-  - visual object 不带 source/tier/eligibility 时不得进入 Screen Objects prompt。
+  - fixture 覆盖 hybrid + missing dump callback，最终 provider 可用，`metadata.hybrid_factory.accessibility_child_skip_reason == "accessibility_dump_callback_missing"`，且 `fallback_chain[0].skip_reason` 同步可见。
+  - fixture 覆盖 hybrid + `skip_accessibility_provider=True`，skip reason 与 base-mark 去重原因可观测。
+  - `_safe_fallback_chain()` 输出保留 sanitized `structure_count` 与 `skip_reason`，并拒绝/裁剪非 schema 字段。
+  - 不改变默认 `AgentConfig.grounding_provider_name == "hybrid"`。
 
-### Step 4 - Resolver Rules For Visual Objects
+### Step 4 - Fallback Chain Failure Taxonomy
 
-- **根因**: 若视觉 object selector 和 accessibility object selector 同权，会增加错点风险。
-- **修改文件候选**: `phone_agent/actions/grounding.py`, `phone_agent/actions/selectors.py`, `phone_agent/graph/objects.py`, `tests/actions/test_grounding.py`, `tests/graph/test_plan_reflect.py`。
+- **根因**: Fallback 已 hint-aware，但 provider 成功、marks miss hint、candidates retained、structure retained、screen-mode supplemental 的语义还需要稳定成可测试 contract。
+- **修改文件候选**: `phone_agent/grounding/fallback.py`, `phone_agent/graph/observation.py`, `tests/actions/test_grounding_provider.py`, `tests/graph/test_state.py`。
 - **计划**:
-  1. 为 `ScreenObject` 增加 selector eligibility：`executable_selector: true|false`、`selector_confidence: strong|weak|none`、`selector_reasons`。
-  2. Eligibility 必须由 resolver 强制检查，不是 prompt 建议；visual source 默认 `executable_selector=false`，只有 builder/resolver 明确写入 true 才可编译。
-  3. accessibility-backed objects 走现有规则；visual-backed objects 只有满足唯一 primary mark、bbox non-overlap、semantic hint match、screen binding match、selector_confidence != none 时才能编译。
-  4. visual ordinal 默认 require `object_role/object_filter + ordinal + list_id` 或 target object id from current prompt；description-only hint 仍不是执行目标。
-  5. visual object failure codes 独立可观测：`visual_object_ambiguous`、`visual_object_not_executable`、`visual_structure_missing`，归类为 grounding fail-closed。
+  1. `fallback_chain` 每项固定包含 `provider`、`success`、`failure_code`、`mark_count`、`candidate_count`、`structure_count`、`usable`、`skip_reason`、`latency_ms`。
+  2. 当所有 provider 都有 marks 但均不匹配 hint，统一 status/failure code 为 `grounding_no_usable_candidate`，保留 candidates 与 structures 供诊断，但 `marks=[]`。
+  3. 当某个 provider marks 不匹配 hint，不能把这些 marks 追加到最终 executable `marks`；只能保留到 diagnostic candidates/structures，除非该 provider 自身 `usable=True`。当前代码仍需修复这一点。
+  4. 当 accessibility usable 且后续 LA 不是 `screen` supplemental mode，必须停止，不调用 LA；当 LA 是显式 `screen` mode，允许只补 sidecar/candidates，不追加 executable marks。
+  5. `_result_is_usable()` 的 hint term 提取继续使用 redacted/safe terms，避免 raw private hint 进入 metadata。
+  6. `_safe_fallback_chain()` 是 trace/checkpoint/prompt 之前的 sanitizer gate；只允许 bounded fields，不透传 provider 原始 message、hint、XML 或 candidates。provider、failure_code、xml_status、provider_order 等 code 字段必须使用 enum/safe-identifier allowlist，不能只做 regex redaction。
 - **验收标准**:
-  - visual object 编译成功后 canonical ActionIR 仍只含 action + element/message。
-  - 低置信/多候选 visual objects 不执行，且不会落回 raw LA bbox tap。
-  - 单测证明 `_resolve_object_selector()` 对 visual object 的 eligibility 做硬校验；没有 eligibility 的 visual object 即使唯一也 fail-closed。
-  - semantic hint match 只能使用 hash/stub/role/source-safe matching、bounded safe UI terms 或 sensitivity tags；不得持久化 raw hint/OCR 参与匹配。
-  - HITL sensitivity 使用 `sensitivity_tags` / `sensitivity_evidence_kind`，不能依赖 raw OCR/hint text 进入 safety/executor。
+  - 现有 fallback tests 继续通过，并新增 structure_count/skip_reason 断言。
+  - wrong-hint 情况 fail-closed，不回退 raw bbox tap，且不匹配 hint 的 provider marks 不进入 final executable marks。
+  - screen supplemental mode 不污染 executable mark list。
+  - sanitizer 单测覆盖 `fallback_chain.structure_count`、`fallback_chain.skip_reason`、恶意 extra raw fields 被丢弃，并覆盖恶意文本塞进 allowed code fields 时被归一为 `unknown`/受控 code。
 
-### Step 5 - Sensitivity Tags And Privacy Boundary
+### Step 5 - Plan/Reflect Trace And Error Path Integration
 
-- **根因**: 当前敏感路由读取 mark/object textual evidence；视觉结构若只保存 hash 会失去支付/登录识别，若保存 raw OCR/hint 又违反隐私边界。
-- **修改文件候选**: `phone_agent/actions/grounding.py`, `phone_agent/graph/objects.py`, `phone_agent/graph/observation.py`, `phone_agent/graph/marks.py`, `phone_agent/checkpoint/serde.py`, `tests/graph/test_context_consumer.py`, `tests/graph/test_plan_reflect.py`。
+- **根因**: 线上排查需要知道 observation 生成了哪些 marks/objects/structures，以及失败发生在 dump、parse、fallback gate、adapter、validator 还是 resolver。
+- **修改文件候选**: `phone_agent/graph/nodes/plan.py`, `phone_agent/graph/nodes/reflect.py`, `phone_agent/graph/trace.py`, `phone_agent/graph/observation.py`, `tests/graph/test_plan_reflect.py`。
 - **计划**:
-  1. 为 visual/accessibility object 都支持 bounded `sensitivity_tags`，仅允许枚举值如 `payment`, `privacy`, `login`, `password`, `otp`, `delete`, `permission`。
-  2. `sensitivity_tags` 可由本地 redacted text classifier 从 raw provider memory 中临时计算，但 state/trace/checkpoint/prompt 只能保存 tags 和 evidence kind，不保存 raw text。
-  3. `_mark_sensitivity()` / object sensitivity merge 优先读取 tags，再读取既有 safe evidence；raw LA hint description 不得作为持久 text_summary 进入 safety。
-  4. 对 LA 当前把 hint description 放入 `text_summary` 的路径做计划约束：visual structure mode 下 text_summary 必须是 redacted/stub/length/hash 或 safe UI term，不得把 task raw hint当 object text。
+  1. `plan_start`、`plan_result`、`plan_error`、`reflect` 相关 trace 都带 `mark_provider_observation` 的 compact summary。
+  2. summary 包含 provider_count、provider_order、fallback_chain、hybrid_factory、screen_structure_summary、object_registry counts、failure_code，不包含 screenshot、XML、raw OCR、raw hint。
+  3. default hybrid result 需要把 accessibility child 的 safe `parse_summary` 汇总到 wrapper metadata，或在文档和 trace schema 中明确 provider-level 与 wrapper-level 的区别；当前实现尚未汇总。
+  4. parse/model error 路径也保留 observation summary，避免模型失败后丢失 grounding 诊断。
+  5. Reflect after-observation 默认仍不触发 LocateAnything fallback；只记录 accessibility/device marks unless explicit `reflect_enable_vlm_grounding`。
 - **验收标准**:
-  - payment/privacy/login/OTP visual object 可路由 confirm/takeover，且 trace/checkpoint 不含 raw OCR/hint。
-  - Hash-only object 不会误报敏感；tag-only object 不会暴露隐私文本。
-  - safety route 不读取 provider/backend/device 字段。
-  - 显式测试 `MarkProviderResult.to_dict()`、`mark_provider_observation`、fallback chain metadata、trace summaries、checkpoint collapse、`MarkRegistry.to_dict()` 与 `MarkRegistry.prompt_block()` 对 LA hint-derived `text_summary` 的脱敏/替换，防止 raw task hint 经 provider result、fallback、mark coercion 或 prompt 泄露。
+  - 单测覆盖 `plan_error` 仍包含 provider/fallback summary。
+  - 单测覆盖 `hybrid_factory` 从 provider result metadata 到 observation/trace 的完整路径。
+  - 单测覆盖 default hybrid 下 child `parse_summary` 可被诊断到，或显式验证文档声明的 provider/wrapper 分层。
+  - confirm/takeover/HITL 路由不受 summary 字段影响。
+  - trace JSON 可关联 `.traces/{trace_id}.jsonl`，且敏感字段脱敏。
 
-### Step 6 - Prompt, Trace, And Plan Node Integration
+### Step 6 - Focused Regression Suite
 
-- **根因**: 如果 prompt 没有标注 source/tier，模型会误以为 visual objects 和 accessibility objects 同等可靠；如果 trace 不记录 sidecar provenance，线上问题不可诊断。
-- **修改文件候选**: `phone_agent/graph/objects.py`, `phone_agent/graph/context.py`, `phone_agent/graph/trace.py`, `phone_agent/graph/nodes/plan.py`, `phone_agent/config/prompts_zh.py`, `phone_agent/config/prompts_en.py`, `README.md`, `docs/future-roadmap.md`, `AGENTS.md`。
+- **根因**: 已发现问题多来自真实设备边界，必须用无需 MLX/Metal 的 fixture 固化。
+- **修改文件候选**: `tests/actions/test_grounding_provider.py`, `tests/graph/test_plan_reflect.py`, `tests/graph/test_state.py`, `tests/graph/test_objects.py`, `tests/test_adb_device_signals.py`。
 - **计划**:
-  1. Screen Objects block 加入 source/tier/eligibility 简短字段。
-  2. Prompt contract 明确：visual object selectors are weaker; prefer accessibility-backed objects when both exist; when in doubt use target_mark_id or reobserve.
-  3. `plan_node` 的 `mark_provider_observation`、prompt block、trace result、parse grounding result 必须记录 visual structure candidate count、eligible count、failure reasons、LA latency、fallback chain 和 composite sidecar summary。
-  4. `plan_error` trace 路径也必须带上 visual/composite sidecar summary；解析失败或模型失败时仍要能诊断 LA visual sidecar 是否生成、被过滤或被判定 non-eligible。
-  5. Context/checkpoint collapse 必须保留 kind/source/tier/eligible counts，不保留 raw nodes/objects。
-  6. 文档更新优先 README、docs/future-roadmap、prompt contract；`AGENTS.md` 仅在仓库内存在且作为项目文档源时更新。
+  1. 增加 bounds fixture：负坐标、内部空白、越界、foldable-like、横屏、零面积。
+  2. 增加 XML fixture：stderr XML ignored、stdout truncated、control char cleaned、invalid ampersand fail-closed as `accessibility_xml_parse_error`、empty hierarchy。
+  3. 增加 hybrid fixture：missing dump callback、skip accessibility child、tree marks miss hint then LA usable、tree usable then LA not called、screen supplemental LA called but not executable。
+  4. 增加 trace fixture：plan_result/plan_error/reflection 均有 compact observation summary。
+  5. 增加 sanitizer fixture：`parse_summary`、`fallback_chain.structure_count`、`fallback_chain.skip_reason`、`hybrid_factory` 保留 schema 字段并丢弃 raw XML/raw hint/raw private text。
 - **验收标准**:
-  - prompt 不展示 raw title/text/hint；只展示 hash/stub/length/source/tier。
-  - context/checkpoint redaction 覆盖 visual sidecar。
-  - docs 同步说明 LA structured marks 是视觉推断，不是控件树真值。
-  - `plan_start`、`plan_result`、`plan_error` trace 均可诊断 visual sidecar 是否产生、是否 eligible、为何 fail-closed。
+  - 默认单测不依赖真实 Android、ADB、MLX、Metal。
+  - 推荐验证命令：`.venv/bin/python -m pytest tests/actions/test_grounding_provider.py tests/graph/test_plan_reflect.py tests/graph/test_state.py tests/graph/test_objects.py tests/test_adb_device_signals.py`。
+  - 若完整 suite 太慢，至少跑以上 focused suite；Autopilot 执行阶段再决定是否扩大。
 
-### Step 7 - Evaluation And Rollout Guardrails
+### Step 7 - Documentation And Roadmap Sync
 
-- **根因**: 视觉结构化容易在动态 UI、广告、推荐流、相似卡片中引入错点，必须有针对性评估。
-- **修改文件候选**: `tests/actions/test_grounding_provider.py`, `tests/graph/test_objects.py`, `tests/graph/test_plan_reflect.py`, `bench/grounding/*`, `evals/*`, `docs/future-roadmap.md`。
+- **根因**: hybrid/accessibility 的默认行为、降级行为和诊断字段属于一线排查入口，必须同步文档，否则后续会误判 fallback 是否工作。
+- **修改文件候选**: `README.md`, `docs/future-roadmap.md`, `.trae/rules/graph.mdc`, `.trae/rules/tools.mdc`, `AGENTS.md`（仅仓库内存在时）。
 - **计划**:
-  1. 增加 LA parser/provider unit fixtures：single target、multi box、dense screen、text detection、invalid output。
-  2. 增加 visual object fixtures：无 accessibility tree 的列表、重复视觉卡片、相似文本、广告/banner 动态噪声。
-  3. 增加 live/smoke 指标：visual object selector success、fail-closed rate、wrong-target rate、latency、LA invocation count。
-  4. 默认关闭结构模式，通过 env/config 灰度：`PHONE_AGENT_LOCATEANYTHING_STRUCTURE_MODE`。
+  1. README grounding/env section 说明默认 `hybrid`、tree dump callback、missing callback 降级、fail-closed 和 trace 字段。
+  2. `docs/future-roadmap.md` 标记本 phase 为 Hybrid Accessibility Hardening，区分已完成 visual sidecar 与新 hardening。
+  3. `.trae/rules/tools.mdc` 若仍包含旧 sandbox escalation wording，按当前 TraeCLI 权限模型同步，但不在 RALPLAN 阶段改。
+  4. 文档中明确 `bench_output/` 默认不提交，真实 LA benchmark 依赖 Metal，不把环境失败当模型失败。
 - **验收标准**:
-  - 默认 test suite 不依赖 MLX/Metal。
-  - 真实 LA benchmark 只在可用 Metal 环境运行，失败不解释为模型失败。
-  - 视觉结构模式上线前必须通过 wrong-target regression。
+  - 文档能回答“tree-first 为什么没有跑”“为什么 fallback 到 LA”“为什么没有点击到候选”“trace 里看哪个字段”。
+  - 不提交临时 evidence、bench output、runtime traces。
 
 ## 约束 Checklist
 
 - [x] Planner 只修改 `.trae/rules/graph.mdc`；业务代码修改必须等待 Critic APPROVE 和用户明确批准。
-- [x] LocateAnything 结构化输出不得伪装成 Android accessibility truth。
-- [x] 默认 `locateanything_structure_mode` 必须为 `off`，避免改变当前稳定 fallback 行为。
-- [x] 所有视觉结构对象必须带 provenance、confidence tier 和 selector eligibility。
-- [x] Observation 必须支持 composite/multi sidecars；不得只取 `provider_structures[0]` 丢弃 visual sidecar。
-- [x] checkpoint/state/trace summary 必须保留 structure kind/source/tier/eligibility counts。
-- [x] `target_mark_id` 仍是唯一执行边界；visual object selector 成功后也必须编译为唯一 atomic mark。
-- [x] Visual object selector eligibility 必须由 resolver 强制执行，不能只靠 prompt。
+- [x] Planner initial rewrite 已清理旧 roadmap，旧视觉结构计划仅保留已完成摘要。
+- [x] `target_mark_id` 仍是唯一执行边界；任何 selector 成功后也必须编译为唯一 atomic mark。
 - [x] `target_text_hint` 只能作为 provider hint，不能成为可执行目标。
-- [x] 多候选、低置信、stale/hash mismatch、无 sidecar、结构歧义必须 fail-closed。
-- [x] Raw hint、raw OCR text、raw private text、截图不得进入 trace/checkpoint/report/prompt。
-- [x] 敏感路由使用 bounded `sensitivity_tags` / evidence kind；不得为了 HITL 保存 raw OCR/hint。
-- [x] `apply_chat_template(..., num_images=1)` 路径保留；不引入绕过 mlx-vlm 官方模板的默认路径。
-- [x] Reflect 默认仍不触发 LA fallback；如要使用视觉结构，必须显式 opt-in。
-- [x] Accessibility-backed objects 优先级高于 visual-backed objects；冲突时 fail-closed 或 reobserve。
-- [x] benchmark/report 必须区分 bbox localization quality、selector correctness、end-to-end task success。
+- [x] 多候选、低置信、stale/hash mismatch、无 sidecar、hint mismatch、结构歧义必须 fail-closed。
+- [x] Raw hint、raw OCR text、raw XML、raw private text、截图不得进入 trace/checkpoint/report/prompt。
+- [x] 本 phase 的新增 diagnostic metadata 只允许 code/count/bool/hash/length；现有 prompt-safe mark/object text summary 契约保持不变。
+- [x] bounds parser 可容忍真实设备格式，但不得伪造控件语义。
+- [x] malformed XML 不做语义修复；未转义 ampersand/截断 hierarchy 只记录 parse error 并 fail-closed。
+- [x] hybrid factory 的 accessibility missing/skip 必须可观测，不得静默伪装成完整 tree-first。
+- [x] hybrid factory metadata carrier 固定为 `FallbackMarkProvider(composition_metadata=...)` -> `MarkProviderResult.metadata.hybrid_factory` + synthetic fallback skip row。
+- [x] plan/reflect trace 必须在 success/error 路径保留 compact observation summary。
+- [x] Reflect 默认仍不触发 LA fallback；如要使用 VLM grounding，必须显式 opt-in。
+- [x] 默认 test suite 不依赖真实 Android、ADB、MLX、Metal。
+- [ ] 不匹配 hint 的 provider marks 只能进入 diagnostic candidates/structures，不能进入最终 executable `marks`。
+- [ ] Diagnostic code 字段使用 enum/safe-identifier allowlist，禁止 raw UI/private text 通过 allowed fields 落入 trace/checkpoint/report。
+- [ ] Default hybrid wrapper 透传或汇总 child provider 的 safe `parse_summary`。
+- [ ] 新增 accessibility failure codes 同步进入 Plan grounding taxonomy，保持 `error_layer=grounding` 一致。

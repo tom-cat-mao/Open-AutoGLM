@@ -619,7 +619,10 @@
       <div class="card-title"><span class="dot green"></span> AccessibilityTreeProvider</div>
       <p><code>name="accessibility_tree"</code> &middot; <code>allow_raw_hints=False</code></p>
       <ul>
-        <li>解析 Android UiAutomator XML Dump 为归一化 0-1000 Marks</li>
+        <li>通过 <code>adb exec-out uiautomator dump /dev/tty</code> 的 stdout XML 解析为归一化 0-1000 Marks</li>
+        <li>Bounds parser 支持 signed / whitespace bounds，并对越界坐标 clamp 到 0-1000</li>
+        <li>XML 控制字符只做清洗；未转义 <code>&amp;</code>、截断 hierarchy、缺失闭合标签或结构错乱返回 <code>accessibility_xml_parse_error</code></li>
+        <li>输出 provider-level <code>metadata.parse_summary</code>，只包含 status code 与 node/mark/structure/bounds 计数</li>
         <li>过滤条件：enabled + visible + (clickable | focusable | checkable | long-clickable | scrollable | 文本承载交互类)</li>
         <li>Mark ID 前缀：<code>ax_</code></li>
         <li>置信度：clickable/focusable 为 1.0，其余为 0.8</li>
@@ -648,7 +651,8 @@
         <li>按顺序运行 Provider；首个成功且可用的结果即停止</li>
         <li>Hint-Aware 可用性门控：检查 token 在 role/text_summary/source 上的匹配</li>
         <li>首个 Provider 的 Marks 不匹配 Hint 时，继续下一个</li>
-        <li>收集链上所有 Marks；返回合并结果及 fallback_chain 元数据</li>
+        <li>返回合并结果及 <code>fallback_chain</code> 元数据：provider、success、failure_code、mark/candidate/structure count、usable、skip_reason、latency</li>
+        <li>Hybrid factory 缺少 dump callback 或显式跳过 tree child 时，写入 <code>hybrid_factory</code> 与 synthetic <code>accessibility_tree</code> skip row</li>
         <li>对 <code>allow_raw_hints=False</code> 的 Provider 脱敏 Hint</li>
       </ul>
     </div>
@@ -674,12 +678,30 @@
       <li>若<strong>有 Hint</strong>：对 Hint 术语进行分词（按非字母数字/CJK 边界拆分，保留 &ge;2 字符的 token，CJK 生成 bigram，最多 12 个唯一术语）</li>
       <li>检查是否有 Hint 术语出现在 Mark 的 <code>role</code>、<code>text_summary</code> 或 <code>source</code> 中</li>
       <li>若匹配：Marks "可用" &rarr; <strong>停止 Fallback</strong></li>
-      <li>若不匹配：收集 Marks 但 Fallback <strong>继续</strong>到下一个 Provider</li>
+      <li>若不匹配：Fallback <strong>继续</strong>到下一个 Provider；不匹配的 Marks 应只作为 diagnostic candidates/structures 保留，不应成为最终 executable Marks</li>
     </ol>
   </div>
 
   <div class="callout info">
     <strong>示例：</strong>Hint "点击 Wi-Fi" &rarr; tokens ["点击", "wi", "fi", "wifi"]。Accessibility Tree 返回蓝牙、显示、存储的 Marks。无 token 匹配 &rarr; 不可用 &rarr; LocateAnything 以 Hint "Wi-Fi" 运行 &rarr; 返回目标 Mark。
+  </div>
+
+  <div class="callout danger">
+    <strong>当前审查待修复：</strong>现有 fallback 实现仍可能把 hint-mismatched Accessibility Marks 合并进最终 <code>marks</code>，即进入 MarkRegistry executable surface。架构目标是将这些 marks 限定为 candidates/structures 诊断信息，只有 <code>usable=True</code> 的 provider marks 能进入最终 executable marks。
+  </div>
+
+  <h3>Hybrid 诊断元数据</h3>
+  <table>
+    <thead><tr><th>字段</th><th>当前来源</th><th>内容约束</th><th>审查状态</th></tr></thead>
+    <tbody>
+      <tr><td>metadata.parse_summary</td><td>AccessibilityTreeProvider</td><td>xml_status、raw_node_count、mark_count、structure_node_count、bounds_parse_fail_count、filtered_zero_area_count、interactive_candidate_count</td><td>Provider 已有；default hybrid wrapper 尚未汇总 child parse_summary 到顶层 result</td></tr>
+      <tr><td>metadata.fallback_chain[]</td><td>FallbackMarkProvider</td><td>provider、success、failure_code、candidate_count、mark_count、structure_count、latency_ms、usable、skip_reason</td><td>已落地；code 字段 sanitizer 仍需 strict allowlist</td></tr>
+      <tr><td>metadata.hybrid_factory</td><td>build_mark_providers(hybrid)</td><td>hybrid_mode、accessibility_child_enabled、accessibility_child_skip_reason、provider_order</td><td>已落地；provider_order 仍需 safe-identifier allowlist</td></tr>
+    </tbody>
+  </table>
+
+  <div class="callout warning">
+    <strong>诊断边界：</strong>这些字段只能承载 code/count/bool/hash/length，不得包含 raw XML、raw hint、raw OCR 或私密 UI 文本。当前实现已经丢弃显式 raw extra fields，但 provider、failure_code、xml_status、provider_order 等 allowed code fields 仍需要 enum / safe identifier sanitizer，而不是只依赖 regex redaction。
   </div>
 
   <h3>Hint 隐私</h3>
@@ -863,6 +885,12 @@
       <tr><td>low_confidence</td><td>grounding</td><td>是</td><td>reobserve</td><td>Mark 置信度 &lt; 0.3</td></tr>
       <tr><td>grounding_ambiguous</td><td>grounding</td><td>是</td><td>reobserve</td><td>单 Hint 产生多个 BBox</td></tr>
       <tr><td>grounding_no_candidate</td><td>grounding</td><td>是</td><td>reobserve</td><td>Provider 返回零个 Mark</td></tr>
+      <tr><td>grounding_no_usable_candidate</td><td>grounding</td><td>是</td><td>reobserve</td><td>Provider 有 marks/candidates，但均不匹配当前 hint</td></tr>
+      <tr><td>accessibility_dump_empty</td><td>grounding</td><td>是</td><td>reobserve</td><td>UiAutomator dump 为空或屏幕尺寸无效</td></tr>
+      <tr><td>accessibility_xml_parse_error</td><td>grounding</td><td>是</td><td>reobserve</td><td>XML 未转义、截断或结构错乱，parser fail-closed</td></tr>
+      <tr><td>accessibility_no_interactive_marks</td><td>grounding</td><td>是</td><td>reobserve</td><td>XML 可解析，但没有可执行交互节点</td></tr>
+      <tr><td>accessibility_structure_missing</td><td>grounding</td><td>是</td><td>reobserve</td><td>XML 可解析但未形成有效 ScreenStructure</td></tr>
+      <tr><td>accessibility_dump_callback_missing</td><td>grounding</td><td>是</td><td>reobserve</td><td>Hybrid factory 没拿到 accessibility dump callback，降级到 LocateAnything</td></tr>
       <tr><td>mark_required</td><td>grounding</td><td>是</td><td>reobserve</td><td>Tap 缺少 target_mark_id</td></tr>
       <tr><td>missing_hint</td><td>grounding</td><td>是</td><td>reobserve</td><td>VLM Provider 需要 Hint 但未提供</td></tr>
       <tr><td>bad_bbox</td><td>grounding</td><td>是</td><td>reobserve</td><td>BBox 验证失败</td></tr>
@@ -873,6 +901,10 @@
 
   <div class="callout danger">
     <strong>Fail-Closed 保证：</strong>所有 Grounding 错误导致 <code>action_parsed=None</code>，运行终止。不存在回退到主 VLM 原始坐标的路径。<code>retry_policy="reobserve"</code> 仅为未来使用记录，当前实现不会自动重试。
+  </div>
+
+  <div class="callout warning">
+    <strong>Taxonomy 待同步：</strong>上表列出了当前 provider/fallback 已经可能产生或架构要求保留的 accessibility/hybrid 错误码。最新审查发现，Plan 节点的 grounding error taxonomy 还没有完整纳入这些新增 code；在实现同步前，部分 code 可能只作为 provider observation metadata 出现，不能假设所有路径都会稳定归类为 <code>error_layer=grounding</code>。
   </div>
 </section>
 
@@ -961,7 +993,10 @@ final_score  = <span class="num">0.55</span> * localization + <span class="num">
     <li><span class="icon red">!</span> <strong>原始 Hint 边界：</strong>原始 Hint 仅保留在 Provider 内存中，绝不进入 Trace、Checkpoint、Prompt Marks Block、Eval JSON 或报告。远程 Provider 原始 Hint 需显式 opt-in。</li>
     <li><span class="icon red">!</span> <strong>坐标归一化：</strong>所有 Mark 使用 0-1000 相对坐标。绝对像素转换仅在 Tool/Backend 层通过 <code>convert_relative_to_absolute()</code> 执行。</li>
     <li><span class="icon blue">i</span> <strong>Tree-First Hybrid：</strong><code>PHONE_AGENT_GROUNDING_PROVIDER=hybrid</code> 优先运行 Accessibility Tree。仅当 Tree Marks 不匹配当前 Hint 时才调用 LocateAnything。</li>
+    <li><span class="icon red">!</span> <strong>Executable Marks：</strong>不匹配当前 Hint 的 provider marks 只能作为 diagnostic candidates/structures 保留，不得进入最终 executable <code>marks</code>。当前代码仍需修复这一点。</li>
     <li><span class="icon blue">i</span> <strong>去重抑制：</strong>Hybrid Provider 激活时，跳过直接基础 Accessibility Mark 注入。Hybrid 链统一管理 Accessibility Marks，避免重复 ADB Dump 和 Mark ID 冲突。</li>
+    <li><span class="icon blue">i</span> <strong>Parser 诊断：</strong>Accessibility provider 的 <code>parse_summary</code> 已记录 XML/bounds 计数；default hybrid wrapper 尚未把 child parse_summary 汇总到顶层 result。</li>
+    <li><span class="icon red">!</span> <strong>诊断字段边界：</strong><code>fallback_chain</code>、<code>hybrid_factory</code>、<code>parse_summary</code> 的 code 字段必须走 enum / safe-identifier allowlist；当前实现仍有 regex-redaction-only 的待修复面。</li>
     <li><span class="icon blue">i</span> <strong>Mark 绑定：</strong>三层身份检查（语义 + 拓扑 + 感知哈希）防止过期 Mark 被执行。</li>
     <li><span class="icon green">+</span> <strong>Prompt 模板：</strong>LocateAnything 必须使用 <code>apply_chat_template(..., num_images=1)</code>。默认 Instruction 保持极简。Context 注入受 <code>locateanything_context_max_chars</code> 约束。</li>
     <li><span class="icon green">+</span> <strong>多框 Fail-Closed：</strong>单 Hint 产生多个 BBox = <code>grounding_ambiguous</code>。不执行首框。</li>

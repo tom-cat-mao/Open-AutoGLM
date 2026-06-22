@@ -7,6 +7,7 @@ from phone_agent.actions.grounding import GroundingError, ground_intent_to_actio
 from phone_agent.grounding.accessibility import (
     AccessibilityTreeProvider,
     parse_uiautomator_marks,
+    parse_uiautomator_summary,
     parse_uiautomator_structure,
     visible_text_summary,
 )
@@ -429,6 +430,37 @@ def test_parse_uiautomator_structure_preserves_topology_and_signed_bounds() -> N
     assert "13800138000" not in title.resource_id_hash
 
 
+def test_parse_uiautomator_accepts_whitespace_and_clamps_out_of_range_bounds() -> None:
+    xml = """<hierarchy>
+      <node text="Search" class="android.widget.Button" clickable="true" enabled="true" bounds="[ -10, 20 ][ 1080, 2400 ]" />
+      <node text="Zero" class="android.widget.Button" clickable="true" enabled="true" bounds="[100,100][100,200]" />
+      <node text="Bad" class="android.widget.Button" clickable="true" enabled="true" bounds="[bad]" />
+    </hierarchy>"""
+
+    marks = parse_uiautomator_marks(xml, screen_width=1080, screen_height=2400)
+    summary = parse_uiautomator_summary(xml, screen_width=1080, screen_height=2400)
+
+    assert marks[0]["bbox"] == [0, 8, 1000, 1000]
+    assert summary["xml_status"] == "ok"
+    assert summary["raw_node_count"] == 3
+    assert summary["mark_count"] == 1
+    assert summary["bounds_parse_fail_count"] == 1
+    assert summary["filtered_zero_area_count"] == 1
+    assert summary["interactive_candidate_count"] == 3
+
+
+def test_parse_uiautomator_summary_cleans_control_chars_but_fails_closed_on_bad_xml() -> None:
+    control_char_xml = """<hierarchy>
+      <node text="OK\x01" class="android.widget.Button" clickable="true" enabled="true" bounds="[0,0][100,100]" />
+    </hierarchy>"""
+    bad_xml = """<hierarchy><node text="A & B" class="android.widget.Button" bounds="[0,0][1,1]" /></hierarchy>"""
+
+    assert parse_uiautomator_summary(control_char_xml, screen_width=100, screen_height=100)["mark_count"] == 1
+    bad_summary = parse_uiautomator_summary(bad_xml, screen_width=100, screen_height=100)
+    assert bad_summary["xml_status"] == "accessibility_xml_parse_error"
+    assert bad_summary["raw_node_count"] == 0
+
+
 def test_accessibility_tree_provider_returns_screen_bound_marks() -> None:
     xml = """<hierarchy>
       <node text="OK" class="android.widget.Button" clickable="true" enabled="true" bounds="[100,200][300,400]" />
@@ -445,6 +477,7 @@ def test_accessibility_tree_provider_returns_screen_bound_marks() -> None:
     assert result.hints[0]["text_length"] == 2
     assert result.screen_structure is not None
     assert result.screen_structure["node_count"] == 1
+    assert result.metadata["parse_summary"]["mark_count"] == 1
 
 
 def test_accessibility_tree_provider_no_marks_fails_closed() -> None:
@@ -453,8 +486,19 @@ def test_accessibility_tree_provider_no_marks_fails_closed() -> None:
     result = provider.provide_marks(Screenshot(), binding())
 
     assert result.success is False
-    assert result.failure_code == "grounding_no_candidate"
+    assert result.failure_code == "accessibility_structure_missing"
     assert result.marks == []
+    assert result.metadata["parse_summary"]["xml_status"] == "ok"
+
+
+def test_accessibility_tree_provider_reports_parse_error_failure_code() -> None:
+    provider = AccessibilityTreeProvider(lambda timeout=None: '<hierarchy><node text="A & B" /></hierarchy>')
+
+    result = provider.provide_marks(Screenshot(), binding())
+
+    assert result.success is False
+    assert result.failure_code == "accessibility_xml_parse_error"
+    assert result.metadata["parse_summary"]["xml_status"] == "accessibility_xml_parse_error"
 
 
 def test_adb_dump_uiautomator_xml_extracts_closed_hierarchy(monkeypatch) -> None:
@@ -606,6 +650,7 @@ def test_fallback_provider_continues_when_tree_marks_do_not_match_hint() -> None
     assert vision.calls == 1
     assert [mark.mark_id for mark in result.marks] == ["ax_1", "la_1_1"]
     assert result.metadata["fallback_chain"][0]["usable"] is False
+    assert result.metadata["fallback_chain"][0]["structure_count"] == 0
     assert result.metadata["fallback_chain"][1]["usable"] is True
 
 
@@ -667,6 +712,7 @@ def test_fallback_provider_preserves_accessibility_and_visual_structures() -> No
 
     assert result.success is True
     assert [item["structure_kind"] for item in result.screen_structures] == ["accessibility", "visual"]
+    assert [row["structure_count"] for row in result.metadata["fallback_chain"]] == [1, 1]
 
 
 def test_fallback_provider_preserves_successful_visual_sidecar_without_marks() -> None:
@@ -915,6 +961,7 @@ def test_hybrid_factory_builds_accessibility_then_locateanything_fallback() -> N
     assert len(providers) == 1
     assert isinstance(providers[0], FallbackMarkProvider)
     assert [provider.name for provider in providers[0].providers] == ["accessibility_tree", "locateanything_mlx"]
+    assert providers[0].composition_metadata["accessibility_child_enabled"] is True
 
 
 def test_hybrid_factory_can_skip_accessibility_child_when_base_marks_present() -> None:
@@ -929,6 +976,39 @@ def test_hybrid_factory_can_skip_accessibility_child_when_base_marks_present() -
     assert len(providers) == 1
     assert isinstance(providers[0], FallbackMarkProvider)
     assert [provider.name for provider in providers[0].providers] == ["locateanything_mlx"]
+    assert providers[0].composition_metadata["accessibility_child_skip_reason"] == "skip_accessibility_provider"
+
+
+def test_hybrid_factory_missing_dump_callback_emits_synthetic_skip_row(monkeypatch) -> None:
+    class StaticLocateProvider:
+        name = "locateanything_mlx"
+        version = "test"
+        allow_raw_hints = True
+
+        def provide_marks(self, screenshot, screen_binding, hints=None, timeout=None):
+            mark = MarkCandidate(mark_id="la_1", bbox=[100, 100, 200, 200], center=[150, 150], source=self.name)
+            return MarkProviderResult(
+                success=True,
+                provider=self.name,
+                screen_id=screen_binding.screen_id,
+                raw_screenshot_hash=screen_binding.raw_screenshot_hash,
+                provider_input_hash="la-hash",
+                marks=[mark],
+                candidates=[mark],
+                candidate_count=1,
+            )
+
+    monkeypatch.setattr("phone_agent.grounding.factory._build_locateanything_provider", lambda cfg: StaticLocateProvider())
+
+    providers = build_mark_providers({"grounding_provider_name": "hybrid"})
+    result = providers[0].provide_marks(Screenshot(), binding())
+
+    assert isinstance(providers[0], FallbackMarkProvider)
+    assert result.success is True
+    assert result.metadata["hybrid_factory"]["accessibility_child_enabled"] is False
+    assert result.metadata["hybrid_factory"]["accessibility_child_skip_reason"] == "accessibility_dump_callback_missing"
+    assert result.metadata["fallback_chain"][0]["provider"] == "accessibility_tree"
+    assert result.metadata["fallback_chain"][0]["skip_reason"] == "accessibility_dump_callback_missing"
 
 
 def test_locateanything_provider_multiple_hints_create_multiple_marks(monkeypatch) -> None:

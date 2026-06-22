@@ -13,7 +13,8 @@ from phone_agent.graph.objects import ScreenStructure, StructureNode, build_stru
 from phone_agent.grounding.provider import MarkCandidate, MarkProviderHint, MarkProviderResult, ScreenBinding
 
 
-BOUNDS_RE = re.compile(r"\[(-?\d+),(-?\d+)\]\[(-?\d+),(-?\d+)\]")
+BOUNDS_RE = re.compile(r"\[\s*(-?\d+)\s*,\s*(-?\d+)\s*\]\s*\[\s*(-?\d+)\s*,\s*(-?\d+)\s*\]")
+INVALID_XML_CONTROL_RE = re.compile(r"[\x00-\x08\x0B\x0C\x0E-\x1F]")
 INTERACTIVE_CLASSES = (
     "Button",
     "CheckBox",
@@ -39,20 +40,92 @@ def parse_uiautomator_marks(
 ) -> list[dict[str, Any]]:
     """Parse UiAutomator XML into normalized 0-1000 mark dicts."""
 
-    if screen_width <= 0 or screen_height <= 0 or not xml_text.strip():
-        return []
-    try:
-        root = ET.fromstring(xml_text)
-    except ET.ParseError:
-        return []
+    parsed = _parse_uiautomator_xml(
+        xml_text,
+        screen_width=screen_width,
+        screen_height=screen_height,
+        source=source,
+        max_marks=max_marks,
+    )
+    return parsed["marks"]
 
+
+def parse_uiautomator_structure(
+    xml_text: str,
+    *,
+    screen_width: int,
+    screen_height: int,
+) -> ScreenStructure | None:
+    """Parse UiAutomator XML into a trace-safe screen structure sidecar."""
+
+    parsed = _parse_uiautomator_xml(
+        xml_text,
+        screen_width=screen_width,
+        screen_height=screen_height,
+    )
+    return parsed["screen_structure"]
+
+
+def parse_uiautomator_summary(
+    xml_text: str,
+    *,
+    screen_width: int,
+    screen_height: int,
+    max_marks: int = 80,
+) -> dict[str, Any]:
+    """Return trace-safe UiAutomator parser diagnostics."""
+
+    parsed = _parse_uiautomator_xml(
+        xml_text,
+        screen_width=screen_width,
+        screen_height=screen_height,
+        max_marks=max_marks,
+    )
+    return parsed["parse_summary"]
+
+
+def _parse_uiautomator_xml(
+    xml_text: str,
+    *,
+    screen_width: int,
+    screen_height: int,
+    source: str = "uiautomator",
+    max_marks: int = 80,
+) -> dict[str, Any]:
+    summary = _empty_parse_summary()
+    if screen_width <= 0 or screen_height <= 0 or not str(xml_text or "").strip():
+        summary["xml_status"] = "accessibility_dump_empty"
+        return {"marks": [], "screen_structure": None, "parse_summary": summary}
+    root, xml_status = _parse_xml_root(xml_text)
+    summary["xml_status"] = xml_status
+    if root is None:
+        return {"marks": [], "screen_structure": None, "parse_summary": summary}
+
+    nodes = list(root.iter("node"))
+    summary["raw_node_count"] = len(nodes)
     marks: list[dict[str, Any]] = []
     seen: set[tuple[int, int, int, int, str, str]] = set()
-    for node in root.iter("node"):
+    for node in nodes:
+        attrs = node.attrib
+        role = _role_from_class(attrs.get("class") or "")
+        text = _node_text(attrs)
+        if _is_candidate_node(attrs, role=role, text=text):
+            summary["interactive_candidate_count"] += 1
+        raw_bounds = _parse_bounds(attrs.get("bounds") or "")
+        if raw_bounds is None:
+            summary["bounds_parse_fail_count"] += 1
+            continue
+        x1, y1, x2, y2 = raw_bounds
+        if x2 <= x1 or y2 <= y1:
+            summary["filtered_zero_area_count"] += 1
+            continue
         if len(marks) >= max_marks:
-            break
-        parsed = _node_to_mark(
-            node.attrib,
+            continue
+        parsed = _node_to_mark_from_parts(
+            attrs,
+            bounds=raw_bounds,
+            role=role,
+            text=text,
             index=len(marks) + 1,
             width=screen_width,
             height=screen_height,
@@ -72,23 +145,40 @@ def parse_uiautomator_marks(
             continue
         seen.add(key)
         marks.append(parsed)
-    return marks
+    screen_structure = _structure_from_root(root, screen_width=screen_width, screen_height=screen_height)
+    summary["mark_count"] = len(marks)
+    summary["structure_node_count"] = len(screen_structure.nodes) if screen_structure is not None else 0
+    return {"marks": marks, "screen_structure": screen_structure, "parse_summary": summary}
 
 
-def parse_uiautomator_structure(
-    xml_text: str,
+def _empty_parse_summary() -> dict[str, Any]:
+    return {
+        "xml_status": "ok",
+        "raw_node_count": 0,
+        "mark_count": 0,
+        "structure_node_count": 0,
+        "bounds_parse_fail_count": 0,
+        "filtered_zero_area_count": 0,
+        "interactive_candidate_count": 0,
+    }
+
+
+def _parse_xml_root(xml_text: str) -> tuple[ET.Element | None, str]:
+    cleaned = INVALID_XML_CONTROL_RE.sub("", str(xml_text or "").lstrip("\ufeff"))
+    if not cleaned.strip():
+        return None, "accessibility_dump_empty"
+    try:
+        return ET.fromstring(cleaned), "ok"
+    except ET.ParseError:
+        return None, "accessibility_xml_parse_error"
+
+
+def _structure_from_root(
+    root: ET.Element,
     *,
     screen_width: int,
     screen_height: int,
 ) -> ScreenStructure | None:
-    """Parse UiAutomator XML into a trace-safe screen structure sidecar."""
-
-    if screen_width <= 0 or screen_height <= 0 or not xml_text.strip():
-        return None
-    try:
-        root = ET.fromstring(xml_text)
-    except ET.ParseError:
-        return None
     nodes: dict[str, StructureNode] = {}
     root_node_id: str | None = None
 
@@ -159,8 +249,10 @@ def visible_text_summary(xml_text: str, *, max_items: int = 20, max_chars: int =
     if not xml_text.strip():
         return ""
     try:
-        root = ET.fromstring(xml_text)
+        root, _status = _parse_xml_root(xml_text)
     except ET.ParseError:
+        return ""
+    if root is None:
         return ""
     values: list[str] = []
     seen: set[str] = set()
@@ -203,18 +295,16 @@ class AccessibilityTreeProvider:
         except Exception as exc:
             return self._failure("provider_error", screen_binding, started, message=type(exc).__name__)
         provider_input_hash = hashlib.sha256(xml_text.encode("utf-8")).hexdigest()[:16]
-        mark_dicts = parse_uiautomator_marks(
+        parsed = _parse_uiautomator_xml(
             xml_text,
             screen_width=screen_binding.width,
             screen_height=screen_binding.height,
             source=self.name,
             max_marks=self.max_marks,
         )
-        screen_structure = parse_uiautomator_structure(
-            xml_text,
-            screen_width=screen_binding.width,
-            screen_height=screen_binding.height,
-        )
+        mark_dicts = parsed["marks"]
+        screen_structure = parsed["screen_structure"]
+        parse_summary = parsed["parse_summary"]
         screen_structure_dict = screen_structure.to_dict() if screen_structure is not None else None
         marks = [
             MarkCandidate(
@@ -230,10 +320,11 @@ class AccessibilityTreeProvider:
             for item in mark_dicts
         ]
         if not marks:
+            failure_code = _accessibility_failure_code(parse_summary, screen_structure_dict)
             return MarkProviderResult(
                 success=False,
                 provider=self.name,
-                failure_code="grounding_no_candidate",
+                failure_code=failure_code,
                 message="no accessible marks",
                 screen_id=screen_binding.screen_id,
                 raw_screenshot_hash=screen_binding.raw_screenshot_hash,
@@ -242,9 +333,9 @@ class AccessibilityTreeProvider:
                 marks=[],
                 candidates=[],
                 candidate_count=0,
-                status="grounding_no_candidate",
+                status=failure_code,
                 hints=[hint.redacted_summary() for hint in hints or []],
-                metadata={"max_marks": self.max_marks},
+                metadata={"max_marks": self.max_marks, "parse_summary": parse_summary},
                 screen_structure=screen_structure_dict,
             )
         return MarkProviderResult(
@@ -259,7 +350,7 @@ class AccessibilityTreeProvider:
             candidate_count=len(marks),
             status="success",
             hints=[hint.redacted_summary() for hint in hints or []],
-            metadata={"max_marks": self.max_marks},
+            metadata={"max_marks": self.max_marks, "parse_summary": parse_summary},
             screen_structure=screen_structure_dict,
         )
 
@@ -283,6 +374,7 @@ class AccessibilityTreeProvider:
             candidates=[],
             candidate_count=0,
             status=code,
+            metadata={"parse_summary": {**_empty_parse_summary(), "xml_status": code}},
         )
 
     @staticmethod
@@ -301,11 +393,34 @@ def _node_to_mark(
     bounds = _parse_bounds(attrs.get("bounds") or "")
     if bounds is None:
         return None
+    role = _role_from_class(attrs.get("class") or "")
+    text = _node_text(attrs)
+    return _node_to_mark_from_parts(
+        attrs,
+        bounds=bounds,
+        role=role,
+        text=text,
+        index=index,
+        width=width,
+        height=height,
+        source=source,
+    )
+
+
+def _node_to_mark_from_parts(
+    attrs: dict[str, str],
+    *,
+    bounds: tuple[int, int, int, int],
+    role: str,
+    text: str,
+    index: int,
+    width: int,
+    height: int,
+    source: str,
+) -> dict[str, Any] | None:
     x1, y1, x2, y2 = bounds
     if x2 <= x1 or y2 <= y1:
         return None
-    role = _role_from_class(attrs.get("class") or "")
-    text = _node_text(attrs)
     if not _is_candidate_node(attrs, role=role, text=text):
         return None
     bbox = [
@@ -402,3 +517,12 @@ def _is_candidate_node(attrs: dict[str, str], *, role: str, text: str) -> bool:
     if text and any(role.endswith(class_suffix) for class_suffix in INTERACTIVE_CLASSES):
         return True
     return False
+
+
+def _accessibility_failure_code(parse_summary: dict[str, Any], screen_structure_dict: dict[str, Any] | None) -> str:
+    xml_status = str(parse_summary.get("xml_status") or "")
+    if xml_status in {"accessibility_dump_empty", "accessibility_xml_parse_error"}:
+        return xml_status
+    if screen_structure_dict is None:
+        return "accessibility_structure_missing"
+    return "accessibility_no_interactive_marks"

@@ -16,8 +16,9 @@ class FallbackMarkProvider:
     version = "ordered"
     allow_raw_hints = True
 
-    def __init__(self, providers: list[MarkProvider]) -> None:
+    def __init__(self, providers: list[MarkProvider], *, composition_metadata: dict[str, Any] | None = None) -> None:
         self.providers = [provider for provider in providers if provider is not None]
+        self.composition_metadata = _safe_composition_metadata(composition_metadata or {})
 
     def provide_marks(
         self,
@@ -28,6 +29,7 @@ class FallbackMarkProvider:
     ) -> MarkProviderResult:
         started = time.perf_counter()
         summaries: list[dict[str, Any]] = []
+        summaries.extend(_synthetic_skip_rows(self.composition_metadata))
         collected_marks: list[Any] = []
         collected_candidates: list[Any] = []
         collected_structures: list[dict[str, Any]] = []
@@ -40,17 +42,7 @@ class FallbackMarkProvider:
             result = provider.provide_marks(screenshot, screen_binding, hints=provider_hints, timeout=timeout)
             last_result = result
             usable = _result_is_usable(result, hints or [])
-            summaries.append(
-                {
-                    "provider": result.provider,
-                    "success": result.success,
-                    "failure_code": result.failure_code,
-                    "candidate_count": result.candidate_count,
-                    "mark_count": len(result.marks or []),
-                    "latency_ms": result.latency_ms,
-                    "usable": usable,
-                }
-            )
+            summaries.append(_fallback_row(result, usable=usable))
             supplemental_screen = usable_result is not None and getattr(provider, "structure_mode", None) == "screen"
             if result.success and result.marks:
                 if not supplemental_screen:
@@ -76,7 +68,7 @@ class FallbackMarkProvider:
                     candidate_count=len(collected_candidates),
                     status="success",
                     hints=result.hints,
-                    metadata={"fallback_chain": summaries},
+                    metadata=_fallback_metadata(summaries, self.composition_metadata),
                     screen_structures=collected_structures,
                 )
         if usable_result is not None:
@@ -92,7 +84,7 @@ class FallbackMarkProvider:
                 candidate_count=len(collected_candidates),
                 status="success",
                 hints=usable_result.hints,
-                metadata={"fallback_chain": summaries},
+                metadata=_fallback_metadata(summaries, self.composition_metadata),
                 screen_structures=collected_structures,
             )
         if collected_marks:
@@ -111,7 +103,7 @@ class FallbackMarkProvider:
                     candidate_count=len(collected_candidates),
                     status="grounding_no_usable_candidate",
                     hints=(last_result.hints if last_result else [hint.redacted_summary() for hint in hints or []]),
-                    metadata={"fallback_chain": summaries},
+                    metadata=_fallback_metadata(summaries, self.composition_metadata),
                     screen_structures=collected_structures,
                 )
             return MarkProviderResult(
@@ -126,7 +118,7 @@ class FallbackMarkProvider:
                 candidate_count=len(collected_candidates),
                 status="success",
                 hints=(last_result.hints if last_result else [hint.redacted_summary() for hint in hints or []]),
-                metadata={"fallback_chain": summaries},
+                metadata=_fallback_metadata(summaries, self.composition_metadata),
                 screen_structures=collected_structures,
             )
         return MarkProviderResult(
@@ -143,7 +135,7 @@ class FallbackMarkProvider:
             candidate_count=len(collected_candidates) if collected_candidates else (last_result.candidate_count if last_result else 0),
             status=(last_result.status if last_result else "provider_unavailable"),
             hints=(last_result.hints if last_result else [hint.redacted_summary() for hint in hints or []]),
-            metadata={"fallback_chain": summaries},
+            metadata=_fallback_metadata(summaries, self.composition_metadata),
             screen_structures=collected_structures,
         )
 
@@ -170,6 +162,65 @@ def _result_structures(result: MarkProviderResult) -> list[dict[str, Any]]:
         seen.add(key)
         structures.append(item)
     return structures
+
+
+def _fallback_row(result: MarkProviderResult, *, usable: bool) -> dict[str, Any]:
+    return {
+        "provider": result.provider,
+        "success": result.success,
+        "failure_code": result.failure_code,
+        "candidate_count": result.candidate_count,
+        "mark_count": len(result.marks or []),
+        "structure_count": len(_result_structures(result)),
+        "latency_ms": result.latency_ms,
+        "usable": usable,
+        "skip_reason": None,
+    }
+
+
+def _fallback_metadata(summaries: list[dict[str, Any]], composition_metadata: dict[str, Any]) -> dict[str, Any]:
+    metadata: dict[str, Any] = {"fallback_chain": summaries}
+    if composition_metadata:
+        metadata["hybrid_factory"] = composition_metadata
+    return metadata
+
+
+def _safe_composition_metadata(value: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    if value.get("hybrid_mode") is not True:
+        return {}
+    provider_order = value.get("provider_order")
+    if not isinstance(provider_order, list):
+        provider_order = []
+    skip_reason = value.get("accessibility_child_skip_reason")
+    if skip_reason not in {None, "accessibility_dump_callback_missing", "skip_accessibility_provider"}:
+        skip_reason = None
+    return {
+        "hybrid_mode": True,
+        "accessibility_child_enabled": value.get("accessibility_child_enabled") is True,
+        "accessibility_child_skip_reason": skip_reason,
+        "provider_order": [str(item)[:64] for item in provider_order[:8]],
+    }
+
+
+def _synthetic_skip_rows(composition_metadata: dict[str, Any]) -> list[dict[str, Any]]:
+    skip_reason = composition_metadata.get("accessibility_child_skip_reason")
+    if not skip_reason:
+        return []
+    return [
+        {
+            "provider": "accessibility_tree",
+            "success": False,
+            "failure_code": skip_reason,
+            "candidate_count": 0,
+            "mark_count": 0,
+            "structure_count": 0,
+            "latency_ms": 0,
+            "usable": False,
+            "skip_reason": skip_reason,
+        }
+    ]
 
 
 def _has_later_screen_structure_provider(providers: list[MarkProvider], start_index: int) -> bool:

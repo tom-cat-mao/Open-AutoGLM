@@ -6,7 +6,7 @@
 
 ## 当前状态
 
-- **Phase 1-14 + Structured Grounding Hardening**: ✅ 已完成当前 graph roadmap 中已批准的实现范围；Phase 11A/11B/11C 完成 Context & Observability Harness，Phase 12A/12B/12C 完成结构化模型输出适配，Phase 13A-13E 完成 Canonical Action IR & Safety Pipeline 阶梯架构，Phase 14A-14E 完成 LangGraph-native Context Engineering Harness；后续 legacy text DSL 删除、mark binding、多候选 grounding fail-closed、错误分层与 bounded context window 已在 RALPLAN/Autopilot 流程中落地；long-term memory 与 LangChain provider abstraction 仍待另行规划
+- **Phase 1-14 + Hybrid Accessibility Grounding Hardening**: ✅ 已完成当前 graph roadmap 中已批准的主要实现范围；Phase 11A/11B/11C 完成 Context & Observability Harness，Phase 12A/12B/12C 完成结构化模型输出适配，Phase 13A-13E 完成 Canonical Action IR & Safety Pipeline 阶梯架构，Phase 14A-14E 完成 LangGraph-native Context Engineering Harness；legacy text DSL 删除、mark binding、多候选 grounding fail-closed、bounded context window、hybrid/accessibility 诊断字段已落地。最新审查仍要求补齐 hybrid executable mark 过滤、diagnostic code 字段 strict sanitizer、child `parse_summary` 透传、accessibility failure code taxonomy；long-term memory 与 LangChain provider abstraction 仍待另行规划
 - **测试**: 已恢复可执行 graph/actions/evals 回归测试与安装门禁；当前本地门禁为 `.venv/bin/pytest tests -q` 全绿
 - **架构**: LangGraph Plan-Execute-Reflect StateGraph
 - **图拓扑**: `plan → execute → [confirm|takeover|reflect|replan|end]`
@@ -17,7 +17,7 @@
 - **评测地基**: 已提供 `evals/run_eval.py --dry-run` smoke harness，以及 `bench/grounding/` LocateAnything benchmark 体系；当前支持 post-training raw JSONL 转 manifest、固定 suite、prediction JSONL、summary JSON、离线复评与 target type / area bucket 分组指标
 - **收益验证**: eval 已输出 `context_mode`、`context_strategy`、`prompt_version`、`selected_sections`、`messages_before/after`、`message_chars_before/after`、`approx_tokens_before/after`、`context_block_chars`、`context_truncated`、`failure_memory_hit_count`、`repeated_failure_count`，支持 off/observe/inject 对比
 - **输出适配**: `ModelConfig.output_mode=json_schema|tool_calls|auto`；旧 text DSL 不再作为动作执行协议；JSON、已聚合 OpenAI `tool_calls` 与 IntentIR 统一归一到 canonical action，parse/adapter/validation failure fail-closed，不绕过 HITL
-- **本地 Grounding**: LocateAnything-3B-4bit (MLX) 与 Android UiAutomator accessibility tree 均已收敛为 MarkRegistry mark 生成层；默认 `PHONE_AGENT_GROUNDING_PROVIDER=hybrid` 先用 accessibility tree 的结构化 bounds/text/class/clickable 信息，失败时再 fallback 到 LocateAnything；UiAutomator provider 产出 `structure_kind=accessibility` 的 `ScreenStructure` sidecar，LocateAnything 可在 `PHONE_AGENT_LOCATEANYTHING_STRUCTURE_MODE=target|screen` 显式开启时产出 `structure_kind=visual` 的视觉 sidecar。Plan 基于 composite `screen_structures + MarkRegistry` 构建 observation-local `ObjectRegistry`，允许主 VLM 在 Screen Objects block 中选择 `target_object_id` 或 `object_role`+`ordinal`/strict `object_filter`；这些 selector 只在 grounding 层编译为唯一 atomic `target_mark_id` 后才能执行。截图无效或 secure screenshot blocked 会 fail-closed，不把黑图继续发给模型；所有结果仍进入 canonical ActionIR/Safety/HITL/Executor；LocateAnything 默认输入图最长边为 `max_size=960`，默认不注入额外 context，必须经 `apply_chat_template(..., num_images=1)`，可通过 bounded `locateanything_context_max_chars` 灰度短 context；multi-box 在默认 `off` 模式下不得 first-box 执行，只能 fail-closed 为歧义，结构模式下也必须经 visual object eligibility 再执行
+- **本地 Grounding**: LocateAnything-3B-4bit (MLX) 与 Android UiAutomator accessibility tree 均已收敛为 MarkRegistry mark 生成层；默认 `PHONE_AGENT_GROUNDING_PROVIDER=hybrid` 先用 accessibility tree 的结构化 bounds/text/class/clickable 信息，失败时再 fallback 到 LocateAnything；UiAutomator provider 产出 `structure_kind=accessibility` 的 `ScreenStructure` sidecar，LocateAnything 可在 `PHONE_AGENT_LOCATEANYTHING_STRUCTURE_MODE=target|screen` 显式开启时产出 `structure_kind=visual` 的视觉 sidecar。Plan 基于 composite `screen_structures + MarkRegistry` 构建 observation-local `ObjectRegistry`，允许主 VLM 在 Screen Objects block 中选择 `target_object_id` 或 `object_role`+`ordinal`/strict `object_filter`；这些 selector 只在 grounding 层编译为唯一 atomic `target_mark_id` 后才能执行。Hybrid accessibility hardening 已补齐 whitespace/signed bounds、控制字符清洗、XML parse fail-closed summary、`fallback_chain` taxonomy、`hybrid_factory` 降级可观测和 plan/reflect trace summary；但默认 hybrid wrapper 当前仍会把 hint-mismatched tree marks 放进最终 executable marks，且 child `parse_summary` 尚未透传到顶层 hybrid result。截图无效或 secure screenshot blocked 会 fail-closed，不把黑图继续发给模型；所有结果仍进入 canonical ActionIR/Safety/HITL/Executor；LocateAnything 默认输入图最长边为 `max_size=960`，默认不注入额外 context，必须经 `apply_chat_template(..., num_images=1)`，可通过 bounded `locateanything_context_max_chars` 灰度短 context；multi-box 在默认 `off` 模式下不得 first-box 执行，只能 fail-closed 为歧义，结构模式下也必须经 visual object eligibility 再执行
 
 ---
 
@@ -86,13 +86,13 @@ PHONE_AGENT_LOCATEANYTHING_MAX_SIZE=960 \
 
 ## 已完成 MVP: Accessibility Tree + LocateAnything Hybrid Grounding
 
-**目标**: 用 Android accessibility tree 作为低延迟、结构化的首选 mark 来源；当 tree 为空、不可用、无候选，或 tree marks 与 provider hint 没有弱匹配时继续调用 LocateAnything 并合并候选，降低平均 grounding 延迟，同时保持主 VLM 只能选择 `target_mark_id` 的执行边界。
+**目标**: 用 Android accessibility tree 作为低延迟、结构化的首选 mark 来源；当 tree 为空、不可用、无候选，或 tree marks 与 provider hint 没有弱匹配时继续调用 LocateAnything，降低平均 grounding 延迟，同时保持主 VLM 只能选择 `target_mark_id` 的执行边界。
 
 **已落地方案**:
-- `phone_agent/grounding/accessibility.py`: 新增 UiAutomator XML parser 与 `AccessibilityTreeProvider`，解析 `bounds/text/content-desc/resource-id/class/clickable/focusable/enabled`，过滤不可见/不可用节点，输出 0-1000 `MarkCandidate`。
+- `phone_agent/grounding/accessibility.py`: 新增 UiAutomator XML parser 与 `AccessibilityTreeProvider`，解析 `bounds/text/content-desc/resource-id/class/clickable/focusable/enabled`，过滤不可见/不可用节点，输出 0-1000 `MarkCandidate`。parser 支持 signed/whitespace bounds，清洗非法 XML 控制字符；未转义 ampersand、截断 hierarchy 或结构错乱以 `accessibility_xml_parse_error` fail-closed，不做语义修复。
 - `phone_agent/adb/device.py`: 新增 `dump_uiautomator_xml()` 与 `get_screen_marks()`；默认命令为 `adb exec-out uiautomator dump /dev/tty`，避免写入设备临时文件。
 - `phone_agent/device_factory.py` 与 `phone_agent/graph/nodes/plan.py`: 支持 `accessibility_marks` 直接把 tree marks 注入 MarkRegistry；并向 provider factory 注入 `accessibility_tree_dump`，供 hybrid fallback 使用。
-- `phone_agent/grounding/fallback.py` / `factory.py`: 新增 ordered fallback provider；`PHONE_AGENT_GROUNDING_PROVIDER=hybrid` 先尝试 `accessibility_tree`，只有 tree marks 与 hint 弱匹配或无 hint 时才停止；不匹配、失败或无候选时继续调用 `locateanything_mlx` 并合并候选。
+- `phone_agent/grounding/fallback.py` / `factory.py`: 新增 ordered fallback provider；`PHONE_AGENT_GROUNDING_PROVIDER=hybrid` 先尝试 `accessibility_tree`，只有 tree marks 与 hint 弱匹配或无 hint 时才停止；不匹配、失败或无候选时继续调用 `locateanything_mlx`。缺少 accessibility dump callback 或显式跳过 tree child 时，provider 仍可降级到 LocateAnything，但 `hybrid_factory` 与 synthetic `fallback_chain` skip row 会记录 `accessibility_dump_callback_missing` / `skip_accessibility_provider`。当前审查发现：hint-mismatched tree marks 仍会被合并进最终 executable `marks`，后续应改为只保留在 diagnostic `candidates` / structures 中。
 - `phone_agent/grounding/locateanything.py`: Prompt 保持官方 `apply_chat_template(..., num_images=1)` 路径；默认 instruction 极短；`locateanything_context_max_chars` 仅允许追加 bounded 单行 `Context:`，默认 `0` 关闭。
 
 **配置**:
@@ -114,6 +114,9 @@ PHONE_AGENT_ACCESSIBILITY_MARKS=true \
 - Tree bounds 必须转换为 0-1000；绝对像素转换仍只在 tool/backend 层。
 - Tree 失败、XML parse 失败、无候选 marks、LocateAnything 失败或歧义，都不能 fallback 为主 VLM raw coordinate tap。
 - LocateAnything context 默认关闭；开启时只能通过 `locateanything_context_max_chars` 注入短 context，不能构造长 prompt 或绕过官方 chat template。
+- 新增诊断字段只允许 code/count/bool/hash/length：`parse_summary`、`fallback_chain`、`hybrid_factory`、`screen_structure_summary` 与 `object_registry_summary` 不得包含 raw XML、raw hint、raw OCR 或隐私文本。
+- `fallback_chain` 固定保留 provider、success、failure_code、mark/candidate/structure count、usable、skip_reason、latency；当所有 provider 有 marks 但不匹配 hint 时统一 fail-closed 为 `grounding_no_usable_candidate`。
+- 当前未闭环项：不匹配 hint 的 provider marks 不应进入最终 executable `marks`；diagnostic code 字段需要 strict enum/safe-identifier sanitizer；default hybrid result 需要汇总 child provider 的 safe `parse_summary`；新增 accessibility failure codes 需要同步 Plan grounding taxonomy。
 
 **验证命令**:
 

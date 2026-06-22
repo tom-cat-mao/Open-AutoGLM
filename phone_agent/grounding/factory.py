@@ -84,7 +84,12 @@ def build_mark_providers(config: dict[str, Any] | None = None) -> list[MarkProvi
     if name in {"hybrid", "accessibility_locateanything", "uiautomator_locateanything"}:
         built: list[MarkProvider] = []
         dump_tree = cfg.get("accessibility_tree_dump") or cfg.get("uiautomator_dump")
-        if dump_tree is not None and not cfg.get("skip_accessibility_provider"):
+        skip_reason: str | None = None
+        if cfg.get("skip_accessibility_provider"):
+            skip_reason = "skip_accessibility_provider"
+        elif dump_tree is None:
+            skip_reason = "accessibility_dump_callback_missing"
+        if dump_tree is not None and skip_reason is None:
             built.append(
                 AccessibilityTreeProvider(
                     dump_tree=dump_tree,
@@ -95,7 +100,18 @@ def build_mark_providers(config: dict[str, Any] | None = None) -> list[MarkProvi
                 )
             )
         built.append(_build_locateanything_provider(cfg))
-        return [FallbackMarkProvider(built)]
+        provider_order = [provider.name for provider in built]
+        return [
+            FallbackMarkProvider(
+                built,
+                composition_metadata={
+                    "hybrid_mode": True,
+                    "accessibility_child_enabled": skip_reason is None,
+                    "accessibility_child_skip_reason": skip_reason,
+                    "provider_order": provider_order,
+                },
+            )
+        ]
     provider = build_mark_provider(cfg)
     return [provider] if provider is not None else []
 

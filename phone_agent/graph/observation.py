@@ -263,8 +263,17 @@ def _summarize_provider_result(result: MarkProviderResult) -> dict[str, Any]:
         ],
     }
     fallback_chain = _safe_fallback_chain((result.metadata or {}).get("fallback_chain"))
+    hybrid_factory = _safe_hybrid_factory((result.metadata or {}).get("hybrid_factory"))
+    parse_summary = _safe_parse_summary((result.metadata or {}).get("parse_summary"))
+    metadata: dict[str, Any] = {}
     if fallback_chain:
-        summary["metadata"] = {"fallback_chain": fallback_chain}
+        metadata["fallback_chain"] = fallback_chain
+    if hybrid_factory:
+        metadata["hybrid_factory"] = hybrid_factory
+    if parse_summary:
+        metadata["parse_summary"] = parse_summary
+    if metadata:
+        summary["metadata"] = metadata
     structure_summary = _safe_screen_structures_summary(_result_structure_dicts(result))
     if structure_summary:
         summary["screen_structures"] = structure_summary
@@ -345,11 +354,52 @@ def _safe_fallback_chain(value: Any) -> list[dict[str, Any]]:
                 "failure_code": _safe_metadata(item.get("failure_code")),
                 "candidate_count": _safe_int(item.get("candidate_count")),
                 "mark_count": _safe_int(item.get("mark_count")),
+                "structure_count": _safe_int(item.get("structure_count")),
                 "latency_ms": _safe_int(item.get("latency_ms")),
                 "usable": bool(item.get("usable")),
+                "skip_reason": _safe_enum(
+                    item.get("skip_reason"),
+                    {"accessibility_dump_callback_missing", "skip_accessibility_provider"},
+                ),
             }
         )
     return rows
+
+
+def _safe_parse_summary(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    return {
+        "xml_status": _safe_metadata(value.get("xml_status"), default="unknown"),
+        "raw_node_count": _safe_int(value.get("raw_node_count")),
+        "mark_count": _safe_int(value.get("mark_count")),
+        "structure_node_count": _safe_int(value.get("structure_node_count")),
+        "bounds_parse_fail_count": _safe_int(value.get("bounds_parse_fail_count")),
+        "filtered_zero_area_count": _safe_int(value.get("filtered_zero_area_count")),
+        "interactive_candidate_count": _safe_int(value.get("interactive_candidate_count")),
+    }
+
+
+def _safe_hybrid_factory(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict) or value.get("hybrid_mode") is not True:
+        return {}
+    provider_order = value.get("provider_order")
+    if not isinstance(provider_order, list):
+        provider_order = []
+    return {
+        "hybrid_mode": True,
+        "accessibility_child_enabled": value.get("accessibility_child_enabled") is True,
+        "accessibility_child_skip_reason": _safe_enum(
+            value.get("accessibility_child_skip_reason"),
+            {"accessibility_dump_callback_missing", "skip_accessibility_provider"},
+        ),
+        "provider_order": [_safe_metadata(item, default="unknown") for item in provider_order[:8]],
+    }
+
+
+def _safe_enum(value: Any, allowed: set[str]) -> str | None:
+    item = str(value or "").strip()
+    return item if item in allowed else None
 
 
 def _validate_provider_result(result: MarkProviderResult, binding: ScreenBinding) -> str | None:

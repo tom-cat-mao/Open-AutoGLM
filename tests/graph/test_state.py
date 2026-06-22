@@ -527,11 +527,30 @@ def test_observation_includes_bounded_fallback_chain_metadata() -> None:
                             "failure_code": "secret-13800138000",
                             "candidate_count": 3,
                             "mark_count": 3,
+                            "structure_count": 2,
                             "latency_ms": 4,
                             "usable": False,
+                            "skip_reason": "accessibility_dump_callback_missing",
                             "raw_xml": "<secret>",
                         }
-                    ]
+                    ],
+                    "hybrid_factory": {
+                        "hybrid_mode": True,
+                        "accessibility_child_enabled": False,
+                        "accessibility_child_skip_reason": "accessibility_dump_callback_missing",
+                        "provider_order": ["accessibility_tree", "locateanything_mlx", "secret-13800138000"],
+                        "raw_hint": "点击 13900139000",
+                    },
+                    "parse_summary": {
+                        "xml_status": "ok",
+                        "raw_node_count": 4,
+                        "mark_count": 3,
+                        "structure_node_count": 4,
+                        "bounds_parse_fail_count": 1,
+                        "filtered_zero_area_count": 1,
+                        "interactive_candidate_count": 3,
+                        "raw_xml": "<secret>",
+                    },
                 },
             )
 
@@ -545,6 +564,13 @@ def test_observation_includes_bounded_fallback_chain_metadata() -> None:
     metadata = observation.mark_provider_observation["providers"][0]["metadata"]
     assert metadata["fallback_chain"][0]["provider"] == "accessibility_tree"
     assert metadata["fallback_chain"][0]["usable"] is False
+    assert metadata["fallback_chain"][0]["structure_count"] == 2
+    assert metadata["fallback_chain"][0]["skip_reason"] == "accessibility_dump_callback_missing"
+    assert metadata["hybrid_factory"]["accessibility_child_skip_reason"] == "accessibility_dump_callback_missing"
+    assert metadata["hybrid_factory"]["provider_order"][:2] == ["accessibility_tree", "locateanything_mlx"]
+    assert metadata["parse_summary"]["bounds_parse_fail_count"] == 1
     raw = json.dumps(metadata, ensure_ascii=False)
     assert "13800138000" not in raw
+    assert "13900139000" not in raw
     assert "raw_xml" not in raw
+    assert "raw_hint" not in raw
