@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 import hashlib
+import re
 from typing import Any, Literal
 
 from phone_agent.graph.context import redact_context_text, sanitize_context_payload
@@ -43,6 +44,24 @@ EXPECTED_OUTCOME_FIELDS = {
     "target_text_hint",
     "timeout_hint",
     "dynamic_regions",
+    "selected_object_id_hash",
+    "object_type",
+    "object_evidence_hash",
+    "title_stub",
+    "title_hash",
+    "container_lineage_hash",
+    "list_lineage_hash",
+    "expected_page_type",
+}
+EXPECTED_OBJECT_FIELDS = {
+    "selected_object_id_hash",
+    "object_type",
+    "object_evidence_hash",
+    "title_stub",
+    "title_hash",
+    "container_lineage_hash",
+    "list_lineage_hash",
+    "expected_page_type",
 }
 MAX_LIST_ITEMS = 12
 MAX_TEXT_CHARS = 160
@@ -59,6 +78,14 @@ class ExpectedOutcome:
     target_text_hint: str | None = None
     timeout_hint: float | None = None
     dynamic_regions: list[str] = field(default_factory=list)
+    selected_object_id_hash: str | None = None
+    object_type: str | None = None
+    object_evidence_hash: str | None = None
+    title_stub: str | None = None
+    title_hash: str | None = None
+    container_lineage_hash: str | None = None
+    list_lineage_hash: str | None = None
+    expected_page_type: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to a JSON-friendly dictionary."""
@@ -101,15 +128,22 @@ def normalize_expected_outcome(
     *,
     action: dict[str, Any] | None = None,
     intent: dict[str, Any] | None = None,
+    selected_object_evidence: dict[str, Any] | None = None,
 ) -> ExpectedOutcome:
     """Validate and normalize an expected outcome with conservative defaults."""
 
     default = default_expected_outcome(action=action, intent=intent)
+    selected_fields = _normalize_selected_object_fields(selected_object_evidence or {})
+    if selected_fields:
+        default = ExpectedOutcome(**{**default.to_dict(), **selected_fields})
     if not isinstance(raw, dict):
         return default
     unsupported = set(raw) - EXPECTED_OUTCOME_FIELDS
     if unsupported:
         return default
+    object_fields = _normalize_selected_object_fields(raw)
+    if selected_fields:
+        object_fields = {**object_fields, **selected_fields}
 
     kind = raw.get("kind", default.kind)
     if not isinstance(kind, str) or kind not in VALID_OUTCOME_KINDS:
@@ -123,6 +157,7 @@ def normalize_expected_outcome(
         target_text_hint=_normalize_optional_string(raw.get("target_text_hint"), default.target_text_hint),
         timeout_hint=_normalize_timeout(raw.get("timeout_hint"), default.timeout_hint),
         dynamic_regions=_normalize_string_list(raw.get("dynamic_regions"), default.dynamic_regions),
+        **object_fields,
     )
 
 
@@ -148,6 +183,9 @@ def sanitize_expected_outcome_dict(
             raw[key] = _stub_text_list(raw.get(key))
     if "target_text_hint" in raw:
         raw["target_text_hint"] = _stub_text_value(raw.get("target_text_hint"))
+    for key in EXPECTED_OBJECT_FIELDS:
+        if key in raw:
+            raw[key] = _normalize_expected_object_value(key, raw.get(key))
     sanitized = sanitize_context_payload(raw, consumer="trace_payload", task_context=task_context)
     if not isinstance(sanitized, dict):
         return None
@@ -229,6 +267,30 @@ def default_expected_outcome(
     if action_name == "Wait":
         return ExpectedOutcome(kind="loading_finished", must_not_observe=["loading", "spinner", "network_error"])
     return ExpectedOutcome()
+
+
+def _normalize_selected_object_fields(raw: dict[str, Any]) -> dict[str, str | None]:
+    result: dict[str, str | None] = {}
+    for key in EXPECTED_OBJECT_FIELDS:
+        normalized = _normalize_expected_object_value(key, raw.get(key))
+        if normalized is not None:
+            result[key] = normalized
+    return result
+
+
+def _normalize_expected_object_value(key: str, value: Any) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if not text:
+        return None
+    if key.endswith("_hash") or key.endswith("_id_hash"):
+        return text[:64] if re.fullmatch(r"[0-9a-fA-F]{6,64}", text) else None
+    if key == "title_stub":
+        return text[:160] if re.fullmatch(r"len:\d{1,6} sha256:[0-9a-fA-F]{6,64}", text) else None
+    return sanitize_context_payload(text, "message", consumer="trace_payload")[:64]
 
 
 def expected_outcome_prompt_block(

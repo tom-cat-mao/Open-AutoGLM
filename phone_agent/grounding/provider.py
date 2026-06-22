@@ -46,6 +46,8 @@ class ScreenBinding:
     observation_epoch: int = 0
     mark_set_version: str | None = None
     perceptual_hash: str | None = None
+    structure_topology_digest: str | None = None
+    object_set_version: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -87,6 +89,7 @@ class MarkProviderResult:
     status: str | None = None
     hints: list[dict[str, Any]] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
+    screen_structure: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

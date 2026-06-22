@@ -111,6 +111,36 @@ def verify_action_outcome(
     before_text_blob = _observation_text(before_observation)
     text_blob = _observation_text(after_observation)
     has_after_observation_text = bool(text_blob.strip())
+    selected_object_signals = _selected_object_signals(expected.to_dict(), after_observation, text_blob)
+    if selected_object_signals:
+        signals = {**signals, **selected_object_signals}
+        evidence["selected_object_signals"] = selected_object_signals
+        if selected_object_signals.get("selected_object_match"):
+            evidence["matched_postconditions"] = ["selected_object_match"]
+            return VerifierResult(
+                status="success",
+                confidence=0.9,
+                signals=signals,
+                evidence=evidence,
+            )
+        if selected_object_signals.get("same_surface_still_visible"):
+            evidence["missing_postconditions"] = ["selected_object_detail_not_opened"]
+            return VerifierResult(
+                status="failure",
+                confidence=0.75,
+                signals=signals,
+                failure_cause="wrong_page",
+                evidence=evidence,
+            )
+        if selected_object_signals.get("wrong_detail_opened"):
+            evidence["missing_postconditions"] = ["selected_object_mismatch"]
+            return VerifierResult(
+                status="failure",
+                confidence=0.8,
+                signals=signals,
+                failure_cause="wrong_page",
+                evidence=evidence,
+            )
     focus_signals = _focus_signals(after_observation)
     if focus_signals:
         signals = {**signals, **focus_signals}
@@ -531,3 +561,65 @@ def _failure_cause_for_expected_kind(kind: str) -> str:
     if kind == "loading_finished":
         return "network_or_loading"
     return "unknown"
+
+
+def _selected_object_signals(expected: dict[str, Any], observation: dict[str, Any] | None, text_blob: str) -> dict[str, Any]:
+    if not isinstance(expected, dict):
+        return {}
+    object_type = expected.get("object_type")
+    object_evidence_hash = expected.get("object_evidence_hash")
+    title_hash = expected.get("title_hash")
+    expected_page_type = str(expected.get("expected_page_type") or "")
+    if not any(isinstance(value, str) and value for value in (object_type, object_evidence_hash, title_hash, expected_page_type)):
+        return {}
+    hashes = [value for value in (object_evidence_hash, title_hash) if isinstance(value, str) and value]
+    hash_match = any(_text_blob_contains_hash(text_blob, digest[:12]) for digest in hashes)
+    detail_signal = _contains_detail_or_player_signal(observation, text_blob, expected_page_type)
+    feed_signal = _contains_feed_or_search_signal(observation, text_blob)
+    any_detail = _contains_detail_or_player_signal(observation, text_blob, "detail_or_player")
+    signals: dict[str, Any] = {
+        "selected_object_expected_page_type": expected_page_type or None,
+        "selected_object_hash_match": hash_match,
+        "selected_object_detail_signal": detail_signal,
+    }
+    if hash_match and feed_signal and expected_page_type in {"detail_or_player", "page_opened"}:
+        signals["same_surface_still_visible"] = True
+    elif hash_match and (detail_signal or expected_page_type not in {"detail_or_player", "page_opened"}):
+        signals["selected_object_match"] = True
+    elif any_detail and not hash_match and expected_page_type in {"detail_or_player", "page_opened"}:
+        signals["wrong_detail_opened"] = True
+    return signals
+
+
+def _contains_detail_or_player_signal(observation: dict[str, Any] | None, text_blob: str, expected_page_type: str) -> bool:
+    if expected_page_type == "input_focused":
+        return bool(_focus_signals(observation).get("focused_editable") or _focus_signals(observation).get("keyboard_visible"))
+    terms = {
+        "播放",
+        "播放器",
+        "全屏",
+        "暂停",
+        "弹幕",
+        "详情",
+        "作者",
+        "关注",
+        "评论",
+        "like",
+        "comment",
+        "player",
+        "pause",
+        "fullscreen",
+        "detail",
+    }
+    return any(term in text_blob for term in terms)
+
+
+def _contains_feed_or_search_signal(observation: dict[str, Any] | None, text_blob: str) -> bool:
+    terms = {"推荐", "首页", "搜索结果", "综合", "筛选", "feed", "search results", "recommend"}
+    if any(term in text_blob for term in terms):
+        return True
+    if isinstance(observation, dict):
+        object_registry = observation.get("object_registry")
+        if isinstance(object_registry, dict) and object_registry.get("object_count", 0):
+            return True
+    return False

@@ -7,6 +7,7 @@ from typing import Any
 
 from phone_agent.actions.adapter import ActionAdapterError, _canonical_action_name
 from phone_agent.actions.ir import is_intent_dict
+from phone_agent.actions.selectors import validate_object_filter
 from phone_agent.actions.validator import ActionValidationError, validate_action
 from phone_agent.graph.marks import (
     MARK_CONFIDENCE_THRESHOLD,
@@ -14,6 +15,11 @@ from phone_agent.graph.marks import (
     SAFE_MARK_ID_RE,
     MarkRegistry,
     hash_hamming_distance,
+)
+from phone_agent.graph.objects import (
+    ObjectRegistry,
+    ScreenObject,
+    object_selected_evidence,
 )
 from phone_agent.grounding.provider import ScreenBinding
 
@@ -30,6 +36,10 @@ INTENT_ALLOWED_FIELDS = {
     "_metadata",
     "action",
     "target_mark_id",
+    "target_object_id",
+    "ordinal",
+    "object_role",
+    "object_filter",
     "target_role",
     "target_text_hint",
     "requires_grounding",
@@ -74,6 +84,7 @@ TAKEOVER_TERMS = {
     "账户",
     "账号",
 }
+SAFE_OBJECT_ID_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,64}$")
 
 
 def validate_intent(intent: dict[str, Any]) -> dict[str, Any]:
@@ -87,6 +98,22 @@ def validate_intent(intent: dict[str, Any]) -> dict[str, Any]:
             raise GroundingError("unsafe_value", "target_mark_id must be a string")
         if not SAFE_MARK_ID_RE.fullmatch(intent["target_mark_id"]):
             raise GroundingError("unsafe_value", "target_mark_id contains unsafe characters")
+    if "target_object_id" in intent:
+        if not isinstance(intent["target_object_id"], str) or not intent["target_object_id"].strip():
+            raise GroundingError("unsafe_value", "target_object_id must be a non-empty string")
+        if not SAFE_OBJECT_ID_RE.fullmatch(intent["target_object_id"]):
+            raise GroundingError("unsafe_value", "target_object_id contains unsafe characters")
+    if "object_role" in intent:
+        if not isinstance(intent["object_role"], str) or not intent["object_role"].strip():
+            raise GroundingError("unsafe_value", "object_role must be a non-empty string")
+    if "ordinal" in intent:
+        if not isinstance(intent["ordinal"], int) or isinstance(intent["ordinal"], bool) or intent["ordinal"] <= 0 or intent["ordinal"] > 100:
+            raise GroundingError("unsafe_value", "ordinal must be a positive integer <= 100")
+    if "object_filter" in intent:
+        try:
+            intent["object_filter"] = validate_object_filter(intent["object_filter"])
+        except ValueError as exc:
+            raise GroundingError("unsafe_value", str(exc)) from exc
     for key in ("target_role", "target_text_hint", "text", "message", "app", "duration"):
         if key in intent and not isinstance(intent[key], str):
             raise GroundingError("unsafe_value", f"{key} must be a string")
@@ -105,6 +132,7 @@ def ground_intent_to_action(
     intent: dict[str, Any], *, mark_registry: MarkRegistry | dict[str, Any] | None, screen_id: str | None,
     screen_binding: ScreenBinding | None = None, timeout: float | None = None,
     grounding_metadata: dict[str, Any] | None = None,
+    object_registry: ObjectRegistry | dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Compile a validated IntentIR dict into canonical ActionIR dict."""
 
@@ -116,6 +144,33 @@ def ground_intent_to_action(
     action_name = _canonical_action_name(action_name)
 
     mark_id = intent.get("target_mark_id")
+    if not mark_id and _has_object_selector(intent):
+        registry = _require_mark_registry(registry)
+        object_reg = object_registry if isinstance(object_registry, ObjectRegistry) else ObjectRegistry.from_dict(object_registry)
+        selected_object = _resolve_object_selector(
+            intent,
+            object_registry=object_reg,
+            mark_registry=registry,
+            screen_id=screen_id,
+            screen_binding=screen_binding,
+            grounding_metadata=grounding_metadata,
+        )
+        mark_id = selected_object.primary_mark_id
+        intent = {
+            **intent,
+            "target_mark_id": mark_id,
+            "_selected_object_evidence": selected_object.sensitivity_evidence_summary or selected_object.evidence_summary,
+        }
+        if grounding_metadata is not None:
+            grounding_metadata["selected_object"] = {
+                "object_id_hash": (object_selected_evidence(selected_object) or {}).get("selected_object_id_hash"),
+                "object_type": selected_object.object_type,
+                "primary_mark_id": selected_object.primary_mark_id,
+                "list_id": selected_object.list_id,
+                "ordinal_index": selected_object.ordinal_index,
+                "sensitivity_route": None,
+            }
+            grounding_metadata["selected_object_evidence"] = object_selected_evidence(selected_object)
     if mark_id:
         if registry is None or not registry.marks:
             raise GroundingError("mark_unavailable", "no MarkRegistry available for mark intent")
@@ -129,6 +184,8 @@ def ground_intent_to_action(
             raise GroundingError("low_confidence", "mark confidence is below threshold")
         _validate_mark_semantics(intent, mark)
         sensitivity = _mark_sensitivity(intent, mark)
+        if grounding_metadata is not None and grounding_metadata.get("selected_object"):
+            grounding_metadata["selected_object"]["sensitivity_route"] = sensitivity
         if sensitivity == "takeover":
             try:
                 return validate_action(
@@ -167,6 +224,190 @@ def ground_intent_to_action(
         return _ground_non_target_intent(intent, action_name)
 
     raise GroundingError("mark_required", "tap-like intent requires target_mark_id")
+
+
+def _require_mark_registry(registry: MarkRegistry | None) -> MarkRegistry:
+    if registry is None or not registry.marks:
+        raise GroundingError("mark_unavailable", "no MarkRegistry available for object intent")
+    return registry
+
+
+def _has_object_selector(intent: dict[str, Any]) -> bool:
+    return any(key in intent for key in ("target_object_id", "ordinal", "object_role", "object_filter"))
+
+
+def _resolve_object_selector(
+    intent: dict[str, Any],
+    *,
+    object_registry: ObjectRegistry | None,
+    mark_registry: MarkRegistry,
+    screen_id: str | None,
+    screen_binding: ScreenBinding | None,
+    grounding_metadata: dict[str, Any] | None,
+) -> ScreenObject:
+    if object_registry is None or not object_registry.objects:
+        raise GroundingError("object_registry_missing", "no ObjectRegistry available for object selector")
+    _validate_object_registry_binding(
+        object_registry,
+        mark_registry=mark_registry,
+        screen_id=screen_id,
+        screen_binding=screen_binding,
+        grounding_metadata=grounding_metadata,
+    )
+    candidates: list[ScreenObject]
+    target_object_id = intent.get("target_object_id")
+    if isinstance(target_object_id, str) and target_object_id.strip():
+        obj = object_registry.get(target_object_id)
+        if obj is None:
+            raise GroundingError("unknown_object", f"unknown object: {target_object_id}")
+        _validate_selected_object_constraints(intent, obj)
+        candidates = [obj]
+    else:
+        candidates = _filter_objects(intent, object_registry)
+        ordinal = intent.get("ordinal")
+        if isinstance(ordinal, int):
+            if ordinal <= 0 or ordinal > len(candidates):
+                raise GroundingError("ordinal_out_of_range", "object ordinal is outside current list")
+            candidates = [candidates[ordinal - 1]]
+    if not candidates:
+        raise GroundingError("unknown_object", "object selector matched no objects")
+    if len(candidates) != 1:
+        raise GroundingError("object_ambiguous", "object selector matched multiple objects")
+    selected = candidates[0]
+    if not selected.primary_mark_id:
+        raise GroundingError("object_without_mark", "object is not bound to an atomic mark")
+    mark = mark_registry.get(selected.primary_mark_id)
+    if mark is None:
+        raise GroundingError("mark_stale", "selected object primary mark is missing")
+    if mark.confidence < MARK_CONFIDENCE_THRESHOLD:
+        raise GroundingError("mark_low_confidence", "selected object primary mark confidence is below threshold")
+    return selected
+
+
+def _validate_selected_object_constraints(intent: dict[str, Any], obj: ScreenObject) -> None:
+    role = intent.get("object_role")
+    if isinstance(role, str) and role.strip():
+        terms = _semantic_terms(role)
+        if terms and not any(term in _object_haystack(obj) for term in terms):
+            raise GroundingError("object_ambiguous", "target_object_id does not match object_role")
+    ordinal = intent.get("ordinal")
+    if isinstance(ordinal, int):
+        if obj.ordinal_index is None or obj.ordinal_index != ordinal:
+            raise GroundingError("object_ambiguous", "target_object_id does not match ordinal")
+    object_filter = intent.get("object_filter")
+    if isinstance(object_filter, dict):
+        try:
+            object_filter = validate_object_filter(object_filter)
+        except ValueError as exc:
+            raise GroundingError("unsafe_value", str(exc)) from exc
+        if not _object_matches_filter(obj, object_filter):
+            raise GroundingError("object_ambiguous", "target_object_id does not match object_filter")
+
+
+def _validate_object_registry_binding(
+    object_registry: ObjectRegistry,
+    *,
+    mark_registry: MarkRegistry,
+    screen_id: str | None,
+    screen_binding: ScreenBinding | None,
+    grounding_metadata: dict[str, Any] | None,
+) -> None:
+    binding_summary = {
+        "object_registry_screen_id": object_registry.screen_id,
+        "current_screen_id": screen_id,
+        "object_set_version": object_registry.object_set_version,
+        "structure_topology_digest": object_registry.structure_topology_digest,
+        "mark_set_version": object_registry.mark_set_version,
+        "current_mark_set_version": mark_registry.mark_set_version,
+    }
+    if grounding_metadata is not None:
+        grounding_metadata["object_binding"] = binding_summary
+    if screen_binding is None:
+        raise GroundingError("object_stale", "screen binding is required for object selector validation")
+    if screen_id and object_registry.screen_id != screen_id:
+        raise GroundingError("object_stale", "ObjectRegistry screen does not match current screen")
+    if object_registry.mark_set_version and mark_registry.mark_set_version and object_registry.mark_set_version != mark_registry.mark_set_version:
+        raise GroundingError("object_stale", "ObjectRegistry mark version does not match current marks")
+    semantic_match = bool(
+        object_registry.semantic_screen_id
+        and object_registry.semantic_screen_id == screen_binding.semantic_screen_id
+    )
+    if object_registry.semantic_screen_id and not semantic_match:
+        raise GroundingError("object_stale", "ObjectRegistry semantic screen does not match current screen")
+    if (
+        object_registry.structure_topology_digest
+        and screen_binding.structure_topology_digest
+        and object_registry.structure_topology_digest != screen_binding.structure_topology_digest
+    ):
+        raise GroundingError("object_stale", "ObjectRegistry topology does not match current screen")
+    if (
+        object_registry.object_set_version
+        and screen_binding.object_set_version
+        and object_registry.object_set_version != screen_binding.object_set_version
+    ):
+        raise GroundingError("object_stale", "ObjectRegistry version does not match current screen")
+
+
+def _filter_objects(intent: dict[str, Any], object_registry: ObjectRegistry) -> list[ScreenObject]:
+    objects = list(object_registry.objects.values())
+    role = intent.get("object_role")
+    if isinstance(role, str) and role.strip():
+        terms = _semantic_terms(role)
+        objects = [
+            obj
+            for obj in objects
+            if any(term in _object_haystack(obj) for term in terms)
+        ]
+    object_filter = intent.get("object_filter")
+    if isinstance(object_filter, dict):
+        try:
+            object_filter = validate_object_filter(object_filter)
+        except ValueError as exc:
+            raise GroundingError("unsafe_value", str(exc)) from exc
+        objects = [obj for obj in objects if _object_matches_filter(obj, object_filter)]
+    return sorted(
+        objects,
+        key=lambda obj: (
+            obj.list_id or "zz",
+            obj.ordinal_index if obj.ordinal_index is not None else 10_000,
+            obj.object_id,
+        ),
+    )
+
+
+def _object_matches_filter(obj: ScreenObject, object_filter: dict[str, str]) -> bool:
+    for key, value in object_filter.items():
+        lowered = value.casefold()
+        if key == "object_type" and obj.object_type.casefold() != lowered:
+            return False
+        if key == "role" and lowered not in str(obj.role or "").casefold():
+            return False
+        if key == "source" and obj.source.casefold() != lowered:
+            return False
+        if key == "list_id" and obj.list_id != value:
+            return False
+        if key == "title_hash_prefix" and not str(obj.title_hash or "").startswith(lowered):
+            return False
+        if key == "text_hash_prefix" and not str(obj.text_hash or "").startswith(lowered):
+            return False
+        if key == "resource_id_hash_prefix" and not str(obj.resource_id_hash or "").startswith(lowered):
+            return False
+        if key == "lineage_hash_prefix" and not str(obj.lineage_hash or "").startswith(lowered):
+            return False
+    return True
+
+
+def _object_haystack(obj: ScreenObject) -> str:
+    return " ".join(
+        str(value or "").casefold()
+        for value in (
+            obj.object_type,
+            obj.role,
+            obj.source,
+            obj.list_id,
+            obj.evidence_summary,
+        )
+    )
 
 
 def _validate_mark_binding(
@@ -238,6 +479,7 @@ def _mark_sensitivity(intent: dict[str, Any], mark: Any) -> str | None:
             intent.get("target_role"),
             intent.get("target_text_hint"),
             intent.get("message"),
+            intent.get("_selected_object_evidence"),
             getattr(mark, "role", None),
             getattr(mark, "text_summary", None),
         )

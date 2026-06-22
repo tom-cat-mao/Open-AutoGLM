@@ -8,10 +8,12 @@ import time
 import xml.etree.ElementTree as ET
 from typing import Any
 
+from phone_agent.graph.context import sanitize_context_payload
+from phone_agent.graph.objects import ScreenStructure, StructureNode, build_structure_topology_digest
 from phone_agent.grounding.provider import MarkCandidate, MarkProviderHint, MarkProviderResult, ScreenBinding
 
 
-BOUNDS_RE = re.compile(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]")
+BOUNDS_RE = re.compile(r"\[(-?\d+),(-?\d+)\]\[(-?\d+),(-?\d+)\]")
 INTERACTIVE_CLASSES = (
     "Button",
     "CheckBox",
@@ -73,6 +75,84 @@ def parse_uiautomator_marks(
     return marks
 
 
+def parse_uiautomator_structure(
+    xml_text: str,
+    *,
+    screen_width: int,
+    screen_height: int,
+) -> ScreenStructure | None:
+    """Parse UiAutomator XML into a trace-safe screen structure sidecar."""
+
+    if screen_width <= 0 or screen_height <= 0 or not xml_text.strip():
+        return None
+    try:
+        root = ET.fromstring(xml_text)
+    except ET.ParseError:
+        return None
+    nodes: dict[str, StructureNode] = {}
+    root_node_id: str | None = None
+
+    def visit(element: ET.Element, *, parent_id: str | None, path: str, depth: int) -> str | None:
+        nonlocal root_node_id
+        if element.tag != "node":
+            child_ids = []
+            for child_index, child in enumerate(list(element)):
+                child_id = visit(child, parent_id=parent_id, path=f"{path}/{child_index}", depth=depth)
+                if child_id:
+                    child_ids.append(child_id)
+            return child_ids[0] if len(child_ids) == 1 else None
+        node_id = f"node_{len(nodes) + 1}"
+        if root_node_id is None:
+            root_node_id = node_id
+        raw_bounds = _parse_bounds(element.attrib.get("bounds") or "")
+        bounds = _normalize_bounds(raw_bounds, width=screen_width, height=screen_height)
+        role = _role_from_class(element.attrib.get("class") or "")
+        text = _safe_node_summary(element.attrib.get("text") or "")
+        content_desc = _safe_node_summary(element.attrib.get("content-desc") or "")
+        resource_id_hash = _hash_value(element.attrib.get("resource-id") or "")
+        child_ids: list[str] = []
+        node = StructureNode(
+            node_id=node_id,
+            path=path,
+            parent_id=parent_id,
+            child_ids=child_ids,
+            depth=depth,
+            bounds=bounds,
+            role=role,
+            class_name=(element.attrib.get("class") or "")[:80] or None,
+            resource_id_hash=resource_id_hash,
+            text_summary=text,
+            content_desc_summary=content_desc,
+            clickable=element.attrib.get("clickable") == "true",
+            focusable=element.attrib.get("focusable") == "true",
+            focused=element.attrib.get("focused") == "true",
+            checkable=element.attrib.get("checkable") == "true",
+            checked=element.attrib.get("checked") == "true",
+            scrollable=element.attrib.get("scrollable") == "true",
+            enabled=element.attrib.get("enabled") != "false",
+            visible=element.attrib.get("visible-to-user") != "false",
+        )
+        nodes[node_id] = node
+        for child_index, child in enumerate(list(element)):
+            child_id = visit(child, parent_id=node_id, path=f"{path}/{child_index}", depth=depth + 1)
+            if child_id:
+                child_ids.append(child_id)
+        if child_ids:
+            nodes[node_id] = StructureNode(**{**node.to_dict(), "bounds": node.bounds, "child_ids": child_ids})
+        return node_id
+
+    for index, child in enumerate(list(root)):
+        visit(child, parent_id=None, path=str(index), depth=0)
+    if not nodes:
+        return None
+    return ScreenStructure(
+        screen_id="",
+        nodes=nodes,
+        root_node_id=root_node_id,
+        topology_digest=build_structure_topology_digest(nodes),
+    )
+
+
 def visible_text_summary(xml_text: str, *, max_items: int = 20, max_chars: int = 300) -> str:
     """Extract a short visible-text summary for optional provider context."""
 
@@ -130,6 +210,12 @@ class AccessibilityTreeProvider:
             source=self.name,
             max_marks=self.max_marks,
         )
+        screen_structure = parse_uiautomator_structure(
+            xml_text,
+            screen_width=screen_binding.width,
+            screen_height=screen_binding.height,
+        )
+        screen_structure_dict = screen_structure.to_dict() if screen_structure is not None else None
         marks = [
             MarkCandidate(
                 mark_id=str(item["mark_id"]),
@@ -159,6 +245,7 @@ class AccessibilityTreeProvider:
                 status="grounding_no_candidate",
                 hints=[hint.redacted_summary() for hint in hints or []],
                 metadata={"max_marks": self.max_marks},
+                screen_structure=screen_structure_dict,
             )
         return MarkProviderResult(
             success=True,
@@ -173,6 +260,7 @@ class AccessibilityTreeProvider:
             status="success",
             hints=[hint.redacted_summary() for hint in hints or []],
             metadata={"max_marks": self.max_marks},
+            screen_structure=screen_structure_dict,
         )
 
     def _failure(
@@ -246,6 +334,25 @@ def _parse_bounds(value: str) -> tuple[int, int, int, int] | None:
     return tuple(int(part) for part in match.groups())  # type: ignore[return-value]
 
 
+def _normalize_bounds(
+    bounds: tuple[int, int, int, int] | None,
+    *,
+    width: int,
+    height: int,
+) -> tuple[int, int, int, int] | None:
+    if bounds is None:
+        return None
+    x1, y1, x2, y2 = bounds
+    if x2 <= x1 or y2 <= y1:
+        return None
+    return (
+        _to_relative(x1, width),
+        _to_relative(y1, height),
+        _to_relative(x2, width),
+        _to_relative(y2, height),
+    )
+
+
 def _to_relative(value: int, maximum: int) -> int:
     if maximum <= 0:
         return 0
@@ -264,6 +371,20 @@ def _node_text(attrs: dict[str, str]) -> str:
         if cleaned and cleaned not in parts:
             parts.append(cleaned)
     return " | ".join(parts)
+
+
+def _safe_node_summary(value: str) -> str | None:
+    cleaned = " ".join(str(sanitize_context_payload(str(value or ""), "message", consumer="inject")).split())
+    if not cleaned:
+        return None
+    return cleaned[:MAX_TEXT_SUMMARY_CHARS]
+
+
+def _hash_value(value: str) -> str | None:
+    cleaned = str(value or "").strip()
+    if not cleaned:
+        return None
+    return hashlib.sha256(cleaned.encode("utf-8")).hexdigest()[:12]
 
 
 def _role_from_class(class_name: str) -> str:

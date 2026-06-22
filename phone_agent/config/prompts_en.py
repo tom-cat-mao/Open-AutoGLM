@@ -19,6 +19,8 @@ Hard constraints:
 ACTION_SCHEMA = """# Action Schema (single action contract)
 - Output must be a JSON object or provider tool call; do not emit Python function calls, XML, Markdown, or the removed text DSL.
 - Screen-target tap-like actions must use IntentIR with `target_mark_id`, for example `{"type":"intent","action":"tap|double_tap|long_press","target_mark_id":"m1"}`; do not guess Tap coordinates and do not use target descriptions as executable targets.
+- If the Screen Objects block has a unique visible object, you may emit observation-local selectors: `target_object_id`, or `object_role`+`ordinal`/strict `object_filter`; selectors are only IntentIR metadata and the harness must compile them to one `target_mark_id` before execution. Do not reuse old object_id/list_id/ordinal after reobserve.
+- `object_filter` must be a flat JSON object. Allowed keys: `object_type`, `role`, `source`, `list_id`, `title_hash_prefix`, `text_hash_prefix`, `resource_id_hash_prefix`, `lineage_hash_prefix`; raw title/text, regex, arrays, nested objects, provider/backend/device fields are forbidden.
 - Launch: `{"type":"do","action":"launch","app":"AppName"}`, preferred when opening the target app.
 - Type / Type_Name: `{"type":"do","action":"type","text":"text"}`; focus the input first, existing text is cleared automatically.
 - Swipe: `{"type":"do","action":"swipe","start":[x1,y1],"end":[x2,y2]}` in 0-1000 relative coordinates.
@@ -65,6 +67,8 @@ You may use a provider envelope: {"action": <one action JSON below>, "expected_o
 `expected_outcome` is only a post-action verification contract, not execution authorization. It must not contain raw private text, commands, device config, provider, or backend fields; execution still comes only from `action`.
 Examples:
 - {"type":"intent","action":"tap","target_mark_id":"m1"}
+- {"type":"intent","action":"tap","target_object_id":"obj_1"}
+- {"type":"intent","action":"tap","object_role":"video","ordinal":1,"object_filter":{"object_type":"video","list_id":"list_1"}}
 - {"action":{"type":"intent","action":"tap","target_mark_id":"m1"},"expected_outcome":{"kind":"input_focused","must_observe":["Search","Cancel"]}}
 - {"type":"intent","action":"tap","target_mark_id":"m2","message":"confirm payment"}
 - {"type":"do","action":"swipe","start":[500,800],"end":[500,200]}

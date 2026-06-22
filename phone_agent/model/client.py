@@ -533,7 +533,7 @@ class ModelClient:
                                     "Launch", "Wait", "Note", "Call_API",
                                     "Interact", "Take_over",
                                 ],
-                                "description": "Tap/Double Tap/Long Press are screen-target actions and must include target_mark_id; raw coordinates are not accepted.",
+                                "description": "Tap/Double Tap/Long Press are screen-target actions and must include target_mark_id or a valid observation-local object selector; raw coordinates are not accepted.",
                             },
                             "start": {
                                 "type": "array",
@@ -557,11 +557,38 @@ class ModelClient:
                             },
                             "target_mark_id": {
                                 "type": "string",
-                                "description": "Required for tap-like screen targeting in structured modes; harness grounds it before execution",
+                                "description": "Preferred for tap-like screen targeting; harness grounds it before execution. Object selectors may be used only as non-executable IntentIR metadata.",
+                            },
+                            "target_object_id": {
+                                "type": "string",
+                                "description": "Observation-local non-executable object id; harness must compile it to a unique target_mark_id before execution.",
+                            },
+                            "ordinal": {
+                                "type": "integer",
+                                "description": "Observation-local 1-based ordinal for an object_role/object_filter selector.",
+                            },
+                            "object_role": {
+                                "type": "string",
+                                "description": "Non-executable object selector role such as video, result, input, or button.",
+                            },
+                            "object_filter": {
+                                "type": "object",
+                                "description": "Strict flat non-executable object selector metadata. Allowed keys: object_type, role, source, list_id, title_hash_prefix, text_hash_prefix, resource_id_hash_prefix, lineage_hash_prefix.",
+                                "additionalProperties": False,
+                                "properties": {
+                                    "object_type": {"type": "string", "maxLength": 64},
+                                    "role": {"type": "string", "maxLength": 64},
+                                    "source": {"type": "string", "maxLength": 64},
+                                    "list_id": {"type": "string", "maxLength": 64},
+                                    "title_hash_prefix": {"type": "string", "pattern": "^[0-9a-fA-F]{6,16}$"},
+                                    "text_hash_prefix": {"type": "string", "pattern": "^[0-9a-fA-F]{6,16}$"},
+                                    "resource_id_hash_prefix": {"type": "string", "pattern": "^[0-9a-fA-F]{6,16}$"},
+                                    "lineage_hash_prefix": {"type": "string", "pattern": "^[0-9a-fA-F]{6,16}$"},
+                                },
                             },
                             "target_role": {
                                 "type": "string",
-                                "description": "Non-executable metadata only; tap-like intent still requires target_mark_id",
+                                "description": "Non-executable metadata only; tap-like intent still requires target_mark_id or a valid object selector before grounding",
                             },
                             "target_text_hint": {
                                 "type": "string",

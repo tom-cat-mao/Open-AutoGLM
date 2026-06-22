@@ -11,6 +11,7 @@ import json
 from typing import Any
 
 from phone_agent.actions.constants import BASE_DANGEROUS_FIELDS
+from phone_agent.actions.selectors import validate_object_filter
 
 
 class ActionAdapterError(ValueError):
@@ -53,6 +54,10 @@ INTENT_FIELDS = {
     "_metadata",
     "action",
     "target_mark_id",
+    "target_object_id",
+    "ordinal",
+    "object_role",
+    "object_filter",
     "target_role",
     "target_text_hint",
     "target_text",
@@ -87,6 +92,10 @@ def adapt_json_action(payload: str | dict[str, Any]) -> dict[str, Any]:
     action_type = data.get("type") or data.get("_metadata")
     intent_keys = {
         "target_mark_id",
+        "target_object_id",
+        "ordinal",
+        "object_role",
+        "object_filter",
         "target_text_hint",
         "target_text",
         "target_role",
@@ -103,14 +112,34 @@ def adapt_json_action(payload: str | dict[str, Any]) -> dict[str, Any]:
                 if key == "requires_grounding":
                     if not isinstance(value, bool):
                         raise ActionAdapterError("unsafe_value", "requires_grounding must be a boolean")
-                elif key in {"action", "target_mark_id", "target_role", "target_text_hint", "text", "message", "app", "duration"} and not isinstance(value, str):
+                elif key in {
+                    "action",
+                    "target_mark_id",
+                    "target_object_id",
+                    "object_role",
+                    "target_role",
+                    "target_text_hint",
+                    "text",
+                    "message",
+                    "app",
+                    "duration",
+                } and not isinstance(value, str):
                     raise ActionAdapterError("unsafe_value", f"{key} must be a string")
+                elif key == "ordinal":
+                    if not isinstance(value, int) or isinstance(value, bool) or value <= 0 or value > 100:
+                        raise ActionAdapterError("unsafe_value", "ordinal must be a positive integer <= 100")
+                elif key == "object_filter":
+                    try:
+                        value = validate_object_filter(value)
+                    except ValueError as exc:
+                        raise ActionAdapterError("unsafe_value", str(exc)) from exc
                 intent[key] = value
         if "action" not in intent:
             raise ActionAdapterError("missing_field", "intent requires action")
         intent["action"] = _canonical_action_name(intent["action"])
         if intent["action"] in {"Tap", "Double Tap", "Long Press"} and "target_mark_id" not in intent:
-            raise ActionAdapterError("mark_required", "tap-like intent requires target_mark_id")
+            if not _has_object_selector(intent):
+                raise ActionAdapterError("mark_required", "tap-like intent requires target_mark_id or object selector")
         return intent
     if action_type == "finish":
         _reject_unexpected_provider_fields(data, {"type", "_metadata", "message"})
@@ -122,9 +151,18 @@ def adapt_json_action(payload: str | dict[str, Any]) -> dict[str, Any]:
         raise ActionAdapterError("unknown_action", "action type must be do or finish")
 
     action_name = _canonical_action_name(data.get("action"))
+    if action_name in {"Tap", "Double Tap", "Long Press"} and bool(intent_keys & set(data)):
+        intent_payload = {
+            key: value
+            for key, value in data.items()
+            if key in (INTENT_FIELDS | {"type"})
+        }
+        intent_payload["type"] = "intent"
+        intent_payload["action"] = action_name
+        return adapt_json_action(intent_payload)
     _reject_unexpected_provider_fields(data, ALLOWED_PROVIDER_FIELDS_BY_ACTION[action_name])
     if action_name in {"Tap", "Double Tap", "Long Press"}:
-        raise ActionAdapterError("mark_required", "tap-like actions must use intent target_mark_id")
+        raise ActionAdapterError("mark_required", "tap-like actions must use intent target_mark_id or object selector")
     action: dict[str, Any] = {"_metadata": "do", "action": action_name}
     if "message" in data:
         if not isinstance(data["message"], str):
@@ -251,3 +289,13 @@ def _validate_point(value: Any, field_name: str) -> list[int | float]:
             raise ActionAdapterError("unsafe_value", "coordinates must be in 0-1000")
         point.append(coordinate)
     return point
+
+
+def _has_object_selector(intent: dict[str, Any]) -> bool:
+    if isinstance(intent.get("target_object_id"), str) and intent["target_object_id"].strip():
+        return True
+    if isinstance(intent.get("object_filter"), dict):
+        return True
+    if isinstance(intent.get("object_role"), str) and isinstance(intent.get("ordinal"), int):
+        return True
+    return False

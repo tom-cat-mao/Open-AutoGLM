@@ -54,6 +54,14 @@ class AgentState(TypedDict):
     screen_hash: Optional[str]  # 当前屏幕 hash 摘要
     observation: Optional[dict]  # 当前 observation 脱敏元数据
     mark_registry: Optional[dict]  # 当前 screen_id 绑定的 Mark Registry
+    screen_structure: Optional[dict]  # 当前 screen_id 绑定的结构 sidecar
+    object_registry: Optional[dict]  # 当前 observation-local object registry
+    screen_structure_summary: Optional[dict]  # trace-safe structure summary
+    object_registry_summary: Optional[dict]  # trace-safe object summary
+    object_registry_binding: Optional[dict]  # object registry binding/version digest
+    object_set_version: Optional[str]  # current object registry version
+    structure_topology_digest: Optional[str]  # current structure topology digest
+    object_trace_summary: Optional[dict]  # selected/compiled object trace summary
 
     # === Plan 节点输出 ===
     thinking: str  # 模型思考过程

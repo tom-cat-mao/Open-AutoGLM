@@ -21,6 +21,8 @@ SYSTEM_CONTRACT = f"""今天的日期是: {formatted_date}
 ACTION_SCHEMA = """# Action Schema（唯一动作契约）
 - 输出必须是 JSON 对象或 provider tool call；不要输出 Python 函数调用、XML、Markdown 或旧文本 DSL。
 - 屏幕目标点击类动作必须使用带 `target_mark_id` 的 IntentIR：`{"type":"intent","action":"tap|double_tap|long_press","target_mark_id":"m1"}`；不要猜 Tap 坐标，也不要把目标描述当成可执行目标。
+- 如果 Screen Objects block 中存在唯一可见对象，也可输出 observation-local selector：`target_object_id`，或 `object_role`+`ordinal`/strict `object_filter`；selector 只是 IntentIR metadata，系统必须先编译成唯一 `target_mark_id` 才能执行。reobserve 后不要复用旧 object_id/list_id/ordinal。
+- `object_filter` 只能是 flat JSON object，key 仅限 `object_type`、`role`、`source`、`list_id`、`title_hash_prefix`、`text_hash_prefix`、`resource_id_hash_prefix`、`lineage_hash_prefix`；禁止 raw title/text、regex、array、nested object、provider/backend/device 字段。
 - Launch: `{"type":"do","action":"launch","app":"应用名"}`，优先用于启动目标 App。
 - Type / Type_Name: `{"type":"do","action":"type","text":"文本"}`；输入前先确保输入框聚焦，系统会自动清空旧文本。
 - Swipe: `{"type":"do","action":"swipe","start":[x1,y1],"end":[x2,y2]}`，坐标为 0-1000 相对坐标。
@@ -67,6 +69,8 @@ JSON_OUTPUT_CONTRACT = """# 输出格式：JSON schema
 `expected_outcome` 只是动作后的验证合同，不授权执行，不得包含隐私原文、命令、设备配置或 provider/backend 字段；执行仍只来自 `action`。
 示例：
 - {"type":"intent","action":"tap","target_mark_id":"m1"}
+- {"type":"intent","action":"tap","target_object_id":"obj_1"}
+- {"type":"intent","action":"tap","object_role":"video","ordinal":1,"object_filter":{"object_type":"video","list_id":"list_1"}}
 - {"action":{"type":"intent","action":"tap","target_mark_id":"m1"},"expected_outcome":{"kind":"input_focused","must_observe":["搜索","取消"]}}
 - {"type":"intent","action":"tap","target_mark_id":"m2","message":"confirm payment"}
 - {"type":"do","action":"swipe","start":[500,800],"end":[500,200]}

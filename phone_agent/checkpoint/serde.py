@@ -49,7 +49,68 @@ def _redact_for_checkpoint(value: Any, key: str | None = None) -> Any:
     """
     from phone_agent.graph.context import sanitize_context_payload
 
-    return sanitize_context_payload(value, key, consumer="checkpoint")
+    return sanitize_context_payload(_collapse_sidecars_for_checkpoint(value), key, consumer="checkpoint")
+
+
+def _collapse_sidecars_for_checkpoint(value: Any, key: str | None = None) -> Any:
+    """Replace full structure/object sidecars with summaries before checkpoint egress."""
+
+    if isinstance(value, dict):
+        if key == "screen_structure":
+            return _screen_structure_summary(value)
+        if key == "object_registry":
+            return _object_registry_summary(value)
+        collapsed = {}
+        for child_key, child in value.items():
+            if child_key == "observation" and isinstance(child, dict):
+                child = _collapse_observation_sidecars(child)
+            collapsed[child_key] = _collapse_sidecars_for_checkpoint(child, str(child_key))
+        return collapsed
+    if isinstance(value, list):
+        return [_collapse_sidecars_for_checkpoint(item, key) for item in value]
+    return value
+
+
+def _collapse_observation_sidecars(value: dict[str, Any]) -> dict[str, Any]:
+    collapsed = dict(value)
+    if isinstance(collapsed.get("screen_structure"), dict):
+        collapsed["screen_structure"] = _screen_structure_summary(collapsed["screen_structure"])
+    if isinstance(collapsed.get("object_registry"), dict):
+        collapsed["object_registry"] = _object_registry_summary(collapsed["object_registry"])
+    return collapsed
+
+
+def _screen_structure_summary(value: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "screen_id": value.get("screen_id"),
+        "semantic_screen_id": value.get("semantic_screen_id"),
+        "mark_set_version": value.get("mark_set_version"),
+        "topology_digest": value.get("topology_digest"),
+        "status": value.get("status"),
+        "node_count": value.get("node_count") or len(value.get("nodes") or {}),
+        "root_node_id": value.get("root_node_id"),
+    }
+
+
+def _object_registry_summary(value: dict[str, Any]) -> dict[str, Any]:
+    objects = value.get("objects") or {}
+    counts: dict[str, int] = {}
+    iterable = objects.values() if isinstance(objects, dict) else objects
+    for item in iterable or []:
+        if isinstance(item, dict):
+            object_type = str(item.get("object_type") or "unknown")
+            counts[object_type] = counts.get(object_type, 0) + 1
+    return {
+        "screen_id": value.get("screen_id"),
+        "semantic_screen_id": value.get("semantic_screen_id"),
+        "object_set_version": value.get("object_set_version"),
+        "structure_topology_digest": value.get("structure_topology_digest"),
+        "mark_set_version": value.get("mark_set_version"),
+        "status": value.get("status"),
+        "object_count": value.get("object_count") or len(objects),
+        "object_type_counts": counts,
+        "truncation_summary": value.get("truncation_summary") or {},
+    }
 
 
 class RedactingSerializer:

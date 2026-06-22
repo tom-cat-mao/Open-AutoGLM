@@ -257,6 +257,7 @@ def _parse_and_ground_response(
     configurable: dict,
     mark_registry,
     screen_binding: ScreenBinding,
+    object_registry=None,
 ):
     """Parse provider response, optionally ground IntentIR, then validate canonical ActionIR."""
 
@@ -313,12 +314,14 @@ def _parse_and_ground_response(
                 screen_binding=screen_binding,
                 timeout=float(configurable.get("grounding_timeout", 10.0) or 10.0),
                 grounding_metadata=grounding_observation,
+                object_registry=object_registry,
             )
             parse_metadata = {
                 **parse_metadata,
                 "intent_detected": True,
                 "grounding_success": True,
                 "target_mark_id": intent_raw.get("target_mark_id"),
+                "target_object_id": intent_raw.get("target_object_id"),
                 "grounding_provider": "mark_registry",
                 "grounding_screen_hash": screen_binding.raw_screenshot_hash,
             }
@@ -368,6 +371,8 @@ def _parse_and_ground_response(
         raw_expected_outcome,
         action=action_parsed,
         intent=intent_raw,
+        selected_object_evidence=grounding_observation.get("selected_object_evidence")
+        or _selected_object_evidence_from_grounding(grounding_observation),
     )
     expected_outcome_dict = runtime_expected_outcome_dict(
         expected_outcome,
@@ -392,6 +397,46 @@ def _parse_and_ground_response(
         expected_outcome_dict,
         expected_outcome_trace,
     )
+
+
+def _selected_object_evidence_from_grounding(grounding_observation: dict[str, Any]) -> dict[str, Any] | None:
+    selected = grounding_observation.get("selected_object")
+    if not isinstance(selected, dict):
+        return None
+    object_id_hash = selected.get("object_id_hash")
+    object_type = selected.get("object_type")
+    if not isinstance(object_id_hash, str) or not isinstance(object_type, str):
+        return None
+    return {
+        "selected_object_id_hash": object_id_hash,
+        "object_type": object_type,
+        "container_lineage_hash": None,
+        "list_lineage_hash": None,
+        "expected_page_type": "detail_or_player" if object_type in {"video", "card", "result"} else "page_opened",
+    }
+
+
+def _observation_state_fields(observation) -> dict[str, Any]:
+    structure = observation.screen_structure
+    objects = observation.object_registry
+    return {
+        "screen_structure": structure.trace_summary() if structure else None,
+        "object_registry": objects.trace_summary() if objects else None,
+        "screen_structure_summary": structure.trace_summary() if structure else {"status": "missing_sidecar"},
+        "object_registry_summary": objects.trace_summary() if objects else {"status": "missing_sidecar"},
+        "object_registry_binding": {
+            "screen_id": objects.screen_id if objects else None,
+            "semantic_screen_id": objects.semantic_screen_id if objects else None,
+            "object_set_version": objects.object_set_version if objects else None,
+            "structure_topology_digest": objects.structure_topology_digest if objects else None,
+            "mark_set_version": objects.mark_set_version if objects else None,
+        }
+        if objects
+        else None,
+        "object_set_version": objects.object_set_version if objects else None,
+        "structure_topology_digest": structure.topology_digest if structure else None,
+        "object_trace_summary": objects.trace_summary() if objects else None,
+    }
 
 
 def _action_for_history(action: dict | None) -> dict | None:
@@ -565,6 +610,12 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
         observation_epoch=observation.snapshot.observation_epoch,
         mark_set_version=observation.snapshot.mark_set_version,
         perceptual_hash=observation.snapshot.perceptual_hash,
+        structure_topology_digest=observation.screen_structure.topology_digest
+        if observation.screen_structure
+        else None,
+        object_set_version=observation.object_registry.object_set_version
+        if observation.object_registry
+        else None,
     )
     mark_registry = observation.mark_registry
     context_mode = get_context_mode(state, config)
@@ -609,6 +660,9 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
 
         screen_info = MessageBuilder.build_screen_info(current_app)
         text_content = f"{task}\n\n{screen_info}"
+        objects_block = observation.object_registry.prompt_block(mark_registry=mark_registry, lang=lang) if observation.object_registry else ""
+        if objects_block:
+            text_content = f"{text_content}\n\n{objects_block}"
         marks_block = mark_registry.prompt_block(lang)
         if marks_block:
             text_content = f"{text_content}\n\n{marks_block}"
@@ -628,6 +682,9 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
             text_content = f"** Screen Info **\n\n{screen_info}\n\n{reflection_context}"
         else:
             text_content = f"** Screen Info **\n\n{screen_info}"
+        objects_block = observation.object_registry.prompt_block(mark_registry=mark_registry, lang=lang) if observation.object_registry else ""
+        if objects_block:
+            text_content = f"{text_content}\n\n{objects_block}"
         marks_block = mark_registry.prompt_block(lang)
         if marks_block:
             text_content = f"{text_content}\n\n{marks_block}"
@@ -713,6 +770,7 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
                     "screen_hash": observation.snapshot.screen_hash,
                     "observation": observation.to_dict(),
                     "mark_registry": mark_registry.to_dict(),
+                    **_observation_state_fields(observation),
                     "screen_width": screenshot.width,
                     "screen_height": screenshot.height,
                     "thinking": "",
@@ -754,6 +812,7 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
                 "screen_hash": observation.snapshot.screen_hash,
                 "observation": observation.to_dict(),
                 "mark_registry": mark_registry.to_dict(),
+                **_observation_state_fields(observation),
                 "screen_width": screenshot.width,
                 "screen_height": screenshot.height,
                 "thinking": "",
@@ -803,6 +862,7 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
             "screen_hash": observation.snapshot.screen_hash,
             "observation": observation.to_dict(),
             "mark_registry": mark_registry.to_dict(),
+            **_observation_state_fields(observation),
             "screen_width": screenshot.width,
             "screen_height": screenshot.height,
             "thinking": "",
@@ -839,6 +899,7 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
         parse_configurable,
         mark_registry,
         screen_binding,
+        object_registry=observation.object_registry,
     )
     retry_count = request_retry_count
     current_error_layer = _layer_for_error(parse_metadata.get("parse_error_code"), grounding_error)
@@ -872,6 +933,7 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
                 parse_configurable,
                 mark_registry,
                 screen_binding,
+                object_registry=observation.object_registry,
             )
             parse_metadata = {**retry_metadata, "parse_retry_count": retry_count, "parse_retry_success": retry_error is None}
             response = retry_response
@@ -943,6 +1005,12 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
             "selected_grounding_candidate_id": selected_grounding_candidate_id,
             "expected_outcome": expected_outcome_trace,
             "mark_registry": mark_registry.trace_summary(),
+            "screen_structure_summary": observation.screen_structure.trace_summary()
+            if observation.screen_structure
+            else {"status": "missing_sidecar"},
+            "object_registry_summary": observation.object_registry.trace_summary()
+            if observation.object_registry
+            else {"status": "missing_sidecar"},
             "repair_attempted": parse_metadata.get("repair_attempted", False),
             "repair_success": parse_metadata.get("repair_success"),
             "repair_error_code": parse_metadata.get("repair_error_code"),
@@ -970,6 +1038,7 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
                 "screen_hash": observation.snapshot.screen_hash,
                 "observation": observation.to_dict(),
                 "mark_registry": mark_registry.to_dict(),
+                **_observation_state_fields(observation),
                 "screen_width": screenshot.width,
                 "screen_height": screenshot.height,
                 "thinking": thinking_safe,
@@ -1010,6 +1079,7 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
             "screen_hash": observation.snapshot.screen_hash,
             "observation": observation.to_dict(),
             "mark_registry": mark_registry.to_dict(),
+            **_observation_state_fields(observation),
             "screen_width": screenshot.width,
             "screen_height": screenshot.height,
             "thinking": thinking_safe,
@@ -1052,6 +1122,7 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
         "screen_hash": observation.snapshot.screen_hash,
         "observation": observation.to_dict(),
         "mark_registry": mark_registry.to_dict(),
+        **_observation_state_fields(observation),
         "screen_width": screenshot.width,
         "screen_height": screenshot.height,
         "thinking": thinking_safe,

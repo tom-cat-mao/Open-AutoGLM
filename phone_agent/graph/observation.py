@@ -14,6 +14,7 @@ from phone_agent.graph.marks import (
     compute_raw_screenshot_hash,
 )
 from phone_agent.graph.context import sanitize_context_payload
+from phone_agent.graph.objects import ObjectRegistry, ScreenStructure, build_object_registry
 from phone_agent.grounding.provider import MarkProvider, MarkProviderHint, MarkProviderResult, ScreenBinding
 
 
@@ -92,12 +93,16 @@ class Observation:
     snapshot: ScreenSnapshot
     mark_registry: MarkRegistry
     mark_provider_observation: dict[str, Any] = field(default_factory=dict)
+    screen_structure: ScreenStructure | None = None
+    object_registry: ObjectRegistry | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "snapshot": self.snapshot.to_dict(),
             "mark_registry": self.mark_registry.to_dict(),
             "mark_provider_observation": self.mark_provider_observation,
+            "screen_structure": self.screen_structure.trace_summary() if self.screen_structure else None,
+            "object_registry": self.object_registry.trace_summary() if self.object_registry else None,
         }
 
 
@@ -251,7 +256,21 @@ def _summarize_provider_result(result: MarkProviderResult) -> dict[str, Any]:
     fallback_chain = _safe_fallback_chain((result.metadata or {}).get("fallback_chain"))
     if fallback_chain:
         summary["metadata"] = {"fallback_chain": fallback_chain}
+    structure_summary = _safe_screen_structure_summary(result.screen_structure)
+    if structure_summary:
+        summary["screen_structure"] = structure_summary
     return summary
+
+
+def _safe_screen_structure_summary(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    return {
+        "status": _safe_metadata(value.get("status"), default="ok"),
+        "node_count": _safe_int(value.get("node_count")),
+        "topology_digest": _safe_metadata(value.get("topology_digest")),
+        "root_node_id": _safe_metadata(value.get("root_node_id")),
+    }
 
 
 def _safe_fallback_chain(value: Any) -> list[dict[str, Any]]:
@@ -333,6 +352,7 @@ def build_observation(
     )
     provider_summaries: list[dict[str, Any]] = []
     provider_marks: list[dict[str, Any]] = []
+    provider_structures: list[ScreenStructure] = []
     for provider in mark_providers or []:
         try:
             hints_for_provider = (
@@ -364,6 +384,10 @@ def build_observation(
             continue
         provider_summaries.append(_summarize_provider_result(result))
         provider_marks.extend(_provider_result_to_marks(result))
+        if isinstance(result.screen_structure, dict):
+            structure = _screen_structure_from_dict(result.screen_structure)
+            if structure is not None:
+                provider_structures.append(structure)
 
     all_marks = base_marks + provider_marks
     screen_id = build_screen_id(
@@ -397,6 +421,32 @@ def build_observation(
         perceptual_hash=perceptual_hash,
         raw_screenshot_hash=raw_screenshot_hash,
     )
+    screen_structure = provider_structures[0] if provider_structures else None
+    if screen_structure is not None:
+        screen_structure = screen_structure.with_binding(
+            screen_id=screen_id,
+            semantic_screen_id=semantic_screen_id,
+            mark_set_version=registry.mark_set_version,
+        )
+    object_registry = build_object_registry(
+        screen_id=screen_id,
+        structure=screen_structure,
+        mark_registry=registry,
+    )
+    if screen_structure is not None:
+        binding = ScreenBinding(
+            screen_id=screen_id,
+            raw_screenshot_hash=raw_screenshot_hash,
+            width=width,
+            height=height,
+            current_app=current_app,
+            semantic_screen_id=semantic_screen_id,
+            observation_epoch=0,
+            mark_set_version=registry.mark_set_version,
+            perceptual_hash=perceptual_hash,
+            structure_topology_digest=screen_structure.topology_digest,
+            object_set_version=object_registry.object_set_version,
+        )
     return Observation(
         snapshot=snapshot,
         mark_registry=registry,
@@ -405,5 +455,58 @@ def build_observation(
             "provider_count": len(mark_providers or []),
             "hint_count": len(provider_hints or []),
             "mark_count": len(registry.marks),
+            "screen_structure_summary": screen_structure.trace_summary() if screen_structure else {"status": "missing_sidecar"},
+            "object_registry_summary": object_registry.trace_summary(),
         },
+        screen_structure=screen_structure,
+        object_registry=object_registry,
+    )
+
+
+def _screen_structure_from_dict(value: dict[str, Any]) -> ScreenStructure | None:
+    from phone_agent.graph.objects import StructureNode, build_structure_topology_digest
+
+    raw_nodes = value.get("nodes")
+    if not isinstance(raw_nodes, dict):
+        return None
+    nodes: dict[str, StructureNode] = {}
+    for node_id, item in raw_nodes.items():
+        if not isinstance(item, dict):
+            continue
+        bounds_value = item.get("bounds")
+        bounds = None
+        if isinstance(bounds_value, list) and len(bounds_value) == 4 and all(isinstance(v, int) for v in bounds_value):
+            bounds = (bounds_value[0], bounds_value[1], bounds_value[2], bounds_value[3])
+        child_ids = [str(child) for child in item.get("child_ids") or [] if isinstance(child, str)]
+        nodes[str(node_id)] = StructureNode(
+            node_id=str(item.get("node_id") or node_id),
+            path=str(item.get("path") or ""),
+            parent_id=item.get("parent_id") if isinstance(item.get("parent_id"), str) else None,
+            child_ids=child_ids,
+            depth=_safe_int(item.get("depth"), maximum=10_000),
+            bounds=bounds,
+            role=_safe_metadata(item.get("role")) or None,
+            class_name=_safe_metadata(item.get("class_name")) or None,
+            resource_id_hash=_safe_metadata(item.get("resource_id_hash")) or None,
+            text_summary=_safe_metadata(item.get("text_summary")) or None,
+            content_desc_summary=_safe_metadata(item.get("content_desc_summary")) or None,
+            clickable=bool(item.get("clickable")),
+            focusable=bool(item.get("focusable")),
+            focused=bool(item.get("focused")),
+            checkable=bool(item.get("checkable")),
+            checked=bool(item.get("checked")),
+            scrollable=bool(item.get("scrollable")),
+            enabled=item.get("enabled") is not False,
+            visible=item.get("visible") is not False,
+        )
+    if not nodes:
+        return None
+    return ScreenStructure(
+        screen_id=_safe_metadata(value.get("screen_id")),
+        semantic_screen_id=_safe_metadata(value.get("semantic_screen_id")) or None,
+        mark_set_version=_safe_metadata(value.get("mark_set_version")) or None,
+        topology_digest=_safe_metadata(value.get("topology_digest")) or build_structure_topology_digest(nodes),
+        status=_safe_metadata(value.get("status"), default="ok"),
+        nodes=nodes,
+        root_node_id=_safe_metadata(value.get("root_node_id")) or None,
     )

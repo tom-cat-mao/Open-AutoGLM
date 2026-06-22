@@ -30,6 +30,7 @@ class FallbackMarkProvider:
         summaries: list[dict[str, Any]] = []
         collected_marks: list[Any] = []
         collected_candidates: list[Any] = []
+        collected_structure: dict[str, Any] | None = None
         last_result: MarkProviderResult | None = None
         for provider in self.providers:
             provider_hints = hints if getattr(provider, "allow_raw_hints", False) else _redact_hints(hints or [])
@@ -50,6 +51,8 @@ class FallbackMarkProvider:
             if result.success and result.marks:
                 collected_marks.extend(result.marks)
                 collected_candidates.extend(result.candidates or result.marks)
+                if collected_structure is None and result.screen_structure:
+                    collected_structure = result.screen_structure
             if result.success and result.marks and usable:
                 return MarkProviderResult(
                     success=True,
@@ -64,6 +67,7 @@ class FallbackMarkProvider:
                     status="success",
                     hints=result.hints,
                     metadata={"fallback_chain": summaries},
+                    screen_structure=collected_structure,
                 )
         if collected_marks:
             if _hint_terms(hints or []):
@@ -82,6 +86,7 @@ class FallbackMarkProvider:
                     status="grounding_no_usable_candidate",
                     hints=(last_result.hints if last_result else [hint.redacted_summary() for hint in hints or []]),
                     metadata={"fallback_chain": summaries},
+                    screen_structure=collected_structure,
                 )
             return MarkProviderResult(
                 success=True,
@@ -96,6 +101,7 @@ class FallbackMarkProvider:
                 status="success",
                 hints=(last_result.hints if last_result else [hint.redacted_summary() for hint in hints or []]),
                 metadata={"fallback_chain": summaries},
+                screen_structure=collected_structure,
             )
         return MarkProviderResult(
             success=False,
