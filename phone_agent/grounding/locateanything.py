@@ -17,6 +17,8 @@ from phone_agent.grounding.provider import MarkCandidate, MarkProviderHint, Mark
 
 
 DEFAULT_LOCATEANYTHING_MAX_SIZE = 960
+LOCATEANYTHING_STRUCTURE_MODES = {"off", "target", "screen"}
+DEFAULT_VISUAL_CATEGORIES = ("button", "text", "input", "card", "image")
 
 
 class LocateAnythingMLXProvider:
@@ -32,14 +34,32 @@ class LocateAnythingMLXProvider:
         *,
         max_size: int = DEFAULT_LOCATEANYTHING_MAX_SIZE,
         context_max_chars: int = 0,
+        structure_mode: str = "off",
+        max_visual_candidates: int = 30,
+        visual_category_budget: int = 5,
+        max_structure_calls: int = 5,
+        invalid_structure_mode: str | None = None,
     ) -> None:
         if max_size <= 0:
             raise ValueError("LocateAnything max_size must be positive")
         if context_max_chars < 0:
             raise ValueError("LocateAnything context_max_chars must be non-negative")
+        if structure_mode not in LOCATEANYTHING_STRUCTURE_MODES:
+            raise ValueError("LocateAnything structure_mode must be one of: off, target, screen")
+        if max_visual_candidates <= 0:
+            raise ValueError("LocateAnything max_visual_candidates must be positive")
+        if visual_category_budget <= 0:
+            raise ValueError("LocateAnything visual_category_budget must be positive")
+        if max_structure_calls <= 0:
+            raise ValueError("LocateAnything max_structure_calls must be positive")
         self.model_path = Path(model_path)
         self.max_size = max_size
         self.context_max_chars = context_max_chars
+        self.structure_mode = structure_mode
+        self.max_visual_candidates = max_visual_candidates
+        self.visual_category_budget = visual_category_budget
+        self.max_structure_calls = max_structure_calls
+        self.invalid_structure_mode = invalid_structure_mode
         self._model = None
         self._processor = None
 
@@ -60,6 +80,8 @@ class LocateAnythingMLXProvider:
             return self._failure("missing_hint", screen_binding, started)
         all_candidates: list[MarkCandidate] = []
         provider_input_hash: str | None = None
+        visual_structure_candidates: list[MarkCandidate] = []
+        ambiguous_for_execution = False
         try:
             image, provider_input_hash = self._prepare_image(screenshot)
             hint_items = hints or []
@@ -86,14 +108,21 @@ class LocateAnythingMLXProvider:
                     for index, box in enumerate(parsed_set.candidates, start=1)
                 ]
                 if len(valid_candidates) > 1:
-                    return self._failure(
-                        "grounding_ambiguous",
-                        screen_binding,
-                        started,
-                        message="multiple valid bboxes",
-                        candidates=all_candidates + candidates,
-                    )
+                    if self.structure_mode == "off":
+                        return self._failure(
+                            "grounding_ambiguous",
+                            screen_binding,
+                            started,
+                            message="multiple valid bboxes",
+                            candidates=all_candidates + candidates,
+                        )
+                    ambiguous_for_execution = True
+                    visual_structure_candidates.extend([candidate for candidate in candidates if candidate.valid])
                 all_candidates.extend(candidates)
+            if self.structure_mode == "screen":
+                visual_structure_candidates.extend(
+                    self._screen_structure_candidates(image, timeout=timeout)[: self.max_visual_candidates]
+                )
         except GroundingParseError as exc:
             return self._failure(exc.code, screen_binding, started, message=str(exc))
         except ImportError:
@@ -107,6 +136,17 @@ class LocateAnythingMLXProvider:
             return self._failure(
                 "grounding_no_candidate", screen_binding, started, message="no valid bbox", candidates=all_candidates
             )
+        executable_marks = valid_marks if self.structure_mode == "off" else ([] if ambiguous_for_execution else valid_marks[:1])
+        visual_candidates = (visual_structure_candidates or valid_marks)[: self.max_visual_candidates]
+        screen_structures = []
+        if self.structure_mode != "off":
+            screen_structures = [
+                self._build_visual_structure(
+                    screen_binding,
+                    visual_candidates,
+                    provider_input_hash=provider_input_hash,
+                )
+            ]
         return MarkProviderResult(
             success=True,
             provider=self.name,
@@ -114,13 +154,102 @@ class LocateAnythingMLXProvider:
             raw_screenshot_hash=screen_binding.raw_screenshot_hash,
             provider_input_hash=provider_input_hash,
             latency_ms=self._latency_ms(started),
-            marks=valid_marks,
-            candidates=all_candidates,
+            marks=executable_marks,
+            candidates=all_candidates + [candidate for candidate in visual_candidates if candidate not in all_candidates],
             candidate_count=len(all_candidates),
             status="success",
             hints=[hint.redacted_summary() for hint in hints or []],
-            metadata={"model_path": str(self.model_path), "context_max_chars": self.context_max_chars},
+            metadata={
+                "model_path": str(self.model_path),
+                "context_max_chars": self.context_max_chars,
+                "structure_mode": self.structure_mode,
+                "invalid_structure_mode": self.invalid_structure_mode,
+                "visual_structure_candidate_count": len(visual_candidates),
+                "executable_mark_count": len(executable_marks),
+                "non_executable_candidate_count": max(0, len(visual_candidates) - len(executable_marks)),
+                "ambiguous_for_execution": ambiguous_for_execution,
+                "visual_structure_failure_codes": getattr(self, "_last_screen_structure_failures", []),
+                "visual_structure_partial": bool(getattr(self, "_last_screen_structure_failures", [])),
+            },
+            screen_structures=screen_structures,
         )
+
+    def _screen_structure_candidates(self, image: Image.Image, *, timeout: float | None = None) -> list[MarkCandidate]:
+        candidates: list[MarkCandidate] = []
+        self._last_screen_structure_failures: list[str] = []
+        categories = DEFAULT_VISUAL_CATEGORIES[: self.visual_category_budget]
+        for call_index, category in enumerate(categories[: self.max_structure_calls], start=1):
+            try:
+                output = self._run_model(image, f"all visible {category} UI elements", timeout=timeout)
+                parsed_set = parse_box_candidates(output)
+            except GroundingParseError as exc:
+                self._last_screen_structure_failures.append(exc.code)
+                continue
+            for index, box in enumerate(parsed_set.valid_candidates, start=1):
+                candidates.append(
+                    MarkCandidate(
+                        mark_id=f"la_screen_{call_index}_{index}",
+                        bbox=box.bbox,
+                        center=box.center,
+                        confidence=None,
+                        source=self.name,
+                        role=category,
+                        text_summary=category,
+                    )
+                )
+                if len(candidates) >= self.max_visual_candidates:
+                    return candidates
+        return candidates
+
+    def _build_visual_structure(
+        self,
+        screen_binding: ScreenBinding,
+        candidates: list[MarkCandidate],
+        *,
+        provider_input_hash: str | None,
+    ) -> dict[str, Any]:
+        nodes: dict[str, dict[str, Any]] = {}
+        for index, candidate in enumerate(candidates[: self.max_visual_candidates], start=1):
+            role = str(candidate.role or "visual_target")
+            nodes[f"visual_{index}"] = {
+                "node_id": f"visual_{index}",
+                "path": f"visual/{index}",
+                "parent_id": None,
+                "child_ids": [],
+                "depth": 0,
+                "bounds": list(candidate.bbox),
+                "role": role,
+                "text_summary": _safe_visual_text(candidate.text_summary, role),
+                "visible": True,
+                "structure_kind": "visual",
+                "source_provider": self.name,
+                "confidence_tier": "weak",
+                "node_provenance": "locateanything_box",
+                "visual_order": index,
+                "confidence": candidate.confidence,
+            }
+        digest_source = "|".join(f"{key}:{item.get('bounds')}:{item.get('role')}" for key, item in nodes.items())
+        structure_digest = hashlib.sha256(digest_source.encode("utf-8")).hexdigest()[:16]
+        return {
+            "screen_id": screen_binding.screen_id,
+            "semantic_screen_id": screen_binding.semantic_screen_id,
+            "mark_set_version": screen_binding.mark_set_version,
+            "status": "ok" if nodes else "visual_structure_partial",
+            "structure_kind": "visual",
+            "source_provider": self.name,
+            "confidence_tier": "weak",
+            "structure_version": "locateanything_visual_v1",
+            "structure_digest": structure_digest,
+            "topology_digest": structure_digest,
+            "node_count": len(nodes),
+            "root_node_id": None,
+            "nodes": nodes,
+            "metadata": {
+                "provider_input_hash": provider_input_hash,
+                "structure_mode": self.structure_mode,
+                "candidate_count": len(candidates),
+            },
+        }
 
     def _prepare_image(self, screenshot: Any) -> tuple[Image.Image, str]:
         raw = base64.b64decode(getattr(screenshot, "base64_data", ""))
@@ -237,8 +366,20 @@ class LocateAnythingMLXProvider:
             candidates=candidates or [],
             candidate_count=len(candidates or []),
             status=code,
+            metadata={
+                "structure_mode": self.structure_mode,
+                "invalid_structure_mode": self.invalid_structure_mode,
+            },
         )
 
     @staticmethod
     def _latency_ms(started: float) -> int:
         return int((time.perf_counter() - started) * 1000)
+
+
+def _safe_visual_text(value: str | None, fallback: str) -> str:
+    text = str(value or "").strip()
+    safe_terms = {"button", "text", "input", "card", "image", "search", "搜索", "visual_target"}
+    if text.casefold() in safe_terms:
+        return text
+    return fallback if fallback.casefold() in safe_terms else "visual_target"

@@ -4,7 +4,12 @@ import subprocess
 from types import ModuleType, SimpleNamespace
 
 from phone_agent.actions.grounding import GroundingError, ground_intent_to_action
-from phone_agent.grounding.accessibility import AccessibilityTreeProvider, parse_uiautomator_marks, visible_text_summary
+from phone_agent.grounding.accessibility import (
+    AccessibilityTreeProvider,
+    parse_uiautomator_marks,
+    parse_uiautomator_structure,
+    visible_text_summary,
+)
 from phone_agent.grounding.fallback import FallbackMarkProvider
 from phone_agent.grounding.fake import FakeGroundingProvider
 from phone_agent.grounding.factory import build_mark_provider, build_mark_providers
@@ -145,6 +150,47 @@ def test_mark_provider_factory_passes_locateanything_context_budget() -> None:
     assert provider.context_max_chars == 32
 
 
+def test_mark_provider_factory_locateanything_structure_mode_precedence(monkeypatch) -> None:
+    monkeypatch.setenv("PHONE_AGENT_LOCATEANYTHING_STRUCTURE_MODE", "screen")
+
+    provider = build_mark_provider(
+        {
+            "grounding_provider_name": "locateanything",
+            "locateanything_structure_mode": "target",
+            "locateanything_max_visual_candidates": 12,
+            "locateanything_visual_category_budget": 2,
+            "locateanything_max_structure_calls": 3,
+        }
+    )
+
+    assert isinstance(provider, LocateAnythingMLXProvider)
+    assert provider.structure_mode == "target"
+    assert provider.max_visual_candidates == 12
+    assert provider.visual_category_budget == 2
+    assert provider.max_structure_calls == 3
+
+
+def test_mark_provider_factory_invalid_explicit_structure_mode_raises() -> None:
+    with pytest.raises(ValueError):
+        build_mark_provider(
+            {
+                "grounding_provider_name": "locateanything",
+                "locateanything_structure_mode": "bad",
+            }
+        )
+
+
+def test_mark_provider_factory_invalid_env_structure_mode_falls_back_off(monkeypatch) -> None:
+    monkeypatch.setenv("PHONE_AGENT_GROUNDING_PROVIDER", "locateanything")
+    monkeypatch.setenv("PHONE_AGENT_LOCATEANYTHING_STRUCTURE_MODE", "bad")
+
+    provider = build_mark_provider()
+
+    assert isinstance(provider, LocateAnythingMLXProvider)
+    assert provider.structure_mode == "off"
+    assert provider.invalid_structure_mode == "bad"
+
+
 def test_locateanything_rejects_non_positive_max_size() -> None:
     with pytest.raises(ValueError):
         LocateAnythingMLXProvider(max_size=0)
@@ -153,6 +199,11 @@ def test_locateanything_rejects_non_positive_max_size() -> None:
 def test_locateanything_rejects_negative_context_budget() -> None:
     with pytest.raises(ValueError):
         LocateAnythingMLXProvider(context_max_chars=-1)
+
+
+def test_locateanything_rejects_invalid_structure_mode() -> None:
+    with pytest.raises(ValueError):
+        LocateAnythingMLXProvider(structure_mode="bad")
 
 
 def test_description_only_intent_requires_mark_id() -> None:
@@ -350,6 +401,34 @@ def test_parse_uiautomator_marks_normalizes_interactive_nodes() -> None:
     assert marks[1]["role"] == "EditText"
 
 
+def test_parse_uiautomator_structure_preserves_topology_and_signed_bounds() -> None:
+    xml = """<hierarchy>
+      <node index="0" text="" resource-id="root" class="android.widget.FrameLayout"
+            clickable="false" enabled="true" bounds="[-10,-20][1080,2400]">
+        <node index="0" text="" resource-id="feed" class="androidx.recyclerview.widget.RecyclerView"
+              scrollable="true" enabled="true" bounds="[0,200][1080,2200]">
+          <node index="0" text="视频标题一" resource-id="title-13800138000" class="android.widget.TextView"
+                clickable="true" enabled="true" bounds="[24,260][1000,420]" />
+        </node>
+      </node>
+    </hierarchy>"""
+
+    structure = parse_uiautomator_structure(xml, screen_width=1080, screen_height=2400)
+
+    assert structure is not None
+    assert structure.root_node_id == "node_1"
+    root = structure.nodes["node_1"]
+    list_node = structure.nodes["node_2"]
+    title = structure.nodes["node_3"]
+    assert root.bounds == (0, 0, 1000, 1000)
+    assert list_node.parent_id == "node_1"
+    assert list_node.scrollable is True
+    assert title.parent_id == "node_2"
+    assert title.text_summary == "视频标题一"
+    assert title.resource_id_hash
+    assert "13800138000" not in title.resource_id_hash
+
+
 def test_accessibility_tree_provider_returns_screen_bound_marks() -> None:
     xml = """<hierarchy>
       <node text="OK" class="android.widget.Button" clickable="true" enabled="true" bounds="[100,200][300,400]" />
@@ -364,6 +443,8 @@ def test_accessibility_tree_provider_returns_screen_bound_marks() -> None:
     assert result.provider_input_hash
     assert result.marks[0].mark_id == "ax_1"
     assert result.hints[0]["text_length"] == 2
+    assert result.screen_structure is not None
+    assert result.screen_structure["node_count"] == 1
 
 
 def test_accessibility_tree_provider_no_marks_fails_closed() -> None:
@@ -528,6 +609,119 @@ def test_fallback_provider_continues_when_tree_marks_do_not_match_hint() -> None
     assert result.metadata["fallback_chain"][1]["usable"] is True
 
 
+def test_fallback_provider_preserves_accessibility_and_visual_structures() -> None:
+    class StaticProvider:
+        version = "test"
+        allow_raw_hints = False
+
+        def __init__(self, name, mark_id, text, structure_kind):
+            self.name = name
+            self.mark_id = mark_id
+            self.text = text
+            self.structure_kind = structure_kind
+
+        def provide_marks(self, screenshot, screen_binding, hints=None, timeout=None):
+            mark = MarkCandidate(
+                mark_id=self.mark_id,
+                bbox=[100, 100, 200, 200],
+                center=[150, 150],
+                source=self.name,
+                text_summary=self.text,
+            )
+            return MarkProviderResult(
+                success=True,
+                provider=self.name,
+                screen_id=screen_binding.screen_id,
+                raw_screenshot_hash=screen_binding.raw_screenshot_hash,
+                provider_input_hash=f"{self.name}-hash",
+                marks=[mark],
+                candidates=[mark],
+                candidate_count=1,
+                screen_structures=[
+                    {
+                        "screen_id": screen_binding.screen_id,
+                        "structure_kind": self.structure_kind,
+                        "source_provider": self.name,
+                        "structure_digest": f"{self.name}-digest",
+                        "topology_digest": f"{self.name}-digest",
+                        "nodes": {
+                            f"{self.name}_node": {
+                                "node_id": f"{self.name}_node",
+                                "path": "0",
+                                "bounds": [100, 100, 200, 200],
+                                "role": "TextView",
+                                "text_summary": self.text,
+                                "visible": True,
+                            }
+                        },
+                    }
+                ],
+            )
+
+    result = FallbackMarkProvider(
+        [
+            StaticProvider("accessibility_tree", "ax_1", "Bluetooth", "accessibility"),
+            StaticProvider("locateanything_mlx", "la_1_1", "Wi-Fi", "visual"),
+        ]
+    ).provide_marks(Screenshot(), binding(), hints=[MarkProviderHint(text="Wi-Fi")])
+
+    assert result.success is True
+    assert [item["structure_kind"] for item in result.screen_structures] == ["accessibility", "visual"]
+
+
+def test_fallback_provider_preserves_successful_visual_sidecar_without_marks() -> None:
+    class VisualSidecarProvider:
+        name = "locateanything_mlx"
+        version = "test"
+        allow_raw_hints = True
+        structure_mode = "target"
+
+        def provide_marks(self, screenshot, screen_binding, hints=None, timeout=None):
+            candidate = MarkCandidate(
+                mark_id="la_1",
+                bbox=[100, 100, 200, 200],
+                center=[150, 150],
+                source=self.name,
+                role="button",
+            )
+            return MarkProviderResult(
+                success=True,
+                provider=self.name,
+                screen_id=screen_binding.screen_id,
+                raw_screenshot_hash=screen_binding.raw_screenshot_hash,
+                provider_input_hash="visual-hash",
+                marks=[],
+                candidates=[candidate],
+                candidate_count=1,
+                screen_structures=[
+                    {
+                        "screen_id": screen_binding.screen_id,
+                        "structure_kind": "visual",
+                        "source_provider": self.name,
+                        "structure_digest": "visual-digest",
+                        "topology_digest": "visual-digest",
+                        "nodes": {
+                            "visual_1": {
+                                "node_id": "visual_1",
+                                "path": "visual/1",
+                                "bounds": [100, 100, 200, 200],
+                                "role": "button",
+                                "visible": True,
+                            }
+                        },
+                    }
+                ],
+            )
+
+    result = FallbackMarkProvider([VisualSidecarProvider()]).provide_marks(
+        Screenshot(), binding(), hints=[MarkProviderHint(text="target")]
+    )
+
+    assert result.success is False
+    assert result.candidates[0].mark_id == "la_1"
+    assert result.screen_structures[0]["structure_kind"] == "visual"
+
+
 def test_fallback_provider_stops_when_tree_marks_match_hint() -> None:
     class StaticProvider:
         name = "accessibility_tree"
@@ -567,6 +761,99 @@ def test_fallback_provider_stops_when_tree_marks_match_hint() -> None:
     assert tree.calls == 1
     assert [mark.mark_id for mark in result.marks] == ["ax_1"]
     assert result.metadata["fallback_chain"][0]["usable"] is True
+
+
+def test_fallback_provider_screen_mode_supplements_usable_tree_without_executable_marks() -> None:
+    class TreeProvider:
+        name = "accessibility_tree"
+        version = "test"
+        allow_raw_hints = False
+
+        def provide_marks(self, screenshot, screen_binding, hints=None, timeout=None):
+            mark = MarkCandidate(mark_id="ax_1", bbox=[1, 2, 3, 4], center=[2, 3], text_summary="Wi-Fi")
+            return MarkProviderResult(
+                success=True,
+                provider=self.name,
+                screen_id=screen_binding.screen_id,
+                raw_screenshot_hash=screen_binding.raw_screenshot_hash,
+                provider_input_hash="tree-hash",
+                marks=[mark],
+                candidates=[mark],
+                candidate_count=1,
+                screen_structures=[
+                    {
+                        "screen_id": screen_binding.screen_id,
+                        "structure_kind": "accessibility",
+                        "source_provider": self.name,
+                        "structure_digest": "tree-digest",
+                        "topology_digest": "tree-digest",
+                        "nodes": {
+                            "node_1": {
+                                "node_id": "node_1",
+                                "path": "0",
+                                "bounds": [1, 2, 3, 4],
+                                "role": "TextView",
+                                "text_summary": "Wi-Fi",
+                                "visible": True,
+                            }
+                        },
+                    }
+                ],
+            )
+
+    class ScreenProvider:
+        name = "locateanything_mlx"
+        version = "test"
+        allow_raw_hints = True
+        structure_mode = "screen"
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def provide_marks(self, screenshot, screen_binding, hints=None, timeout=None):
+            self.calls += 1
+            mark = MarkCandidate(mark_id="la_screen_1_1", bbox=[10, 20, 30, 40], center=[20, 30], source=self.name, role="button")
+            return MarkProviderResult(
+                success=True,
+                provider=self.name,
+                screen_id=screen_binding.screen_id,
+                raw_screenshot_hash=screen_binding.raw_screenshot_hash,
+                provider_input_hash="screen-hash",
+                marks=[mark],
+                candidates=[mark],
+                candidate_count=1,
+                screen_structures=[
+                    {
+                        "screen_id": screen_binding.screen_id,
+                        "structure_kind": "visual",
+                        "source_provider": self.name,
+                        "structure_digest": "visual-digest",
+                        "topology_digest": "visual-digest",
+                        "nodes": {
+                            "visual_1": {
+                                "node_id": "visual_1",
+                                "path": "visual/1",
+                                "bounds": [10, 20, 30, 40],
+                                "role": "button",
+                                "visible": True,
+                            }
+                        },
+                    }
+                ],
+            )
+
+    screen_provider = ScreenProvider()
+    result = FallbackMarkProvider([TreeProvider(), screen_provider]).provide_marks(
+        Screenshot(),
+        binding(),
+        hints=[MarkProviderHint(text="Wi-Fi")],
+    )
+
+    assert screen_provider.calls == 1
+    assert result.success is True
+    assert [mark.mark_id for mark in result.marks] == ["ax_1"]
+    assert [item["structure_kind"] for item in result.screen_structures] == ["accessibility", "visual"]
+    assert len(result.metadata["fallback_chain"]) == 2
 
 
 def test_fallback_provider_fails_closed_when_all_marks_miss_hint() -> None:
@@ -664,6 +951,76 @@ def test_locateanything_provider_multiple_hints_create_multiple_marks(monkeypatc
     assert [mark.mark_id for mark in result.marks] == ["la_1_1", "la_2_1"]
     assert [mark.bbox for mark in result.marks] == [[100, 200, 300, 400], [500, 600, 700, 800]]
     assert result.provider_input_hash == "input-hash"
+
+
+def test_locateanything_target_structure_mode_returns_visual_sidecar(monkeypatch) -> None:
+    provider = LocateAnythingMLXProvider(model_path="models/LocateAnything-3B-4bit", structure_mode="target")
+
+    monkeypatch.setattr("phone_agent.grounding.locateanything.platform.system", lambda: "Darwin")
+    monkeypatch.setattr("phone_agent.grounding.locateanything.platform.machine", lambda: "arm64")
+    monkeypatch.setattr("pathlib.Path.exists", lambda self: True)
+    monkeypatch.setattr(provider, "_prepare_image", lambda screenshot: (object(), "input-hash"))
+    monkeypatch.setattr(provider, "_run_model", lambda image, description, timeout=None, context=None: "<box>100 200 300 400</box>")
+
+    result = provider.provide_marks(Screenshot(), binding(), hints=[MarkProviderHint(text="搜索 13800138000")])
+
+    assert result.success is True
+    assert len(result.marks) == 1
+    assert result.screen_structures[0]["structure_kind"] == "visual"
+    node = result.screen_structures[0]["nodes"]["visual_1"]
+    assert node["text_summary"] == "visual_target"
+    assert "13800138000" not in str(result.to_dict())
+
+
+def test_locateanything_target_structure_mode_multi_box_is_not_immediately_executable(monkeypatch) -> None:
+    provider = LocateAnythingMLXProvider(model_path="models/LocateAnything-3B-4bit", structure_mode="target")
+
+    monkeypatch.setattr("phone_agent.grounding.locateanything.platform.system", lambda: "Darwin")
+    monkeypatch.setattr("phone_agent.grounding.locateanything.platform.machine", lambda: "arm64")
+    monkeypatch.setattr("pathlib.Path.exists", lambda self: True)
+    monkeypatch.setattr(provider, "_prepare_image", lambda screenshot: (object(), "input-hash"))
+    monkeypatch.setattr(
+        provider,
+        "_run_model",
+        lambda image, description, timeout=None, context=None: "<box>100 200 300 400</box><box>500 600 700 800</box>",
+    )
+
+    result = provider.provide_marks(Screenshot(), binding(), hints=[MarkProviderHint(text="target")])
+
+    assert result.success is True
+    assert result.marks == []
+    assert result.candidate_count == 2
+    assert result.metadata["ambiguous_for_execution"] is True
+    assert result.screen_structures[0]["node_count"] == 2
+
+
+def test_mark_provider_result_to_dict_sanitizes_metadata_and_structure_text() -> None:
+    mark = MarkCandidate(mark_id="m1", bbox=[1, 2, 3, 4], center=[2, 3], text_summary="13800138000")
+    result = MarkProviderResult(
+        success=True,
+        provider="test",
+        marks=[mark],
+        candidates=[mark],
+        candidate_count=1,
+        metadata={"raw_hint": "请点击 13800138000", "nested": {"ocr": "foo@example.com"}},
+        screen_structures=[
+            {
+                "structure_kind": "visual",
+                "nodes": {
+                    "visual_1": {
+                        "node_id": "visual_1",
+                        "text_summary": "13800138000",
+                        "content_desc_summary": "foo@example.com",
+                    }
+                },
+            }
+        ],
+    )
+
+    serialized = str(result.to_dict())
+
+    assert "13800138000" not in serialized
+    assert "foo@example.com" not in serialized
 
 
 def test_locateanything_provider_ambiguous_single_hint_fails_closed(monkeypatch) -> None:

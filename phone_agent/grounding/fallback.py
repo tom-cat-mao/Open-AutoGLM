@@ -30,9 +30,12 @@ class FallbackMarkProvider:
         summaries: list[dict[str, Any]] = []
         collected_marks: list[Any] = []
         collected_candidates: list[Any] = []
-        collected_structure: dict[str, Any] | None = None
+        collected_structures: list[dict[str, Any]] = []
         last_result: MarkProviderResult | None = None
-        for provider in self.providers:
+        usable_result: MarkProviderResult | None = None
+        for index, provider in enumerate(self.providers):
+            if usable_result is not None and getattr(provider, "structure_mode", None) != "screen":
+                continue
             provider_hints = hints if getattr(provider, "allow_raw_hints", False) else _redact_hints(hints or [])
             result = provider.provide_marks(screenshot, screen_binding, hints=provider_hints, timeout=timeout)
             last_result = result
@@ -48,12 +51,19 @@ class FallbackMarkProvider:
                     "usable": usable,
                 }
             )
+            supplemental_screen = usable_result is not None and getattr(provider, "structure_mode", None) == "screen"
             if result.success and result.marks:
-                collected_marks.extend(result.marks)
+                if not supplemental_screen:
+                    collected_marks.extend(result.marks)
                 collected_candidates.extend(result.candidates or result.marks)
-                if collected_structure is None and result.screen_structure:
-                    collected_structure = result.screen_structure
-            if result.success and result.marks and usable:
+                collected_structures.extend(_result_structures(result))
+            elif result.success:
+                collected_candidates.extend(result.candidates or [])
+                collected_structures.extend(_result_structures(result))
+            if result.success and result.marks and usable and usable_result is None:
+                usable_result = result
+                if _has_later_screen_structure_provider(self.providers, index + 1):
+                    continue
                 return MarkProviderResult(
                     success=True,
                     provider=result.provider,
@@ -67,8 +77,24 @@ class FallbackMarkProvider:
                     status="success",
                     hints=result.hints,
                     metadata={"fallback_chain": summaries},
-                    screen_structure=collected_structure,
+                    screen_structures=collected_structures,
                 )
+        if usable_result is not None:
+            return MarkProviderResult(
+                success=True,
+                provider=usable_result.provider,
+                screen_id=usable_result.screen_id,
+                raw_screenshot_hash=usable_result.raw_screenshot_hash,
+                provider_input_hash=usable_result.provider_input_hash,
+                latency_ms=int((time.perf_counter() - started) * 1000),
+                marks=collected_marks,
+                candidates=collected_candidates,
+                candidate_count=len(collected_candidates),
+                status="success",
+                hints=usable_result.hints,
+                metadata={"fallback_chain": summaries},
+                screen_structures=collected_structures,
+            )
         if collected_marks:
             if _hint_terms(hints or []):
                 return MarkProviderResult(
@@ -86,7 +112,7 @@ class FallbackMarkProvider:
                     status="grounding_no_usable_candidate",
                     hints=(last_result.hints if last_result else [hint.redacted_summary() for hint in hints or []]),
                     metadata={"fallback_chain": summaries},
-                    screen_structure=collected_structure,
+                    screen_structures=collected_structures,
                 )
             return MarkProviderResult(
                 success=True,
@@ -101,7 +127,7 @@ class FallbackMarkProvider:
                 status="success",
                 hints=(last_result.hints if last_result else [hint.redacted_summary() for hint in hints or []]),
                 metadata={"fallback_chain": summaries},
-                screen_structure=collected_structure,
+                screen_structures=collected_structures,
             )
         return MarkProviderResult(
             success=False,
@@ -113,12 +139,41 @@ class FallbackMarkProvider:
             provider_input_hash=(last_result.provider_input_hash if last_result else None),
             latency_ms=int((time.perf_counter() - started) * 1000),
             marks=[],
-            candidates=(last_result.candidates if last_result else []),
-            candidate_count=(last_result.candidate_count if last_result else 0),
+            candidates=collected_candidates or (last_result.candidates if last_result else []),
+            candidate_count=len(collected_candidates) if collected_candidates else (last_result.candidate_count if last_result else 0),
             status=(last_result.status if last_result else "provider_unavailable"),
             hints=(last_result.hints if last_result else [hint.redacted_summary() for hint in hints or []]),
             metadata={"fallback_chain": summaries},
+            screen_structures=collected_structures,
         )
+
+
+def _result_structures(result: MarkProviderResult) -> list[dict[str, Any]]:
+    structures: list[dict[str, Any]] = []
+    if isinstance(result.screen_structures, list) and result.screen_structures:
+        raw_items = result.screen_structures
+    elif isinstance(result.screen_structure, dict):
+        raw_items = [result.screen_structure]
+    else:
+        raw_items = []
+    seen: set[tuple[str, str, str]] = set()
+    for item in raw_items:
+        if not isinstance(item, dict):
+            continue
+        key = (
+            str(item.get("source_provider") or item.get("provider") or result.provider),
+            str(item.get("structure_kind") or "accessibility"),
+            str(item.get("structure_digest") or item.get("topology_digest") or item.get("visual_structure_digest") or ""),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        structures.append(item)
+    return structures
+
+
+def _has_later_screen_structure_provider(providers: list[MarkProvider], start_index: int) -> bool:
+    return any(getattr(provider, "structure_mode", None) == "screen" for provider in providers[start_index:])
 
 
 def _redact_hints(hints: list[MarkProviderHint]) -> list[MarkProviderHint]:

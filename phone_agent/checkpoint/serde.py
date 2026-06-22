@@ -58,6 +58,8 @@ def _collapse_sidecars_for_checkpoint(value: Any, key: str | None = None) -> Any
     if isinstance(value, dict):
         if key == "screen_structure":
             return _screen_structure_summary(value)
+        if key == "screen_structures":
+            return _screen_structures_summary(value)
         if key == "object_registry":
             return _object_registry_summary(value)
         collapsed = {}
@@ -75,9 +77,26 @@ def _collapse_observation_sidecars(value: dict[str, Any]) -> dict[str, Any]:
     collapsed = dict(value)
     if isinstance(collapsed.get("screen_structure"), dict):
         collapsed["screen_structure"] = _screen_structure_summary(collapsed["screen_structure"])
+    if isinstance(collapsed.get("screen_structures"), list):
+        collapsed["screen_structures"] = _screen_structures_summary(collapsed["screen_structures"])
     if isinstance(collapsed.get("object_registry"), dict):
         collapsed["object_registry"] = _object_registry_summary(collapsed["object_registry"])
     return collapsed
+
+
+def _screen_structures_summary(value: list[Any]) -> dict[str, Any]:
+    summaries = [_screen_structure_summary(item) for item in value if isinstance(item, dict)]
+    kind_counts: dict[str, int] = {}
+    for item in summaries:
+        kind = str(item.get("structure_kind") or "unknown")
+        kind_counts[kind] = kind_counts.get(kind, 0) + 1
+    return {
+        "status": "ok" if summaries else "missing_sidecar",
+        "structure_count": len(summaries),
+        "kind_counts": kind_counts,
+        "merge_order": [item.get("structure_kind") for item in summaries],
+        "structures": summaries,
+    }
 
 
 def _screen_structure_summary(value: dict[str, Any]) -> dict[str, Any]:
@@ -87,6 +106,10 @@ def _screen_structure_summary(value: dict[str, Any]) -> dict[str, Any]:
         "mark_set_version": value.get("mark_set_version"),
         "topology_digest": value.get("topology_digest"),
         "status": value.get("status"),
+        "structure_kind": value.get("structure_kind"),
+        "source_provider": value.get("source_provider"),
+        "confidence_tier": value.get("confidence_tier"),
+        "structure_digest": value.get("structure_digest"),
         "node_count": value.get("node_count") or len(value.get("nodes") or {}),
         "root_node_id": value.get("root_node_id"),
     }
@@ -95,11 +118,17 @@ def _screen_structure_summary(value: dict[str, Any]) -> dict[str, Any]:
 def _object_registry_summary(value: dict[str, Any]) -> dict[str, Any]:
     objects = value.get("objects") or {}
     counts: dict[str, int] = {}
+    source_counts: dict[str, int] = {}
+    eligible_count = 0
     iterable = objects.values() if isinstance(objects, dict) else objects
     for item in iterable or []:
         if isinstance(item, dict):
             object_type = str(item.get("object_type") or "unknown")
             counts[object_type] = counts.get(object_type, 0) + 1
+            source_kind = str(item.get("source_kind") or "unknown")
+            source_counts[source_kind] = source_counts.get(source_kind, 0) + 1
+            if item.get("executable_selector"):
+                eligible_count += 1
     return {
         "screen_id": value.get("screen_id"),
         "semantic_screen_id": value.get("semantic_screen_id"),
@@ -109,6 +138,8 @@ def _object_registry_summary(value: dict[str, Any]) -> dict[str, Any]:
         "status": value.get("status"),
         "object_count": value.get("object_count") or len(objects),
         "object_type_counts": counts,
+        "source_kind_counts": source_counts,
+        "eligible_selector_count": eligible_count,
         "truncation_summary": value.get("truncation_summary") or {},
     }
 

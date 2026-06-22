@@ -30,6 +30,59 @@ def test_adapt_json_rejects_description_only_tap_intent() -> None:
     assert exc_info.value.code == "mark_required"
 
 
+def test_adapt_json_accepts_object_selector_as_non_executable_intent() -> None:
+    action = adapt_json_action(
+        {
+            "type": "intent",
+            "action": "tap",
+            "target_object_id": "obj_1",
+            "object_role": "video",
+            "ordinal": 1,
+            "object_filter": {"object_type": "video", "title_hash_prefix": "abcdef"},
+        }
+    )
+
+    assert action == {
+        "_metadata": "intent",
+        "action": "Tap",
+        "target_object_id": "obj_1",
+        "object_role": "video",
+        "ordinal": 1,
+        "object_filter": {"object_type": "video", "title_hash_prefix": "abcdef"},
+    }
+    with pytest.raises(ActionValidationError) as exc_info:
+        validate_action(action)
+    assert exc_info.value.code == "invalid_metadata"
+
+
+@pytest.mark.parametrize(
+    "object_filter",
+    [
+        {"title": "raw"},
+        {"object_type": ["video"]},
+        {"object_type": {"nested": "video"}},
+        {"object_type": "vid.*"},
+        {"title_hash_prefix": "zzzzzz"},
+        {"title_hash_prefix": "abc"},
+        {"backend": "mlx"},
+        {},
+    ],
+)
+def test_adapt_json_rejects_invalid_object_filter(object_filter) -> None:
+    with pytest.raises(ActionAdapterError) as exc_info:
+        adapt_json_action(
+            {
+                "type": "intent",
+                "action": "tap",
+                "object_role": "video",
+                "ordinal": 1,
+                "object_filter": object_filter,
+            }
+        )
+
+    assert exc_info.value.code == "unsafe_value"
+
+
 def test_adapt_json_rejects_provider_selection_in_intent() -> None:
     with pytest.raises(ActionAdapterError) as exc_info:
         adapt_json_action({"type": "intent", "action": "tap", "target_text_hint": "设置", "backend": "mlx"})

@@ -17,7 +17,7 @@
 - **评测地基**: 已提供 `evals/run_eval.py --dry-run` smoke harness，以及 `bench/grounding/` LocateAnything benchmark 体系；当前支持 post-training raw JSONL 转 manifest、固定 suite、prediction JSONL、summary JSON、离线复评与 target type / area bucket 分组指标
 - **收益验证**: eval 已输出 `context_mode`、`context_strategy`、`prompt_version`、`selected_sections`、`messages_before/after`、`message_chars_before/after`、`approx_tokens_before/after`、`context_block_chars`、`context_truncated`、`failure_memory_hit_count`、`repeated_failure_count`，支持 off/observe/inject 对比
 - **输出适配**: `ModelConfig.output_mode=json_schema|tool_calls|auto`；旧 text DSL 不再作为动作执行协议；JSON、已聚合 OpenAI `tool_calls` 与 IntentIR 统一归一到 canonical action，parse/adapter/validation failure fail-closed，不绕过 HITL
-- **本地 Grounding**: LocateAnything-3B-4bit (MLX) 与 Android UiAutomator accessibility tree 均已收敛为 MarkRegistry mark 生成层；默认 `PHONE_AGENT_GROUNDING_PROVIDER=hybrid` 先用 accessibility tree 的结构化 bounds/text/class/clickable 信息，失败时再 fallback 到 LocateAnything；主 VLM 的屏幕目标点击类动作只输出 `target_mark_id`，不再通过 `target_text_hint` 直接生成 ActionIR；截图无效或 secure screenshot blocked 会 fail-closed，不把黑图继续发给模型；所有结果仍进入 canonical ActionIR/Safety/HITL/Executor；LocateAnything 默认输入图最长边为 `max_size=960`，默认不注入额外 context，必须经 `apply_chat_template(..., num_images=1)`，可通过 bounded `locateanything_context_max_chars` 灰度短 context；multi-box 不得 first-box 执行，可注册多个 marks 或 fail-closed 为歧义
+- **本地 Grounding**: LocateAnything-3B-4bit (MLX) 与 Android UiAutomator accessibility tree 均已收敛为 MarkRegistry mark 生成层；默认 `PHONE_AGENT_GROUNDING_PROVIDER=hybrid` 先用 accessibility tree 的结构化 bounds/text/class/clickable 信息，失败时再 fallback 到 LocateAnything；UiAutomator provider 产出 `structure_kind=accessibility` 的 `ScreenStructure` sidecar，LocateAnything 可在 `PHONE_AGENT_LOCATEANYTHING_STRUCTURE_MODE=target|screen` 显式开启时产出 `structure_kind=visual` 的视觉 sidecar。Plan 基于 composite `screen_structures + MarkRegistry` 构建 observation-local `ObjectRegistry`，允许主 VLM 在 Screen Objects block 中选择 `target_object_id` 或 `object_role`+`ordinal`/strict `object_filter`；这些 selector 只在 grounding 层编译为唯一 atomic `target_mark_id` 后才能执行。截图无效或 secure screenshot blocked 会 fail-closed，不把黑图继续发给模型；所有结果仍进入 canonical ActionIR/Safety/HITL/Executor；LocateAnything 默认输入图最长边为 `max_size=960`，默认不注入额外 context，必须经 `apply_chat_template(..., num_images=1)`，可通过 bounded `locateanything_context_max_chars` 灰度短 context；multi-box 在默认 `off` 模式下不得 first-box 执行，只能 fail-closed 为歧义，结构模式下也必须经 visual object eligibility 再执行
 
 ---
 
@@ -29,7 +29,7 @@
 
 **已落地方案**:
 - `phone_agent/grounding/`: 提供 `MarkProvider` contract、`ScreenBinding`、`MarkProviderResult`、fake provider、LocateAnything MLX lazy provider、`<box>` parser 与 provider factory；LocateAnything provider 会读取完整截图并按 `max_size` 等比例缩小后推理，默认 `960`。
-- `phone_agent/actions/adapter.py`: `IntentIR` 的屏幕目标点击类动作必须带 `target_mark_id`；`target_text_hint`/`target_role` 仅保留为非执行 hint metadata；拒绝 provider/backend/命令类危险字段。
+- `phone_agent/actions/adapter.py`: `IntentIR` 的屏幕目标点击类动作必须带 `target_mark_id` 或有效 observation-local object selector；`target_text_hint`/`target_role` 仅保留为非执行 hint metadata；拒绝 provider/backend/命令类危险字段。
 - `phone_agent/actions/grounding.py`: 仅将 `target_mark_id` 通过 MarkRegistry 编译为 canonical Tap/Double Tap/Long Press ActionIR；description hints 不再直接走 provider 或生成 ActionIR。
 - `phone_agent/graph/nodes/plan.py`: 在 Plan 请求前构建 MarkRegistry 并注入 marks block；provider 失败或无 marks 只记录 mark_provider_observation，不回退为主 VLM 直接坐标。
 - `phone_agent/graph/context.py` / `trace.py` / `evals/run_eval.py`: 新增 `grounding_observation` section、grounding latency/failure histogram 与 target hint 默认脱敏。
@@ -120,6 +120,42 @@ PHONE_AGENT_ACCESSIBILITY_MARKS=true \
 ```bash
 .venv/bin/pytest tests/actions/test_grounding_provider.py tests/graph/test_state.py tests/graph/test_plan_reflect.py -q
 ```
+
+---
+
+## 已完成 MVP: Structured Object Grounding And Verification
+
+**目标**: 在不破坏 atomic `target_mark_id` 执行边界的前提下，为动态列表、搜索结果、视频 feed 等页面补充结构化 object/list/ordinal 语义，解决 flat marks 难以表达“第一个视频/第二个结果”的问题。
+
+**已落地方案**:
+- `phone_agent/grounding/accessibility.py`: UiAutomator XML 解析 signed/negative bounds，并输出 `MarkCandidate` 与 trace-safe `ScreenStructure`；仅依赖真实 dump 支持的 `bounds/text/content-desc/resource-id/class/clickable/focusable/focused/checkable/checked/scrollable/enabled/visible-to-user` 字段。
+- `phone_agent/graph/objects.py`: 新增 `StructureNode`、`ScreenStructure`、`ScreenObject`、`ObjectRegistry`、prompt block、object set version、topology digest 与 selected-object hash/stub evidence。
+- `phone_agent/graph/observation.py` / `plan.py`: `Observation` 构建 composite `screen_structures`、legacy `screen_structure` 与 `object_registry` 一等 sidecar；Plan prompt 固定先注入 hash-only Screen Objects block，再注入 Screen Marks block；state/trace 输出 `screen_structure_summary`（structure count、kind distribution、merge order、composite digest）、`object_registry_summary`（source/tier/eligible counts）、`object_registry_binding`、`object_set_version`、`structure_topology_digest` 与 `object_trace_summary`，不持久化 raw object title/text。
+- `phone_agent/grounding/locateanything.py` / `factory.py`: 新增 opt-in `locateanything_structure_mode=off|target|screen`，默认 `off`。`target` 为当前 hint bbox 生成 visual sidecar；`screen` 使用 bounded category prompts，并受 `locateanything_max_visual_candidates`、`locateanything_visual_category_budget`、`locateanything_max_structure_calls` 限制。显式 config/AgentConfig 非法值报错；env 非法值回落 `off` 并在 provider metadata 记录 `invalid_structure_mode`。
+- `phone_agent/graph/objects.py` / `actions/grounding.py`: `ScreenObject` 增加 `source_kind/source_provider/confidence_tier/executable_selector/selector_confidence/selector_reasons/sensitivity_tags`。visual object 在 prompt 标注 `source=visual tier=weak eligible=true|false`，resolver 对 `executable_selector` 做硬校验；低置信、多候选、重叠或未授权 visual selector fail-closed 为 `visual_object_not_executable` / `visual_object_ambiguous`，不会回退 raw bbox tap。
+- `phone_agent/actions/adapter.py` / `selectors.py`: JSON/tool_calls/auto 接受 allowlisted selector fields：`target_object_id`、`ordinal`、`object_role`、`object_filter`。adapter 只产出非执行 IntentIR，不读取 ObjectRegistry、不解析 ordinal、不生成 compiled mark。
+- `phone_agent/actions/grounding.py`: resolver 顺序为 ObjectRegistry binding/version -> object/ordinal 唯一 primary mark -> MarkRegistry binding/confidence/semantics -> sensitivity merge -> canonical ActionIR。object selector 成功后 canonical ActionIR 只含 action + element/message，不保留 object selector 字段。
+- `phone_agent/graph/expected_outcome.py`: selected-object evidence 只作为 verifier-only hash/stub 字段进入 ExpectedOutcome，不进入 ActionIR、Validator、Safety Gate、Executor 或 pending_execute。
+
+**Prompt 与 selector 限制**:
+- Screen Objects block 排序为 screen summary、limits、lists、top visible objects/cards、selector rules；atomic marks 作为独立 Screen Marks block 紧随其后。Screen Objects block 只展示 object type/role/list/ordinal、primary mark 和 hash/lineage evidence，不展示 raw title/text；默认 lists 5、objects 30、总 block 4000 chars。
+- `object_id`、`list_id`、`ordinal` 仅在当前 observation 内有效；reobserve 后必须重新选择或重新验证。
+- `object_filter` v1 只能是 strict flat JSON object，key 仅限 `object_type`、`role`、`source`、`list_id`、`title_hash_prefix`、`text_hash_prefix`、`resource_id_hash_prefix`、`lineage_hash_prefix`；value 只能是 1-64 字符 string，hash prefix 为 6-16 位 hex；禁止 raw title/text、regex、array、nested object、provider/backend/device 字段。
+
+**Failure codes 与 HITL**:
+- object selector failure codes: `object_registry_missing`、`object_stale`、`unknown_object`、`ordinal_out_of_range`、`object_ambiguous`、`object_without_mark`、`mark_stale`、`mark_low_confidence`。
+- 这些 failure codes 只表示 grounding fail-closed；不会生成 raw coordinate Tap，不进入 `pending_execute`。
+- 敏感 object evidence 不是 GroundingError：payment/privacy 返回 canonical Tap + confirmation message；login/OTP 返回 canonical `Take_over`，继续由 Safety Gate 路由到 `confirm_node` / `takeover_node`。
+
+**验证命令**:
+
+```bash
+.venv/bin/pytest tests/actions/test_adapter.py tests/actions/test_grounding_provider.py tests/graph/test_objects.py tests/graph/test_plan_reflect.py::test_plan_node_includes_object_registry_sidecars_and_prompt tests/model/test_client.py -q
+.venv/bin/pytest tests/actions tests/model tests/graph -q
+.venv/bin/pytest tests -q
+```
+
+真实 Bilibili 实机 smoke 仍依赖可用 Android 设备与测试账号，不作为无设备 CI 的硬阻塞。
 
 ---
 

@@ -14,7 +14,14 @@ from phone_agent.graph.marks import (
     compute_raw_screenshot_hash,
 )
 from phone_agent.graph.context import sanitize_context_payload
-from phone_agent.graph.objects import ObjectRegistry, ScreenStructure, build_object_registry
+from phone_agent.graph.objects import (
+    ObjectRegistry,
+    ScreenStructure,
+    StructureNode,
+    build_composite_structure_digest,
+    build_object_registry,
+    summarize_structures,
+)
 from phone_agent.grounding.provider import MarkProvider, MarkProviderHint, MarkProviderResult, ScreenBinding
 
 
@@ -94,6 +101,7 @@ class Observation:
     mark_registry: MarkRegistry
     mark_provider_observation: dict[str, Any] = field(default_factory=dict)
     screen_structure: ScreenStructure | None = None
+    screen_structures: list[ScreenStructure] = field(default_factory=list)
     object_registry: ObjectRegistry | None = None
 
     def to_dict(self) -> dict[str, Any]:
@@ -102,6 +110,7 @@ class Observation:
             "mark_registry": self.mark_registry.to_dict(),
             "mark_provider_observation": self.mark_provider_observation,
             "screen_structure": self.screen_structure.trace_summary() if self.screen_structure else None,
+            "screen_structures": [structure.trace_summary() for structure in self.screen_structures],
             "object_registry": self.object_registry.trace_summary() if self.object_registry else None,
         }
 
@@ -256,10 +265,55 @@ def _summarize_provider_result(result: MarkProviderResult) -> dict[str, Any]:
     fallback_chain = _safe_fallback_chain((result.metadata or {}).get("fallback_chain"))
     if fallback_chain:
         summary["metadata"] = {"fallback_chain": fallback_chain}
-    structure_summary = _safe_screen_structure_summary(result.screen_structure)
+    structure_summary = _safe_screen_structures_summary(_result_structure_dicts(result))
     if structure_summary:
-        summary["screen_structure"] = structure_summary
+        summary["screen_structures"] = structure_summary
+        if structure_summary.get("structures"):
+            summary["screen_structure"] = structure_summary["structures"][0]
     return summary
+
+
+def _result_structure_dicts(result: MarkProviderResult) -> list[dict[str, Any]]:
+    if isinstance(result.screen_structures, list) and result.screen_structures:
+        raw_items = result.screen_structures
+    elif isinstance(result.screen_structure, dict):
+        raw_items = [result.screen_structure]
+    else:
+        raw_items = []
+    structures: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for item in raw_items:
+        if not isinstance(item, dict):
+            continue
+        key = (
+            str(item.get("source_provider") or item.get("provider") or result.provider),
+            str(item.get("structure_kind") or "accessibility"),
+            str(item.get("structure_digest") or item.get("topology_digest") or ""),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        structures.append(item)
+    return structures
+
+
+def _safe_screen_structures_summary(values: list[dict[str, Any]]) -> dict[str, Any]:
+    if not values:
+        return {}
+    summaries = [_safe_screen_structure_summary(value) for value in values if isinstance(value, dict)]
+    summaries = [summary for summary in summaries if summary]
+    if not summaries:
+        return {}
+    kind_counts: dict[str, int] = {}
+    for summary in summaries:
+        kind = summary.get("structure_kind") or "unknown"
+        kind_counts[kind] = kind_counts.get(kind, 0) + 1
+    return {
+        "structure_count": len(summaries),
+        "kind_counts": kind_counts,
+        "merge_order": [summary.get("structure_kind") for summary in summaries],
+        "structures": summaries,
+    }
 
 
 def _safe_screen_structure_summary(value: Any) -> dict[str, Any]:
@@ -267,6 +321,10 @@ def _safe_screen_structure_summary(value: Any) -> dict[str, Any]:
         return {}
     return {
         "status": _safe_metadata(value.get("status"), default="ok"),
+        "structure_kind": _safe_metadata(value.get("structure_kind"), default="accessibility"),
+        "source_provider": _safe_metadata(value.get("source_provider")),
+        "confidence_tier": _safe_metadata(value.get("confidence_tier")),
+        "structure_digest": _safe_metadata(value.get("structure_digest") or value.get("topology_digest")),
         "node_count": _safe_int(value.get("node_count")),
         "topology_digest": _safe_metadata(value.get("topology_digest")),
         "root_node_id": _safe_metadata(value.get("root_node_id")),
@@ -384,8 +442,8 @@ def build_observation(
             continue
         provider_summaries.append(_summarize_provider_result(result))
         provider_marks.extend(_provider_result_to_marks(result))
-        if isinstance(result.screen_structure, dict):
-            structure = _screen_structure_from_dict(result.screen_structure)
+        for structure_dict in _result_structure_dicts(result):
+            structure = _screen_structure_from_dict(structure_dict)
             if structure is not None:
                 provider_structures.append(structure)
 
@@ -421,18 +479,30 @@ def build_observation(
         perceptual_hash=perceptual_hash,
         raw_screenshot_hash=raw_screenshot_hash,
     )
-    screen_structure = provider_structures[0] if provider_structures else None
-    if screen_structure is not None:
-        screen_structure = screen_structure.with_binding(
+    bound_structures: list[ScreenStructure] = []
+    seen_structure_keys: set[tuple[str, str, str]] = set()
+    for structure in sorted(provider_structures, key=lambda item: (1 if item.structure_kind == "visual" else 0, item.source_provider or "", item.structure_digest or item.topology_digest or "")):
+        bound = structure.with_binding(
             screen_id=screen_id,
             semantic_screen_id=semantic_screen_id,
             mark_set_version=registry.mark_set_version,
         )
+        key = (
+            bound.source_provider or "",
+            bound.structure_kind,
+            bound.structure_digest or bound.topology_digest or "",
+        )
+        if key in seen_structure_keys:
+            continue
+        seen_structure_keys.add(key)
+        bound_structures.append(bound)
+    screen_structure = bound_structures[0] if bound_structures else None
     object_registry = build_object_registry(
         screen_id=screen_id,
-        structure=screen_structure,
+        structure=bound_structures,
         mark_registry=registry,
     )
+    composite_structure_digest = build_composite_structure_digest(bound_structures)
     if screen_structure is not None:
         binding = ScreenBinding(
             screen_id=screen_id,
@@ -444,7 +514,7 @@ def build_observation(
             observation_epoch=0,
             mark_set_version=registry.mark_set_version,
             perceptual_hash=perceptual_hash,
-            structure_topology_digest=screen_structure.topology_digest,
+            structure_topology_digest=composite_structure_digest,
             object_set_version=object_registry.object_set_version,
         )
     return Observation(
@@ -455,20 +525,24 @@ def build_observation(
             "provider_count": len(mark_providers or []),
             "hint_count": len(provider_hints or []),
             "mark_count": len(registry.marks),
-            "screen_structure_summary": screen_structure.trace_summary() if screen_structure else {"status": "missing_sidecar"},
+            "screen_structure_summary": summarize_structures(bound_structures),
             "object_registry_summary": object_registry.trace_summary(),
         },
         screen_structure=screen_structure,
+        screen_structures=bound_structures,
         object_registry=object_registry,
     )
 
 
 def _screen_structure_from_dict(value: dict[str, Any]) -> ScreenStructure | None:
-    from phone_agent.graph.objects import StructureNode, build_structure_topology_digest
-
     raw_nodes = value.get("nodes")
     if not isinstance(raw_nodes, dict):
         return None
+    structure_kind = _safe_metadata(value.get("structure_kind"), default="accessibility")
+    if structure_kind not in {"accessibility", "visual"}:
+        structure_kind = "accessibility"
+    source_provider = _safe_metadata(value.get("source_provider") or value.get("provider")) or None
+    confidence_tier = _safe_metadata(value.get("confidence_tier")) or ("weak" if structure_kind == "visual" else "strong")
     nodes: dict[str, StructureNode] = {}
     for node_id, item in raw_nodes.items():
         if not isinstance(item, dict):
@@ -498,6 +572,13 @@ def _screen_structure_from_dict(value: dict[str, Any]) -> ScreenStructure | None
             scrollable=bool(item.get("scrollable")),
             enabled=item.get("enabled") is not False,
             visible=item.get("visible") is not False,
+            structure_kind=structure_kind,
+            source_provider=source_provider,
+            confidence_tier=_safe_metadata(item.get("confidence_tier")) or confidence_tier,
+            node_provenance=_safe_metadata(item.get("node_provenance")) or None,
+            visual_order=_safe_int(item.get("visual_order"), maximum=10_000) if item.get("visual_order") is not None else None,
+            confidence=_safe_float(item.get("confidence")),
+            sensitivity_tags=_safe_sensitivity_tags(item.get("sensitivity_tags")),
         )
     if not nodes:
         return None
@@ -509,4 +590,21 @@ def _screen_structure_from_dict(value: dict[str, Any]) -> ScreenStructure | None
         status=_safe_metadata(value.get("status"), default="ok"),
         nodes=nodes,
         root_node_id=_safe_metadata(value.get("root_node_id")) or None,
+        structure_kind=structure_kind,
+        source_provider=source_provider,
+        confidence_tier=confidence_tier,
+        structure_version=_safe_metadata(value.get("structure_version")) or None,
+        structure_digest=_safe_metadata(value.get("structure_digest") or value.get("topology_digest")) or build_structure_topology_digest(nodes),
     )
+
+
+def _safe_sensitivity_tags(value: Any) -> list[str]:
+    allowed = {"payment", "privacy", "login", "password", "otp", "delete", "permission"}
+    if not isinstance(value, list):
+        return []
+    tags: list[str] = []
+    for item in value:
+        tag = str(item or "").strip().casefold()
+        if tag in allowed and tag not in tags:
+            tags.append(tag)
+    return tags

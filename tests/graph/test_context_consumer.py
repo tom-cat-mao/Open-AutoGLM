@@ -202,6 +202,60 @@ def test_redacting_serializer_stubs_private_keys_on_dumps() -> None:
     assert serde.loads(data) == dumped
 
 
+def test_redacting_serializer_collapses_full_sidecars_on_dumps() -> None:
+    from phone_agent.checkpoint.serde import RedactingSerializer
+
+    class _FakeInner:
+        def __init__(self) -> None:
+            self.last_dumped = None
+
+        def dumps(self, value):
+            self.last_dumped = value
+            return json.dumps(value).encode("utf-8")
+
+        def loads(self, data):
+            return json.loads(data.decode("utf-8"))
+
+    inner = _FakeInner()
+    serde = RedactingSerializer(inner=inner)
+    payload = {
+        "channel_values": {
+            "screen_structure": {
+                "screen_id": "screen-1",
+                "topology_digest": "topo",
+                "nodes": {
+                    "node_1": {
+                        "text_summary": "张三的私密标题",
+                        "content_desc_summary": "地址 北京市海淀区",
+                    }
+                },
+            },
+            "object_registry": {
+                "screen_id": "screen-1",
+                "object_set_version": "objv",
+                "objects": {
+                    "obj_1": {
+                        "object_type": "video",
+                        "evidence_summary": "张三的私密标题",
+                        "sensitivity_evidence_summary": "验证码 123456",
+                    }
+                },
+            },
+        }
+    }
+
+    serde.dumps(payload)
+    dumped = inner.last_dumped["channel_values"]
+    raw = json.dumps(dumped, ensure_ascii=False)
+    assert "张三" not in raw
+    assert "北京市" not in raw
+    assert "123456" not in raw
+    assert "nodes" not in dumped["screen_structure"]
+    assert "objects" not in dumped["object_registry"]
+    assert dumped["screen_structure"]["node_count"] == 1
+    assert dumped["object_registry"]["object_type_counts"] == {"video": 1}
+
+
 def test_redacting_serializer_loads_is_passthrough() -> None:
     from phone_agent.checkpoint.serde import RedactingSerializer
 

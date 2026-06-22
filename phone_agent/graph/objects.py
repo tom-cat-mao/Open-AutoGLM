@@ -8,6 +8,7 @@ from typing import Any
 
 from phone_agent.graph.context import sanitize_context_payload
 from phone_agent.graph.marks import Mark, MarkRegistry, build_mark_topology_digest
+from phone_agent.graph.marks import MARK_CONFIDENCE_THRESHOLD
 
 
 OBJECT_FAILURE_CODES = {
@@ -19,16 +20,21 @@ OBJECT_FAILURE_CODES = {
     "object_without_mark",
     "mark_stale",
     "mark_low_confidence",
+    "visual_object_ambiguous",
+    "visual_object_not_executable",
+    "visual_structure_missing",
 }
 MAX_OBJECT_EVIDENCE_CHARS = 120
 MAX_PROMPT_OBJECTS = 30
 MAX_PROMPT_LISTS = 5
 MAX_OBJECTS_BLOCK_CHARS = 4000
+SENSITIVITY_TAGS = {"payment", "privacy", "login", "password", "otp", "delete", "permission"}
+VISUAL_OBJECT_TYPES = {"visual_target", "visual_text", "visual_control", "visual_group", "visual_card"}
 
 
 @dataclass(frozen=True)
 class StructureNode:
-    """Trace-safe normalized accessibility node."""
+    """Trace-safe normalized structure node."""
 
     node_id: str
     path: str
@@ -49,6 +55,13 @@ class StructureNode:
     scrollable: bool = False
     enabled: bool = True
     visible: bool = True
+    structure_kind: str = "accessibility"
+    source_provider: str | None = None
+    confidence_tier: str | None = None
+    node_provenance: str | None = None
+    visual_order: int | None = None
+    confidence: float | None = None
+    sensitivity_tags: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
@@ -68,6 +81,11 @@ class ScreenStructure:
     status: str = "ok"
     nodes: dict[str, StructureNode] = field(default_factory=dict)
     root_node_id: str | None = None
+    structure_kind: str = "accessibility"
+    source_provider: str | None = None
+    confidence_tier: str | None = None
+    structure_version: str | None = None
+    structure_digest: str | None = None
 
     def with_binding(
         self,
@@ -84,6 +102,11 @@ class ScreenStructure:
             status=self.status,
             nodes=self.nodes,
             root_node_id=self.root_node_id,
+            structure_kind=self.structure_kind,
+            source_provider=self.source_provider,
+            confidence_tier=self.confidence_tier,
+            structure_version=self.structure_version,
+            structure_digest=self.structure_digest,
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -93,6 +116,11 @@ class ScreenStructure:
             "mark_set_version": self.mark_set_version,
             "topology_digest": self.topology_digest or build_structure_topology_digest(self.nodes),
             "status": self.status,
+            "structure_kind": self.structure_kind,
+            "source_provider": self.source_provider,
+            "confidence_tier": self.confidence_tier,
+            "structure_version": self.structure_version,
+            "structure_digest": self.structure_digest or self.topology_digest or build_structure_topology_digest(self.nodes),
             "node_count": len(self.nodes),
             "root_node_id": self.root_node_id,
             "nodes": {node_id: node.to_dict() for node_id, node in self.nodes.items()},
@@ -105,6 +133,10 @@ class ScreenStructure:
             "mark_set_version": self.mark_set_version,
             "topology_digest": self.topology_digest or build_structure_topology_digest(self.nodes),
             "status": self.status,
+            "structure_kind": self.structure_kind,
+            "source_provider": self.source_provider,
+            "confidence_tier": self.confidence_tier,
+            "structure_digest": self.structure_digest or self.topology_digest or build_structure_topology_digest(self.nodes),
             "node_count": len(self.nodes),
         }
 
@@ -124,6 +156,13 @@ class ScreenObject:
     confidence: float = 1.0
     role: str | None = None
     source: str = "accessibility"
+    source_kind: str = "accessibility"
+    source_provider: str | None = None
+    confidence_tier: str = "strong"
+    executable_selector: bool = True
+    selector_confidence: str = "strong"
+    selector_reasons: list[str] = field(default_factory=list)
+    sensitivity_tags: list[str] = field(default_factory=list)
     evidence_summary: str | None = None
     sensitivity_evidence_summary: str | None = None
     title_hash: str | None = None
@@ -141,6 +180,8 @@ class ScreenObject:
             f"- {self.object_id}: type={self.object_type} role={self.role or 'unknown'}"
             f"{list_part}{ordinal} primary_mark_id={self.primary_mark_id}"
             f" confidence={round(self.confidence, 3)}"
+            f" source={self.source_kind} tier={self.confidence_tier}"
+            f" eligible={str(self.executable_selector).lower()} selector_confidence={self.selector_confidence}"
             f" title_hash={self.title_hash} text_hash={self.text_hash}"
             f" lineage_hash={self.lineage_hash}"
         )
@@ -217,8 +258,13 @@ class ObjectRegistry:
 
     def trace_summary(self) -> dict[str, Any]:
         counts: dict[str, int] = {}
+        source_counts: dict[str, int] = {}
+        eligible_count = 0
         for obj in self.objects.values():
             counts[obj.object_type] = counts.get(obj.object_type, 0) + 1
+            source_counts[obj.source_kind] = source_counts.get(obj.source_kind, 0) + 1
+            if obj.executable_selector:
+                eligible_count += 1
         return {
             "screen_id": self.screen_id,
             "semantic_screen_id": self.semantic_screen_id,
@@ -228,6 +274,8 @@ class ObjectRegistry:
             "status": self.status,
             "object_count": len(self.objects),
             "object_type_counts": counts,
+            "source_kind_counts": source_counts,
+            "eligible_selector_count": eligible_count,
             "truncation_summary": self.truncation_summary,
         }
 
@@ -245,6 +293,7 @@ class ObjectRegistry:
         rules = (
             "rules: object_id/list_id/ordinal are valid only for this observation; "
             "use target_object_id or object_role+ordinal/object_filter only when a unique object is visible; "
+            "visual objects are weaker than accessibility objects and require eligible=true; "
             "target_text_hint is only a provider hint and is not executable."
         )
         if lang != "en":
@@ -256,6 +305,7 @@ class ObjectRegistry:
             rules = (
                 "规则：object_id/list_id/ordinal 只在当前 observation 有效；"
                 "只有唯一可见对象时才使用 target_object_id 或 object_role+ordinal/object_filter；"
+                "visual 对象是弱视觉推断，必须 eligible=true 才可选择；"
                 "target_text_hint 只是 provider hint，不是可执行目标。"
             )
         list_ids = _top_list_ids(self.objects.values())
@@ -277,7 +327,7 @@ def build_structure_topology_digest(nodes: dict[str, StructureNode]) -> str:
     rows = []
     for node in nodes.values():
         rows.append(
-            f"{node.path}:{node.parent_id or ''}:{node.bounds}:{node.role or ''}:"
+            f"{node.structure_kind}:{node.source_provider or ''}:{node.path}:{node.parent_id or ''}:{node.bounds}:{node.role or ''}:"
             f"{int(node.clickable)}{int(node.focusable)}{int(node.scrollable)}"
         )
     return hashlib.sha256("|".join(sorted(rows)).encode("utf-8")).hexdigest()[:16]
@@ -288,7 +338,8 @@ def build_object_set_version(objects: dict[str, ScreenObject]) -> str:
     for obj in objects.values():
         rows.append(
             f"{obj.object_id}:{obj.object_type}:{obj.primary_mark_id}:"
-            f"{obj.list_id or ''}:{obj.ordinal_index or ''}:{obj.lineage_hash or ''}"
+            f"{obj.list_id or ''}:{obj.ordinal_index or ''}:{obj.lineage_hash or ''}:"
+            f"{obj.source_kind}:{int(obj.executable_selector)}"
         )
     return hashlib.sha256("|".join(sorted(rows)).encode("utf-8")).hexdigest()[:16]
 
@@ -296,22 +347,115 @@ def build_object_set_version(objects: dict[str, ScreenObject]) -> str:
 def build_object_registry(
     *,
     screen_id: str,
-    structure: ScreenStructure | None,
+    structure: ScreenStructure | list[ScreenStructure] | None,
     mark_registry: MarkRegistry,
     source: str = "accessibility",
 ) -> ObjectRegistry:
     """Build executable screen objects from current structure and atomic marks."""
 
     objects: dict[str, ScreenObject] = {}
-    if structure is None or not structure.nodes or not mark_registry.marks:
+    structures = _normalize_structures(structure)
+    if not structures or not mark_registry.marks:
         return ObjectRegistry(
             screen_id=screen_id,
             semantic_screen_id=mark_registry.semantic_screen_id,
             mark_set_version=mark_registry.mark_set_version,
-            structure_topology_digest=structure.topology_digest if structure else None,
+            structure_topology_digest=None,
             status="missing_sidecar",
         )
 
+    conflict_count = 0
+    list_count = 0
+    for current_structure in sorted(structures, key=_structure_sort_key):
+        before_count = len(objects)
+        if current_structure.structure_kind == "visual":
+            conflict_count += _append_visual_objects(objects, current_structure, mark_registry)
+        else:
+            list_count += _append_accessibility_objects(objects, current_structure, mark_registry, source=source)
+        if len(objects) == before_count and current_structure.structure_kind == "visual":
+            continue
+    structure_digest = build_composite_structure_digest(structures)
+    return ObjectRegistry(
+        screen_id=screen_id,
+        objects=objects,
+        semantic_screen_id=mark_registry.semantic_screen_id,
+        object_set_version=build_object_set_version(objects),
+        structure_topology_digest=_strong_structure_digest(structures) or structure_digest,
+        mark_set_version=mark_registry.mark_set_version,
+        truncation_summary={
+            "object_count": len(objects),
+            "prompt_object_limit": MAX_PROMPT_OBJECTS,
+            "list_count": list_count,
+            "prompt_list_limit": MAX_PROMPT_LISTS,
+            "structure_count": len(structures),
+            "visual_conflict_count": conflict_count,
+            "composite_structure_digest": structure_digest,
+            "strong_structure_digest": _strong_structure_digest(structures),
+        },
+    )
+
+
+def _normalize_structures(structure: ScreenStructure | list[ScreenStructure] | None) -> list[ScreenStructure]:
+    if structure is None:
+        return []
+    if isinstance(structure, ScreenStructure):
+        return [structure]
+    return [item for item in structure if isinstance(item, ScreenStructure)]
+
+
+def _structure_sort_key(structure: ScreenStructure) -> tuple[int, str, str]:
+    priority = 1 if structure.structure_kind == "visual" else 0
+    return (priority, structure.source_provider or "", structure.structure_digest or structure.topology_digest or "")
+
+
+def build_composite_structure_digest(structures: list[ScreenStructure]) -> str | None:
+    if not structures:
+        return None
+    rows = [
+        f"{structure.structure_kind}:{structure.source_provider or ''}:"
+        f"{structure.structure_digest or structure.topology_digest or build_structure_topology_digest(structure.nodes)}"
+        for structure in structures
+    ]
+    return hashlib.sha256("|".join(rows).encode("utf-8")).hexdigest()[:16]
+
+
+def _strong_structure_digest(structures: list[ScreenStructure]) -> str | None:
+    for structure in structures:
+        if structure.structure_kind == "accessibility":
+            return structure.topology_digest or structure.structure_digest or build_structure_topology_digest(structure.nodes)
+    return None
+
+
+def summarize_structures(structures: list[ScreenStructure]) -> dict[str, Any]:
+    counts: dict[str, int] = {}
+    node_counts: dict[str, int] = {}
+    total_nodes = 0
+    for structure in structures:
+        kind = structure.structure_kind or "unknown"
+        counts[kind] = counts.get(kind, 0) + 1
+        node_counts[kind] = node_counts.get(kind, 0) + len(structure.nodes)
+        total_nodes += len(structure.nodes)
+    return {
+        "status": "ok" if structures else "missing_sidecar",
+        "structure_count": len(structures),
+        "kind_counts": counts,
+        "node_counts": node_counts,
+        "node_count": total_nodes,
+        "topology_digest": _strong_structure_digest(structures) or (structures[0].topology_digest if structures else None),
+        "merge_order": [structure.structure_kind for structure in structures],
+        "composite_structure_digest": build_composite_structure_digest(structures),
+        "strong_structure_digest": _strong_structure_digest(structures),
+        "structures": [structure.trace_summary() for structure in structures[:8]],
+    }
+
+
+def _append_accessibility_objects(
+    objects: dict[str, ScreenObject],
+    structure: ScreenStructure,
+    mark_registry: MarkRegistry,
+    *,
+    source: str,
+) -> int:
     parent_to_marks = _map_marks_to_structure_nodes(structure, mark_registry)
     scrollable_nodes = [node for node in structure.nodes.values() if node.scrollable and node.visible]
     scrollable_nodes.sort(key=lambda node: (node.bounds or (0, 0, 0, 0))[1])
@@ -333,9 +477,12 @@ def build_object_registry(
         if list_id and object_type in {"card", "result", "video", "button"}:
             ordinal_by_list[list_id] = ordinal_by_list.get(list_id, 0) + 1
             ordinal_index = ordinal_by_list[list_id]
-        lineage_hash = _hash_text(f"{node.path}|{list_id or ''}|{object_type}")[:12]
+        lineage_hash = _hash_text(f"{node.path}|{list_id or ''}|{object_type}") or None
         object_id = f"obj_{len(objects) + 1}"
         evidence = _safe_evidence(mark.text_summary or node.text_summary or node.content_desc_summary or node.role or object_type)
+        tags = _normalize_sensitivity_tags(node.sensitivity_tags) or _infer_sensitivity_tags(
+            " ".join(text for text in [mark.text_summary, node.text_summary, node.content_desc_summary] if text)
+        )
         objects[object_id] = ScreenObject(
             object_id=object_id,
             object_type=object_type,
@@ -347,33 +494,183 @@ def build_object_registry(
             confidence=mark.confidence,
             role=mark.role or node.role,
             source=source,
+            source_kind="accessibility",
+            source_provider=structure.source_provider or source,
+            confidence_tier=structure.confidence_tier or "strong",
+            executable_selector=True,
+            selector_confidence="strong",
+            selector_reasons=["accessibility_structure"],
+            sensitivity_tags=tags,
             evidence_summary=evidence,
-            sensitivity_evidence_summary=_safe_evidence(
-                " ".join(
-                    text
-                    for text in [mark.text_summary, node.text_summary, node.content_desc_summary]
-                    if text
-                )
-            ),
+            sensitivity_evidence_summary=_safe_evidence(" ".join(tags) or " ".join(text for text in [mark.text_summary, node.text_summary, node.content_desc_summary] if text)),
             title_hash=_hash_text(mark.text_summary or node.text_summary),
             text_hash=_hash_text(node.text_summary or mark.text_summary),
             resource_id_hash=node.resource_id_hash,
             lineage_hash=lineage_hash,
         )
-    return ObjectRegistry(
-        screen_id=screen_id,
-        objects=objects,
-        semantic_screen_id=mark_registry.semantic_screen_id,
-        object_set_version=build_object_set_version(objects),
-        structure_topology_digest=structure.topology_digest or build_structure_topology_digest(structure.nodes),
-        mark_set_version=mark_registry.mark_set_version,
-        truncation_summary={
-            "object_count": len(objects),
-            "prompt_object_limit": MAX_PROMPT_OBJECTS,
-            "list_count": len(list_by_node),
-            "prompt_list_limit": MAX_PROMPT_LISTS,
-        },
+    return len(list_by_node)
+
+
+def _append_visual_objects(
+    objects: dict[str, ScreenObject],
+    structure: ScreenStructure,
+    mark_registry: MarkRegistry,
+) -> int:
+    conflict_count = 0
+    visual_nodes = sorted(
+        [node for node in structure.nodes.values() if node.visible and node.bounds is not None],
+        key=lambda node: (
+            node.visual_order if node.visual_order is not None else 10_000,
+            (node.bounds or (0, 0, 0, 0))[1],
+            (node.bounds or (0, 0, 0, 0))[0],
+            node.node_id,
+        ),
     )
+    ordinal_by_row: dict[int, int] = {}
+    for node in visual_nodes:
+        mark = _best_mark_for_node(node, mark_registry)
+        if mark is None:
+            continue
+        overlaps_accessibility = any(
+            obj.source_kind == "accessibility"
+            and obj.primary_mark_id
+            and (existing_mark := mark_registry.get(obj.primary_mark_id)) is not None
+            and _bbox_iou(mark.bbox, existing_mark.bbox) >= 0.5
+            for obj in objects.values()
+        )
+        if overlaps_accessibility:
+            conflict_count += 1
+        object_type = _visual_object_type_for(node, mark)
+        row_bucket = _visual_row_bucket(node.bounds)
+        ordinal_by_row[row_bucket] = ordinal_by_row.get(row_bucket, 0) + 1
+        ordinal_index = ordinal_by_row[row_bucket] if len(visual_nodes) <= MAX_PROMPT_OBJECTS else None
+        list_id = f"visual_row_{row_bucket}" if ordinal_index is not None and len(visual_nodes) > 1 else None
+        selector_reasons = ["visual_structure", "single_primary_mark"]
+        source_safe_bound = _visual_node_has_source_safe_binding(node, mark)
+        executable_selector = (
+            source_safe_bound
+            and not overlaps_accessibility
+            and mark.confidence >= MARK_CONFIDENCE_THRESHOLD
+        )
+        selector_confidence = "weak" if executable_selector else "none"
+        if not source_safe_bound:
+            selector_reasons.append("missing_source_safe_binding")
+        if overlaps_accessibility:
+            selector_reasons.append("overlaps_accessibility")
+        if mark.confidence < MARK_CONFIDENCE_THRESHOLD:
+            selector_reasons.append("low_mark_confidence")
+        object_id = f"obj_{len(objects) + 1}"
+        evidence = _safe_evidence(node.text_summary or mark.text_summary or node.role or object_type)
+        tags = _normalize_sensitivity_tags(node.sensitivity_tags) or _infer_sensitivity_tags(node.text_summary or mark.text_summary)
+        objects[object_id] = ScreenObject(
+            object_id=object_id,
+            object_type=object_type,
+            atomic_mark_ids=[mark.mark_id],
+            primary_mark_id=mark.mark_id,
+            container_node_id=node.node_id,
+            list_id=list_id,
+            ordinal_index=ordinal_index,
+            confidence=min(float(node.confidence if node.confidence is not None else mark.confidence), mark.confidence),
+            role=mark.role or node.role,
+            source="visual",
+            source_kind="visual",
+            source_provider=structure.source_provider or node.source_provider,
+            confidence_tier=structure.confidence_tier or node.confidence_tier or "weak",
+            executable_selector=executable_selector,
+            selector_confidence=selector_confidence,
+            selector_reasons=selector_reasons,
+            sensitivity_tags=tags,
+            evidence_summary=evidence,
+            sensitivity_evidence_summary=_safe_evidence(" ".join(tags)),
+            title_hash=_hash_text(node.text_summary or mark.text_summary),
+            text_hash=_hash_text(node.text_summary or mark.text_summary),
+            lineage_hash=_hash_text(f"{structure.structure_digest or structure.topology_digest}|{node.path}|{list_id or ''}|{object_type}"),
+        )
+    return conflict_count
+
+
+def _best_mark_for_node(node: StructureNode, mark_registry: MarkRegistry) -> Mark | None:
+    if node.bounds is None:
+        return None
+    best: tuple[float, str, Mark] | None = None
+    for mark in mark_registry.marks.values():
+        score = _bbox_overlap_ratio(mark.bbox, node.bounds)
+        if score <= 0:
+            continue
+        candidate = (score, mark.mark_id, mark)
+        if best is None or candidate[:2] > best[:2]:
+            best = candidate
+    return best[2] if best else None
+
+
+def _visual_object_type_for(node: StructureNode, mark: Mark) -> str:
+    haystack = " ".join(str(value or "").casefold() for value in (node.role, mark.role, node.text_summary, mark.text_summary))
+    if "text" in haystack or "ocr" in haystack:
+        return "visual_text"
+    if "card" in haystack or "video" in haystack or "result" in haystack:
+        return "visual_card"
+    if "button" in haystack or "control" in haystack or "search" in haystack or "搜索" in haystack:
+        return "visual_control"
+    if "group" in haystack or "container" in haystack:
+        return "visual_group"
+    return "visual_target"
+
+
+def _visual_node_has_source_safe_binding(node: StructureNode, mark: Mark) -> bool:
+    haystack = " ".join(str(value or "").casefold() for value in (node.role, mark.role, node.text_summary, mark.text_summary))
+    safe_terms = {"button", "text", "input", "card", "image", "search", "搜索", "visual_target"}
+    if any(term in haystack for term in safe_terms):
+        return True
+    return bool(node.sensitivity_tags)
+
+
+def _visual_row_bucket(bounds: tuple[int, int, int, int] | None) -> int:
+    if bounds is None:
+        return 0
+    return int(round(bounds[1] / 80.0))
+
+
+def _bbox_iou(left: tuple[float, float, float, float], right: tuple[float, float, float, float]) -> float:
+    lx1, ly1, lx2, ly2 = [float(v) for v in left]
+    rx1, ry1, rx2, ry2 = [float(v) for v in right]
+    x1 = max(lx1, rx1)
+    y1 = max(ly1, ry1)
+    x2 = min(lx2, rx2)
+    y2 = min(ly2, ry2)
+    if x2 <= x1 or y2 <= y1:
+        return 0.0
+    intersection = (x2 - x1) * (y2 - y1)
+    union = max(1.0, (lx2 - lx1) * (ly2 - ly1) + (rx2 - rx1) * (ry2 - ry1) - intersection)
+    return intersection / union
+
+
+def _normalize_sensitivity_tags(tags: Any) -> list[str]:
+    if not isinstance(tags, list):
+        return []
+    normalized: list[str] = []
+    for tag in tags:
+        value = str(tag or "").strip().casefold()
+        if value in SENSITIVITY_TAGS and value not in normalized:
+            normalized.append(value)
+    return normalized
+
+
+def _infer_sensitivity_tags(value: Any) -> list[str]:
+    text = str(value or "").casefold()
+    tags: list[str] = []
+    term_map = {
+        "payment": ("pay", "payment", "purchase", "支付", "付款", "购买"),
+        "privacy": ("privacy", "隐私"),
+        "login": ("login", "登录", "账号", "账户"),
+        "password": ("password", "密码"),
+        "otp": ("captcha", "otp", "验证码"),
+        "delete": ("delete", "remove", "删除", "移除"),
+        "permission": ("permission", "权限"),
+    }
+    for tag, terms in term_map.items():
+        if any(term in text for term in terms):
+            tags.append(tag)
+    return tags
 
 
 def object_selected_evidence(obj: ScreenObject | None) -> dict[str, Any] | None:
@@ -402,6 +699,15 @@ def _coerce_object(item: dict[str, Any]) -> ScreenObject | None:
     primary_mark_id = item.get("primary_mark_id")
     if primary_mark_id is not None and not isinstance(primary_mark_id, str):
         primary_mark_id = None
+    source_kind = item.get("source_kind") if isinstance(item.get("source_kind"), str) else "accessibility"
+    has_explicit_eligibility = "executable_selector" in item
+    has_explicit_selector_confidence = "selector_confidence" in item
+    executable_selector = bool(item.get("executable_selector")) if has_explicit_eligibility else source_kind != "visual"
+    selector_confidence = (
+        item.get("selector_confidence")
+        if isinstance(item.get("selector_confidence"), str)
+        else ("none" if source_kind == "visual" and not has_explicit_selector_confidence else "strong")
+    )
     return ScreenObject(
         object_id=object_id,
         object_type=object_type,
@@ -414,6 +720,15 @@ def _coerce_object(item: dict[str, Any]) -> ScreenObject | None:
         confidence=float(item.get("confidence") or 0.0),
         role=item.get("role") if isinstance(item.get("role"), str) else None,
         source=item.get("source") if isinstance(item.get("source"), str) else "accessibility",
+        source_kind=source_kind,
+        source_provider=item.get("source_provider") if isinstance(item.get("source_provider"), str) else None,
+        confidence_tier=item.get("confidence_tier") if isinstance(item.get("confidence_tier"), str) else "strong",
+        executable_selector=executable_selector,
+        selector_confidence=selector_confidence,
+        selector_reasons=[
+            str(reason) for reason in item.get("selector_reasons") or [] if isinstance(reason, str)
+        ],
+        sensitivity_tags=_normalize_sensitivity_tags(item.get("sensitivity_tags")),
         evidence_summary=item.get("evidence_summary") if isinstance(item.get("evidence_summary"), str) else None,
         sensitivity_evidence_summary=item.get("sensitivity_evidence_summary")
         if isinstance(item.get("sensitivity_evidence_summary"), str)
@@ -512,6 +827,7 @@ def _prompt_objects(objects: Any, *, mark_registry: MarkRegistry | None) -> list
     return sorted(
         selected,
         key=lambda obj: (
+            1 if obj.source_kind == "visual" else 0,
             obj.list_id or "zz",
             obj.ordinal_index if obj.ordinal_index is not None else 10_000,
             obj.object_id,

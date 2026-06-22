@@ -857,6 +857,64 @@ def test_plan_node_hybrid_ignores_direct_accessibility_marks_and_uses_provider_g
     assert provider_summary["metadata"]["fallback_chain"][0]["provider"] == "accessibility_tree"
 
 
+def test_plan_node_includes_object_registry_sidecars_and_prompt(base_state, fake_device) -> None:
+    class DeviceWithFeed:
+        def __init__(self, delegate):
+            self.delegate = delegate
+
+        def get_screenshot(self, device_id=None):
+            return self.delegate.get_screenshot(device_id)
+
+        def get_current_app(self, device_id=None):
+            return self.delegate.get_current_app(device_id)
+
+        @property
+        def module(self):
+            class Module:
+                @staticmethod
+                def dump_uiautomator_xml(device_id=None, timeout=None):
+                    return """<hierarchy>
+                      <node text="" class="android.widget.FrameLayout" enabled="true" bounds="[0,0][1000,2000]">
+                        <node text="" class="androidx.recyclerview.widget.RecyclerView" scrollable="true" enabled="true" bounds="[0,200][1000,1800]">
+                          <node text="视频标题一" class="android.widget.TextView" clickable="true" enabled="true" bounds="[20,260][980,420]" />
+                          <node text="视频标题二" class="android.widget.TextView" clickable="true" enabled="true" bounds="[20,460][980,620]" />
+                        </node>
+                      </node>
+                    </hierarchy>"""
+
+            return Module
+
+    model = FakeModelClient(FakeModelResponse("", '{"type":"intent","action":"tap","object_role":"video","ordinal":1}'))
+    base_state["task"] = "打开第一个视频"
+
+    result = plan_node(
+        base_state,
+        {
+            "configurable": {
+                "model_client": model,
+                "device_factory": DeviceWithFeed(fake_device),
+                "output_mode": "json_schema",
+                "grounding_provider_name": "hybrid",
+                "verbose": False,
+            }
+        },
+    )
+
+    text = model.messages[-1]["content"][-1]["text"]
+    assert "屏幕对象" in text
+    assert "primary_mark_id=ax_2" in text
+    assert "视频标题一" not in text
+    assert "title_hash=5d0fe1cbd1c0" in text
+    assert result["action_parsed"] == {"_metadata": "do", "action": "Tap", "element": [500.0, 170.0]}
+    assert result["intent_raw"]["ordinal"] == 1
+    assert result["object_registry_summary"]["object_count"] >= 2
+    assert result["screen_structure_summary"]["node_count"] == 4
+    assert "target_object_id" not in result["action_parsed"]
+    assert result["expected_outcome"]["selected_object_id_hash"]
+    assert result["expected_outcome"]["title_hash"]
+    assert result["expected_outcome"]["expected_page_type"] == "detail_or_player"
+
+
 def test_plan_node_hybrid_filters_unrelated_accessibility_base_path(base_state, fake_device) -> None:
     class DeviceWithUnrelatedMarks:
         def __init__(self, delegate):
@@ -1145,6 +1203,61 @@ def test_plan_trace_can_include_raw_model_response_when_enabled(
     metadata = plan_error["payload"]["parse_metadata"]
     assert metadata["raw_model_response"] == "legacy text action"
     assert metadata["raw_model_response_length"] == len("legacy text action")
+
+
+def test_plan_error_trace_includes_observation_sidecar_summaries(
+    base_state, fake_device, tmp_path
+) -> None:
+    from phone_agent.graph.trace import JsonlTraceWriter
+
+    writer = JsonlTraceWriter(trace_id="plan-error-sidecars", trace_dir=tmp_path)
+    base_state["task"] = "搜索"
+
+    class ParseFailureModel:
+        def request(self, *_args, **_kwargs):
+            raise ModelParseError("invalid_json", {"parse_error_code": "invalid_json"})
+
+    class DeviceWithTree:
+        def __init__(self, delegate):
+            self.delegate = delegate
+
+        def get_screenshot(self, device_id=None):
+            return self.delegate.get_screenshot(device_id)
+
+        def get_current_app(self, device_id=None):
+            return self.delegate.get_current_app(device_id)
+
+        @property
+        def module(self):
+            class Module:
+                @staticmethod
+                def dump_uiautomator_xml(device_id=None, timeout=None):
+                    return """<hierarchy>
+                      <node text="搜索" class="android.widget.TextView" clickable="true" enabled="true" bounds="[100,100][500,200]" />
+                    </hierarchy>"""
+
+            return Module
+
+    plan_node(
+        base_state,
+        {
+            "configurable": {
+                "model_client": ParseFailureModel(),
+                "device_factory": DeviceWithTree(fake_device),
+                "trace_writer": writer,
+                "verbose": False,
+                "parse_retry": 0,
+                "grounding_provider_name": "hybrid",
+            }
+        },
+    )
+
+    records = [json.loads(line) for line in writer.path.read_text(encoding="utf-8").splitlines()]
+    plan_error = next(item for item in records if item["event"] == "plan_error")
+    payload = plan_error["payload"]
+    assert payload["mark_provider_observation"]["provider_count"] == 1
+    assert payload["screen_structure_summary"]["node_count"] == 1
+    assert payload["object_registry_summary"]["object_count"] == 1
 
 
 def test_reflect_node_cn_and_en_task_finished_detection(
@@ -1535,6 +1648,171 @@ def test_reflect_node_hash_matches_text_segment(base_state, fake_device) -> None
 
     assert result["verifier_status"] == "success"
     assert result["verifier_evidence"]["matched_postconditions"] == ["sha256:44ce7ae909bb"]
+
+
+def test_reflect_node_selected_object_hash_matches_detail_page(base_state, fake_device) -> None:
+    base_state["action_parsed"] = {"_metadata": "do", "action": "Tap", "element": [500, 300]}
+    base_state["expected_outcome"] = {
+        "kind": "generic",
+        "must_observe": [],
+        "must_not_observe": [],
+        "target_mark_id": "m1",
+        "target_text_hint": None,
+        "timeout_hint": None,
+        "dynamic_regions": [],
+        "object_type": "video",
+        "object_evidence_hash": "5d0fe1cbd1c0",
+        "title_hash": "5d0fe1cbd1c0",
+        "expected_page_type": "detail_or_player",
+    }
+    model = FakeModelClient(
+        FakeModelResponse("ok", '{"verdict":"failed","failure_cause":"wrong_page","suggested_strategy":"retry","message":"model missed"}')
+    )
+
+    result = reflect_node(
+        base_state,
+        {
+            "configurable": {
+                "model_client": model,
+                "device_factory": fake_device,
+                "verbose": False,
+                "after_screen_marks": [
+                    {"mark_id": "title", "bbox": [50, 100, 900, 180], "role": "TextView", "text_summary": "视频标题一"},
+                    {"mark_id": "player", "bbox": [0, 200, 1000, 800], "role": "Button", "text_summary": "播放器 暂停 弹幕"},
+                ],
+                "grounding_provider_name": "off",
+            }
+        },
+    )
+
+    assert result["verifier_status"] == "success"
+    assert result["reflection_verdict"] == "succeeded"
+    assert result["verifier_evidence"]["selected_object_signals"]["selected_object_match"] is True
+
+
+def test_reflect_node_selected_object_detects_wrong_detail(base_state, fake_device) -> None:
+    base_state["action_parsed"] = {"_metadata": "do", "action": "Tap", "element": [500, 300]}
+    base_state["expected_outcome"] = {
+        "kind": "generic",
+        "must_observe": [],
+        "must_not_observe": [],
+        "target_mark_id": "m1",
+        "target_text_hint": None,
+        "timeout_hint": None,
+        "dynamic_regions": [],
+        "object_type": "video",
+        "object_evidence_hash": "5d0fe1cbd1c0",
+        "title_hash": "5d0fe1cbd1c0",
+        "expected_page_type": "detail_or_player",
+    }
+    model = FakeModelClient(
+        FakeModelResponse("ok", '{"verdict":"succeeded","failure_cause":"none","suggested_strategy":"continue","message":"ok"}')
+    )
+
+    result = reflect_node(
+        base_state,
+        {
+            "configurable": {
+                "model_client": model,
+                "device_factory": fake_device,
+                "verbose": False,
+                "after_screen_marks": [
+                    {"mark_id": "other", "bbox": [50, 100, 900, 180], "role": "TextView", "text_summary": "其他标题"},
+                    {"mark_id": "player", "bbox": [0, 200, 1000, 800], "role": "Button", "text_summary": "播放器 暂停 弹幕"},
+                ],
+                "grounding_provider_name": "off",
+            }
+        },
+    )
+
+    assert result["verifier_status"] == "failure"
+    assert result["reflection_verdict"] == "failed"
+    assert result["verifier_evidence"]["selected_object_signals"]["wrong_detail_opened"] is True
+
+
+def test_reflect_node_selected_object_detects_still_on_feed(base_state, fake_device) -> None:
+    base_state["action_parsed"] = {"_metadata": "do", "action": "Tap", "element": [500, 300]}
+    base_state["expected_outcome"] = {
+        "kind": "generic",
+        "must_observe": [],
+        "must_not_observe": [],
+        "target_mark_id": "m1",
+        "target_text_hint": None,
+        "timeout_hint": None,
+        "dynamic_regions": [],
+        "object_type": "video",
+        "object_evidence_hash": "5d0fe1cbd1c0",
+        "title_hash": "5d0fe1cbd1c0",
+        "expected_page_type": "detail_or_player",
+    }
+    model = FakeModelClient(
+        FakeModelResponse("ok", '{"verdict":"succeeded","failure_cause":"none","suggested_strategy":"continue","message":"ok"}')
+    )
+
+    result = reflect_node(
+        base_state,
+        {
+            "configurable": {
+                "model_client": model,
+                "device_factory": fake_device,
+                "verbose": False,
+                "after_screen_marks": [
+                    {"mark_id": "feed", "bbox": [0, 0, 1000, 100], "role": "TextView", "text_summary": "首页 推荐"},
+                    {"mark_id": "title", "bbox": [50, 300, 900, 420], "role": "TextView", "text_summary": "视频标题一"},
+                ],
+                "grounding_provider_name": "off",
+            }
+        },
+    )
+
+    assert result["verifier_status"] == "failure"
+    assert result["reflection_verdict"] == "failed"
+    assert result["verifier_evidence"]["selected_object_signals"]["same_surface_still_visible"] is True
+
+
+def test_reflect_node_selected_object_feed_terms_win_over_generic_player_terms(base_state, fake_device) -> None:
+    base_state["action_parsed"] = {"_metadata": "do", "action": "Tap", "element": [500, 300]}
+    base_state["expected_outcome"] = {
+        "kind": "generic",
+        "must_observe": [],
+        "must_not_observe": [],
+        "target_mark_id": "m1",
+        "target_text_hint": None,
+        "timeout_hint": None,
+        "dynamic_regions": [],
+        "object_type": "video",
+        "object_evidence_hash": "5d0fe1cbd1c0",
+        "title_hash": "5d0fe1cbd1c0",
+        "expected_page_type": "detail_or_player",
+    }
+    model = FakeModelClient(
+        FakeModelResponse("ok", '{"verdict":"succeeded","failure_cause":"none","suggested_strategy":"continue","message":"ok"}')
+    )
+
+    result = reflect_node(
+        base_state,
+        {
+            "configurable": {
+                "model_client": model,
+                "device_factory": fake_device,
+                "verbose": False,
+                "after_screen_marks": [
+                    {"mark_id": "feed", "bbox": [0, 0, 1000, 100], "role": "TextView", "text_summary": "首页 推荐"},
+                    {"mark_id": "title", "bbox": [50, 300, 900, 420], "role": "TextView", "text_summary": "视频标题一"},
+                    {"mark_id": "actions", "bbox": [50, 430, 900, 520], "role": "TextView", "text_summary": "评论 播放"},
+                ],
+                "grounding_provider_name": "off",
+            }
+        },
+    )
+
+    assert result["verifier_status"] == "failure"
+    assert result["reflection_verdict"] == "failed"
+    signals = result["verifier_evidence"]["selected_object_signals"]
+    assert signals["selected_object_hash_match"] is True
+    assert signals["selected_object_detail_signal"] is True
+    assert signals["same_surface_still_visible"] is True
+    assert "selected_object_match" not in signals
 
 
 def test_reflect_node_input_focused_requires_focus_or_keyboard_signal(base_state, fake_device) -> None:

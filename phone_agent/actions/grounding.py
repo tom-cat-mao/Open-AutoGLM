@@ -160,6 +160,7 @@ def ground_intent_to_action(
             **intent,
             "target_mark_id": mark_id,
             "_selected_object_evidence": selected_object.sensitivity_evidence_summary or selected_object.evidence_summary,
+            "_selected_object_sensitivity_tags": selected_object.sensitivity_tags,
         }
         if grounding_metadata is not None:
             grounding_metadata["selected_object"] = {
@@ -276,12 +277,24 @@ def _resolve_object_selector(
     selected = candidates[0]
     if not selected.primary_mark_id:
         raise GroundingError("object_without_mark", "object is not bound to an atomic mark")
+    _validate_visual_object_eligibility(selected)
     mark = mark_registry.get(selected.primary_mark_id)
     if mark is None:
         raise GroundingError("mark_stale", "selected object primary mark is missing")
     if mark.confidence < MARK_CONFIDENCE_THRESHOLD:
         raise GroundingError("mark_low_confidence", "selected object primary mark confidence is below threshold")
     return selected
+
+
+def _validate_visual_object_eligibility(obj: ScreenObject) -> None:
+    if obj.source_kind != "visual":
+        return
+    if not obj.executable_selector or obj.selector_confidence == "none":
+        raise GroundingError("visual_object_not_executable", "visual object is not selector-executable")
+    if obj.selector_confidence not in {"weak", "strong"}:
+        raise GroundingError("visual_object_not_executable", "visual object selector confidence is missing")
+    if not obj.primary_mark_id or len(obj.atomic_mark_ids or []) != 1:
+        raise GroundingError("visual_object_ambiguous", "visual object must bind to exactly one atomic mark")
 
 
 def _validate_selected_object_constraints(intent: dict[str, Any], obj: ScreenObject) -> None:
@@ -473,6 +486,13 @@ def _ground_non_target_intent(intent: dict[str, Any], action_name: str) -> dict[
 
 
 def _mark_sensitivity(intent: dict[str, Any], mark: Any) -> str | None:
+    tags = intent.get("_selected_object_sensitivity_tags")
+    if isinstance(tags, list):
+        normalized = {str(tag or "").casefold() for tag in tags}
+        if normalized & {"login", "password", "otp"}:
+            return "takeover"
+        if normalized & {"payment", "privacy", "delete", "permission"}:
+            return "confirm"
     haystack = " ".join(
         str(value or "")
         for value in (

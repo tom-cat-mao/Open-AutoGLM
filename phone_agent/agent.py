@@ -44,6 +44,10 @@ class AgentConfig:
     accessibility_timeout: float = 3.0
     accessibility_max_marks: int = 80
     locateanything_context_max_chars: int = 0
+    locateanything_structure_mode: str | None = None
+    locateanything_max_visual_candidates: int = 30
+    locateanything_visual_category_budget: int = 5
+    locateanything_max_structure_calls: int = 5
 
     def __post_init__(self):
         self.context_mode = normalize_context_mode(self.context_mode)
@@ -324,6 +328,10 @@ class PhoneAgent:
                 "accessibility_timeout": self.agent_config.accessibility_timeout,
                 "accessibility_max_marks": self.agent_config.accessibility_max_marks,
                 "locateanything_context_max_chars": self.agent_config.locateanything_context_max_chars,
+                "locateanything_structure_mode": self.agent_config.locateanything_structure_mode,
+                "locateanything_max_visual_candidates": self.agent_config.locateanything_max_visual_candidates,
+                "locateanything_visual_category_budget": self.agent_config.locateanything_visual_category_budget,
+                "locateanything_max_structure_calls": self.agent_config.locateanything_max_structure_calls,
             }
         }
 

@@ -418,11 +418,14 @@ def _selected_object_evidence_from_grounding(grounding_observation: dict[str, An
 
 def _observation_state_fields(observation) -> dict[str, Any]:
     structure = observation.screen_structure
+    structures = getattr(observation, "screen_structures", []) or ([structure] if structure else [])
     objects = observation.object_registry
+    structure_summary = observation.mark_provider_observation.get("screen_structure_summary") or {"status": "missing_sidecar"}
     return {
         "screen_structure": structure.trace_summary() if structure else None,
+        "screen_structures": [item.trace_summary() for item in structures],
         "object_registry": objects.trace_summary() if objects else None,
-        "screen_structure_summary": structure.trace_summary() if structure else {"status": "missing_sidecar"},
+        "screen_structure_summary": structure_summary,
         "object_registry_summary": objects.trace_summary() if objects else {"status": "missing_sidecar"},
         "object_registry_binding": {
             "screen_id": objects.screen_id if objects else None,
@@ -434,8 +437,18 @@ def _observation_state_fields(observation) -> dict[str, Any]:
         if objects
         else None,
         "object_set_version": objects.object_set_version if objects else None,
-        "structure_topology_digest": structure.topology_digest if structure else None,
+        "structure_topology_digest": objects.structure_topology_digest if objects else (structure.topology_digest if structure else None),
         "object_trace_summary": objects.trace_summary() if objects else None,
+    }
+
+
+def _plan_error_observation_fields(observation) -> dict[str, Any]:
+    objects = observation.object_registry
+    return {
+        "mark_provider_observation": observation.mark_provider_observation,
+        "screen_structure_summary": observation.mark_provider_observation.get("screen_structure_summary")
+        or {"status": "missing_sidecar"},
+        "object_registry_summary": objects.trace_summary() if objects else {"status": "missing_sidecar"},
     }
 
 
@@ -610,9 +623,13 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
         observation_epoch=observation.snapshot.observation_epoch,
         mark_set_version=observation.snapshot.mark_set_version,
         perceptual_hash=observation.snapshot.perceptual_hash,
-        structure_topology_digest=observation.screen_structure.topology_digest
-        if observation.screen_structure
-        else None,
+        structure_topology_digest=observation.object_registry.structure_topology_digest
+        if observation.object_registry
+        else (
+            observation.screen_structure.topology_digest
+            if observation.screen_structure
+            else None
+        ),
         object_set_version=observation.object_registry.object_set_version
         if observation.object_registry
         else None,
@@ -757,6 +774,7 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
                         "failure_cause": "model_parse_failed",
                         "parse_metadata": parse_metadata,
                         "parse_error_code": parse_metadata.get("parse_error_code"),
+                        **_plan_error_observation_fields(observation),
                         **error_fields,
                         **context_metrics,
                     },
@@ -799,6 +817,7 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
                     "failure_cause": "model_parse_failed",
                     "parse_metadata": parse_metadata,
                     "parse_error_code": parse_metadata.get("parse_error_code"),
+                    **_plan_error_observation_fields(observation),
                     **error_fields,
                     **context_metrics,
                 },
@@ -849,6 +868,7 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
                 "failure_cause": "model_parse_failed",
                 "parse_metadata": parse_metadata,
                 "parse_error_code": parse_metadata.get("parse_error_code"),
+                **_plan_error_observation_fields(observation),
                 **error_fields,
                 **context_metrics,
             },
@@ -1005,9 +1025,8 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
             "selected_grounding_candidate_id": selected_grounding_candidate_id,
             "expected_outcome": expected_outcome_trace,
             "mark_registry": mark_registry.trace_summary(),
-            "screen_structure_summary": observation.screen_structure.trace_summary()
-            if observation.screen_structure
-            else {"status": "missing_sidecar"},
+            "screen_structure_summary": observation.mark_provider_observation.get("screen_structure_summary")
+            or {"status": "missing_sidecar"},
             "object_registry_summary": observation.object_registry.trace_summary()
             if observation.object_registry
             else {"status": "missing_sidecar"},

@@ -41,6 +41,7 @@ phone_agent/
     ├── state.py                 # AgentState TypedDict
     ├── builder.py               # create_agent_graph()
     ├── edges.py                 # 条件边路由
+    ├── marks.py / objects.py    # screen-bound marks、ScreenStructure、ObjectRegistry sidecars
     ├── trace.py                 # 本地 JSONL trace 与脱敏
     ├── context.py               # context selector、request compaction、预算裁剪与脱敏
     ├── nodes/
@@ -158,7 +159,7 @@ Context selector 与 compaction 只能影响模型请求构造和脱敏观测指
 
 Plan 阶段支持 provider response envelope：`{"action": {...}, "expected_outcome": {...}}`。其中 `action` 继续经 adapter、grounding、validator、repair、safety gate 和 executor；`expected_outcome` 是 sibling postcondition contract，绝不进入 canonical `ActionIR` 或 executor payload，也不提供执行授权。运行态 state 保存 hash/哨兵形式的 verifier contract，verifier 会对当轮 UI 文本做现场 hash/片段 hash 匹配；`action_raw`、trace、report、checkpoint 等外发/持久化路径单独使用 stub/hash summary。真实 `ModelClient` 会先校验 nested `action`，再保留 envelope 给 Plan 拆分；旧 plain action JSON 仍兼容。
 
-`ExpectedOutcome` 支持 `kind`、`must_observe`、`must_not_observe`、`target_mark_id`、`target_text_hint`、`timeout_hint`、`dynamic_regions`。provider 未给出时会按动作生成保守默认：Launch 验证目标 app；Type 默认不把原始输入文本持久化到 `must_observe`，只有 provider 显式给出隐私安全的 outcome 时才做文本匹配；Tap/Double Tap/Long Press 默认保持 `generic`，避免把原本已存在的 target hint 当作成功证据；Swipe 只把内容位移作为弱确定信号；Wait 验证 loading/spinner/network error 等消失。
+`ExpectedOutcome` 支持 `kind`、`must_observe`、`must_not_observe`、`target_mark_id`、`target_text_hint`、`timeout_hint`、`dynamic_regions`。结构化 object selector 成功编译后，还可绑定 verifier-only selected-object 字段：`selected_object_id_hash`、`object_type`、`object_evidence_hash`、`title_stub`、`title_hash`、`container_lineage_hash`、`list_lineage_hash`、`expected_page_type`。这些字段只以 hash/stub 形式进入 ExpectedOutcome、trace/checkpoint/verifier prompt，不进入 canonical ActionIR、Validator、Safety Gate、Executor 或 `pending_execute`，也不提供执行授权。provider 未给出时会按动作生成保守默认：Launch 验证目标 app；Type 默认不把原始输入文本持久化到 `must_observe`，只有 provider 显式给出隐私安全的 outcome 时才做文本匹配；Tap/Double Tap/Long Press 默认保持 `generic`，避免把原本已存在的 target hint 当作成功证据；Swipe 只把内容位移作为弱确定信号；Wait 验证 loading/spinner/network error 等消失。
 
 Reflect 阶段会基于动作后的截图/current_app 重新构建 after observation，并携带动作前/动作后的脱敏 observation 摘要运行 deterministic verifier；高置信 deterministic success/failure 会直接映射到结构化 reflection，只有 unknown/低置信才把 stub/hash 后的 verifier signal、ExpectedOutcome summary、before/after observation summary 与当前截图作为 isolated verifier request 交给模型判断。该请求不追加到 `state["messages"]`，也不参与 request compaction 的持久状态。Reflect 默认只使用 accessibility/device marks，不触发 LocateAnything fallback，除非显式开启 `reflect_enable_vlm_grounding`。`screen_changed` 已降级为 weak signal，不能单独证明 Tap/Type/搜索/打开视频/Swipe 成功。广告、banner、推荐流、热词、计数器等动态区域默认视为噪声；搜索框/输入框类 `input_focused` 后置条件会参考 focused/editable/keyboard/top activity 等只读信号。只有按 action/outcome 绑定的强进展（如 Type 后目标文本出现、input_focused 的 focused/keyboard 信号）才会阻止机械 takeover；trace 只记录 `verifier_evidence` 中 stubbed/redacted matched/missing postconditions、progress/weak signals 与 redacted summaries。
 
@@ -180,7 +181,7 @@ Reflect 阶段会基于动作后的截图/current_app 重新构建 after observa
 
 > 完整架构文档见 [Grounding Architecture](docs/grounding-architecture.html)
 
-Open-AutoGLM 支持把主 VLM 的语义/意图与本地视觉定位拆开：Observation 阶段先由静态 marks、设备 marks、LocateAnything/Fake 等 `MarkProvider` 生成当前屏幕的 `MarkRegistry`；主 VLM 在 JSON/tool_calls 模式只通过 `target_mark_id` 引用屏幕目标；本地 harness 再把 mark 编译为 canonical `ActionIR -> Validator -> Repair -> Validator -> Safety/HITL -> Executor`。
+Open-AutoGLM 支持把主 VLM 的语义/意图与本地视觉定位拆开：Observation 阶段先由静态 marks、设备 marks、LocateAnything/Fake 等 `MarkProvider` 生成当前屏幕的 `MarkRegistry`；Android UiAutomator provider 同时生成 `ScreenStructure` 与 `ObjectRegistry` sidecars，用于表达 observation-local 的 list/card/input/button 等对象；主 VLM 在 JSON/tool_calls 模式可通过 `target_mark_id` 引用屏幕目标，也可在 Screen Objects block 存在唯一对象时输出 `target_object_id`、`object_role` + `ordinal` 或 strict `object_filter`。这些 selector 只是 IntentIR metadata，本地 harness 必须先在 `phone_agent/actions/grounding.py` 中把它们编译为唯一 atomic mark，再进入 canonical `ActionIR -> Validator -> Repair -> Validator -> Safety/HITL -> Executor`。
 
 ```bash
 # 默认测试不需要 MLX；真实 LocateAnything 需要 Apple Silicon + Metal + mlx-vlm
@@ -196,17 +197,23 @@ export PHONE_AGENT_LOCATEANYTHING_MAX_SIZE=960
 # 可选：优先使用 Android UiAutomator accessibility tree，失败时再调用 LocateAnything
 export PHONE_AGENT_GROUNDING_PROVIDER=hybrid
 export PHONE_AGENT_ACCESSIBILITY_MAX_MARKS=80
+# 可选：开启 LocateAnything 视觉结构 sidecar；默认 off，不改变稳定 fallback 行为
+export PHONE_AGENT_LOCATEANYTHING_STRUCTURE_MODE=target  # off | target | screen
 # 可选：直接把 accessibility tree marks 注入 MarkRegistry，不启用小模型 provider
 export PHONE_AGENT_ACCESSIBILITY_MARKS=true
 ```
 
 LocateAnything provider 会先读取当前完整截图，再按最长边 `max_size` 等比例缩小后送入模型；默认 `max_size=960`，这是基于本地 benchmark 在速度和 bbox 一致性之间的折中。运行时可通过 config `locateanything_max_size`（优先）或 `grounding_max_size` 覆盖，也可通过环境变量 `PHONE_AGENT_LOCATEANYTHING_MAX_SIZE`（优先）或 `PHONE_AGENT_GROUNDING_MAX_SIZE` 灰度/回滚；非法或非正整数会回落默认值。
 
-Android accessibility tree 通过 `adb exec-out uiautomator dump /dev/tty` 获取当前 UI XML，解析可交互节点的 `bounds/text/content-desc/resource-id/class/clickable/focusable/enabled` 等字段，并统一转换为 0-1000 MarkRegistry marks。`PHONE_AGENT_GROUNDING_PROVIDER=hybrid` 是推荐的省时路径：先尝试 accessibility tree；如果 tree marks 与 provider hint 没有弱匹配、树为空、不可用或没有候选 marks，会继续 fallback 到 LocateAnything 并合并候选。`PHONE_AGENT_ACCESSIBILITY_MARKS=true` 则把 accessibility marks 作为设备 base marks 注入；如果它与 `hybrid` 同时开启，direct/base accessibility mark 注入会被跳过，accessibility marks 由 hybrid provider 链统一生成和 gating，避免绕过 hint-aware fallback。
+Android accessibility tree 通过 `adb exec-out uiautomator dump /dev/tty` 获取当前 UI XML，解析可交互节点的 `bounds/text/content-desc/resource-id/class/clickable/focusable/focused/checkable/checked/scrollable/enabled/visible-to-user` 等 dump-supported 字段，并统一转换为 0-1000 MarkRegistry marks；signed/negative bounds 会归一化到 0-1000 或被拒绝。provider 还会输出 trace-safe `ScreenStructure`，`plan_node` 再从当前 `ScreenStructure + MarkRegistry` 构建 `ObjectRegistry`，把 Screen Objects block 放在 Screen Marks block 之前。Screen Objects prompt 只展示 object type/role/list/ordinal、primary mark 和 hash/lineage evidence，不展示 raw title/text；默认上限为 lists 5、objects 30、总 block 4000 chars。object_id/list_id/ordinal 只在当前 observation 内有效，reobserve 后必须重新选择或重新验证。`PHONE_AGENT_GROUNDING_PROVIDER=hybrid` 是推荐的省时路径：先尝试 accessibility tree；如果 tree marks 与 provider hint 没有弱匹配、树为空、不可用或没有候选 marks，会继续 fallback 到 LocateAnything 并合并候选。`PHONE_AGENT_ACCESSIBILITY_MARKS=true` 则把 accessibility marks 作为设备 base marks 注入；如果它与 `hybrid` 同时开启，direct/base accessibility mark 注入会被跳过，accessibility marks 由 hybrid provider 链统一生成和 gating，避免绕过 hint-aware fallback。
+
+LocateAnything 结构化视觉 mark 默认关闭，可通过 `locateanything_structure_mode` 或 `PHONE_AGENT_LOCATEANYTHING_STRUCTURE_MODE=target|screen` 灰度开启。`target` 只在 LocateAnything 被调用时把当前 hint 的 bbox 生成 `structure_kind=visual` sidecar；`screen` 使用 bounded category prompts 生成屏幕级视觉候选，并受 `locateanything_max_visual_candidates`、`locateanything_visual_category_budget`、`locateanything_max_structure_calls` 限制。视觉 sidecar 不伪装成 Android accessibility tree：它只保存 bbox、role/type guess、visual order、confidence tier、source/provider 和 bounded `sensitivity_tags`，不会生成 clickable/focusable/resource id 等平台真值。Observation 会按 accessibility first、visual second 构建 composite `screen_structures`，trace/checkpoint 只保留 kind/source/tier/count/digest summary。Screen Objects prompt 会标出 `source=visual tier=weak eligible=true|false`；resolver 对 visual object 的 `executable_selector` 做硬校验，低置信、多候选、重叠或未授权 selector 均 fail-closed，不回退为 raw bbox tap。
 
 LocateAnything prompt 必须保持官方/库侧 chat template：代码通过 `mlx_vlm.prompt_utils.apply_chat_template(..., num_images=1)` 生成最终 prompt，fallback 仅为旧版 `mlx-vlm` 保留 `<image-0>` 前缀。默认 instruction 保持短句：`Locate the region that matches the following description: ...`。可选 `PHONE_AGENT_LOCATEANYTHING_CONTEXT_MAX_CHARS` / config `locateanything_context_max_chars` 只允许追加一行 bounded `Context:`，默认 `0` 表示不注入额外 context，避免小模型被长 prompt 干扰。
 
-安全边界：屏幕目标点击类动作的唯一可执行 IntentIR target 是 `target_mark_id`。`target_text_hint` / 目标描述只能作为受控、bounded 的本地 MarkProvider hint，不能直接生成 ActionIR；本地 LocateAnything/Fake 可在内存中使用 raw hint 做 query-conditioned grounding，但 raw hint 不写入 trace、checkpoint、prompt marks block、eval JSON 或报告。LocateAnything/Fake/OCR/UIAutomator/SoM 只能生成 marks；未知 mark、缺失 registry、provider 缺失、stale/hash mismatch、低置信、bad bbox、多候选歧义等会 fail-closed 为 `error_layer=grounding`，不会回退为主 VLM 直接坐标 Tap。trace/eval 只记录 provider、mark id、bbox/center、screen/hash、latency、failure code、candidate_count 与脱敏 hint summary，不记录原始截图或 raw target text。若未来接入远程 grounding provider，raw hint 必须显式 opt-in，否则默认使用脱敏 hint。
+安全边界：屏幕目标点击类动作的唯一可执行边界仍是 atomic `target_mark_id`。object selector 只允许作为编译前 IntentIR metadata；adapter 只做字段白名单、类型归一化和 strict `object_filter` 校验，不读取 ObjectRegistry、不解析 ordinal、不生成 compiled mark。`object_filter` 只允许 flat JSON object，key 限于 `object_type`、`role`、`source`、`list_id`、`title_hash_prefix`、`text_hash_prefix`、`resource_id_hash_prefix`、`lineage_hash_prefix`，值必须是 1-64 字符 string，hash prefix 为 6-16 位 hex；禁止 raw title/text、regex、array、nested object、provider/backend/device 字段。resolver 的 object failure codes 为 `object_registry_missing`、`object_stale`、`unknown_object`、`ordinal_out_of_range`、`object_ambiguous`、`object_without_mark`、`mark_stale`、`mark_low_confidence`、`visual_object_ambiguous`、`visual_object_not_executable`、`visual_structure_missing`，均 fail-closed/reobserve/replan/takeover，不回退为主 VLM 直接坐标 Tap。敏感 object evidence 不是 grounding failure：payment/privacy/delete/permission 会返回带 confirmation message 的 canonical Tap，login/password/OTP 会返回 canonical `Take_over`，继续由 Safety Gate 路由到 HITL。
+
+`target_text_hint` / 目标描述只能作为受控、bounded 的本地 MarkProvider hint，不能直接生成 ActionIR；本地 LocateAnything/Fake 可在内存中使用 raw hint 做 query-conditioned grounding，但 raw hint 不写入 trace、checkpoint、prompt marks block、eval JSON 或报告。LocateAnything/Fake/OCR/UIAutomator/SoM 只能生成 marks；未知 mark、缺失 registry、provider 缺失、stale/hash mismatch、低置信、bad bbox、多候选歧义等会 fail-closed 为 `error_layer=grounding`，不会回退为主 VLM 直接坐标 Tap。trace/eval 只记录 provider、mark id、bbox/center、screen/hash、latency、failure code、candidate_count、`screen_structure_summary`、`object_registry_summary`、compiled mark 与脱敏 hint/object summary，不记录原始截图、raw target text 或 raw private title。若未来接入远程 grounding provider，raw hint 必须显式 opt-in，否则默认使用脱敏 hint。
 
 ### Grounding Benchmark
 
@@ -346,6 +353,10 @@ python main.py --device-id 192.168.1.100:5555 --base-url http://localhost:8000/v
 | `PHONE_AGENT_LOCATEANYTHING_MODEL` | LocateAnything-3B-4bit 模型路径 | `models/LocateAnything-3B-4bit` |
 | `PHONE_AGENT_LOCATEANYTHING_MAX_SIZE` | LocateAnything 输入图最长边；provider 专属配置，优先于通用 grounding max size | `960` |
 | `PHONE_AGENT_LOCATEANYTHING_CONTEXT_MAX_CHARS` | LocateAnything prompt 的可选短 context 字符预算；0 表示关闭 | `0` |
+| `PHONE_AGENT_LOCATEANYTHING_STRUCTURE_MODE` | LocateAnything 视觉结构 sidecar 模式：`off` / `target` / `screen`；显式 config 非法值报错，env 非法值回落 `off` 并记录 metadata | `off` |
+| `PHONE_AGENT_LOCATEANYTHING_MAX_VISUAL_CANDIDATES` | 视觉结构 sidecar 最大候选数 | `30` |
+| `PHONE_AGENT_LOCATEANYTHING_VISUAL_CATEGORY_BUDGET` | `screen` 模式 bounded category prompt 数量 | `5` |
+| `PHONE_AGENT_LOCATEANYTHING_MAX_STRUCTURE_CALLS` | `screen` 模式最多 LocateAnything 结构化调用数 | `5` |
 | `PHONE_AGENT_GROUNDING_MAX_SIZE` | 通用 grounding 输入图最长边 fallback；当前仅 LocateAnything factory 消费 | `960` |
 
 ## 开发

@@ -587,6 +587,35 @@ def test_tool_spec_target_mark_has_grounding_description() -> None:
     assert "harness grounds" in mark_prop["description"]
     assert "target_intent" not in properties
     assert "non-executable" in properties["target_text_hint"]["description"].lower()
+    assert "target_object_id" in properties
+    assert "object_filter" in properties
+    assert "non-executable" in properties["target_object_id"]["description"].lower()
+    assert "strict flat" in properties["object_filter"]["description"].lower()
+    assert properties["object_filter"]["additionalProperties"] is False
+    assert "title_hash_prefix" in properties["object_filter"]["properties"]
+
+
+def test_tool_calls_do_tap_with_object_selector_maps_to_intent() -> None:
+    client = ModelClient(ModelConfig())
+    _thinking, action, metadata = client._parse_response_with_metadata(
+        "",
+        tool_calls=[
+            {
+                "type": "function",
+                "function": {
+                    "name": "do",
+                    "arguments": json.dumps(
+                        {"type": "do", "action": "Tap", "target_object_id": "obj_1"},
+                        ensure_ascii=False,
+                    ),
+                },
+            }
+        ],
+        output_mode="tool_calls",
+    )
+
+    assert json.loads(action) == {"_metadata": "intent", "action": "Tap", "target_object_id": "obj_1"}
+    assert metadata["adapter_used"] == "tool_calls"
 
 
 def test_tool_spec_duration_has_format_description() -> None:

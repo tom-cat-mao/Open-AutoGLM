@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from typing import Any, Protocol
 
+from phone_agent.graph.context import sanitize_context_payload
+
 
 @dataclass(frozen=True)
 class MarkProviderHint:
@@ -89,10 +91,72 @@ class MarkProviderResult:
     status: str | None = None
     hints: list[dict[str, Any]] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
+    screen_structures: list[dict[str, Any]] = field(default_factory=list)
     screen_structure: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        data = asdict(self)
+        data["metadata"] = _sanitize_metadata(data.get("metadata"))
+        for key in ("marks", "candidates"):
+            for item in data.get(key) or []:
+                if isinstance(item, dict) and item.get("text_summary"):
+                    item["text_summary"] = sanitize_context_payload(
+                        item.get("text_summary"),
+                        "text_summary",
+                        consumer="checkpoint",
+                    )
+        data["screen_structures"] = _sanitize_structures(data.get("screen_structures"))
+        if isinstance(data.get("screen_structure"), dict):
+            data["screen_structure"] = _sanitize_structure(data["screen_structure"])
+        if data["screen_structures"]:
+            # screen_structures is the canonical wire field.  Keep the legacy
+            # alias only for old consumers that still read a single sidecar.
+            data["screen_structure"] = data["screen_structures"][0]
+        elif data["screen_structure"]:
+            data["screen_structures"] = [data["screen_structure"]]
+        return data
+
+
+def _sanitize_structures(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    return [_sanitize_structure(item) for item in value if isinstance(item, dict)]
+
+
+def _sanitize_structure(value: dict[str, Any]) -> dict[str, Any]:
+    sanitized = dict(value)
+    nodes = sanitized.get("nodes")
+    if isinstance(nodes, dict):
+        sanitized_nodes: dict[str, Any] = {}
+        for node_id, node in nodes.items():
+            if not isinstance(node, dict):
+                continue
+            safe_node = dict(node)
+            for key in ("text_summary", "content_desc_summary", "label", "title"):
+                if safe_node.get(key):
+                    safe_node[key] = sanitize_context_payload(
+                        safe_node.get(key),
+                        key,
+                        consumer="checkpoint",
+                    )
+            sanitized_nodes[str(node_id)] = safe_node
+        sanitized["nodes"] = sanitized_nodes
+    return sanitized
+
+
+def _sanitize_metadata(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {
+            str(key): _sanitize_metadata(child)
+            for key, child in value.items()
+        }
+    if isinstance(value, list):
+        return [_sanitize_metadata(item) for item in value]
+    if isinstance(value, tuple):
+        return [_sanitize_metadata(item) for item in value]
+    if isinstance(value, str):
+        return sanitize_context_payload(value, "message", consumer="checkpoint")
+    return value
 
 
 class MarkProvider(Protocol):

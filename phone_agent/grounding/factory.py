@@ -24,6 +24,22 @@ def _resolve_positive_int(value: Any, *, default: int) -> int:
     return resolved if resolved > 0 else default
 
 
+def _resolve_structure_mode(cfg: dict[str, Any]) -> tuple[str, str | None]:
+    explicit = cfg.get("locateanything_structure_mode")
+    if explicit not in {None, ""}:
+        mode = str(explicit).lower()
+        if mode not in {"off", "target", "screen"}:
+            raise ValueError("locateanything_structure_mode must be one of: off, target, screen")
+        return mode, None
+    env_value = os.getenv("PHONE_AGENT_LOCATEANYTHING_STRUCTURE_MODE")
+    if env_value in {None, ""}:
+        return "off", None
+    mode = str(env_value).lower()
+    if mode not in {"off", "target", "screen"}:
+        return "off", mode
+    return mode, None
+
+
 def build_mark_provider(config: dict[str, Any] | None = None) -> MarkProvider | None:
     """Build a mark provider from runtime config/env without exposing it to tool schemas."""
 
@@ -99,8 +115,26 @@ def _build_locateanything_provider(cfg: dict[str, Any]) -> LocateAnythingMLXProv
         cfg.get("locateanything_context_max_chars") or os.getenv("PHONE_AGENT_LOCATEANYTHING_CONTEXT_MAX_CHARS"),
         default=0,
     )
+    structure_mode, invalid_structure_mode = _resolve_structure_mode(cfg)
     return LocateAnythingMLXProvider(
         model_path=model_path,
         max_size=max_size,
         context_max_chars=context_max_chars,
+        structure_mode=structure_mode,
+        max_visual_candidates=_resolve_positive_int(
+            cfg.get("locateanything_max_visual_candidates")
+            or os.getenv("PHONE_AGENT_LOCATEANYTHING_MAX_VISUAL_CANDIDATES"),
+            default=30,
+        ),
+        visual_category_budget=_resolve_positive_int(
+            cfg.get("locateanything_visual_category_budget")
+            or os.getenv("PHONE_AGENT_LOCATEANYTHING_VISUAL_CATEGORY_BUDGET"),
+            default=5,
+        ),
+        max_structure_calls=_resolve_positive_int(
+            cfg.get("locateanything_max_structure_calls")
+            or os.getenv("PHONE_AGENT_LOCATEANYTHING_MAX_STRUCTURE_CALLS"),
+            default=5,
+        ),
+        invalid_structure_mode=invalid_structure_mode,
     )

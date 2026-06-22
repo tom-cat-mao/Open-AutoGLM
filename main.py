@@ -30,6 +30,7 @@ Environment Variables:
     PHONE_AGENT_ACCESSIBILITY_MARKS: Include UiAutomator marks as device screen marks
     PHONE_AGENT_ACCESSIBILITY_MAX_MARKS: Maximum UiAutomator marks per screen
     PHONE_AGENT_LOCATEANYTHING_CONTEXT_MAX_CHARS: Optional short LocateAnything context budget
+    PHONE_AGENT_LOCATEANYTHING_STRUCTURE_MODE: off/target/screen visual structure sidecar mode
 """
 
 import argparse
@@ -749,6 +750,34 @@ Examples:
         help="Optional short context budget for LocateAnything prompts; 0 disables extra context",
     )
 
+    parser.add_argument(
+        "--locateanything-structure-mode",
+        choices=["off", "target", "screen"],
+        default=None,
+        help="Optional LocateAnything visual structure mode: off, target, or screen",
+    )
+
+    parser.add_argument(
+        "--locateanything-max-visual-candidates",
+        type=int,
+        default=int(os.getenv("PHONE_AGENT_LOCATEANYTHING_MAX_VISUAL_CANDIDATES", "30")),
+        help="Maximum visual sidecar candidates emitted by LocateAnything structure mode",
+    )
+
+    parser.add_argument(
+        "--locateanything-visual-category-budget",
+        type=int,
+        default=int(os.getenv("PHONE_AGENT_LOCATEANYTHING_VISUAL_CATEGORY_BUDGET", "5")),
+        help="Maximum bounded visual categories queried in screen structure mode",
+    )
+
+    parser.add_argument(
+        "--locateanything-max-structure-calls",
+        type=int,
+        default=int(os.getenv("PHONE_AGENT_LOCATEANYTHING_MAX_STRUCTURE_CALLS", "5")),
+        help="Maximum LocateAnything calls used for screen structure sidecar generation",
+    )
+
     # Device options
     parser.add_argument(
         "--device-id",
@@ -993,6 +1022,10 @@ def main():
         accessibility_timeout=args.accessibility_timeout,
         accessibility_max_marks=args.accessibility_max_marks,
         locateanything_context_max_chars=args.locateanything_context_max_chars,
+        locateanything_structure_mode=args.locateanything_structure_mode,
+        locateanything_max_visual_candidates=args.locateanything_max_visual_candidates,
+        locateanything_visual_category_budget=args.locateanything_visual_category_budget,
+        locateanything_max_structure_calls=args.locateanything_max_structure_calls,
     )
 
     agent = PhoneAgent(
