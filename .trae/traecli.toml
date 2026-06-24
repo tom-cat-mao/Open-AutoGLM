@@ -19,20 +19,120 @@ PhoneAgent 强约束摘要：模型输出协议仅支持 json_schema|tool_calls|
 Grounding 摘要：runtime 只执行 target_mark_id -> MarkRegistry -> ActionIR；LocateAnything/Fake/OCR/UIAutomator/SoM 只能生成 marks，不能把 target_text_hint 当可执行目标。默认 PHONE_AGENT_GROUNDING_PROVIDER=hybrid，accessibility tree 优先，失败再 fallback LocateAnything。Grounding benchmark 入口在 bench/grounding/，输出目录 bench_output/ 默认不提交。
 '''
 
+developer_instructions = "You have oh-my-codex installed. AGENTS.md is the orchestration brain and main control surface. Follow AGENTS.md for skill/keyword routing, $name workflow invocation, and role-specialized subagents; when spawning native subagents, set `agent_type` to an installed role and never omit it for OMX work. Use outcome-first, concise progress updates: state the target result, constraints, validation evidence, and stop condition before adding process detail. Native subagents live in .codex/agents and may handle independent parallel subtasks within one Codex session or team pane. Skills load from .codex/skills, not native-agent TOMLs. Treat installed prompts as narrower execution surfaces under AGENTS.md authority."
+
 web_search = "disabled"
 approval_policy = "on-request"
 sandbox_mode = "workspace-write"
 approvals_reviewer = "auto_review"
+resource_dirs = [".trae", ".agents", ".codex"]
 
 [sandbox_workspace_write]
 network_access = true
 writable_roots = []
 
-[skills.".trae/skills/autopilot/SKILL.md"]
-enabled = true
+# ── oh-my-codex features ──
 
-[skills.".trae/skills/ralplan/SKILL.md"]
-enabled = true
+[features]
+multi_agent = true
+child_agents_md = true
+hooks = true
+goals = true
+
+# ── oh-my-codex agents ──
+
+[agents]
+max_depth = 2
+
+[agents.analyst]
+description = "Requirements clarity, acceptance criteria, hidden constraints"
+config_file = "./agents/analyst.toml"
+
+[agents.architect]
+description = "System design, boundaries, interfaces, long-horizon tradeoffs"
+config_file = "./agents/architect.toml"
+
+[agents.code-reviewer]
+description = "Comprehensive review across all concerns"
+config_file = "./agents/code-reviewer.toml"
+
+[agents.code-simplifier]
+description = "Simplifies recently modified code for clarity and consistency without changing behavior"
+config_file = "./agents/code-simplifier.toml"
+
+[agents.critic]
+description = "Plan/design critical challenge and review"
+config_file = "./agents/critic.toml"
+
+[agents.debugger]
+description = "Root-cause analysis, regression isolation, failure diagnosis"
+config_file = "./agents/debugger.toml"
+
+[agents.dependency-expert]
+description = "External SDK/API/package evaluation"
+config_file = "./agents/dependency-expert.toml"
+
+[agents.designer]
+description = "UX/UI architecture, interaction design"
+config_file = "./agents/designer.toml"
+
+[agents.executor]
+description = "Code implementation, refactoring, feature work"
+config_file = "./agents/executor.toml"
+
+[agents.explore]
+description = "Fast codebase search and file/symbol mapping"
+config_file = "./agents/explore.toml"
+
+[agents.git-master]
+description = "Commit strategy, history hygiene, rebasing"
+config_file = "./agents/git-master.toml"
+
+[agents.planner]
+description = "Task sequencing, execution plans, risk flags"
+config_file = "./agents/planner.toml"
+
+[agents.prometheus-strict-metis]
+description = "Prometheus Strict requirements interviewer and ambiguity mapper"
+config_file = "./agents/prometheus-strict-metis.toml"
+
+[agents.prometheus-strict-momus]
+description = "Prometheus Strict adversarial plan critic and risk challenger"
+config_file = "./agents/prometheus-strict-momus.toml"
+
+[agents.prometheus-strict-oracle]
+description = "Prometheus Strict implementation readiness verifier and handoff judge"
+config_file = "./agents/prometheus-strict-oracle.toml"
+
+[agents.researcher]
+description = "External documentation and reference research"
+config_file = "./agents/researcher.toml"
+
+[agents.scholastic]
+description = "Ontology-first reasoning reviewer: category mistakes, hidden assumptions, modality separation, scholastic critique, and minimal-repair proposals"
+config_file = "./agents/scholastic.toml"
+
+[agents.team-executor]
+description = "Supervised team execution for conservative delivery lanes"
+config_file = "./agents/team-executor.toml"
+
+[agents.test-engineer]
+description = "Test strategy, coverage, flaky-test hardening"
+config_file = "./agents/test-engineer.toml"
+
+[agents.verifier]
+description = "Completion evidence, claim validation, test adequacy"
+config_file = "./agents/verifier.toml"
+
+[agents.vision]
+description = "Image/screenshot/diagram analysis"
+config_file = "./agents/vision.toml"
+
+[agents.writer]
+description = "Documentation, migration notes, user guidance"
+config_file = "./agents/writer.toml"
+
+# ── project skills (non-conflicting) ──
 
 [skills.".trae/skills/smart-search-cli/SKILL.md"]
 enabled = true
@@ -42,6 +142,8 @@ enabled = true
 
 [skills.".trae/skills/ui-ux-pro-max/SKILL.md"]
 enabled = true
+
+# ── MCP servers ──
 
 [mcp_servers.Context7]
 command = "bunx"
@@ -58,6 +160,45 @@ enabled = true
 required = false
 startup_timeout_sec = 30.0
 tool_timeout_sec = 30.0
+
+# ── oh-my-codex hooks ──
+
+[[SessionStart.hooks]]
+type = "command"
+command = "\"/opt/homebrew/Cellar/node/26.3.1/bin/node\" \"/Users/bytedance/.bun/install/global/node_modules/oh-my-codex/dist/scripts/codex-native-hook.js\""
+timeout = 30
+
+[[PreToolUse.hooks]]
+type = "command"
+command = "\"/opt/homebrew/Cellar/node/26.3.1/bin/node\" \"/Users/bytedance/.bun/install/global/node_modules/oh-my-codex/dist/scripts/codex-native-hook.js\""
+timeout = 30
+
+[[PostToolUse.hooks]]
+type = "command"
+command = "\"/opt/homebrew/Cellar/node/26.3.1/bin/node\" \"/Users/bytedance/.bun/install/global/node_modules/oh-my-codex/dist/scripts/codex-native-hook.js\""
+timeout = 30
+
+[[UserPromptSubmit.hooks]]
+type = "command"
+command = "\"/opt/homebrew/Cellar/node/26.3.1/bin/node\" \"/Users/bytedance/.bun/install/global/node_modules/oh-my-codex/dist/scripts/codex-native-hook.js\""
+timeout = 30
+
+[[PreCompact.hooks]]
+type = "command"
+command = "\"/opt/homebrew/Cellar/node/26.3.1/bin/node\" \"/Users/bytedance/.bun/install/global/node_modules/oh-my-codex/dist/scripts/codex-native-hook.js\""
+timeout = 30
+
+[[PostCompact.hooks]]
+type = "command"
+command = "\"/opt/homebrew/Cellar/node/26.3.1/bin/node\" \"/Users/bytedance/.bun/install/global/node_modules/oh-my-codex/dist/scripts/codex-native-hook.js\""
+timeout = 30
+
+[[Stop.hooks]]
+type = "command"
+command = "\"/opt/homebrew/Cellar/node/26.3.1/bin/node\" \"/Users/bytedance/.bun/install/global/node_modules/oh-my-codex/dist/scripts/codex-native-hook.js\""
+timeout = 30
+
+# ── project-specific hooks ──
 
 [[PostToolUse.hooks]]
 type = "command"
