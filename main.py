@@ -31,6 +31,9 @@ Environment Variables:
     PHONE_AGENT_ACCESSIBILITY_MAX_MARKS: Maximum UiAutomator marks per screen
     PHONE_AGENT_LOCATEANYTHING_CONTEXT_MAX_CHARS: Optional short LocateAnything context budget
     PHONE_AGENT_LOCATEANYTHING_STRUCTURE_MODE: off/target/screen visual structure sidecar mode
+    PHONE_AGENT_REMOTE_GROUNDING_BASE_URL: OpenAI-compatible remote grounding base URL
+    PHONE_AGENT_REMOTE_GROUNDING_API_KEY: Remote grounding API key
+    PHONE_AGENT_REMOTE_GROUNDING_MODEL: Remote grounding model (default: step-3.7-flash)
 """
 
 import argparse
@@ -709,9 +712,9 @@ Examples:
     parser.add_argument(
         "--grounding-provider",
         type=str,
-        choices=["off", "fake", "locateanything", "locateanything_mlx", "mlx", "accessibility", "accessibility_tree", "uiautomator", "hybrid"],
+        choices=["off", "fake", "locateanything", "locateanything_mlx", "mlx", "accessibility", "accessibility_tree", "uiautomator", "hybrid", "remote_openai", "stepfun", "hybrid_remote", "accessibility_remote"],
         default=os.getenv("PHONE_AGENT_GROUNDING_PROVIDER", DEFAULT_GROUNDING_PROVIDER_NAME),
-        help="Optional mark provider: off, fake, locateanything, accessibility, or hybrid",
+        help="Optional mark provider: off, fake, locateanything, accessibility, hybrid, remote_openai/stepfun, or hybrid_remote",
     )
 
     parser.add_argument(
@@ -776,6 +779,45 @@ Examples:
         type=int,
         default=int(os.getenv("PHONE_AGENT_LOCATEANYTHING_MAX_STRUCTURE_CALLS", "5")),
         help="Maximum LocateAnything calls used for screen structure sidecar generation",
+    )
+
+    parser.add_argument(
+        "--remote-grounding-base-url",
+        default=os.getenv("PHONE_AGENT_REMOTE_GROUNDING_BASE_URL"),
+        help="OpenAI-compatible remote grounding base URL",
+    )
+
+    parser.add_argument(
+        "--remote-grounding-api-key-env",
+        default=os.getenv("PHONE_AGENT_REMOTE_GROUNDING_API_KEY_ENV", "PHONE_AGENT_REMOTE_GROUNDING_API_KEY"),
+        help="Environment variable name containing the remote grounding API key",
+    )
+
+    parser.add_argument(
+        "--remote-grounding-model",
+        default=os.getenv("PHONE_AGENT_REMOTE_GROUNDING_MODEL", "step-3.7-flash"),
+        help="Remote grounding model name",
+    )
+
+    parser.add_argument(
+        "--remote-grounding-max-size",
+        type=int,
+        default=int(os.getenv("PHONE_AGENT_REMOTE_GROUNDING_MAX_SIZE", "960")),
+        help="Max long edge for images sent to remote grounding",
+    )
+
+    parser.add_argument(
+        "--remote-grounding-timeout",
+        type=float,
+        default=float(os.getenv("PHONE_AGENT_REMOTE_GROUNDING_TIMEOUT", "30")),
+        help="Remote grounding API timeout in seconds",
+    )
+
+    parser.add_argument(
+        "--remote-grounding-allow-raw-hints",
+        action="store_true",
+        default=parse_env_bool("PHONE_AGENT_REMOTE_GROUNDING_ALLOW_RAW_HINTS", False),
+        help="Allow raw provider hints to leave the process for remote grounding",
     )
 
     # Device options
@@ -1026,6 +1068,12 @@ def main():
         locateanything_max_visual_candidates=args.locateanything_max_visual_candidates,
         locateanything_visual_category_budget=args.locateanything_visual_category_budget,
         locateanything_max_structure_calls=args.locateanything_max_structure_calls,
+        remote_grounding_base_url=args.remote_grounding_base_url,
+        remote_grounding_api_key_env=args.remote_grounding_api_key_env,
+        remote_grounding_model=args.remote_grounding_model,
+        remote_grounding_max_size=args.remote_grounding_max_size,
+        remote_grounding_timeout=args.remote_grounding_timeout,
+        remote_grounding_allow_raw_hints=args.remote_grounding_allow_raw_hints,
     )
 
     agent = PhoneAgent(

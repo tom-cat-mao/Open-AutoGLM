@@ -213,3 +213,34 @@ def test_run_structured_error_path_has_finished_semantics(monkeypatch) -> None:
     assert result.error == "device unavailable"
     assert result.final_message == "Error: device unavailable"
     assert result.trace_path
+
+
+def test_agent_config_passes_remote_grounding_options(monkeypatch) -> None:
+    final_state = {"finished": True, "step_count": 1, "action_result": {"success": True, "message": "done"}, "error": None, "hitl_count": 0}
+    agent = PhoneAgent(
+        agent_config=AgentConfig(
+            max_steps=3,
+            device_id="device-1",
+            grounding_provider_name="hybrid_remote",
+            remote_grounding_base_url="https://api.stepfun.com/v1",
+            remote_grounding_api_key_env="STEPFUN_TEST_KEY",
+            remote_grounding_model="step-3.7-flash",
+            remote_grounding_max_size=720,
+            remote_grounding_timeout=12,
+            remote_grounding_allow_raw_hints=True,
+        )
+    )
+    agent._graph = FakeGraph(final_state)
+    monkeypatch.setattr("phone_agent.agent.get_device_factory", lambda: FakeDeviceFactory())
+
+    result = agent.run_structured("task")
+    cfg = agent._graph.config["configurable"]
+
+    assert result.success is True
+    assert cfg["grounding_provider_name"] == "hybrid_remote"
+    assert cfg["remote_grounding_base_url"] == "https://api.stepfun.com/v1"
+    assert cfg["remote_grounding_api_key_env"] == "STEPFUN_TEST_KEY"
+    assert cfg["remote_grounding_model"] == "step-3.7-flash"
+    assert cfg["remote_grounding_max_size"] == 720
+    assert cfg["remote_grounding_timeout"] == 12
+    assert cfg["remote_grounding_allow_raw_hints"] is True

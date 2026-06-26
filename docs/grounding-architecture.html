@@ -523,7 +523,7 @@
     <li><span class="icon red">!</span> 主 VLM <strong>绝不输出原始坐标</strong>，屏幕目标动作只引用 <code>target_mark_id</code>。</li>
     <li><span class="icon red">!</span> 所有屏幕定位必须通过 <code>MarkRegistry</code>，由 <code>MarkProvider</code> 实例填充。</li>
     <li><span class="icon red">!</span> Grounding 失败（Provider 缺失、低置信、过期 Mark、Hash 不匹配、歧义等）<strong>绝不回退为主 VLM 原始坐标</strong>，直接 Fail-Closed。</li>
-    <li><span class="icon blue">i</span> 推荐配置 <code>PHONE_AGENT_GROUNDING_PROVIDER=hybrid</code>：优先 Accessibility Tree，LocateAnything VLM 作为 Fallback。</li>
+    <li><span class="icon blue">i</span> 推荐配置 <code>PHONE_AGENT_GROUNDING_PROVIDER=hybrid</code>：优先 Accessibility Tree，LocateAnything VLM 作为 Fallback；<code>stepfun</code>/<code>hybrid_remote</code> 仅显式 opt-in。</li>
     <li><span class="icon green">+</span> 所有坐标归一化为 <strong>0-1000</strong> 范围，绝对像素转换仅在 Tool/Backend 层执行。</li>
   </ul>
 
@@ -696,7 +696,8 @@
     <tbody>
       <tr><td>metadata.parse_summary</td><td>AccessibilityTreeProvider</td><td>xml_status、raw_node_count、mark_count、structure_node_count、bounds_parse_fail_count、filtered_zero_area_count、interactive_candidate_count</td><td>Provider 已有；default hybrid wrapper 尚未汇总 child parse_summary 到顶层 result</td></tr>
       <tr><td>metadata.fallback_chain[]</td><td>FallbackMarkProvider</td><td>provider、success、failure_code、candidate_count、mark_count、structure_count、latency_ms、usable、skip_reason</td><td>已落地；code 字段 sanitizer 仍需 strict allowlist</td></tr>
-      <tr><td>metadata.hybrid_factory</td><td>build_mark_providers(hybrid)</td><td>hybrid_mode、accessibility_child_enabled、accessibility_child_skip_reason、provider_order</td><td>已落地；provider_order 仍需 safe-identifier allowlist</td></tr>
+      <tr><td>metadata.hybrid_factory</td><td>build_mark_providers(hybrid)</td><td>hybrid_mode、accessibility_child_enabled、accessibility_child_skip_reason、provider_order</td><td>已落地；provider_order 走 safe-identifier allowlist</td></tr>
+      <tr><td>metadata.remote</td><td>RemoteOpenAIGroundingProvider</td><td>model、base_url_host、image size/length、hint_length、raw_hint_sent、bbox_count</td><td>已落地；不包含 API key、base64、raw hint、raw response</td></tr>
     </tbody>
   </table>
 
@@ -705,11 +706,11 @@
   </div>
 
   <h3>Hint 隐私</h3>
-  <p><code>allow_raw_hints=False</code> 的 Provider（当前仅 AccessibilityTreeProvider）接收脱敏后的 Hint。脱敏流程：</p>
+  <p><code>allow_raw_hints=False</code> 的 Provider（AccessibilityTreeProvider、默认 RemoteOpenAIGroundingProvider）接收脱敏后的 Hint。脱敏流程：</p>
   <ul style="padding-left:20px; font-size:14px; color:var(--text-muted); line-height:1.8;">
     <li>所有 Hint 字段经 <code>sanitize_context_payload()</code> 脱敏（手机号、邮箱、API Key 等）</li>
     <li><code>text</code> 截断至 240 字符，<code>source</code>/<code>action</code> 截断至 64 字符</li>
-    <li><code>allow_raw_hints=True</code> 的 Provider（LocateAnything、Fake）仅在内存中接收原始 Hint</li>
+    <li><code>allow_raw_hints=True</code> 的本地 Provider（LocateAnything、Fake）仅在内存中接收原始 Hint；Remote provider 只有显式 opt-in 才允许 raw hint 出站</li>
     <li>原始 Hint <strong>绝不</strong>进入 Trace、Checkpoint、Prompt Marks Block、Eval JSON 或报告</li>
   </ul>
 </section>
@@ -825,6 +826,8 @@
     <thead><tr><th>名称</th><th>Provider</th><th>说明</th></tr></thead>
     <tbody>
       <tr><td>hybrid</td><td>FallbackMarkProvider([AccessibilityTree, LocateAnything])</td><td>推荐：Tree 优先 + VLM Fallback</td></tr>
+      <tr><td>stepfun / remote_openai</td><td>RemoteOpenAIGroundingProvider</td><td>可选：OpenAI-compatible remote grounding</td></tr>
+      <tr><td>hybrid_remote / accessibility_remote</td><td>FallbackMarkProvider([AccessibilityTree, RemoteOpenAI])</td><td>可选：Tree 优先 + StepFun/API Fallback</td></tr>
       <tr><td>accessibility</td><td>AccessibilityTreeProvider</td><td>仅 Tree，无 VLM Fallback</td></tr>
       <tr><td>locateanything</td><td>LocateAnythingMLXProvider</td><td>仅 VLM，无 Tree</td></tr>
       <tr><td>fake</td><td>FakeGroundingProvider</td><td>测试替身</td></tr>
@@ -832,7 +835,7 @@
     </tbody>
   </table>
 
-  <p>别名：<code>accessibility_tree</code>、<code>uiautomator</code> &rarr; AccessibilityTreeProvider；<code>locateanything_mlx</code>、<code>mlx</code> &rarr; LocateAnythingMLXProvider；<code>accessibility_locateanything</code>、<code>uiautomator_locateanything</code> &rarr; hybrid。</p>
+  <p>别名：<code>accessibility_tree</code>、<code>uiautomator</code> &rarr; AccessibilityTreeProvider；<code>locateanything_mlx</code>、<code>mlx</code> &rarr; LocateAnythingMLXProvider；<code>accessibility_locateanything</code>、<code>uiautomator_locateanything</code> &rarr; hybrid；<code>accessibility_remote</code> &rarr; hybrid_remote。</p>
 
   <h3>环境变量</h3>
   <table>
@@ -843,6 +846,9 @@
       <tr><td>PHONE_AGENT_ACCESSIBILITY_TIMEOUT</td><td>3.0</td><td>UiAutomator Dump 超时（秒）</td></tr>
       <tr><td>PHONE_AGENT_ACCESSIBILITY_MAX_MARKS</td><td>80</td><td>每屏最大 Accessibility Marks 数</td></tr>
       <tr><td>PHONE_AGENT_LOCATEANYTHING_MODEL</td><td>models/LocateAnything-3B-4bit</td><td>模型路径</td></tr>
+      <tr><td>PHONE_AGENT_REMOTE_GROUNDING_BASE_URL</td><td>https://api.stepfun.com/v1</td><td>remote grounding API base URL</td></tr>
+      <tr><td>PHONE_AGENT_REMOTE_GROUNDING_MODEL</td><td>step-3.7-flash</td><td>remote grounding model</td></tr>
+      <tr><td>PHONE_AGENT_REMOTE_GROUNDING_MAX_SIZE</td><td>960</td><td>remote 出站图片最长边</td></tr>
       <tr><td>PHONE_AGENT_LOCATEANYTHING_MAX_SIZE</td><td>960</td><td>输入图最长边（Provider 专属）</td></tr>
       <tr><td>PHONE_AGENT_LOCATEANYTHING_CONTEXT_MAX_CHARS</td><td>0</td><td>Context 字符预算（0=关闭）</td></tr>
       <tr><td>PHONE_AGENT_GROUNDING_MAX_SIZE</td><td>960</td><td>通用 Grounding 最大尺寸 Fallback</td></tr>
@@ -996,7 +1002,7 @@ final_score  = <span class="num">0.55</span> * localization + <span class="num">
     <li><span class="icon red">!</span> <strong>Executable Marks：</strong>不匹配当前 Hint 的 provider marks 只能作为 diagnostic candidates/structures 保留，不得进入最终 executable <code>marks</code>。当前代码仍需修复这一点。</li>
     <li><span class="icon blue">i</span> <strong>去重抑制：</strong>Hybrid Provider 激活时，跳过直接基础 Accessibility Mark 注入。Hybrid 链统一管理 Accessibility Marks，避免重复 ADB Dump 和 Mark ID 冲突。</li>
     <li><span class="icon blue">i</span> <strong>Parser 诊断：</strong>Accessibility provider 的 <code>parse_summary</code> 已记录 XML/bounds 计数；default hybrid wrapper 尚未把 child parse_summary 汇总到顶层 result。</li>
-    <li><span class="icon red">!</span> <strong>诊断字段边界：</strong><code>fallback_chain</code>、<code>hybrid_factory</code>、<code>parse_summary</code> 的 code 字段必须走 enum / safe-identifier allowlist；当前实现仍有 regex-redaction-only 的待修复面。</li>
+    <li><span class="icon red">!</span> <strong>诊断字段边界：</strong><code>fallback_chain</code>、<code>hybrid_factory</code>、<code>parse_summary</code>、<code>remote</code> 的 code/summary 字段必须走 enum / safe-identifier allowlist，不记录 raw XML、raw hint、API key、base64 或 raw response。</li>
     <li><span class="icon blue">i</span> <strong>Mark 绑定：</strong>三层身份检查（语义 + 拓扑 + 感知哈希）防止过期 Mark 被执行。</li>
     <li><span class="icon green">+</span> <strong>Prompt 模板：</strong>LocateAnything 必须使用 <code>apply_chat_template(..., num_images=1)</code>。默认 Instruction 保持极简。Context 注入受 <code>locateanything_context_max_chars</code> 约束。</li>
     <li><span class="icon green">+</span> <strong>多框 Fail-Closed：</strong>单 Hint 产生多个 BBox = <code>grounding_ambiguous</code>。不执行首框。</li>
@@ -1015,6 +1021,7 @@ final_score  = <span class="num">0.55</span> * localization + <span class="num">
     &nbsp;&nbsp;<span class="file">factory.py</span> <span class="desc"># build_mark_provider()、build_mark_providers()、优先级解析</span><br>
     &nbsp;&nbsp;<span class="file">accessibility.py</span> <span class="desc"># AccessibilityTreeProvider、parse_uiautomator_marks()、INTERACTIVE_CLASSES</span><br>
     &nbsp;&nbsp;<span class="file">locateanything.py</span> <span class="desc"># LocateAnythingMLXProvider、pbd_generate、Prompt 模板</span><br>
+    &nbsp;&nbsp;<span class="file">remote_openai.py</span> <span class="desc"># RemoteOpenAIGroundingProvider、OpenAI-compatible StepFun/API grounding</span><br>
     &nbsp;&nbsp;<span class="file">fallback.py</span> <span class="desc"># FallbackMarkProvider、Hint-Aware 可用性门控、Hint 脱敏</span><br>
     &nbsp;&nbsp;<span class="file">fake.py</span> <span class="desc"># FakeGroundingProvider（测试替身）</span><br>
     &nbsp;&nbsp;<span class="file">parser.py</span> <span class="desc"># parse_box_response()、parse_box_candidates()、BBox 验证</span><br>

@@ -203,13 +203,32 @@ export PHONE_AGENT_LOCATEANYTHING_STRUCTURE_MODE=target  # off | target | screen
 export PHONE_AGENT_ACCESSIBILITY_MARKS=true
 ```
 
+### Remote OpenAI-Compatible Grounding（可选）
+
+`MarkProvider` Protocol 仍是单个 provider 的接口；runtime 组合入口是 `build_mark_providers()`。除默认 `hybrid` 外，可显式启用远程 provider：
+
+```bash
+export PHONE_AGENT_GROUNDING_PROVIDER=stepfun          # alias: remote_openai
+export PHONE_AGENT_REMOTE_GROUNDING_BASE_URL=https://api.stepfun.com/v1
+export PHONE_AGENT_REMOTE_GROUNDING_API_KEY=...
+export PHONE_AGENT_REMOTE_GROUNDING_MODEL=step-3.7-flash
+export PHONE_AGENT_REMOTE_GROUNDING_MAX_SIZE=960
+
+# tree-first：先 accessibility tree，失败再调用远程 StepFun
+export PHONE_AGENT_GROUNDING_PROVIDER=hybrid_remote   # alias: accessibility_remote
+```
+
+远程 provider 只生成 `MarkCandidate`，不会直接执行 tap；执行边界仍是 `target_mark_id -> MarkRegistry -> ActionIR`。默认 `PHONE_AGENT_GROUNDING_PROVIDER=hybrid` 不变，仍是 `AccessibilityTreeProvider -> LocateAnythingMLXProvider`。远程请求使用当前截图缩放重编码后的 PNG data URL 和 bounded/redacted hint；`PHONE_AGENT_REMOTE_GROUNDING_ALLOW_RAW_HINTS=true` 才允许 raw hint 出站。trace/checkpoint/report 只记录 model、host、latency、尺寸、hash、长度、candidate/failure code 等 allowlisted summary，不记录 API key、base64 image、raw hint、raw response 或完整 URL query。
+
+OpenAI-compatible provider 首轮已支持 StepFun `step-3.7-flash`；Anthropic Messages 兼容接口是后续扩展目标，不是默认 runtime 依赖。
+
 LocateAnything provider 会先读取当前完整截图，再按最长边 `max_size` 等比例缩小后送入模型；默认 `max_size=960`，这是基于本地 benchmark 在速度和 bbox 一致性之间的折中。运行时可通过 config `locateanything_max_size`（优先）或 `grounding_max_size` 覆盖，也可通过环境变量 `PHONE_AGENT_LOCATEANYTHING_MAX_SIZE`（优先）或 `PHONE_AGENT_GROUNDING_MAX_SIZE` 灰度/回滚；非法或非正整数会回落默认值。
 
 Android accessibility tree 通过 `adb exec-out uiautomator dump /dev/tty` 获取当前 UI XML；`dump_uiautomator_xml()` 只从 stdout 提取闭合 `<hierarchy>`，不会接受 stderr 中的 XML 片段。parser 解析可交互节点的 `bounds/text/content-desc/resource-id/class/clickable/focusable/focused/checkable/checked/scrollable/enabled/visible-to-user` 等 dump-supported 字段，并统一转换为 0-1000 MarkRegistry marks；signed/negative bounds 与带空白的 bounds 会归一化到 0-1000 或被拒绝。XML 控制字符只做清洗，未转义 `&`、截断 hierarchy、缺失闭合标签或结构错乱会以 `accessibility_xml_parse_error` fail-closed，不做语义修复。provider 还会输出 trace-safe `ScreenStructure`，`plan_node` 再从当前 `ScreenStructure + MarkRegistry` 构建 `ObjectRegistry`，把 Screen Objects block 放在 Screen Marks block 之前。Screen Objects prompt 只展示 object type/role/list/ordinal、primary mark 和 hash/lineage evidence，不展示 raw title/text；默认上限为 lists 5、objects 30、总 block 4000 chars。object_id/list_id/ordinal 只在当前 observation 内有效，reobserve 后必须重新选择或重新验证。
 
 `PHONE_AGENT_GROUNDING_PROVIDER=hybrid` 是推荐路径：默认由 `build_mark_providers()` 构建 `AccessibilityTreeProvider -> LocateAnythingMLXProvider` 的 `FallbackMarkProvider`。如果 tree marks 与 provider hint 没有弱匹配、tree 为空、不可用或没有候选 marks，fallback 会继续调用 LocateAnything；缺少 dump callback 或显式 `skip_accessibility_provider=true` 时仍可降级到 LocateAnything，但 `metadata.hybrid_factory` 与 synthetic `fallback_chain` skip row 会记录 `accessibility_dump_callback_missing` / `skip_accessibility_provider`。`PHONE_AGENT_ACCESSIBILITY_MARKS=true` 会把 accessibility marks 作为设备 base marks 注入；如果它与 `hybrid` 同时开启，direct/base accessibility mark 注入会被跳过，accessibility marks 由 hybrid provider 链统一生成和 gating，避免绕过 hint-aware fallback。
 
-当前诊断字段会进入脱敏 observation/trace summary，便于回答“tree-first 为什么没有跑”或“为什么没有点击到候选”。`AccessibilityTreeProvider` 自身的 `metadata.parse_summary` 只包含 `xml_status`、XML node/mark/structure 计数、bounds 解析失败计数、零面积过滤计数和可交互候选计数；默认 hybrid wrapper 当前主要透出 `metadata.fallback_chain[]` 与 `metadata.hybrid_factory`，还没有把 child provider 的 `parse_summary` 汇总到顶层 hybrid result，这是下一步需要补齐的诊断闭环。`fallback_chain[]` 只应包含 provider、success、failure_code、mark/candidate/structure count、usable、skip_reason、latency；`hybrid_factory` 只记录 hybrid 是否启用、accessibility child 是否构建、skip reason 与 provider_order。审查发现当前 sanitizer 仍依赖 regex-redaction + 截断，尚未对 provider/failure_code/xml_status/provider_order 等 code 字段实施严格枚举或 safe-identifier allowlist；在接入 custom provider 前需要继续收紧。
+当前诊断字段会进入脱敏 observation/trace summary，便于回答“tree-first 为什么没有跑”或“为什么没有点击到候选”。`AccessibilityTreeProvider` 自身的 `metadata.parse_summary` 只包含 `xml_status`、XML node/mark/structure 计数、bounds 解析失败计数、零面积过滤计数和可交互候选计数；默认 hybrid wrapper 当前主要透出 `metadata.fallback_chain[]` 与 `metadata.hybrid_factory`，还没有把 child provider 的 `parse_summary` 汇总到顶层 hybrid result，这是下一步需要补齐的诊断闭环。`fallback_chain[]` 只包含 provider、success、failure_code、mark/candidate/structure count、usable、skip_reason、latency；`hybrid_factory` 只记录 hybrid 是否启用、accessibility child 是否构建、skip reason 与 provider_order。provider/failure_code/xml_status/provider_order 等 code 字段使用 safe-identifier/enum allowlist；remote metadata 只透出 `metadata.remote` 中的 code/count/bool/hash/length/latency/model/host 摘要。
 
 LocateAnything 结构化视觉 mark 默认关闭，可通过 `locateanything_structure_mode` 或 `PHONE_AGENT_LOCATEANYTHING_STRUCTURE_MODE=target|screen` 灰度开启。`target` 只在 LocateAnything 被调用时把当前 hint 的 bbox 生成 `structure_kind=visual` sidecar；`screen` 使用 bounded category prompts 生成屏幕级视觉候选，并受 `locateanything_max_visual_candidates`、`locateanything_visual_category_budget`、`locateanything_max_structure_calls` 限制。视觉 sidecar 不伪装成 Android accessibility tree：它只保存 bbox、role/type guess、visual order、confidence tier、source/provider 和 bounded `sensitivity_tags`，不会生成 clickable/focusable/resource id 等平台真值。Observation 会按 accessibility first、visual second 构建 composite `screen_structures`，trace/checkpoint 只保留 kind/source/tier/count/digest summary。Screen Objects prompt 会标出 `source=visual tier=weak eligible=true|false`；resolver 对 visual object 的 `executable_selector` 做硬校验，低置信、多候选、重叠或未授权 selector 均 fail-closed，不回退为 raw bbox tap。
 
@@ -217,7 +236,7 @@ LocateAnything prompt 必须保持官方/库侧 chat template：代码通过 `ml
 
 安全边界：屏幕目标点击类动作的唯一可执行边界仍是 atomic `target_mark_id`。object selector 只允许作为编译前 IntentIR metadata；adapter 只做字段白名单、类型归一化和 strict `object_filter` 校验，不读取 ObjectRegistry、不解析 ordinal、不生成 compiled mark。`object_filter` 只允许 flat JSON object，key 限于 `object_type`、`role`、`source`、`list_id`、`title_hash_prefix`、`text_hash_prefix`、`resource_id_hash_prefix`、`lineage_hash_prefix`，值必须是 1-64 字符 string，hash prefix 为 6-16 位 hex；禁止 raw title/text、regex、array、nested object、provider/backend/device 字段。resolver 的 object failure codes 为 `object_registry_missing`、`object_stale`、`unknown_object`、`ordinal_out_of_range`、`object_ambiguous`、`object_without_mark`、`mark_stale`、`mark_low_confidence`、`visual_object_ambiguous`、`visual_object_not_executable`、`visual_structure_missing`，均 fail-closed/reobserve/replan/takeover，不回退为主 VLM 直接坐标 Tap。敏感 object evidence 不是 grounding failure：payment/privacy/delete/permission 会返回带 confirmation message 的 canonical Tap，login/password/OTP 会返回 canonical `Take_over`，继续由 Safety Gate 路由到 HITL。
 
-`target_text_hint` / 目标描述只能作为受控、bounded 的本地 MarkProvider hint，不能直接生成 ActionIR；本地 LocateAnything/Fake 可在内存中使用 raw hint 做 query-conditioned grounding，但 raw hint 不写入 trace、checkpoint、prompt marks block、eval JSON 或报告。LocateAnything/Fake/OCR/UIAutomator/SoM 只能生成 marks；未知 mark、缺失 registry、provider 缺失、stale/hash mismatch、低置信、bad bbox、多候选歧义等会 fail-closed 为 `error_layer=grounding`，不会回退为主 VLM 直接坐标 Tap。trace/eval 只记录 provider、mark id、bbox/center、screen/hash、latency、failure code、candidate_count、provider 诊断 summary（当前包括 accessibility provider 的 `parse_summary`、hybrid wrapper 的 `fallback_chain` / `hybrid_factory`）、`screen_structure_summary`、`object_registry_summary`、compiled mark 与脱敏 hint/object summary，不记录原始截图、raw XML、raw hint、raw target text 或 raw private title。若未来接入远程 grounding provider，raw hint 必须显式 opt-in，否则默认使用脱敏 hint。
+`target_text_hint` / 目标描述只能作为受控、bounded 的本地 MarkProvider hint，不能直接生成 ActionIR；本地 LocateAnything/Fake 可在内存中使用 raw hint 做 query-conditioned grounding，但 raw hint 不写入 trace、checkpoint、prompt marks block、eval JSON 或报告。LocateAnything/Fake/OCR/UIAutomator/SoM 只能生成 marks；未知 mark、缺失 registry、provider 缺失、stale/hash mismatch、低置信、bad bbox、多候选歧义等会 fail-closed 为 `error_layer=grounding`，不会回退为主 VLM 直接坐标 Tap。trace/eval 只记录 provider、mark id、bbox/center、screen/hash、latency、failure code、candidate_count、provider 诊断 summary（当前包括 accessibility provider 的 `parse_summary`、hybrid wrapper 的 `fallback_chain` / `hybrid_factory`）、`screen_structure_summary`、`object_registry_summary`、compiled mark 与脱敏 hint/object summary，不记录原始截图、raw XML、raw hint、raw target text 或 raw private title。远程 grounding provider 的 raw hint 必须显式 opt-in，否则默认使用脱敏 hint；API key、base64 screenshot、raw response 不进入 trace/checkpoint/report。
 
 ### Grounding Benchmark
 
@@ -231,6 +250,7 @@ LocateAnything prompt 必须保持官方/库侧 chat template：代码通过 `ml
 | `bench/grounding/scoring.py` | CI 可运行的纯 Python scoring primitives |
 | `bench/grounding/reporting.py` | prediction enrichment、summary、按 target type / area bucket 分组 |
 | `bench/grounding/run_locateanything.py` | LocateAnything 正式 benchmark runner |
+| `bench/grounding/run_remote_provider.py` | OpenAI-compatible/StepFun remote grounding benchmark runner |
 | `bench/grounding/score_predictions.py` | 固定 manifest 后离线复评 predictions |
 
 推荐先固定 manifest，再用同一 manifest 比较不同模型。当前 LocateAnything 主 suite：
@@ -255,6 +275,19 @@ LocateAnything prompt 必须保持官方/库侧 chat template：代码通过 `ml
 ```
 
 MLX/Metal 需要可访问 GPU 的 macOS arm64 环境。若在沙箱、headless 或虚拟化环境中出现 `No Metal device available`，需要在非沙箱 shell 中运行同一命令。`bench_output/` 是本地结果目录，默认不作为源码提交对象。
+
+StepFun / OpenAI-compatible API 横评使用同一 manifest：
+
+```bash
+.venv/bin/python -m bench.grounding.run_remote_provider \
+  --manifest bench_output/grounding/aw_mobile_clean_trusted_1000_manifest.json \
+  --base-url https://api.stepfun.com/v1 \
+  --api-key-env PHONE_AGENT_REMOTE_GROUNDING_API_KEY \
+  --model step-3.7-flash \
+  --max-size 960 \
+  --output bench_output/grounding/stepfun_aw_mobile_clean_trusted_1000_predictions.jsonl \
+  --summary-output bench_output/grounding/stepfun_aw_mobile_clean_trusted_1000_summary.json
+```
 
 离线复评：
 
@@ -350,7 +383,7 @@ python main.py --device-id 192.168.1.100:5555 --base-url http://localhost:8000/v
 | `PHONE_AGENT_MAX_STEPS` | 最大步数 | `100` |
 | `PHONE_AGENT_DEVICE_ID` | 设备 ID | 自动检测 |
 | `PHONE_AGENT_LANG` | 语言 | `cn` |
-| `PHONE_AGENT_GROUNDING_PROVIDER` | grounding provider：`hybrid` / `locateanything` / `accessibility` / `fake` / `off`（别名：`accessibility_tree`/`uiautomator`→accessibility，`locateanything_mlx`/`mlx`→locateanything，`accessibility_locateanything`/`uiautomator_locateanything`→hybrid） | `hybrid` |
+| `PHONE_AGENT_GROUNDING_PROVIDER` | grounding provider：`hybrid` / `locateanything` / `accessibility` / `remote_openai` / `stepfun` / `hybrid_remote` / `fake` / `off`（别名：`accessibility_tree`/`uiautomator`→accessibility，`locateanything_mlx`/`mlx`→locateanything，`accessibility_locateanything`/`uiautomator_locateanything`→hybrid，`accessibility_remote`→hybrid_remote） | `hybrid` |
 | `PHONE_AGENT_ACCESSIBILITY_MARKS` | 是否把 Android UiAutomator tree 作为设备 base marks 注入 MarkRegistry | `false` |
 | `PHONE_AGENT_ACCESSIBILITY_TIMEOUT` | `uiautomator dump` 超时时间（秒） | `3.0` |
 | `PHONE_AGENT_ACCESSIBILITY_MAX_MARKS` | 每屏最多保留的 accessibility marks 数量 | `80` |
@@ -361,7 +394,12 @@ python main.py --device-id 192.168.1.100:5555 --base-url http://localhost:8000/v
 | `PHONE_AGENT_LOCATEANYTHING_MAX_VISUAL_CANDIDATES` | 视觉结构 sidecar 最大候选数 | `30` |
 | `PHONE_AGENT_LOCATEANYTHING_VISUAL_CATEGORY_BUDGET` | `screen` 模式 bounded category prompt 数量 | `5` |
 | `PHONE_AGENT_LOCATEANYTHING_MAX_STRUCTURE_CALLS` | `screen` 模式最多 LocateAnything 结构化调用数 | `5` |
-| `PHONE_AGENT_GROUNDING_MAX_SIZE` | 通用 grounding 输入图最长边 fallback；当前仅 LocateAnything factory 消费 | `960` |
+| `PHONE_AGENT_GROUNDING_MAX_SIZE` | 通用 grounding 输入图最长边 fallback；LocateAnything/remote factory 均可消费，provider 专属配置优先 | `960` |
+| `PHONE_AGENT_REMOTE_GROUNDING_BASE_URL` | OpenAI-compatible remote grounding API base URL | `https://api.stepfun.com/v1` |
+| `PHONE_AGENT_REMOTE_GROUNDING_API_KEY` | remote grounding API key；只从 env/config 注入，不写入 trace/report | 无 |
+| `PHONE_AGENT_REMOTE_GROUNDING_MODEL` | remote grounding model | `step-3.7-flash` |
+| `PHONE_AGENT_REMOTE_GROUNDING_MAX_SIZE` | remote grounding 出站图片最长边 | `960` |
+| `PHONE_AGENT_REMOTE_GROUNDING_ALLOW_RAW_HINTS` | 是否允许 raw hint 出站；默认只发 redacted/bounded hint | `false` |
 
 ## 开发
 
@@ -392,20 +430,17 @@ python main.py --device-id 192.168.1.100:5555 --base-url http://localhost:8000/v
 
 ### TraeCLI 项目配置
 
-本仓库包含项目级 TraeCLI 配置，用于约束开发流程和持续执行编排：
+本仓库包含项目级 TraeCLI 2.0 配置，并使用 oh-my-codex（OMX）作为规划、持续执行和验证编排层：
 
 | 范围 | 路径 |
 |------|------|
 | TraeCLI 2.0 项目配置 | `.trae/traecli.toml` |
-| LangGraph roadmap 与执行约束 | `.trae/rules/graph.mdc` |
-| RALPLAN 共识规划协议 | `.trae/rules/ralplan.mdc` |
-| Autopilot 流水线协议 | `.trae/rules/autopilot.mdc` |
-| Slash commands | `.trae/commands/ralplan.md`, `.trae/commands/autopilot.md` |
-| Skills | `.trae/skills/ralplan/SKILL.md`, `.trae/skills/autopilot/SKILL.md` |
-| Project agents | `.trae/agents/*.md` |
-| Hooks | `.trae/hooks/ralplan.py`, `.trae/hooks/autopilot.py` |
+| LangGraph roadmap 与 Open-AutoGLM 执行约束 | `.trae/rules/graph.mdc` |
+| RALPLAN / Autopilot 边界说明 | `.trae/rules/ralplan.mdc`, `.trae/rules/autopilot.mdc` |
+| OMX skills / agents / prompts | `.codex/skills/`, `.codex/agents/`, `.codex/prompts/` |
+| 保留的项目专属 skills | `.trae/skills/phone-agent-live-diagnosis/`, `.trae/skills/smart-search-cli/`, `.trae/skills/ui-ux-pro-max/` |
 
-Autopilot 已完成 TraeCLI-native 编排：`ralplan -> execution -> ralph -> qa -> complete`。它复用 RALPLAN `planner` / `architect` / `critic`，并新增 `executor`、`debugger`、`test-engineer`、`designer`、`code-reviewer`、`security-reviewer` 六个项目级 stage agents；不迁移 `.omc` runtime，不改变 `phone_agent/` 业务运行时。`.trae/traecli.toml` 按 TraeCLI 2.0 TOML schema 承载项目级 instructions、hook 与 MCP 配置；`.trae/traecli.legacy.yaml` 仅作为旧版/Coco 配置备份参考。业务执行协议以 `json_schema|tool_calls|auto` 为准，不再包含旧 text DSL 回滚。涉及 prompt/context/grounding harness 的执行计划、验收矩阵与阶段状态以 `.trae/rules/graph.mdc` 为准；TraeCLI 规则、README、docs 与 AGENTS 约束必须同步更新。项目命令必须优先使用 `.venv/bin/python`、`.venv/bin/pytest`、`.venv/bin/pip`。
+旧 Trae-native `autopilot` / `ralplan` skills、slash commands 和 Python continuation hooks 已移除。TraeCLI 2.0 通过 `.trae/traecli.toml` 优先发现 `.codex` 资源，默认使用 OMX canonical workflow：`$deep-interview -> $ralplan -> $ultragoal (+ $team if needed) -> $code-review -> $ultraqa`。`.trae/rules/graph.mdc` 只保留 Open-AutoGLM 架构 roadmap、PhoneAgent/LangGraph/Grounding 不变量和项目约束镜像；workflow state 与计划证据归 OMX `.omx/**` runtime 管理且默认不提交。业务执行协议以 `json_schema|tool_calls|auto` 为准，不再包含旧 text DSL 回滚。项目命令必须优先使用 `.venv/bin/python`、`.venv/bin/pytest`、`.venv/bin/pip`。
 
 ```bash
 .venv/bin/pytest tests -q

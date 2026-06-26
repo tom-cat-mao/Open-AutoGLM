@@ -166,9 +166,9 @@ def _result_structures(result: MarkProviderResult) -> list[dict[str, Any]]:
 
 def _fallback_row(result: MarkProviderResult, *, usable: bool) -> dict[str, Any]:
     return {
-        "provider": result.provider,
+        "provider": _safe_identifier(result.provider),
         "success": result.success,
-        "failure_code": result.failure_code,
+        "failure_code": _safe_identifier(result.failure_code, default=""),
         "candidate_count": result.candidate_count,
         "mark_count": len(result.marks or []),
         "structure_count": len(_result_structures(result)),
@@ -200,8 +200,19 @@ def _safe_composition_metadata(value: dict[str, Any]) -> dict[str, Any]:
         "hybrid_mode": True,
         "accessibility_child_enabled": value.get("accessibility_child_enabled") is True,
         "accessibility_child_skip_reason": skip_reason,
-        "provider_order": [str(item)[:64] for item in provider_order[:8]],
+        "provider_order": [_safe_identifier(item) for item in provider_order[:8]],
     }
+
+
+def _safe_identifier(value: Any, *, default: str = "unknown") -> str:
+    text = str(value or "").strip().lower().replace("-", "_")
+    if not text or len(text) > 64:
+        return default
+    if not all(char.isascii() and (char.isalnum() or char == "_") for char in text):
+        return default
+    if any(char.isdigit() for char in text):
+        return default
+    return text
 
 
 def _synthetic_skip_rows(composition_metadata: dict[str, Any]) -> list[dict[str, Any]]:
