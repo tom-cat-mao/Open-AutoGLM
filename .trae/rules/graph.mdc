@@ -29,6 +29,7 @@ notes: "Autopilot execution and final QA completed for optional remote OpenAI-co
 - `build_mark_provider()` 单数 factory 仍存在，但只适合 legacy/single-provider fallback；它不处理 `hybrid`，不应作为新能力主接入口。
 - Accessibility Tree hybrid、ScreenStructure/ObjectRegistry、object selector grounding、LocateAnything structured visual sidecar、hybrid_factory/fallback_chain 诊断已完成或部分完成。
 - Grounding benchmark 已在 `bench/grounding/` 建立：manifest 使用 0-1000 bbox；scoring/reporting 可离线复评 predictions；正式 runner 包括本地 `run_locateanything.py` 与 remote/OpenAI-compatible `run_remote_provider.py`。
+- Remote OpenAI Grounding Provider + `hybrid_remote` 已就位：`RemoteOpenAIGroundingProvider` 实现 `MarkProvider` Protocol，`build_mark_providers()` 支持 `remote_openai` / `stepfun` / `hybrid_remote` / `accessibility_remote`；`run_remote_provider.py` benchmark runner 可横评 local LA vs StepFun；隐私 sanitizer、allowlist metadata、fail-closed parser 均已实现。
 - 仍需保留既有 hardening 未闭环项：hint-mismatched provider marks 不得进入 executable `marks`、diagnostic code 字段需 strict sanitizer、hybrid child `parse_summary` 汇总、accessibility failure taxonomy 同步。
 
 ## RALPLAN-DR 摘要
@@ -106,7 +107,7 @@ Fixed manifest (0-1000 GT)
 - **Consequences**: 会新增配置面、远程网络错误 taxonomy、API secret redaction、provider prompt contract 与 focused tests；默认 provider 仍保持 `hybrid`。
 - **Follow-ups**: Anthropic Messages provider、provider comparison dashboard、真实设备 trace replay benchmark、remote raw hint opt-in policy review。
 
-## 当前规划 Phase: Optional Remote API Grounding Provider + Benchmark Support
+## 已完成 Phase: Optional Remote API Grounding Provider + Benchmark Support
 
 ### Step 1 - Clarify Provider Contract And Factory Entry Boundaries
 

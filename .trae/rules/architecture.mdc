@@ -33,6 +33,6 @@ globs: "phone_agent/agent.py,phone_agent/graph/**/*.py,phone_agent/model/client.
 ## 修改前检查
 
 - 如果新增或改变 State 字段、Node 职责、Edge 路由、Tool 行为或 HITL 流程，先读取 `.trae/rules/graph.mdc`。
-- 如果新增或改变模型输出格式、Action Adapter、canonical action schema、parse metadata，先读取 `.trae/rules/model.mdc` 与 `.trae/rules/actions.mdc`。
+- 如果新增或改变模型输出格式、Action Adapter、canonical action schema、parse metadata，先读取 `.trae/rules/actions.mdc`。
 - 如果需要先设计 roadmap 或引入 Planner/Architect/Critic 审查，先读取 `.trae/rules/ralplan.mdc`。
 - 修改后保持旧入口兼容：`PhoneAgent.run()` 仍应可调用。
