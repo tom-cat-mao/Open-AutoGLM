@@ -222,7 +222,7 @@ def test_autopilot_docs_and_hook_use_consistent_agents() -> None:
         for path in docs:
             assert name in path.read_text(encoding="utf-8"), f"{name} missing from {path}"
 
-    boundary_keywords = [".omc", ".trae/traecli.yaml", "handoff", "subagent tracking", "不主动 commit"]
+    boundary_keywords = [".omc", ".trae/traecli.toml", "handoff", "subagent tracking", "不主动 commit"]
     for path in docs:
         text = path.read_text(encoding="utf-8")
         for keyword in boundary_keywords:
@@ -231,7 +231,7 @@ def test_autopilot_docs_and_hook_use_consistent_agents() -> None:
 
 def test_traecli_escalation_protocol_is_documented() -> None:
     paths = [
-        ROOT / ".trae" / "traecli.yaml",
+        ROOT / ".trae" / "traecli.toml",
         ROOT / ".trae" / "skills" / "phone-agent-live-diagnosis" / "SKILL.md",
         ROOT / ".trae" / "rules" / "tools.mdc",
     ]

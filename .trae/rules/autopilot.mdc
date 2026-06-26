@@ -1,123 +1,39 @@
 ---
-description: Autopilot pipeline：与 RALPLAN 联动的持续执行状态机协议
+description: Autopilot 使用 OMX canonical workflow；旧 Trae-native 状态机已移除
 alwaysApply: false
-globs: ".trae/commands/autopilot.md,.trae/hooks/autopilot.py,.trae/rules/autopilot.mdc,.trae/rules/ralplan.mdc,.trae/rules/graph.mdc,.trae/traecli.toml"
+globs: ".codex/skills/autopilot/SKILL.md,.codex/skills/deep-interview/SKILL.md,.codex/skills/ralplan/SKILL.md,.codex/skills/ultragoal/SKILL.md,.codex/skills/code-review/SKILL.md,.codex/skills/ultraqa/SKILL.md,.trae/traecli.toml,.trae/rules/graph.mdc"
 ---
 
-# Autopilot Pipeline
+# Autopilot Boundary
 
-Autopilot 是 TraeCLI-native 的持续执行工作流，不迁移 `.omc`，不引入 TypeScript pipeline runtime。
+Open-AutoGLM 不再维护 Trae-native Autopilot 状态机。
 
-## 1. 状态与产物边界
+## Canonical workflow
 
-| 类型 | 路径 | 读写方 | 说明 |
-|---|---|---|---|
-| RALPLAN 协议 | `.trae/rules/ralplan.mdc` | Agent | Plan → Architect → Critic 共识规划 |
-| RALPLAN 产物 | `.trae/rules/graph.mdc` | Planner/Agent | roadmap、approval、执行约束唯一真相源 |
-| Autopilot 协议 | `.trae/rules/autopilot.mdc` | Agent | stage、信号、续跑规则 |
-| Autopilot 状态 | `.trae/autopilot/state.json` | hook | runtime state，不进入默认上下文，不提交 |
-| subagent tracking | `.trae/autopilot/subagent-tracking.json` | hook | 感知 subagent 活跃，避免 stop hook 误续跑 |
-| mode registry | `.trae/modes/state.json` | hook | 与 RALPLAN/team/RALPH 等互斥模式共享的运行时锁 |
-| transition log | `.trae/autopilot/transitions.jsonl` | hook | 轻量记录 stage on_enter/on_exit，便于诊断 |
-| Transcript | TraeCLI cache | hook | 只扫描 assistant 输出的完成信号 |
-
-## 2. Stage 顺序
+Autopilot 必须使用 oh-my-codex 最新 workflow：
 
 ```text
-ralplan -> execution -> ralph -> qa -> complete
+$deep-interview -> $ralplan -> $ultragoal (+ $team if needed) -> $code-review -> $ultraqa
 ```
 
-| Stage | 完成信号 | 目标 |
-|---|---|---|
-| `ralplan` | `PIPELINE_RALPLAN_COMPLETE` | 运行 RALPLAN，直到 `graph.mdc` Final Check 通过 |
-| `execution` | `PIPELINE_EXECUTION_COMPLETE` | 按 approved roadmap 实现变更 |
-| `ralph` | `PIPELINE_RALPH_COMPLETE` | 运行 RALPH/verification 检查并修复失败 |
-| `qa` | `PIPELINE_QA_COMPLETE` | 最终自检、清理临时产物、同步状态 |
-| `complete` | `PIPELINE_COMPLETE` | Autopilot 完成，hook 停止续跑 |
+详细协议以 `.codex/skills/autopilot/SKILL.md` 为准。
 
-## 3. PipelineConfig
+## Removed legacy surfaces
 
-Autopilot 使用轻量 Pipeline Adapter 模式；不引入 TypeScript runtime，但每个 stage 有统一的 `id / name / completion_signal / should_skip / prompt` 语义。
+以下旧入口已删除，不得恢复：
 
-默认配置：
+- `.trae/skills/autopilot/`
+- `.trae/commands/autopilot.md`
+- `.trae/hooks/autopilot.py`
+- `.trae/autopilot/state.json` / `.trae/autopilot/transitions.jsonl` 作为 workflow runtime
 
-```yaml
-planning: ralplan        # ralplan | direct | false
-execution: solo          # solo | team
-verification:
-  engine: ralph
-  max_iterations: 100
-qa: true
-max_stage_iterations: 10
-```
+## State and artifact boundary
 
-支持参数：
+- Workflow state 使用 OMX：`.omx/state/**` 与 `omx state ... --json`。
+- Planning/context artifacts 使用 OMX：`.omx/context/**`、`.omx/plans/**`、`.omx/specs/**`。
+- Durable execution 使用 OMX Ultragoal：`.omx/ultragoal/**` 与 Codex/TraeCLI goal surface。
+- `.trae/rules/graph.mdc` 只保留 Open-AutoGLM 架构 roadmap、PhoneAgent/LangGraph/Grounding 不变量和项目约束镜像；不再作为 Autopilot runtime state。
 
-| 参数 | 行为 |
-|---|---|
-| `--planning=ralplan|direct|false` | 选择规划方式；`direct/false` 从 execution 开始 |
-| `--execution=solo|team` | solo 主 Agent 实现；team 强化 subagent 拆分与并行 |
-| `--verification=false` / `--no-verification` | 跳过 RALPH/verification stage |
-| `--qa=false` / `--no-qa` | 跳过 QA stage |
-| `--max-stage-iterations=N` | 单 stage stop-hook 最大续跑次数 |
-| `--use-current-plan` | graph 已 approved 时复用当前计划，从 execution 开始 |
+## Project constraints
 
-## 4. RALPLAN 联动
-
-- 默认先运行 `ralplan`，避免复用旧 `graph.mdc` 执行新需求。
-- 启动前检查 `.trae/modes/state.json`；若 RALPLAN/team/RALPH 等互斥模式正由其他 session 持有，则拒绝启动或恢复。
-- 若 RALPLAN 处于 `pending_approval` 且用户调用 `/autopilot --use-current-plan`，Autopilot 会把 RALPLAN state 标记为 `handoff` 后接管 mode registry。
-- 只有用户明确传入 `--use-current-plan` 或无任务正文时，才可在 `graph.mdc` 已满足以下条件时跳过 `ralplan`：
-  - `design_status: critic_approved`
-  - `last_critic_verdict: APPROVE`
-  - `approved_for_execution: true`
-- `--direct` 等价于 `--planning=direct`，可跳过 RALPLAN，但仍必须先生成清晰执行计划；架构级变更不建议使用。
-- 自然语言触发仅接受明确提到 autopilot/自动持续执行/端到端流水线的任务；过短且无锚点的请求不会自动启动。
-
-## 5. Completion Signal 规则
-
-- Agent 完成当前 stage 后，必须单独输出一行：`AUTOPILOT_SIGNAL: <SIGNAL>`。
-- hook 只从 assistant transcript 中识别该格式，避免把 prompt 中的信号说明误判为完成。
-- 未输出信号时，stop hook 会以 `decision:block` 注入当前 stage continuation prompt。
-- continuation prompt 顶部包含 HUD，例如：`Pipeline 2/4: [OK] RALPLAN | [>>] Execution (iter 3) | [..] RALPH | [..] QA`。
-- stage 进入、退出和 pipeline 完成会追加写入 `.trae/autopilot/transitions.jsonl`，不影响主状态机。
-
-## 6. Subagent 编排
-
-| Stage | 推荐 subagent 用法 |
-|---|---|
-| `ralplan` | 复用并串行调用 `planner` → `architect` → `critic`；ITERATE 回 `planner` |
-| `execution/solo` | 主 Agent 实现，按需调用 `designer` / `executor` / `debugger` / `test-engineer` 辅助 |
-| `execution/team` | TodoWrite 拆分后并行调用 `designer` / `executor` / `debugger` / `test-engineer`，主 Agent 负责最终编辑、合并与一致性 |
-| `ralph` | 并行只读审查：`code-reviewer`、`security-reviewer`、`architect`、`critic`；必要时调用 `debugger` / `test-engineer`；主 Agent 修复高置信问题 |
-| `qa` | `test-engineer` 辅助验证，`code-reviewer` / `security-reviewer` 最终抽查；主 Agent 汇总 diff/测试/临时产物/状态边界；prompt/context harness 任务必须验证 `context_mode=off|observe|inject`、`prompt_version=context_harness_v1`、request-only compaction、trace/eval 隐私指标和 Safety/HITL 不变式，且不得恢复旧 text DSL prompt 回滚路径 |
-
-项目级 Autopilot stage agents 定义在 `.trae/agents/`：
-
-- `executor`：按 approved roadmap 执行聚焦实现。
-- `debugger`：定位测试失败、hook 行为异常和最小修复路径。
-- `test-engineer`：设计、补充和运行 TraeCLI Autopilot 编排测试。
-- `designer`：复杂实现前做局部设计与边界确认。
-- `code-reviewer`：只读审查 diff 范围、逻辑一致性和可维护性。
-- `security-reviewer`：只读审查权限、安全、命令注入和越权风险。
-
-RALPLAN 三件套 `planner` / `architect` / `critic` 继续复用既有 `.trae/agents/` 定义，不复制第二套规划协议。
-
-Autopilot 监听 `subagent_start` / `subagent_stop`，subagent 活跃窗口内不注入新的 continuation prompt。
-
-## 7. 执行约束
-
-- Critic 未 `APPROVE` 前不得修改业务代码，除非用户显式 `--direct`。
-- 不把 Autopilot runtime state 写进 `.trae/rules/*.mdc`。
-- 不修改 `.trae/traecli.toml`；项目级 agents 通过 `.trae/agents/*.md` 自动发现，若不可用需回到 RALPLAN 重新批准。
-- 不主动 commit；完成后只汇总变更和验证结果。
-- 测试临时产物可清理，已有用户/项目改动不得过度清理。
-
-## 8. 管理命令
-
-| 命令 | 行为 |
-|---|---|
-| `/autopilot status` | 查看当前 `.trae/autopilot/state.json` 摘要 |
-| `/autopilot cancel` | 标记当前 pipeline cancelled，stop hook 不再续跑 |
-| `/autopilot resume` | 24 小时内将已有 state 绑定当前 session 并继续当前 active stage |
-| `/autopilot reset` | 取消旧 pipeline，下一次启动重新初始化 |
+Autopilot 执行 Open-AutoGLM 任务时仍必须遵守 AGENTS.md 与 `.trae/rules/graph.mdc` 中的 PhoneAgent、LangGraph、ActionIR、HITL、Grounding、privacy、benchmark 约束。

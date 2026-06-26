@@ -1,6 +1,6 @@
 instructions = '''
 默认使用中文。你是 Open-AutoGLM 项目的资深 pair-programmer，先读本仓库事实，再按需加载规则；不要把配置提示词当作架构文档。TraeCLI 2.0 会加载项目 AGENTS.md、.trae/rules/、.trae/skills/、.trae/agents/ 等资源；本文件只保留项目级行为入口和少量强约束，详细协议以对应文件为准。
-项目规则按需加载：涉及 LangGraph State/Node/Edge/Tool/HITL 或核心 Agent loop 变更时读取 .trae/rules/graph.mdc 与 .trae/rules/architecture.mdc；涉及 roadmap、实现计划、架构审查或 Planner-Architect-Critic 流程时读取 .trae/rules/ralplan.mdc；涉及 Autopilot 持续执行时读取 .trae/rules/autopilot.mdc。普通任务不要主动加载重型设计流程。
+项目规则按需加载：涉及 LangGraph State/Node/Edge/Tool/HITL 或核心 Agent loop 变更时读取 .trae/rules/graph.mdc 与 .trae/rules/architecture.mdc；涉及 roadmap、实现计划、架构审查或 Planner-Architect-Critic 流程时使用 .codex/skills/ralplan/SKILL.md 与 OMX canonical workflow；涉及 Autopilot 持续执行时使用 .codex/skills/autopilot/SKILL.md。普通任务不要主动加载重型设计流程。
 
 # Output Style Constraints (Claude-Mode)
 - Brevity is very important as a default. You MUST be extremely concise (i.e. no more than 5-10 lines for summaries).
@@ -25,7 +25,7 @@ web_search = "disabled"
 approval_policy = "on-request"
 sandbox_mode = "workspace-write"
 approvals_reviewer = "auto_review"
-resource_dirs = [".trae", ".agents", ".codex"]
+resource_dirs = [".codex", ".trae", ".agents"]
 
 [sandbox_workspace_write]
 network_access = true
@@ -33,8 +33,10 @@ writable_roots = []
 
 # ── oh-my-codex features ──
 
+[features.multi_agent_v2]
+enabled = true
+
 [features]
-multi_agent = true
 child_agents_md = true
 hooks = true
 goals = true
@@ -132,7 +134,96 @@ config_file = "./agents/vision.toml"
 description = "Documentation, migration notes, user guidance"
 config_file = "./agents/writer.toml"
 
-# ── project skills (non-conflicting) ──
+# ── oh-my-codex skills ──
+
+[skills.".codex/skills/ai-slop-cleaner/SKILL.md"]
+enabled = true
+
+[skills.".codex/skills/analyze/SKILL.md"]
+enabled = true
+
+[skills.".codex/skills/ask/SKILL.md"]
+enabled = true
+
+[skills.".codex/skills/autopilot/SKILL.md"]
+enabled = true
+
+[skills.".codex/skills/autoresearch/SKILL.md"]
+enabled = true
+
+[skills.".codex/skills/autoresearch-goal/SKILL.md"]
+enabled = true
+
+[skills.".codex/skills/best-practice-research/SKILL.md"]
+enabled = true
+
+[skills.".codex/skills/cancel/SKILL.md"]
+enabled = true
+
+[skills.".codex/skills/code-review/SKILL.md"]
+enabled = true
+
+[skills.".codex/skills/configure-notifications/SKILL.md"]
+enabled = true
+
+[skills.".codex/skills/deep-interview/SKILL.md"]
+enabled = true
+
+[skills.".codex/skills/design/SKILL.md"]
+enabled = true
+
+[skills.".codex/skills/doctor/SKILL.md"]
+enabled = true
+
+[skills.".codex/skills/hud/SKILL.md"]
+enabled = true
+
+[skills.".codex/skills/omx-setup/SKILL.md"]
+enabled = true
+
+[skills.".codex/skills/performance-goal/SKILL.md"]
+enabled = true
+
+[skills.".codex/skills/pipeline/SKILL.md"]
+enabled = true
+
+[skills.".codex/skills/plan/SKILL.md"]
+enabled = true
+
+[skills.".codex/skills/prometheus-strict/SKILL.md"]
+enabled = true
+
+[skills.".codex/skills/ralph/SKILL.md"]
+enabled = true
+
+[skills.".codex/skills/ralplan/SKILL.md"]
+enabled = true
+
+[skills.".codex/skills/skill/SKILL.md"]
+enabled = true
+
+[skills.".codex/skills/team/SKILL.md"]
+enabled = true
+
+[skills.".codex/skills/ultragoal/SKILL.md"]
+enabled = true
+
+[skills.".codex/skills/ultraqa/SKILL.md"]
+enabled = true
+
+[skills.".codex/skills/ultrawork/SKILL.md"]
+enabled = true
+
+[skills.".codex/skills/visual-ralph/SKILL.md"]
+enabled = true
+
+[skills.".codex/skills/wiki/SKILL.md"]
+enabled = true
+
+[skills.".codex/skills/worker/SKILL.md"]
+enabled = true
+
+# ── project skills (kept unchanged) ──
 
 [skills.".trae/skills/smart-search-cli/SKILL.md"]
 enabled = true
@@ -165,37 +256,37 @@ tool_timeout_sec = 30.0
 
 [[SessionStart.hooks]]
 type = "command"
-command = "\"/opt/homebrew/Cellar/node/26.3.1/bin/node\" \"/Users/bytedance/.bun/install/global/node_modules/oh-my-codex/dist/scripts/codex-native-hook.js\""
+command = "\"/opt/homebrew/bin/node\" \"/Users/bytedance/.bun/install/global/node_modules/oh-my-codex/dist/scripts/codex-native-hook.js\""
 timeout = 30
 
 [[PreToolUse.hooks]]
 type = "command"
-command = "\"/opt/homebrew/Cellar/node/26.3.1/bin/node\" \"/Users/bytedance/.bun/install/global/node_modules/oh-my-codex/dist/scripts/codex-native-hook.js\""
+command = "\"/opt/homebrew/bin/node\" \"/Users/bytedance/.bun/install/global/node_modules/oh-my-codex/dist/scripts/codex-native-hook.js\""
 timeout = 30
 
 [[PostToolUse.hooks]]
 type = "command"
-command = "\"/opt/homebrew/Cellar/node/26.3.1/bin/node\" \"/Users/bytedance/.bun/install/global/node_modules/oh-my-codex/dist/scripts/codex-native-hook.js\""
+command = "\"/opt/homebrew/bin/node\" \"/Users/bytedance/.bun/install/global/node_modules/oh-my-codex/dist/scripts/codex-native-hook.js\""
 timeout = 30
 
 [[UserPromptSubmit.hooks]]
 type = "command"
-command = "\"/opt/homebrew/Cellar/node/26.3.1/bin/node\" \"/Users/bytedance/.bun/install/global/node_modules/oh-my-codex/dist/scripts/codex-native-hook.js\""
+command = "\"/opt/homebrew/bin/node\" \"/Users/bytedance/.bun/install/global/node_modules/oh-my-codex/dist/scripts/codex-native-hook.js\""
 timeout = 30
 
 [[PreCompact.hooks]]
 type = "command"
-command = "\"/opt/homebrew/Cellar/node/26.3.1/bin/node\" \"/Users/bytedance/.bun/install/global/node_modules/oh-my-codex/dist/scripts/codex-native-hook.js\""
+command = "\"/opt/homebrew/bin/node\" \"/Users/bytedance/.bun/install/global/node_modules/oh-my-codex/dist/scripts/codex-native-hook.js\""
 timeout = 30
 
 [[PostCompact.hooks]]
 type = "command"
-command = "\"/opt/homebrew/Cellar/node/26.3.1/bin/node\" \"/Users/bytedance/.bun/install/global/node_modules/oh-my-codex/dist/scripts/codex-native-hook.js\""
+command = "\"/opt/homebrew/bin/node\" \"/Users/bytedance/.bun/install/global/node_modules/oh-my-codex/dist/scripts/codex-native-hook.js\""
 timeout = 30
 
 [[Stop.hooks]]
 type = "command"
-command = "\"/opt/homebrew/Cellar/node/26.3.1/bin/node\" \"/Users/bytedance/.bun/install/global/node_modules/oh-my-codex/dist/scripts/codex-native-hook.js\""
+command = "\"/opt/homebrew/bin/node\" \"/Users/bytedance/.bun/install/global/node_modules/oh-my-codex/dist/scripts/codex-native-hook.js\""
 timeout = 30
 
 # ── project-specific hooks ──
@@ -237,7 +328,7 @@ case "$file" in
 esac
 case "$rel" in
   .trae/rules/graph.mdc)
-    printf '%s\n' '{"hookSpecificOutput":{"additionalContext":"检测到 .trae/rules/graph.mdc 已更新。如果这是 RALPLAN roadmap 变更，下一步应调用 architect 审查，然后调用 critic 给出 APPROVE / ITERATE / REJECT；Critic 未 APPROVE 前不要进入实现。"}}'
+    printf '%s\n' '{"hookSpecificOutput":{"additionalContext":"检测到 .trae/rules/graph.mdc 已更新。Open-AutoGLM 架构约束仍以 graph.mdc 为准；规划/执行编排使用 OMX canonical workflow（.codex/skills/ralplan 与 .codex/skills/autopilot），不要恢复旧 Trae-native RALPLAN/Autopilot 状态机。"}}'
     ;;
 esac
 '''
@@ -289,103 +380,3 @@ case "$command" in
 esac
 '''
 timeout = 5
-
-[[UserPromptSubmit.hooks]]
-type = "command"
-command = '''
-input=$(cat)
-workspace=$(printf '%s' "$input" | jq -r '.cwd // empty')
-if [ -z "$workspace" ]; then
-  workspace="${workspaceFolder}"
-fi
-if [ -z "$workspace" ]; then
-  workspace=$(pwd)
-fi
-if [ -x "$workspace/.venv/bin/python" ]; then
-  py="$workspace/.venv/bin/python"
-else
-  py="python3"
-fi
-output=$(printf '%s' "$input" | "$py" "$workspace/.trae/hooks/ralplan.py")
-if [ -n "$output" ]; then
-  printf '%s\n' "$output"
-  exit 0
-fi
-printf '%s' "$input" | "$py" "$workspace/.trae/hooks/autopilot.py"
-'''
-timeout = 10
-
-[[Stop.hooks]]
-type = "command"
-command = '''
-input=$(cat)
-workspace=$(printf '%s' "$input" | jq -r '.cwd // empty')
-if [ -z "$workspace" ]; then
-  workspace="${workspaceFolder}"
-fi
-if [ -z "$workspace" ]; then
-  workspace=$(pwd)
-fi
-if [ -x "$workspace/.venv/bin/python" ]; then
-  py="$workspace/.venv/bin/python"
-else
-  py="python3"
-fi
-output=$(printf '%s' "$input" | "$py" "$workspace/.trae/hooks/ralplan.py")
-if [ -n "$output" ]; then
-  printf '%s\n' "$output"
-  exit 0
-fi
-printf '%s' "$input" | "$py" "$workspace/.trae/hooks/autopilot.py"
-'''
-timeout = 10
-
-[[SubagentStart.hooks]]
-type = "command"
-command = '''
-input=$(cat)
-workspace=$(printf '%s' "$input" | jq -r '.cwd // empty')
-if [ -z "$workspace" ]; then
-  workspace="${workspaceFolder}"
-fi
-if [ -z "$workspace" ]; then
-  workspace=$(pwd)
-fi
-if [ -x "$workspace/.venv/bin/python" ]; then
-  py="$workspace/.venv/bin/python"
-else
-  py="python3"
-fi
-output=$(printf '%s' "$input" | "$py" "$workspace/.trae/hooks/ralplan.py")
-if [ -n "$output" ]; then
-  printf '%s\n' "$output"
-  exit 0
-fi
-printf '%s' "$input" | "$py" "$workspace/.trae/hooks/autopilot.py"
-'''
-timeout = 10
-
-[[SubagentStop.hooks]]
-type = "command"
-command = '''
-input=$(cat)
-workspace=$(printf '%s' "$input" | jq -r '.cwd // empty')
-if [ -z "$workspace" ]; then
-  workspace="${workspaceFolder}"
-fi
-if [ -z "$workspace" ]; then
-  workspace=$(pwd)
-fi
-if [ -x "$workspace/.venv/bin/python" ]; then
-  py="$workspace/.venv/bin/python"
-else
-  py="python3"
-fi
-output=$(printf '%s' "$input" | "$py" "$workspace/.trae/hooks/ralplan.py")
-if [ -n "$output" ]; then
-  printf '%s\n' "$output"
-  exit 0
-fi
-printf '%s' "$input" | "$py" "$workspace/.trae/hooks/autopilot.py"
-'''
-timeout = 10

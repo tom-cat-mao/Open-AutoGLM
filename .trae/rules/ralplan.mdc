@@ -1,239 +1,40 @@
 ---
-description: RALPLAN 共识规划协议：Planner → Architect → Critic，pending approval 前严禁执行
+description: RALPLAN 使用 OMX consensus planning；旧 Trae-native graph.mdc 规划状态机已移除
 alwaysApply: false
-globs: ".trae/commands/ralplan.md,.trae/hooks/ralplan.py,.trae/rules/ralplan.mdc,.trae/rules/graph.mdc,.trae/agents/*.md,.trae/traecli.toml"
+globs: ".codex/skills/ralplan/SKILL.md,.codex/skills/plan/SKILL.md,.codex/skills/deep-interview/SKILL.md,.trae/traecli.toml,.trae/rules/graph.mdc"
 ---
 
-# RALPLAN-DR Consensus Planning
+# RALPLAN Boundary
 
-RALPLAN 是 TraeCLI-native 的纯规划模式：Planner → Architect → Critic 迭代共识，在获得明确批准前严禁执行代码变更。
+Open-AutoGLM 不再维护 Trae-native RALPLAN 状态机。
 
-## 1. 核心边界
+## Canonical workflow
 
-| 类型 | 路径 | 说明 |
-|---|---|---|
-| 协议 | `.trae/rules/ralplan.mdc` | 入口、共识循环、hook、pending approval 与 handoff |
-| 计划产物 | `.trae/rules/graph.mdc` | roadmap、approval、执行约束唯一真相源 |
-| runtime state | `.trae/ralplan/state.json` | session 级状态，不进入默认上下文，不提交 |
-| stop breaker | `.trae/ralplan/stop-breaker.json` | 防止无限续跑 |
-| subagent tracking | `.trae/ralplan/subagent-tracking.json` | subagent 活跃感知 |
-| mode registry | `.trae/modes/state.json` | 与 Autopilot/team/RALPH 等互斥模式共享的运行时锁 |
-
-## 2. 入口
-
-- `/ralplan <task>`：显式启动共识规划。
-- 用户消息显式调用 `ralplan` / `共识规划` / `先规划再执行` / `规划模式` 时，由 hook 初始化。
-- 模糊执行请求会被 Pre-Execution Gate 重定向到 RALPLAN。
-- Autopilot 第一阶段复用本协议，但 pipeline 语义由 `.trae/rules/autopilot.mdc` 决定。
-- 启动或 resume 前检查 mode registry；若 Autopilot/team/RALPH 等互斥模式正由其他 session 持有，则拒绝接管。
-
-## 3. graph.mdc 格式约定
-
-`graph.mdc` 是 TraeCLI rule 文件，必须保持 YAML frontmatter + Markdown 正文结构。
-
-### 3.1 frontmatter 模板
-
-除非明确要改变规则加载范围，否则 Planner 必须保留当前 frontmatter，或按以下模板恢复：
-
-```yaml
----
-description: LangGraph roadmap 与核心执行约束；仅在 RALPLAN/Autopilot 规划阶段加载
-alwaysApply: false
-globs: ".trae/commands/ralplan.md,.trae/commands/autopilot.md,.trae/hooks/ralplan.py,.trae/hooks/autopilot.py,.trae/rules/ralplan.mdc,.trae/rules/autopilot.mdc,.trae/rules/graph.mdc"
----
-```
-
-- `globs` 是规则加载配置，不是 roadmap 内容；默认不得自由重写。
-- 业务状态不得放入 frontmatter，必须放入正文 `RALPLAN Status` 的 fenced yaml 块。
-
-### 3.2 正文固定结构
-
-````markdown
-# RALPLAN Status
-
-```yaml
-status: idle | draft | architect_reviewed | iterate | critic_approved | in_progress | completed | blocked | rejected
-design_status: idle | draft | architect_reviewed | iterate | critic_approved | rejected
-execution_status: not_started | in_progress | completed | blocked
-iteration: <non-negative integer>
-planner_mode: initial_rewrite | feedback_revision | null
-revision_scope: full_roadmap | targeted_findings | null
-last_planner_update: <short text or null>
-last_architect_review: <short text or null>
-last_critic_verdict: APPROVE | ITERATE | REJECT | null
-approved_for_execution: true | false
-notes: <short text>
-```
-
-# Roadmap
-
-## 已完成 Phase
-...
-
-## RALPLAN-DR 摘要
-...
-
-## 当前规划 Phase
-...
-
-# 约束 Checklist
-...
-````
-
-- `design_status` 表示 RALPLAN 规划状态。
-- `execution_status` 表示已批准计划的执行状态。
-- `status` 保留为兼容/摘要字段；设计判断优先看 `design_status`，执行判断优先看 `execution_status`。
-- 设计已批准并进入执行后，`planner_mode` / `revision_scope` 可为 `null`；只有设计轮次中的 `draft` / `iterate` 状态必须明确二者。
-
-## 4. 共识循环
+RALPLAN 必须使用 oh-my-codex 最新 consensus planning：
 
 ```text
-Planner initial_rewrite
-  -> Architect read-only review
-  -> Critic APPROVE / ITERATE / REJECT
-  -> ITERATE: Planner feedback_revision, max 5 iterations
-  -> APPROVE: Final Check, then pending approval
+$ralplan == $plan --consensus
+Planner -> Architect -> Critic
 ```
 
-必须遵守：
+详细协议以 `.codex/skills/ralplan/SKILL.md` 与 `.codex/skills/plan/SKILL.md` 为准。
 
-- Planner 只规划，不实现；唯一允许修改的目标是 `.trae/rules/graph.mdc`。
-- Planner 必须读取当前 `graph.mdc`，再用 `Write` 输出完整、合法、自洽的 `graph.mdc`。
-- 禁止用 `Edit` / `MultiEdit` 追加、局部打补丁或把审查报告拼进 `graph.mdc`。
-- Architect 与 Critic 必须串行，不能并行。
-- Architect / Critic 只读，不得修改代码或 `graph.mdc`。
-- Critic 未 `APPROVE` 前不得修改业务代码、提交、推送、开 PR 或调用执行型 skill。
-- 完整 Architect/Critic 报告只在本轮 loop 内传递，不写入 `graph.mdc`。
+## Removed legacy surfaces
 
-## 5. Planner 协议
+以下旧入口已删除，不得恢复：
 
-| 模式 | 触发条件 | Planner 行为 |
-|---|---|---|
-| `initial_rewrite` | `iteration == 0` 或新 task 首轮 | 重建当前 roadmap；保留已完成 Phase 摘要和有效约束；删除过期/冲突/历史性内容 |
-| `feedback_revision` | Critic `ITERATE` 后 | 基于 Architect/Critic findings 做最小必要修订；不无故重排 Phase；不删除无关有效约束 |
+- `.trae/skills/ralplan/`
+- `.trae/commands/ralplan.md`
+- `.trae/hooks/ralplan.py`
+- `.trae/ralplan/state.json` / `.trae/ralplan/stop-breaker.json` 作为 workflow runtime
+- `graph.mdc` 内的旧 RALPLAN approval ledger 作为唯一计划产物
 
-RALPLAN-DR 摘要必须包含：
+## Artifact boundary
 
-- Principles：3-5 条核心原则。
-- Decision Drivers：top 3 决策驱动。
-- Viable Options：至少 2 个方案及 bounded pros/cons；若只剩一个可行方案，写明排除理由。
-- Selected Approach：明确选择与理由。
-- ADR：Decision / Drivers / Alternatives / Why chosen / Consequences / Follow-ups。
-- 每个执行步骤包含根因、修改文件候选、验收标准。
+- RALPLAN 计划、PRD、test-spec、consensus evidence 使用 OMX artifacts：`.omx/context/**`、`.omx/plans/**`、`.omx/specs/**`、`.omx/state/**`。
+- Architect/Critic durable evidence 必须按 OMX 协议记录，不能仅靠 `graph.mdc` 中的摘要字段证明 consensus complete。
+- `.trae/rules/graph.mdc` 只保留 Open-AutoGLM 架构 roadmap、项目不变量和执行约束镜像。
 
-Deliberate 模式在高风险任务或 `--deliberate` 时启用，并额外包含：
+## Execution boundary
 
-- Pre-mortem：3 个失败场景。
-- Expanded Test Plan：Unit / Integration / E2E / Observability。
-
-## 6. Architect 协议
-
-- 读取 `graph.mdc` 和相关代码，代码是 State/Node/Edge/Tool/HITL 架构事实来源。
-- 审查方案选择、步骤可执行性、验收标准、修改文件列表、项目不变量。
-- 必须给出最强反方论点和至少一个真实权衡张力。
-- 输出短报告；不要要求把完整报告写入 `graph.mdc`。
-
-## 7. Critic 协议
-
-Critic 只读质量门，输出 `APPROVE` / `ITERATE` / `REJECT`。
-
-| Verdict | 条件 | 下一步 |
-|---|---|---|
-| `APPROVE` | 无阻塞项，且重大问题不超过 1 个 | 进入 Final Check |
-| `ITERATE` | 存在阻塞项、多个重大问题、计划不可执行或关键假设未验证 | findings 回 Planner，`planner_mode=feedback_revision` |
-| `REJECT` | 需求或方向存在根本性错误 | 停止并返回用户澄清 |
-
-输出应包含：Critical / Major / Minor Findings、What's Missing、Ambiguity Risks、Multi-Perspective Notes、Verdict Justification、Open Questions。低置信度内容放 Open Questions。
-
-## 8. Iteration Protocol
-
-```python
-iteration = current_iteration
-max_iterations = 5
-feedback = None
-
-while iteration < max_iterations:
-    planner_mode = "initial_rewrite" if iteration == 0 else "feedback_revision"
-    revision_scope = "full_roadmap" if iteration == 0 else "targeted_findings"
-
-    # Planner: Read graph.mdc → 按 mode 生成完整 graph.mdc → Write graph.mdc
-    planner.write_graph(task, feedback, planner_mode, revision_scope)
-
-    # Architect / Critic 必须串行，不能并行
-    arch_report = architect.review_graph()
-    verdict, findings = critic.evaluate_graph(arch_report)
-
-    if verdict == "APPROVE":
-        final_check_graph()
-        return "approved"
-    if verdict == "REJECT":
-        return "rejected"
-
-    feedback = findings
-    iteration += 1
-
-return "max_iterations_reached"
-```
-
-## 9. Final Check
-
-Critic `APPROVE` 后，主 Agent 必须先把最终完成态写入/确认到 `graph.mdc`，再重新读取 `graph.mdc` 执行 Final Check；通过后进入 `pending_approval`。
-
-检查项：
-
-- `.mdc` frontmatter 存在且包含 `description`、`alwaysApply`、`globs`。
-- `# RALPLAN Status` 存在，且 fenced yaml 块可读。
-- `design_status: critic_approved`，`last_critic_verdict: APPROVE`，`approved_for_execution: true` 三者一致。
-- `execution_status` 为 `not_started`、`in_progress`、`completed` 或 `blocked`。
-- `iteration` 是非负整数；设计轮次中的 `planner_mode` / `revision_scope` 与轮次语义一致，已批准或执行中可为 `null`。
-- Roadmap 至少包含当前 Phase、目标/根因、修改文件候选、验收标准。
-- 已完成 Phase 只摘要，不展开长实现细节。
-- `graph.mdc` 未嵌入完整 Architect/Critic 报告或历史 diff。
-
-Final Check 失败时：结构问题由主 Agent 修正；语义问题退回 Planner 做 `feedback_revision`。
-
-## 10. Approval 与 Handoff
-
-Standalone `/ralplan` 默认在 Critic APPROVE + Final Check 后进入 `pending_approval` 并停止等待用户。
-
-用户明确批准后，才能将 `approved_for_execution` 视为执行许可，并交接给：
-
-- `/autopilot --use-current-plan`
-- `/autopilot --direct`
-- 其他用户明确指定的执行流程
-
-拒绝或取消时可终止 RALPLAN state；交接时只 deactivate，不清空计划产物。
-`/autopilot --use-current-plan` 可消费 `pending_approval` 状态并把 RALPLAN 标记为 `handoff`，前提是 `graph.mdc` 已满足 approved 条件。
-
-## 11. Stop Hook 规则
-
-- RALPLAN active 时，stop hook 注入 continuation prompt。
-- 终端阶段允许停止：`complete`、`failed`、`cancelled`、`rejected`、`handoff`、`pending_approval`。
-- subagent 5 秒内活跃时允许主 Agent 暂停，不消耗熔断器。
-- 熔断器上限 30 次，TTL 45 分钟；耗尽后自动 deactivated。
-- 进入 `cancelled`、`rejected`、`handoff`、`failed` 等终端阶段时释放 mode registry。
-
-## 12. Pre-Execution Gate
-
-模糊执行请求默认先走 RALPLAN。以下任一锚点存在时可通过 gate：
-
-- 文件路径、Issue/PR 编号、符号名、测试命令、编号步骤、验收标准、错误引用、代码块、`force:` 或 `!` 前缀。
-
-Gate 目标是避免在需求不清晰时直接进入 ralph/autopilot/team/execution。
-
-## 13. Context Budget
-
-- `ralplan.mdc` 只放流程协议，不放长背景论证。
-- Agent prompt 只放角色职责和硬约束，不复制完整协议。
-- `graph.mdc` 只保留当前 roadmap、已完成 Phase 摘要和有效约束。
-- 每轮 ITERATE 只传当前 findings，不累计所有历史报告。
-- 完整审查报告不得写入 `graph.mdc`；状态字段只写一句 summary。
-
-## 14. Checklist
-
-- [ ] Planner 使用 `Write` 整体覆写完整合法 `graph.mdc`。
-- [ ] 首轮为 `initial_rewrite`，迭代轮为 `feedback_revision`。
-- [ ] `globs` / frontmatter 默认保留。
-- [ ] Architect 和 Critic 只读且串行。
-- [ ] Critic APPROVE 后执行 Final Check。
-- [ ] 未通过 Final Check 不进入实现。
+Critic approval 前不得进入实现；approval 后默认 handoff 到 `$ultragoal`，只有用户明确选择时才使用 `$team` 或 `$ralph` fallback。

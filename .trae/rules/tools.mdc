@@ -14,6 +14,7 @@ globs: "phone_agent/**/*.py"
 | 查第三方库 API（LangGraph/LangChain） | Context7 |
 | 搜本项目代码 | Fast Context |
 | LocateAnything grounding benchmark | `.venv/bin/python -m bench.grounding.run_locateanything` |
+| Remote/StepFun grounding benchmark | `.venv/bin/python -m bench.grounding.run_remote_provider` |
 | 固定 manifest 离线复评 grounding predictions | `.venv/bin/python -m bench.grounding.score_predictions` |
 
 ## SmartSearch
@@ -40,7 +41,9 @@ globs: "phone_agent/**/*.py"
 正式 benchmark 入口在 `bench/grounding/`：
 
 - `run_locateanything.py`：读取 manifest 或 post-training raw JSONL，运行 LocateAnything，输出 predictions JSONL 与 summary JSON。
+- `run_remote_provider.py`：读取同一 manifest 或 post-training raw JSONL，运行 OpenAI-compatible/StepFun remote provider，输出同一 predictions schema；API key 只从 env 读取。
 - `score_predictions.py`：固定 manifest 后复评已有 predictions。
 - post-training 数据 bbox 是 0-1 normalized xyxy；benchmark manifest 统一使用 0-1000 normalized xyxy。
-- 真实 LocateAnything 依赖 Apple Silicon + Metal + `mlx-vlm`。沙箱、headless 或虚拟化环境可能无法访问 Metal；出现 `No Metal device available`、`Operation not permitted` 或设备/GPU 访问失败时，必须把它记录为环境限制，不要解释成模型质量失败。若当前 TraeCLI 会话允许提权，可按会话权限模型重跑；若权限策略禁止提权，则报告 blocker 与可复现命令，不要反复重试。
+- 真实 LocateAnything 依赖 Apple Silicon + Metal + `mlx-vlm`。沙箱、headless 或虚拟化环境可能无法访问 Metal；出现 `No Metal device available`、`Operation not permitted` 或设备/GPU 访问失败时，必须把它记录为环境限制，不要解释成模型质量失败。若当前 TraeCLI 会话允许提权，必须用工具参数 `sandbox_permissions="require_escalated"` 重跑，并填写用户可读 `justification`；仅对可复用、非破坏命令设置窄 `prefix_rule`。若权限策略禁止提权，则报告 blocker 与可复现命令，不要反复重试。
+- Remote/StepFun benchmark 依赖网络与 `PHONE_AGENT_REMOTE_GROUNDING_API_KEY`；默认测试必须使用 fake client，不访问网络、凭证、ADB、MLX 或 Metal。
 - `bench_output/` 是本地结果目录，默认不作为源码提交对象。
