@@ -14,51 +14,12 @@
 - **可观测性**: 已提供默认本地 JSONL trace，`RunResult` / eval JSON 可通过 `trace_id` 与 `trace_path` 关联 trace 文件；默认脱敏敏感截图、prompt/API key 与隐私文本
 - **短期 Context Harness**: 已支持 `context_mode=off|observe|inject`，默认 `inject`；记录 `screen_belief`、`action_outcome_summary`、`failure_memory`、`summarized_history`、`short_term_memory`、`action_ledger` 与 context 指标；inject 模式通过单一 `build_plan_context_block()` 从 raw state 字段重建并 regex 替换敏感文本后注入 Plan；state 写入路径只做 regex 替换、不 stub，stub 策略仅在 `phone_agent/checkpoint/serde.py::RedactingSerializer` 的 checkpoint egress 触发；request-only compaction 不改写 `state["messages"]`，保留最新截图并裁剪旧请求文本
 - **策略反思**: 已支持结构化 `reflection_verdict`、`failure_cause`、`suggested_strategy`，下一轮 plan 可读取失败原因和建议策略
-- **评测地基**: 已提供 `evals/run_eval.py --dry-run` smoke harness，以及 `bench/grounding/` grounding benchmark 体系；当前支持 post-training raw JSONL 转 manifest、固定 suite、LocateAnything/remote OpenAI-compatible prediction JSONL、summary JSON、离线复评与 target type / area bucket 分组指标
+- **评测地基**: 已提供 `evals/run_eval.py --dry-run` smoke harness，以及 `bench/grounding/` LocateAnything benchmark 体系；当前支持 post-training raw JSONL 转 manifest、固定 suite、prediction JSONL、summary JSON、离线复评与 target type / area bucket 分组指标
 - **收益验证**: eval 已输出 `context_mode`、`context_strategy`、`prompt_version`、`selected_sections`、`messages_before/after`、`message_chars_before/after`、`approx_tokens_before/after`、`context_block_chars`、`context_truncated`、`failure_memory_hit_count`、`repeated_failure_count`，支持 off/observe/inject 对比
 - **输出适配**: `ModelConfig.output_mode=json_schema|tool_calls|auto`；旧 text DSL 不再作为动作执行协议；JSON、已聚合 OpenAI `tool_calls` 与 IntentIR 统一归一到 canonical action，parse/adapter/validation failure fail-closed，不绕过 HITL
-- **Grounding**: LocateAnything-3B-4bit (MLX)、Android UiAutomator accessibility tree、remote OpenAI-compatible provider 均收敛为 MarkRegistry mark 生成层；默认 `PHONE_AGENT_GROUNDING_PROVIDER=hybrid` 不变，仍先用 accessibility tree，失败时 fallback 到 LocateAnything。显式 `PHONE_AGENT_GROUNDING_PROVIDER=stepfun|remote_openai` 可调用 StepFun/OpenAI-compatible vision API；显式 `hybrid_remote|accessibility_remote` 保持 tree-first，再 fallback 到 remote provider。UiAutomator provider 产出 `structure_kind=accessibility` 的 `ScreenStructure` sidecar，LocateAnything 可在 `PHONE_AGENT_LOCATEANYTHING_STRUCTURE_MODE=target|screen` 显式开启时产出 `structure_kind=visual` 的视觉 sidecar。Plan 基于 composite `screen_structures + MarkRegistry` 构建 observation-local `ObjectRegistry`，允许主 VLM 在 Screen Objects block 中选择 `target_object_id` 或 `object_role`+`ordinal`/strict `object_filter`；这些 selector 只在 grounding 层编译为唯一 atomic `target_mark_id` 后才能执行。截图无效或 secure screenshot blocked 会 fail-closed，不把黑图继续发给模型；所有结果仍进入 canonical ActionIR/Safety/HITL/Executor；LocateAnything/remote 默认输入图最长边为 `max_size=960`；remote provider 默认只发送 redacted/bounded hint，API key、base64 screenshot、raw hint、raw response 不进入 trace/checkpoint/report；multi-box 不得 first-box 执行，只能 fail-closed 为歧义。
+- **本地 Grounding**: LocateAnything-3B-4bit (MLX) 与 Android UiAutomator accessibility tree 均已收敛为 MarkRegistry mark 生成层；默认 `PHONE_AGENT_GROUNDING_PROVIDER=hybrid` 先用 accessibility tree 的结构化 bounds/text/class/clickable 信息，失败时再 fallback 到 LocateAnything；UiAutomator provider 产出 `structure_kind=accessibility` 的 `ScreenStructure` sidecar，LocateAnything 可在 `PHONE_AGENT_LOCATEANYTHING_STRUCTURE_MODE=target|screen` 显式开启时产出 `structure_kind=visual` 的视觉 sidecar。Plan 基于 composite `screen_structures + MarkRegistry` 构建 observation-local `ObjectRegistry`，允许主 VLM 在 Screen Objects block 中选择 `target_object_id` 或 `object_role`+`ordinal`/strict `object_filter`；这些 selector 只在 grounding 层编译为唯一 atomic `target_mark_id` 后才能执行。Hybrid accessibility hardening 已补齐 whitespace/signed bounds、控制字符清洗、XML parse fail-closed summary、`fallback_chain` taxonomy、`hybrid_factory` 降级可观测和 plan/reflect trace summary；但默认 hybrid wrapper 当前仍会把 hint-mismatched tree marks 放进最终 executable marks，且 child `parse_summary` 尚未透传到顶层 hybrid result。截图无效或 secure screenshot blocked 会 fail-closed，不把黑图继续发给模型；所有结果仍进入 canonical ActionIR/Safety/HITL/Executor；LocateAnything 默认输入图最长边为 `max_size=960`，默认不注入额外 context，必须经 `apply_chat_template(..., num_images=1)`，可通过 bounded `locateanything_context_max_chars` 灰度短 context；multi-box 在默认 `off` 模式下不得 first-box 执行，只能 fail-closed 为歧义，结构模式下也必须经 visual object eligibility 再执行
 
 ---
-
-## 已完成 Phase: Optional Remote API Grounding Provider + Benchmark Support
-
-**目标**: 将本地 LocateAnything grounding 扩展为可选 OpenAI-compatible remote provider，并用同一 benchmark manifest 横评 StepFun `step-3.7-flash` 与本地 LocateAnything。
-
-**已落地方案**:
-- `phone_agent/grounding/remote_openai.py`: 新增 `RemoteOpenAIGroundingProvider`，实现仍是单个 `MarkProvider` Protocol；输入为当前截图缩放 PNG data URL + bounded/redacted hint，输出严格单 bbox mark。
-- `phone_agent/grounding/factory.py`: runtime 组合只扩展 `build_mark_providers()`；`remote_openai`/`stepfun` 返回 remote provider，`hybrid_remote`/`accessibility_remote` 返回 `AccessibilityTreeProvider -> RemoteOpenAIGroundingProvider` 的 tree-first fallback；默认 `hybrid` 仍为 accessibility -> LocateAnything。
-- `phone_agent/grounding/parser.py`: bbox parser 支持 `<box>` 与受控 JSON bbox；多框、空输出、越界、坏格式均 fail-closed。
-- `phone_agent/graph/observation.py` / `phone_agent/grounding/fallback.py`: provider/failure/status/provider_order 走 safe-identifier/enum allowlist；remote metadata 只透出 model/host/尺寸/长度/raw_hint_sent/bbox_count 等摘要。
-- `bench/grounding/run_remote_provider.py`: 新增 remote runner，输出与 `run_locateanything.py` 对齐的 predictions schema，并复用 `score_predictions.py` 离线复评。
-
-**启用示例**:
-
-```bash
-PHONE_AGENT_GROUNDING_PROVIDER=hybrid_remote \
-PHONE_AGENT_REMOTE_GROUNDING_BASE_URL=https://api.stepfun.com/v1 \
-PHONE_AGENT_REMOTE_GROUNDING_API_KEY=... \
-PHONE_AGENT_REMOTE_GROUNDING_MODEL=step-3.7-flash \
-.venv/bin/python main.py --output-mode json_schema "打开设置"
-```
-
-**Benchmark 示例**:
-
-```bash
-.venv/bin/python -m bench.grounding.run_remote_provider \
-  --manifest bench_output/grounding/aw_mobile_clean_trusted_1000_manifest.json \
-  --base-url https://api.stepfun.com/v1 \
-  --api-key-env PHONE_AGENT_REMOTE_GROUNDING_API_KEY \
-  --model step-3.7-flash \
-  --output bench_output/grounding/stepfun_predictions.jsonl \
-  --summary-output bench_output/grounding/stepfun_summary.json
-```
-
-**安全边界**:
-- Remote bbox 只能生成 marks，不能直接产生 ActionIR 或执行 tap。
-- 默认 provider 不变；StepFun/remote 只能显式 opt-in。
-- 默认测试使用 fake client，不需要真实 StepFun 凭证、网络、ADB、MLX 或 Metal。
-
 
 ## 已完成 MVP: LocateAnything Local Mark Provider
 

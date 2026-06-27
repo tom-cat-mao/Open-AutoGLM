@@ -14,7 +14,6 @@
 - `scoring.py`：纯 Python 评分核心，CI 可运行，不依赖 MLX/ADB。
 - `datasets.py`：post-training raw JSONL → Open-AutoGLM manifest，统一转换到 0-1000 bbox。
 - `run_locateanything.py`：正式 LocateAnything benchmark runner，输出 prediction JSONL 和 summary JSON。
-- `run_remote_provider.py`：OpenAI-compatible/StepFun remote grounding runner，输出同一 prediction schema。
 - `score_predictions.py`：离线复评已有 predictions，便于固定 manifest 后复现实验。
 - `bench_grounding.py`：保留为本地 smoke/preprocess 实验，不作为正式报告入口。
 
@@ -83,23 +82,6 @@
 ```
 
 MLX/Metal 在 macOS arm64 上运行，沙箱环境可能没有 Metal device；如果出现 `No Metal device available`，需要在非沙箱执行同一命令。
-
-## Remote OpenAI-Compatible / StepFun Benchmark
-
-固定 manifest 后可用同一数据横评 StepFun `step-3.7-flash`：
-
-```bash
-.venv/bin/python -m bench.grounding.run_remote_provider \
-  --manifest bench_output/grounding/aw_mobile_clean_trusted_1000_manifest.json \
-  --base-url https://api.stepfun.com/v1 \
-  --api-key-env PHONE_AGENT_REMOTE_GROUNDING_API_KEY \
-  --model step-3.7-flash \
-  --max-size 960 \
-  --output bench_output/grounding/stepfun_aw_mobile_clean_trusted_1000_predictions.jsonl \
-  --summary-output bench_output/grounding/stepfun_aw_mobile_clean_trusted_1000_summary.json
-```
-
-runner 只把 API key 从环境变量读入，不写入 predictions/summary；输出字段与 LocateAnything runner 对齐，可直接进入 `score_predictions.py`。默认测试使用 fake request，不需要网络、凭证、ADB、MLX 或 Metal。
 
 固定 manifest 后可离线复评：
 

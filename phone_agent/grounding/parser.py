@@ -7,7 +7,6 @@ Supports two formats:
 
 from __future__ import annotations
 
-import json
 import re
 from dataclasses import dataclass
 
@@ -60,50 +59,7 @@ def _extract_boxes(text: str) -> list[tuple[int, int, int, int]]:
             if coords not in boxes:
                 boxes.append(coords)
 
-    for coords in _extract_json_boxes(text):
-        if coords not in boxes:
-            boxes.append(coords)
-
     return boxes
-
-
-def _extract_json_boxes(text: str) -> list[tuple[int, int, int, int]]:
-    snippets = []
-    stripped = text.strip()
-    if stripped.startswith("{") or stripped.startswith("["):
-        snippets.append(stripped)
-    fenced = re.findall(r"```(?:json)?\s*([\s\S]*?)```", text, re.IGNORECASE)
-    snippets.extend(snippet.strip() for snippet in fenced)
-    boxes: list[tuple[int, int, int, int]] = []
-    for snippet in snippets:
-        try:
-            payload = json.loads(snippet)
-        except json.JSONDecodeError:
-            continue
-        for item in _json_box_values(payload):
-            try:
-                coords = tuple(int(round(float(value))) for value in item)
-            except (TypeError, ValueError):
-                continue
-            boxes.append(coords)
-    return boxes
-
-
-def _json_box_values(value: object) -> list[list[object]]:
-    if isinstance(value, dict):
-        for key in ("bbox", "box"):
-            item = value.get(key)
-            if isinstance(item, list) and len(item) == 4:
-                return [item]
-        boxes = value.get("boxes")
-        if isinstance(boxes, list):
-            return [item for item in boxes if isinstance(item, list) and len(item) == 4]
-        return []
-    if isinstance(value, list) and len(value) == 4 and not any(isinstance(item, (list, dict)) for item in value):
-        return [value]
-    if isinstance(value, list):
-        return [item for item in value if isinstance(item, list) and len(item) == 4]
-    return []
 
 
 def _validate_box(

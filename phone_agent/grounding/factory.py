@@ -10,10 +10,6 @@ from phone_agent.grounding.fallback import FallbackMarkProvider
 from phone_agent.grounding.fake import FakeGroundingProvider
 from phone_agent.grounding.locateanything import DEFAULT_LOCATEANYTHING_MAX_SIZE, LocateAnythingMLXProvider
 from phone_agent.grounding.provider import MarkProvider
-from phone_agent.grounding.remote_openai import (
-    DEFAULT_REMOTE_GROUNDING_MAX_SIZE,
-    RemoteOpenAIGroundingProvider,
-)
 
 DEFAULT_GROUNDING_PROVIDER_NAME = "hybrid"
 
@@ -45,7 +41,7 @@ def _resolve_structure_mode(cfg: dict[str, Any]) -> tuple[str, str | None]:
 
 
 def build_mark_provider(config: dict[str, Any] | None = None) -> MarkProvider | None:
-    """Build one legacy/single mark provider; runtime composition uses build_mark_providers()."""
+    """Build a mark provider from runtime config/env without exposing it to tool schemas."""
 
     cfg = config or {}
     provider = cfg.get("mark_provider") or cfg.get("grounding_provider")
@@ -85,9 +81,7 @@ def build_mark_providers(config: dict[str, Any] | None = None) -> list[MarkProvi
         cfg.get("grounding_provider_name")
         or os.getenv("PHONE_AGENT_GROUNDING_PROVIDER", DEFAULT_GROUNDING_PROVIDER_NAME)
     ).lower()
-    if name in {"remote_openai", "stepfun"}:
-        return [_build_remote_openai_provider(cfg)]
-    if name in {"hybrid", "accessibility_locateanything", "uiautomator_locateanything", "hybrid_remote", "accessibility_remote"}:
+    if name in {"hybrid", "accessibility_locateanything", "uiautomator_locateanything"}:
         built: list[MarkProvider] = []
         dump_tree = cfg.get("accessibility_tree_dump") or cfg.get("uiautomator_dump")
         skip_reason: str | None = None
@@ -105,10 +99,7 @@ def build_mark_providers(config: dict[str, Any] | None = None) -> list[MarkProvi
                     ),
                 )
             )
-        if name in {"hybrid_remote", "accessibility_remote"}:
-            built.append(_build_remote_openai_provider(cfg))
-        else:
-            built.append(_build_locateanything_provider(cfg))
+        built.append(_build_locateanything_provider(cfg))
         provider_order = [provider.name for provider in built]
         return [
             FallbackMarkProvider(
@@ -162,35 +153,4 @@ def _build_locateanything_provider(cfg: dict[str, Any]) -> LocateAnythingMLXProv
             default=5,
         ),
         invalid_structure_mode=invalid_structure_mode,
-    )
-
-
-def _resolve_bool(value: Any, *, default: bool = False) -> bool:
-    if value in {None, ""}:
-        return default
-    if isinstance(value, bool):
-        return value
-    return str(value).lower() in {"1", "true", "yes", "on"}
-
-
-def _build_remote_openai_provider(cfg: dict[str, Any]) -> RemoteOpenAIGroundingProvider:
-    max_size = _resolve_positive_int(
-        cfg.get("remote_grounding_max_size")
-        or cfg.get("grounding_max_size")
-        or os.getenv("PHONE_AGENT_REMOTE_GROUNDING_MAX_SIZE")
-        or os.getenv("PHONE_AGENT_GROUNDING_MAX_SIZE"),
-        default=DEFAULT_REMOTE_GROUNDING_MAX_SIZE,
-    )
-    return RemoteOpenAIGroundingProvider(
-        base_url=cfg.get("remote_grounding_base_url") or os.getenv("PHONE_AGENT_REMOTE_GROUNDING_BASE_URL"),
-        api_key=os.getenv(str(cfg.get("remote_grounding_api_key_env") or "PHONE_AGENT_REMOTE_GROUNDING_API_KEY")),
-        model=cfg.get("remote_grounding_model") or os.getenv("PHONE_AGENT_REMOTE_GROUNDING_MODEL"),
-        max_size=max_size,
-        timeout=cfg.get("remote_grounding_timeout"),
-        allow_raw_hints=_resolve_bool(
-            cfg.get("remote_grounding_allow_raw_hints")
-            or os.getenv("PHONE_AGENT_REMOTE_GROUNDING_ALLOW_RAW_HINTS"),
-            default=False,
-        ),
-        request_callable=cfg.get("remote_grounding_request_callable"),
     )

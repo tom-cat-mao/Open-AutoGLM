@@ -48,12 +48,6 @@ class AgentConfig:
     locateanything_max_visual_candidates: int = 30
     locateanything_visual_category_budget: int = 5
     locateanything_max_structure_calls: int = 5
-    remote_grounding_base_url: str | None = None
-    remote_grounding_api_key_env: str = "PHONE_AGENT_REMOTE_GROUNDING_API_KEY"
-    remote_grounding_model: str | None = None
-    remote_grounding_max_size: int = 960
-    remote_grounding_timeout: float | None = None
-    remote_grounding_allow_raw_hints: bool = False
 
     def __post_init__(self):
         self.context_mode = normalize_context_mode(self.context_mode)
@@ -338,12 +332,6 @@ class PhoneAgent:
                 "locateanything_max_visual_candidates": self.agent_config.locateanything_max_visual_candidates,
                 "locateanything_visual_category_budget": self.agent_config.locateanything_visual_category_budget,
                 "locateanything_max_structure_calls": self.agent_config.locateanything_max_structure_calls,
-                "remote_grounding_base_url": self.agent_config.remote_grounding_base_url,
-                "remote_grounding_api_key_env": self.agent_config.remote_grounding_api_key_env,
-                "remote_grounding_model": self.agent_config.remote_grounding_model,
-                "remote_grounding_max_size": self.agent_config.remote_grounding_max_size,
-                "remote_grounding_timeout": self.agent_config.remote_grounding_timeout,
-                "remote_grounding_allow_raw_hints": self.agent_config.remote_grounding_allow_raw_hints,
             }
         }
 

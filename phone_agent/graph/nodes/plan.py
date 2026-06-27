@@ -570,7 +570,7 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
 
         accessibility_enabled = os.getenv("PHONE_AGENT_ACCESSIBILITY_MARKS", "").lower() in {"1", "true", "yes", "on"}
     provider_name = str(configurable.get("grounding_provider_name") or "").lower()
-    hybrid_provider_enabled = provider_name in {"hybrid", "accessibility_locateanything", "uiautomator_locateanything", "hybrid_remote", "accessibility_remote"}
+    hybrid_provider_enabled = provider_name in {"hybrid", "accessibility_locateanything", "uiautomator_locateanything"}
     if screen_marks is None and accessibility_enabled and not hybrid_provider_enabled and hasattr(device_factory, "get_screen_marks"):
         try:
             screen_marks = device_factory.get_screen_marks(

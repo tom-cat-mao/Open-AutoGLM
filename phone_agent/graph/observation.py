@@ -25,23 +25,9 @@ from phone_agent.graph.objects import (
 from phone_agent.grounding.provider import MarkProvider, MarkProviderHint, MarkProviderResult, ScreenBinding
 
 
-SAFE_IDENTIFIER_REPLACEMENT = "unknown"
-
-
 def _safe_metadata(value: Any, *, default: str = "") -> str:
     safe = str(sanitize_context_payload(str(value or ""), "message", consumer="inject")).strip()
     return safe[:64] or default
-
-
-def _safe_identifier(value: Any, *, default: str = SAFE_IDENTIFIER_REPLACEMENT) -> str:
-    text = str(value or "").strip().lower().replace("-", "_")
-    if not text or len(text) > 64:
-        return default
-    if not all(char.isascii() and (char.isalnum() or char == "_") for char in text):
-        return default
-    if any(char.isdigit() for char in text):
-        return default
-    return text
 
 
 def _safe_int(value: Any, *, default: int = 0, maximum: int = 10_000_000) -> int:
@@ -242,16 +228,16 @@ def _summarize_provider_result(result: MarkProviderResult) -> dict[str, Any]:
     """Return trace-safe provider metadata without raw hint or mark text."""
 
     summary = {
-        "provider": _safe_identifier(result.provider),
+        "provider": _safe_metadata(result.provider, default="unknown"),
         "success": result.success,
-        "failure_code": _safe_identifier(result.failure_code, default=""),
+        "failure_code": _safe_metadata(result.failure_code),
         "message": _safe_metadata(result.message),
         "screen_id": _safe_metadata(result.screen_id),
         "raw_screenshot_hash": _safe_metadata(result.raw_screenshot_hash),
         "provider_input_hash": _safe_metadata(result.provider_input_hash),
         "latency_ms": _safe_int(result.latency_ms),
         "candidate_count": _safe_int(result.candidate_count),
-        "status": _safe_identifier(result.status, default=""),
+        "status": _safe_metadata(result.status),
         "hints": [
             {
                 key: _safe_metadata(value)
@@ -279,7 +265,6 @@ def _summarize_provider_result(result: MarkProviderResult) -> dict[str, Any]:
     fallback_chain = _safe_fallback_chain((result.metadata or {}).get("fallback_chain"))
     hybrid_factory = _safe_hybrid_factory((result.metadata or {}).get("hybrid_factory"))
     parse_summary = _safe_parse_summary((result.metadata or {}).get("parse_summary"))
-    remote_summary = _safe_remote_summary(result.metadata or {})
     metadata: dict[str, Any] = {}
     if fallback_chain:
         metadata["fallback_chain"] = fallback_chain
@@ -287,8 +272,6 @@ def _summarize_provider_result(result: MarkProviderResult) -> dict[str, Any]:
         metadata["hybrid_factory"] = hybrid_factory
     if parse_summary:
         metadata["parse_summary"] = parse_summary
-    if remote_summary:
-        metadata["remote"] = remote_summary
     if metadata:
         summary["metadata"] = metadata
     structure_summary = _safe_screen_structures_summary(_result_structure_dicts(result))
@@ -366,9 +349,9 @@ def _safe_fallback_chain(value: Any) -> list[dict[str, Any]]:
             continue
         rows.append(
             {
-                "provider": _safe_identifier(item.get("provider")),
+                "provider": _safe_metadata(item.get("provider"), default="unknown"),
                 "success": bool(item.get("success")),
-                "failure_code": _safe_identifier(item.get("failure_code"), default=""),
+                "failure_code": _safe_metadata(item.get("failure_code")),
                 "candidate_count": _safe_int(item.get("candidate_count")),
                 "mark_count": _safe_int(item.get("mark_count")),
                 "structure_count": _safe_int(item.get("structure_count")),
@@ -387,7 +370,7 @@ def _safe_parse_summary(value: Any) -> dict[str, Any]:
     if not isinstance(value, dict):
         return {}
     return {
-        "xml_status": _safe_identifier(value.get("xml_status")),
+        "xml_status": _safe_metadata(value.get("xml_status"), default="unknown"),
         "raw_node_count": _safe_int(value.get("raw_node_count")),
         "mark_count": _safe_int(value.get("mark_count")),
         "structure_node_count": _safe_int(value.get("structure_node_count")),
@@ -410,25 +393,8 @@ def _safe_hybrid_factory(value: Any) -> dict[str, Any]:
             value.get("accessibility_child_skip_reason"),
             {"accessibility_dump_callback_missing", "skip_accessibility_provider"},
         ),
-        "provider_order": [_safe_identifier(item) for item in provider_order[:8]],
+        "provider_order": [_safe_metadata(item, default="unknown") for item in provider_order[:8]],
     }
-
-
-def _safe_remote_summary(value: Any) -> dict[str, Any]:
-    if not isinstance(value, dict):
-        return {}
-    fields = {
-        "model": _safe_metadata(value.get("model")),
-        "base_url_host": _safe_metadata(value.get("base_url_host")),
-        "max_size": _safe_int(value.get("max_size")),
-        "request_image_width": _safe_int(value.get("request_image_width")),
-        "request_image_height": _safe_int(value.get("request_image_height")),
-        "request_image_length": _safe_int(value.get("request_image_length")),
-        "hint_length": _safe_int(value.get("hint_length")),
-        "raw_hint_sent": bool(value.get("raw_hint_sent")),
-        "bbox_count": _safe_int(value.get("bbox_count")),
-    }
-    return {key: item for key, item in fields.items() if item not in {"", 0, False, None}}
 
 
 def _safe_enum(value: Any, allowed: set[str]) -> str | None:
