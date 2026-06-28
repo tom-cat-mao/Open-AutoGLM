@@ -122,7 +122,7 @@ print(result)
 structured = agent.run_structured("打开淘宝搜索无线耳机")
 print(structured.to_dict())
 # 包含 success / finished / steps / duration / error / hitl_count / trace_id / trace_path
-# failure_cause / retry_count / context_mode / context_strategy / prompt_version
+# failure_cause / retry_count / finish_validation_status / verifier_status / prompt_version
 # selected_sections / messages_before/after / approx_tokens_before/after 等 context metrics
 ```
 
@@ -151,7 +151,7 @@ Phase 14 将 prompt、context selector 与 context-window compaction 收敛为 L
 | Context selector | `select_plan_context()` 输出 `context_strategy`、`selected_sections`、脱敏 context block 与计数指标 |
 | Request compaction | `compact_messages_for_request()` 仅压缩传给 `model_client.request()` 的消息，不改写 `state["messages"]` |
 | 图片预算 | 历史图片从模型请求中剥离，最新用户截图保留；保持 `messages_reducer` append/replace 语义 |
-| 隐私指标 | trace/eval 只持久化 section IDs、消息数、字符数、近似 token、截断状态等，不持久化 raw prompt/context/image |
+| 隐私指标 | trace/eval 只持久化 section IDs、消息数、字符数、近似 token、截断状态、finish validation code/hash 等，不持久化 raw prompt/context/image |
 
 Context selector 与 compaction 只能影响模型请求构造和脱敏观测指标，不得修改 `action_raw`、`action_parsed`、`pending_execute`、`interrupt_result`、`action_confirmed` 或 Safety/HITL 路由字段。
 
@@ -159,9 +159,11 @@ Context selector 与 compaction 只能影响模型请求构造和脱敏观测指
 
 Plan 阶段支持 provider response envelope：`{"action": {...}, "expected_outcome": {...}}`。其中 `action` 继续经 adapter、grounding、validator、repair、safety gate 和 executor；`expected_outcome` 是 sibling postcondition contract，绝不进入 canonical `ActionIR` 或 executor payload，也不提供执行授权。运行态 state 保存 hash/哨兵形式的 verifier contract，verifier 会对当轮 UI 文本做现场 hash/片段 hash 匹配；`action_raw`、trace、report、checkpoint 等外发/持久化路径单独使用 stub/hash summary。真实 `ModelClient` 会先校验 nested `action`，再保留 envelope 给 Plan 拆分；旧 plain action JSON 仍兼容。
 
-`ExpectedOutcome` 支持 `kind`、`must_observe`、`must_not_observe`、`target_mark_id`、`target_text_hint`、`timeout_hint`、`dynamic_regions`。结构化 object selector 成功编译后，还可绑定 verifier-only selected-object 字段：`selected_object_id_hash`、`object_type`、`object_evidence_hash`、`title_stub`、`title_hash`、`container_lineage_hash`、`list_lineage_hash`、`expected_page_type`。这些字段只以 hash/stub 形式进入 ExpectedOutcome、trace/checkpoint/verifier prompt，不进入 canonical ActionIR、Validator、Safety Gate、Executor 或 `pending_execute`，也不提供执行授权。provider 未给出时会按动作生成保守默认：Launch 验证目标 app；Type 默认不把原始输入文本持久化到 `must_observe`，只有 provider 显式给出隐私安全的 outcome 时才做文本匹配；Tap/Double Tap/Long Press 默认保持 `generic`，避免把原本已存在的 target hint 当作成功证据；Swipe 只把内容位移作为弱确定信号；Wait 验证 loading/spinner/network error 等消失。
+`ExpectedOutcome` 支持 `kind`、`must_observe`、`must_not_observe`、`target_mark_id`、`target_text_hint`、`timeout_hint`、`dynamic_regions`。结构化 object selector 成功编译后，还可绑定 verifier-only selected-object 字段：`selected_object_id_hash`、`object_type`、`object_evidence_hash`、`title_stub`、`title_hash`、`container_lineage_hash`、`list_lineage_hash`、`expected_page_type`。这些字段只以 hash/stub 形式进入 ExpectedOutcome、trace/checkpoint/verifier prompt，不进入 canonical ActionIR、Validator、Safety Gate、Executor 或 `pending_execute`，也不提供执行授权。provider 未给出时会按动作生成保守默认：Launch 验证目标 app；Type 默认不把原始输入文本持久化到 `must_observe`，只有 provider 显式给出隐私安全的 outcome 时才做文本匹配；带 object evidence 的 Tap/Double Tap/Long Press 会提升为 `input_focused`、`page_opened` 或 `target_appeared`，否则保持 `generic`，避免把原本已存在的 target hint 当作成功证据；Swipe 只把内容位移作为弱确定信号；Wait 验证 loading/spinner/network error 等消失。
 
 Reflect 阶段会基于动作后的截图/current_app 重新构建 after observation，并携带动作前/动作后的脱敏 observation 摘要运行 deterministic verifier；高置信 deterministic success/failure 会直接映射到结构化 reflection，只有 unknown/低置信才把 stub/hash 后的 verifier signal、ExpectedOutcome summary、before/after observation summary 与当前截图作为 isolated verifier request 交给模型判断。该请求不追加到 `state["messages"]`，也不参与 request compaction 的持久状态。Reflect 默认只使用 accessibility/device marks，不触发 LocateAnything fallback，除非显式开启 `reflect_enable_vlm_grounding`。`screen_changed` 已降级为 weak signal，不能单独证明 Tap/Type/搜索/打开视频/Swipe 成功。广告、banner、推荐流、热词、计数器等动态区域默认视为噪声；搜索框/输入框类 `input_focused` 后置条件会参考 focused/editable/keyboard/top activity 等只读信号。只有按 action/outcome 绑定的强进展（如 Type 后目标文本出现、input_focused 的 focused/keyboard 信号）才会阻止机械 takeover；trace 只记录 `verifier_evidence` 中 stubbed/redacted matched/missing postconditions、progress/weak signals 与 redacted summaries。
+
+Plan 每一轮都会注入一个 compact `TaskGoalContract`，独立于历史消息 compaction 保留任务目标、app hint、ordinal、terminal evidence 与任务/entity hash。`finish` 不再直接等同成功：execute 只记录 `pending_finish` 与脱敏 `finish_claim`，然后路由到 reflect；reflect 通过 `validate_finish_claim()` 对 `TaskGoalContract + after observation + verifier evidence` 做最终目标验证。若缺少最终证据（例如只搜索到 UP 主但没有打开/播放第二个视频），状态会以 `failure_cause="goal_not_satisfied"` 继续 replan，而不是 `success=true`。trace/eval 只记录 `finish_validation_status`、matched/missing terminal evidence、task hash 与长度/哈希 stub，不记录 raw task/entity/title。
 
 ### Model Output Adapter
 
@@ -382,7 +384,7 @@ python main.py --device-id 192.168.1.100:5555 --base-url http://localhost:8000/v
 .venv/bin/python evals/run_eval.py --dry-run --trace-dir .traces/smoke
 ```
 
-当前 Evaluation Harness 覆盖结构化结果、基础指标、HITL interrupt routing 计数、trace 文件关联、retry count、failure cause histogram，以及 `context_mode`、`context_strategy`、`prompt_version`、`selected_sections`、`messages_before/after`、`message_chars_before/after`、`approx_tokens_before/after`、`context_block_chars`、`context_truncated`、`failure_memory_hit_count`、`repeated_failure_count` 等 context 指标；不承诺跨进程持久 resume，完整 resume 指标将在 checkpoint/resume 阶段补齐。
+当前 Evaluation Harness 覆盖结构化结果、基础指标、HITL interrupt routing 计数、trace 文件关联、retry count、failure cause histogram、`verifier_status_counts`、`finish_validation_counts`，以及 `context_mode`、`context_strategy`、`prompt_version`、`selected_sections`、`messages_before/after`、`message_chars_before/after`、`approx_tokens_before/after`、`context_block_chars`、`context_truncated`、`failure_memory_hit_count`、`repeated_failure_count` 等 context 指标；不承诺跨进程持久 resume，完整 resume 指标将在 checkpoint/resume 阶段补齐。
 
 ```bash
 .venv/bin/python evals/run_eval.py --dry-run --context-mode observe --trace-dir .traces/smoke
@@ -400,12 +402,10 @@ python main.py --device-id 192.168.1.100:5555 --base-url http://localhost:8000/v
 | LangGraph roadmap 与执行约束 | `.trae/rules/graph.mdc` |
 | RALPLAN 共识规划协议 | `.trae/rules/ralplan.mdc` |
 | Autopilot 流水线协议 | `.trae/rules/autopilot.mdc` |
-| Slash commands | `.trae/commands/ralplan.md`, `.trae/commands/autopilot.md` |
-| Skills | `.trae/skills/ralplan/SKILL.md`, `.trae/skills/autopilot/SKILL.md` |
+| OMX skills | `.codex/skills/ralplan/SKILL.md`, `.codex/skills/autopilot/SKILL.md`, `.codex/skills/ultragoal/SKILL.md` |
 | Project agents | `.trae/agents/*.md` |
-| Hooks | `.trae/hooks/ralplan.py`, `.trae/hooks/autopilot.py` |
 
-Autopilot 已完成 TraeCLI-native 编排：`ralplan -> execution -> ralph -> qa -> complete`。它复用 RALPLAN `planner` / `architect` / `critic`，并新增 `executor`、`debugger`、`test-engineer`、`designer`、`code-reviewer`、`security-reviewer` 六个项目级 stage agents；不迁移 `.omc` runtime，不改变 `phone_agent/` 业务运行时。`.trae/traecli.toml` 按 TraeCLI 2.0 TOML schema 承载项目级 instructions、hook 与 MCP 配置；`.trae/traecli.legacy.yaml` 仅作为旧版/Coco 配置备份参考。业务执行协议以 `json_schema|tool_calls|auto` 为准，不再包含旧 text DSL 回滚。涉及 prompt/context/grounding harness 的执行计划、验收矩阵与阶段状态以 `.trae/rules/graph.mdc` 为准；TraeCLI 规则、README、docs 与 AGENTS 约束必须同步更新。项目命令必须优先使用 `.venv/bin/python`、`.venv/bin/pytest`、`.venv/bin/pip`。
+Autopilot 使用 OMX canonical workflow：`$deep-interview -> $ralplan -> $ultragoal -> $code-review -> $ultraqa`，本仓库 `.trae/rules/autopilot.mdc` / `.trae/rules/ralplan.mdc` 只保留 TraeCLI 2.0 边界规则并指向 `.codex/skills/`。业务执行协议以 `json_schema|tool_calls|auto` 为准，不再包含旧 text DSL 回滚。涉及 prompt/context/grounding/finish validation harness 的执行计划、验收矩阵与阶段状态以 `.trae/rules/graph.mdc` 为准；TraeCLI 规则、README、docs 与 AGENTS 约束必须同步更新。项目命令必须优先使用 `.venv/bin/python`、`.venv/bin/pytest`、`.venv/bin/pip`。
 
 ```bash
 .venv/bin/pytest tests -q

@@ -44,6 +44,7 @@ FAILURE_TAXONOMY = {
     "context_lost",
     "repeated_action",
     "model_parse_failed",
+    "goal_not_satisfied",
     "unknown",
 }
 FAILURE_CAUSE_ALIASES = {

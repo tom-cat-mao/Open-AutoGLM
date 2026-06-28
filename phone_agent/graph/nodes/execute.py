@@ -16,6 +16,7 @@ from phone_agent.graph.context import (
     sanitize_context_payload,
 )
 from phone_agent.graph.tools import dispatch_tool
+from phone_agent.graph.task_goal import finish_claim_summary
 from phone_agent.graph.trace import emit_trace
 from phone_agent.model.client import MessageBuilder
 
@@ -199,15 +200,25 @@ def execute_node(state: "AgentState", config: RunnableConfig) -> dict:
     if action_parsed.get("_metadata") == "finish":
         result = ActionResult(
             success=True,
-            should_finish=True,
+            should_finish=False,
             message=action_parsed.get("message"),
         )
         messages = _strip_and_append(messages, thinking, action_raw)
-        emit_trace(config, state, "execute", "execute_finish", {"message": result.message})
+        finish_claim = finish_claim_summary(result.message or "")
+        emit_trace(
+            config,
+            state,
+            "execute",
+            "execute_finish_pending",
+            {"finish_claim": finish_claim, "pending_finish": True},
+        )
         return {
             "action_result": result.__dict__,
             "messages": messages,
-            "finished": True,
+            "finished": False,
+            "pending_finish": True,
+            "finish_claim": finish_claim,
+            "finish_validation_status": "pending",
             **_context_update(result.__dict__),
         }
 

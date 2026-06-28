@@ -19,6 +19,7 @@ from phone_agent.graph.context import (
     should_inject_context,
 )
 from phone_agent.graph.state import AgentState
+from phone_agent.graph.task_goal import build_task_goal_contract
 from phone_agent.graph.trace import JsonlTraceWriter
 from phone_agent.grounding.factory import DEFAULT_GROUNDING_PROVIDER_NAME
 
@@ -36,6 +37,9 @@ class AgentConfig:
     trace_dir: str = ".traces"
     trace_redact: bool = True
     trace_raw_model_response: bool = False
+    trace_request_messages: bool = False
+    trace_prompt_blocks: bool = False
+    trace_unredacted_prompt: bool = False
     trace_strict: bool = False
     context_mode: str = DEFAULT_CONTEXT_MODE
     prompt_version: str = PROMPT_VERSION
@@ -107,6 +111,8 @@ class RunResult:
     error_code: str | None = None
     recoverable: bool | None = None
     retry_policy: str | None = None
+    finish_validation_status: str | None = None
+    finish_validation_evidence: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize the result to a JSON-friendly dictionary."""
@@ -218,6 +224,7 @@ class PhoneAgent:
             context_strategy = "observe_only"
         return {
             "task": task,
+            "task_goal_contract": build_task_goal_contract(task).to_trace_payload(),
             "messages": [],
             "step_count": 0,
             "max_steps": self.agent_config.max_steps,
@@ -250,6 +257,10 @@ class PhoneAgent:
             "recoverable": None,
             "retry_policy": None,
             "action_result": None,
+            "pending_finish": False,
+            "finish_claim": None,
+            "finish_validation_status": None,
+            "finish_validation_evidence": None,
             "reflection": None,
             "action_succeeded": True,
             "reflection_verdict": None,
@@ -302,6 +313,7 @@ class PhoneAgent:
             trace_dir=self.agent_config.trace_dir,
             redact=self.agent_config.trace_redact,
             allow_raw_debug=self.agent_config.trace_raw_model_response,
+            allow_raw_request_debug=self.agent_config.trace_unredacted_prompt,
             strict=self.agent_config.trace_strict,
         )
 
@@ -321,6 +333,9 @@ class PhoneAgent:
                 "verbose": self.agent_config.verbose,
                 "trace_id": trace_id,
                 "trace_writer": trace_writer,
+                "trace_request_messages": self.agent_config.trace_request_messages,
+                "trace_prompt_blocks": self.agent_config.trace_prompt_blocks,
+                "trace_unredacted_prompt": self.agent_config.trace_unredacted_prompt,
                 "context_mode": self.agent_config.context_mode,
                 "prompt_version": self.agent_config.prompt_version,
                 "grounding_provider_name": self.agent_config.grounding_provider_name,
@@ -380,6 +395,8 @@ class PhoneAgent:
             error_code=state.get("error_code"),
             recoverable=state.get("recoverable"),
             retry_policy=state.get("retry_policy"),
+            finish_validation_status=state.get("finish_validation_status"),
+            finish_validation_evidence=state.get("finish_validation_evidence"),
             **context_metrics,
         )
 

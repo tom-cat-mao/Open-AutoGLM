@@ -52,6 +52,7 @@ EXPECTED_OUTCOME_FIELDS = {
     "container_lineage_hash",
     "list_lineage_hash",
     "expected_page_type",
+    "expected_rank",
 }
 EXPECTED_OBJECT_FIELDS = {
     "selected_object_id_hash",
@@ -62,6 +63,7 @@ EXPECTED_OBJECT_FIELDS = {
     "container_lineage_hash",
     "list_lineage_hash",
     "expected_page_type",
+    "expected_rank",
 }
 MAX_LIST_ITEMS = 12
 MAX_TEXT_CHARS = 160
@@ -86,6 +88,7 @@ class ExpectedOutcome:
     container_lineage_hash: str | None = None
     list_lineage_hash: str | None = None
     expected_page_type: str | None = None
+    expected_rank: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to a JSON-friendly dictionary."""
@@ -135,7 +138,7 @@ def normalize_expected_outcome(
     default = default_expected_outcome(action=action, intent=intent)
     selected_fields = _normalize_selected_object_fields(selected_object_evidence or {})
     if selected_fields:
-        default = ExpectedOutcome(**{**default.to_dict(), **selected_fields})
+        default = _default_with_selected_object(default, selected_fields)
     if not isinstance(raw, dict):
         return default
     unsupported = set(raw) - EXPECTED_OUTCOME_FIELDS
@@ -269,8 +272,24 @@ def default_expected_outcome(
     return ExpectedOutcome()
 
 
-def _normalize_selected_object_fields(raw: dict[str, Any]) -> dict[str, str | None]:
-    result: dict[str, str | None] = {}
+def _default_with_selected_object(
+    default: ExpectedOutcome,
+    selected_fields: dict[str, str | None],
+) -> ExpectedOutcome:
+    kind = default.kind
+    expected_page_type = selected_fields.get("expected_page_type")
+    object_type = selected_fields.get("object_type")
+    if expected_page_type == "input_focused" or object_type in {"input", "search", "textfield"}:
+        kind = "input_focused"
+    elif object_type in {"video", "card", "result", "item", "visual_card", "visual_target"}:
+        kind = "page_opened"
+    elif kind == "generic" and expected_page_type:
+        kind = "target_appeared"
+    return ExpectedOutcome(**{**default.to_dict(), "kind": kind, **selected_fields})
+
+
+def _normalize_selected_object_fields(raw: dict[str, Any]) -> dict[str, str | int | None]:
+    result: dict[str, str | int | None] = {}
     for key in EXPECTED_OBJECT_FIELDS:
         normalized = _normalize_expected_object_value(key, raw.get(key))
         if normalized is not None:
@@ -278,8 +297,15 @@ def _normalize_selected_object_fields(raw: dict[str, Any]) -> dict[str, str | No
     return result
 
 
-def _normalize_expected_object_value(key: str, value: Any) -> str | None:
+def _normalize_expected_object_value(key: str, value: Any) -> str | int | None:
     if value is None:
+        return None
+    if key == "expected_rank":
+        if isinstance(value, int) and not isinstance(value, bool) and 1 <= value <= 100:
+            return value
+        if isinstance(value, str) and value.isdigit():
+            rank = int(value)
+            return rank if 1 <= rank <= 100 else None
         return None
     if not isinstance(value, str):
         return None

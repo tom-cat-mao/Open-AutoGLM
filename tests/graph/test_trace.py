@@ -67,6 +67,23 @@ def test_sanitize_raw_model_response_requires_unredacted_trace() -> None:
     assert unredacted["parse_metadata"]["raw_model_response"] == "not json 13800138000"
 
 
+def test_sanitize_request_messages_requires_unredacted_prompt_trace() -> None:
+    payload = {
+        "request_messages": [
+            {"role": "user", "content": [{"type": "text", "text": "打开 13800138000"}]}
+        ],
+        "prompt_blocks": {"task": "打开 13800138000"},
+    }
+
+    redacted = sanitize_for_trace(payload)
+    unredacted = sanitize_for_trace(payload, allow_raw_request_debug=True)
+
+    assert redacted["request_messages"] == "<redacted>"
+    assert redacted["prompt_blocks"] == "<redacted>"
+    assert unredacted["request_messages"][0]["content"][0]["text"] == "打开 13800138000"
+    assert unredacted["prompt_blocks"]["task"] == "打开 13800138000"
+
+
 def test_sanitize_keeps_context_metrics_but_not_raw_context_block() -> None:
     payload = {
         "prompt_version": "context_harness_v1",
@@ -128,3 +145,45 @@ def test_execute_trace_records_confirm_interrupt(base_state, tmp_path) -> None:
     confirm_record = next(item for item in records if item["event"] == "confirm_interrupt")
     payload = confirm_record["payload"]
     assert payload["interrupt_message"]["redacted"] is True
+
+
+def test_unredacted_prompt_debug_still_strips_image_payload(base_state, fake_device, tmp_path) -> None:
+    from phone_agent.graph.nodes.plan import plan_node
+    from phone_agent.graph.trace import JsonlTraceWriter
+
+    class FakeModelResponse:
+        def __init__(self, thinking: str, action: str) -> None:
+            self.thinking = thinking
+            self.action = action
+            self.parse_metadata = None
+
+    class FakeModelClient:
+        def __init__(self, response: FakeModelResponse) -> None:
+            self.response = response
+
+        def request(self, messages, **kwargs):
+            return self.response
+
+    writer = JsonlTraceWriter(
+        trace_id="prompt-image-strip",
+        trace_dir=tmp_path,
+        allow_raw_request_debug=True,
+    )
+    model = FakeModelClient(FakeModelResponse("think", '{"type":"do","action":"Wait","duration":"1 seconds"}'))
+
+    plan_node(
+        base_state,
+        {
+            "configurable": {
+                "model_client": model,
+                "device_factory": fake_device,
+                "trace_writer": writer,
+                "trace_request_messages": True,
+                "trace_unredacted_prompt": True,
+            }
+        },
+    )
+
+    records = [json.loads(line) for line in writer.path.read_text(encoding="utf-8").splitlines()]
+    payload = next(item["payload"] for item in records if item["event"] == "plan_prompt_debug")
+    assert "image_url" not in json.dumps(payload["request_messages"])

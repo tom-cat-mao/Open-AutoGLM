@@ -94,6 +94,7 @@ def fake_device() -> FakeDeviceFactory:
 def base_state() -> dict[str, Any]:
     return {
         "task": "测试任务",
+        "task_goal_contract": None,
         "messages": [
             {
                 "role": "user",
@@ -138,6 +139,10 @@ def base_state() -> dict[str, Any]:
         "selected_grounding_candidate_id": None,
         "expected_outcome": None,
         "action_result": None,
+        "pending_finish": False,
+        "finish_claim": None,
+        "finish_validation_status": None,
+        "finish_validation_evidence": None,
         "reflection": None,
         "action_succeeded": True,
         "reflection_verdict": None,

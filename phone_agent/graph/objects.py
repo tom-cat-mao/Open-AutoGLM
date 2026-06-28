@@ -687,6 +687,7 @@ def object_selected_evidence(obj: ScreenObject | None) -> dict[str, Any] | None:
         "container_lineage_hash": obj.lineage_hash,
         "list_lineage_hash": _hash_text(obj.list_id),
         "expected_page_type": _expected_page_type(obj.object_type),
+        "expected_rank": obj.ordinal_index,
     }
 
 

@@ -75,6 +75,8 @@ def test_run_result_defaults_and_serialization() -> None:
         "error_code": None,
         "recoverable": None,
         "retry_policy": None,
+        "finish_validation_status": None,
+        "finish_validation_evidence": None,
     }
 
 
@@ -108,6 +110,8 @@ def test_run_structured_returns_metrics_and_keeps_config(monkeypatch) -> None:
         "approx_tokens_after": 200,
         "failure_memory_hit_count": 1,
         "repeated_failure_count": 1,
+        "finish_validation_status": "success",
+        "finish_validation_evidence": {"status": "success"},
     }
     agent = make_agent(final_state)
     monkeypatch.setattr(
@@ -137,6 +141,8 @@ def test_run_structured_returns_metrics_and_keeps_config(monkeypatch) -> None:
     assert result.message_chars_after == 800
     assert result.failure_memory_hit_count == 1
     assert result.repeated_failure_count == 1
+    assert result.finish_validation_status == "success"
+    assert result.finish_validation_evidence == {"status": "success"}
     assert agent._graph.initial_state["hitl_count"] == 0
     assert agent._graph.initial_state["context_mode"] == "inject"
     assert agent._graph.config["configurable"]["trace_id"] == result.trace_id

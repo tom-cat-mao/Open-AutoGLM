@@ -41,6 +41,7 @@ class AgentState(TypedDict):
 
     # === 任务 ===
     task: str  # 用户原始任务
+    task_goal_contract: Optional[dict]  # trace-safe durable task goal contract
     step_count: int  # 当前步数
     max_steps: int  # 最大步数
     lang: str  # 语言
@@ -88,6 +89,10 @@ class AgentState(TypedDict):
 
     # === Execute 节点输出 ===
     action_result: Optional[dict]  # ActionResult 序列化为 dict
+    pending_finish: bool  # finish claim pending reflect validation
+    finish_claim: Optional[dict]  # trace-safe finish claim summary
+    finish_validation_status: Optional[str]  # pending / success / failure / unknown
+    finish_validation_evidence: Optional[dict]  # trace-safe final goal evidence
 
     # === Reflect 节点输出 ===
     reflection: Optional[str]  # 反思结论

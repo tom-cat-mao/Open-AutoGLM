@@ -1664,6 +1664,7 @@ def test_reflect_node_selected_object_hash_matches_detail_page(base_state, fake_
         "object_evidence_hash": "5d0fe1cbd1c0",
         "title_hash": "5d0fe1cbd1c0",
         "expected_page_type": "detail_or_player",
+        "expected_rank": 1,
     }
     model = FakeModelClient(
         FakeModelResponse("ok", '{"verdict":"failed","failure_cause":"wrong_page","suggested_strategy":"retry","message":"model missed"}')
@@ -1704,6 +1705,7 @@ def test_reflect_node_selected_object_detects_wrong_detail(base_state, fake_devi
         "object_evidence_hash": "5d0fe1cbd1c0",
         "title_hash": "5d0fe1cbd1c0",
         "expected_page_type": "detail_or_player",
+        "expected_rank": 1,
     }
     model = FakeModelClient(
         FakeModelResponse("ok", '{"verdict":"succeeded","failure_cause":"none","suggested_strategy":"continue","message":"ok"}')
@@ -1744,6 +1746,7 @@ def test_reflect_node_selected_object_detects_still_on_feed(base_state, fake_dev
         "object_evidence_hash": "5d0fe1cbd1c0",
         "title_hash": "5d0fe1cbd1c0",
         "expected_page_type": "detail_or_player",
+        "expected_rank": 1,
     }
     model = FakeModelClient(
         FakeModelResponse("ok", '{"verdict":"succeeded","failure_cause":"none","suggested_strategy":"continue","message":"ok"}')
@@ -1784,6 +1787,7 @@ def test_reflect_node_selected_object_feed_terms_win_over_generic_player_terms(b
         "object_evidence_hash": "5d0fe1cbd1c0",
         "title_hash": "5d0fe1cbd1c0",
         "expected_page_type": "detail_or_player",
+        "expected_rank": 1,
     }
     model = FakeModelClient(
         FakeModelResponse("ok", '{"verdict":"succeeded","failure_cause":"none","suggested_strategy":"continue","message":"ok"}')
@@ -2495,6 +2499,38 @@ def test_plan_node_inject_mode_adds_bounded_context(base_state, fake_device) -> 
     assert "screen_belief" in result["selected_sections"]
 
 
+def test_plan_node_can_trace_unredacted_prompt_debug(base_state, fake_device, tmp_path) -> None:
+    from phone_agent.graph.trace import JsonlTraceWriter
+
+    writer = JsonlTraceWriter(
+        trace_id="prompt-debug",
+        trace_dir=tmp_path,
+        allow_raw_request_debug=True,
+    )
+    model = FakeModelClient(FakeModelResponse("think", '{"type":"do","action":"Wait","duration":"1 seconds"}'))
+
+    plan_node(
+        base_state,
+        {
+            "configurable": {
+                "model_client": model,
+                "device_factory": fake_device,
+                "trace_writer": writer,
+                "trace_request_messages": True,
+                "trace_prompt_blocks": True,
+                "trace_unredacted_prompt": True,
+            }
+        },
+    )
+
+    records = [json.loads(line) for line in writer.path.read_text(encoding="utf-8").splitlines()]
+    prompt_debug = next(item for item in records if item["event"] == "plan_prompt_debug")
+    payload = prompt_debug["payload"]
+    assert payload["request_messages"][-1]["content"][-1]["text"]
+    assert payload["prompt_blocks"]["task"] == base_state["task"]
+    assert payload["prompt_block_chars"]["marks_block"] >= 0
+
+
 def test_plan_node_inject_mode_redacts_sensitive_context(base_state, fake_device) -> None:
     base_state["context_mode"] = "inject"
     base_state["screen_belief"] = {"summary": "允许存储权限", "visible_text": "13800138000"}
@@ -2652,3 +2688,227 @@ def test_custom_system_prompt_skips_app_registry(base_state, fake_device) -> Non
 
     system_msg = result["messages"][0]
     assert system_msg["content"] == "custom prompt"
+
+
+def test_plan_node_injects_task_goal_after_message_compaction(base_state, fake_device) -> None:
+    base_state["task"] = "去b站看逗比的雀巢的第二个视频"
+    base_state["step_count"] = 3
+    base_state["messages"] = [
+        {"role": "system", "content": "sys"},
+        *[
+            {"role": "assistant" if index % 2 else "user", "content": f"history-{index}"}
+            for index in range(10)
+        ],
+    ]
+    model = FakeModelClient(FakeModelResponse("think", '{"type":"do","action":"Wait","duration":"1 seconds"}'))
+
+    result = plan_node(
+        base_state,
+        {"configurable": {"model_client": model, "device_factory": fake_device, "context_mode": "inject"}},
+    )
+
+    text = model.messages[-1]["content"][-1]["text"]
+    assert "任务目标契约" in text
+    assert "open_or_watch_ranked_content" in text
+    assert "ordinal=2" in text
+    assert result["task_goal_contract"]["goal_type"] == "open_or_watch_ranked_content"
+
+
+def test_reflect_node_rejects_pending_finish_without_final_goal_evidence(base_state, fake_device) -> None:
+    base_state["task"] = "去b站看逗比的雀巢的第二个视频"
+    base_state["action_parsed"] = {"_metadata": "finish", "message": "已搜索到UP主"}
+    base_state["action_result"] = {"success": True, "should_finish": False, "message": "已搜索到UP主"}
+    base_state["pending_finish"] = True
+    model = FakeModelClient(FakeModelResponse("unused", '{"verdict":"succeeded","failure_cause":"none","suggested_strategy":"finish","message":"done"}'))
+
+    result = reflect_node(
+        base_state,
+        {
+            "configurable": {
+                "model_client": model,
+                "device_factory": fake_device,
+                "verbose": False,
+                "after_screen_marks": [
+                    {"mark_id": "tab", "bbox": [0, 0, 1000, 100], "role": "TextView", "text_summary": "搜索结果 综合 视频"},
+                    {"mark_id": "up", "bbox": [50, 200, 900, 260], "role": "TextView", "text_summary": "UP主"},
+                ],
+                "grounding_provider_name": "off",
+            }
+        },
+    )
+
+    assert result["finished"] is False
+    assert result["pending_finish"] is False
+    assert result["finish_validation_status"] in {"failure", "unknown"}
+    assert result["failure_cause"] == "goal_not_satisfied"
+    assert result["suggested_strategy"] == "continue"
+
+
+def test_reflect_node_accepts_pending_finish_with_final_goal_evidence(base_state, fake_device) -> None:
+    base_state["task"] = "去b站看逗比的雀巢的第二个视频"
+    base_state["action_parsed"] = {"_metadata": "finish", "message": "已打开第二个视频"}
+    base_state["action_result"] = {"success": True, "should_finish": False, "message": "已打开第二个视频"}
+    base_state["pending_finish"] = True
+    base_state["expected_outcome"] = {
+        "kind": "generic",
+        "must_observe": [],
+        "must_not_observe": [],
+        "target_mark_id": "m1",
+        "target_text_hint": None,
+        "timeout_hint": None,
+        "dynamic_regions": [],
+        "object_type": "video",
+        "object_evidence_hash": "5d0fe1cbd1c0",
+        "title_hash": "5d0fe1cbd1c0",
+        "expected_page_type": "detail_or_player",
+        "expected_rank": 2,
+    }
+    model = FakeModelClient(FakeModelResponse("unused", '{"verdict":"failed","failure_cause":"unknown","suggested_strategy":"retry","message":"miss"}'))
+
+    result = reflect_node(
+        base_state,
+        {
+            "configurable": {
+                "model_client": model,
+                "device_factory": fake_device,
+                "verbose": False,
+                "after_screen_marks": [
+                    {"mark_id": "title", "bbox": [50, 100, 900, 180], "role": "TextView", "text_summary": "视频标题一"},
+                    {"mark_id": "player", "bbox": [0, 200, 1000, 800], "role": "Button", "text_summary": "播放器 暂停 弹幕 评论"},
+                ],
+                "grounding_provider_name": "off",
+            }
+        },
+    )
+
+    assert result["finished"] is True
+    assert result["finish_validation_status"] == "success"
+    assert result["failure_cause"] is None
+
+
+
+def test_expected_outcome_selected_video_object_defaults_to_page_opened(base_state, fake_device) -> None:
+    class DeviceWithVideoObject:
+        def __init__(self, delegate):
+            self.delegate = delegate
+
+        def get_screenshot(self, device_id=None):
+            return self.delegate.get_screenshot(device_id)
+
+        def get_current_app(self, device_id=None):
+            return self.delegate.get_current_app(device_id)
+
+        @property
+        def module(self):
+            class Module:
+                @staticmethod
+                def dump_uiautomator_xml(device_id=None, timeout=None):
+                    return """<hierarchy>
+                      <node text="" class="android.widget.FrameLayout" enabled="true" bounds="[0,0][1000,2000]">
+                        <node text="" class="androidx.recyclerview.widget.RecyclerView" scrollable="true" enabled="true" bounds="[0,200][1000,1800]">
+                          <node text="视频标题一" class="android.widget.TextView" clickable="true" enabled="true" bounds="[20,260][980,420]" />
+                          <node text="视频标题二" class="android.widget.TextView" clickable="true" enabled="true" bounds="[20,460][980,620]" />
+                        </node>
+                      </node>
+                    </hierarchy>"""
+
+            return Module
+
+    model = FakeModelClient(FakeModelResponse("", '{"type":"intent","action":"tap","object_role":"video","ordinal":1}'))
+    base_state["task"] = "打开第一个视频"
+
+    result = plan_node(
+        base_state,
+        {
+            "configurable": {
+                "model_client": model,
+                "device_factory": DeviceWithVideoObject(fake_device),
+                "output_mode": "json_schema",
+                "grounding_provider_name": "hybrid",
+                "verbose": False,
+            }
+        },
+    )
+
+    assert result["expected_outcome"]["kind"] == "page_opened"
+    assert result["expected_outcome"]["object_type"] == "video"
+    assert result["expected_outcome"]["expected_page_type"] == "detail_or_player"
+
+
+def test_reflect_node_generic_pending_finish_can_use_model_evidence(base_state, fake_device) -> None:
+    base_state["task"] = "完成普通页面任务"
+    base_state["action_parsed"] = {"_metadata": "finish", "message": "已完成"}
+    base_state["action_result"] = {"success": True, "should_finish": False, "message": "已完成"}
+    base_state["pending_finish"] = True
+    model = FakeModelClient(
+        FakeModelResponse(
+            "ok",
+            '{"action_effect":"succeeded","task_progress":"finished",'
+            '"matched_postconditions":["done"],"missing_postconditions":[], '
+            '"dynamic_change_only":false,"evidence":"完成标识可见","next_strategy":"finish"}',
+        )
+    )
+
+    result = reflect_node(
+        base_state,
+        {
+            "configurable": {
+                "model_client": model,
+                "device_factory": fake_device,
+                "verbose": False,
+                "after_screen_marks": [
+                    {"mark_id": "done", "bbox": [50, 60, 950, 160], "role": "TextView", "text_summary": "已完成"}
+                ],
+                "grounding_provider_name": "off",
+            }
+        },
+    )
+
+    assert "任务目标契约" in model.messages[-1]["content"][-1]["text"]
+    assert result["finished"] is True
+    assert result["finish_validation_status"] == "success"
+    assert "model_reflection_evidence" in result["finish_validation_evidence"]["matched_terminal_evidence"]
+
+
+def test_reflect_node_rejects_ranked_finish_without_expected_rank_match(base_state, fake_device) -> None:
+    base_state["task"] = "去b站看逗比的雀巢的第二个视频"
+    base_state["action_parsed"] = {"_metadata": "finish", "message": "已打开视频"}
+    base_state["action_result"] = {"success": True, "should_finish": False, "message": "已打开视频"}
+    base_state["pending_finish"] = True
+    base_state["expected_outcome"] = {
+        "kind": "generic",
+        "must_observe": [],
+        "must_not_observe": [],
+        "target_mark_id": "m1",
+        "target_text_hint": None,
+        "timeout_hint": None,
+        "dynamic_regions": [],
+        "object_type": "video",
+        "object_evidence_hash": "5d0fe1cbd1c0",
+        "title_hash": "5d0fe1cbd1c0",
+        "expected_page_type": "detail_or_player",
+        "expected_rank": 1,
+    }
+    model = FakeModelClient(FakeModelResponse("unused", '{"verdict":"succeeded","failure_cause":"none","suggested_strategy":"finish","message":"done"}'))
+
+    result = reflect_node(
+        base_state,
+        {
+            "configurable": {
+                "model_client": model,
+                "device_factory": fake_device,
+                "verbose": False,
+                "after_screen_marks": [
+                    {"mark_id": "title", "bbox": [50, 100, 900, 180], "role": "TextView", "text_summary": "视频标题一"},
+                    {"mark_id": "player", "bbox": [0, 200, 1000, 800], "role": "Button", "text_summary": "播放器 暂停 弹幕 评论"},
+                ],
+                "grounding_provider_name": "off",
+            }
+        },
+    )
+
+    assert result["finished"] is False
+    assert result["finish_validation_status"] in {"failure", "unknown"}
+    assert "selected_rank=2" in result["finish_validation_evidence"]["missing_terminal_evidence"]
+    assert result["verifier_evidence"]["selected_object_signals"]["selected_object_match"] is True
+    assert "selected_rank_match" not in result["verifier_evidence"]["selected_object_signals"]

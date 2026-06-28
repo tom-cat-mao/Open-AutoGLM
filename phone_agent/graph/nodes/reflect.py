@@ -27,6 +27,12 @@ from phone_agent.graph.screenshot_status import (
     screenshot_failure_message,
     screenshot_is_sensitive,
 )
+from phone_agent.graph.task_goal import (
+    ensure_task_goal_contract,
+    task_goal_prompt_block,
+    task_goal_trace_payload,
+    validate_finish_claim,
+)
 from phone_agent.graph.trace import emit_trace
 from phone_agent.graph.verifier import merge_verifier_with_reflection, verify_action_outcome
 from phone_agent.grounding.factory import build_mark_providers
@@ -486,6 +492,53 @@ def _sanitize_verifier_result_dict(verifier_result, *, task_context: str | None 
     return data
 
 
+def _maybe_emit_reflect_prompt_debug(
+    config: RunnableConfig,
+    state: "AgentState",
+    *,
+    reflect_messages: list[dict],
+    reflect_text: str,
+    expected_outcome_text: str,
+    verifier_signals: str,
+    before_summary: str,
+    after_summary: str,
+    screen_info: str,
+) -> None:
+    """Emit opt-in reflect request debug traces for local diagnosis."""
+
+    configurable = config.get("configurable", {}) if config else {}
+    reflect_debug_messages = _strip_images_for_reflect_prompt_debug(reflect_messages)
+    payload: dict[str, object] = {
+        "request_message_count": len(reflect_messages),
+        "request_message_roles": [message.get("role") for message in reflect_messages],
+        "prompt_block_chars": {
+            "reflect_text": len(reflect_text or ""),
+            "expected_outcome_text": len(expected_outcome_text or ""),
+            "verifier_signals": len(verifier_signals or ""),
+            "before_summary": len(before_summary or ""),
+            "after_summary": len(after_summary or ""),
+            "screen_info": len(screen_info or ""),
+        },
+    }
+    if configurable.get("trace_request_messages"):
+        payload["request_messages"] = reflect_debug_messages
+    if configurable.get("trace_prompt_blocks"):
+        payload["prompt_blocks"] = {
+            "reflect_text": reflect_text,
+            "expected_outcome_text": expected_outcome_text,
+            "verifier_signals": verifier_signals,
+            "before_summary": before_summary,
+            "after_summary": after_summary,
+            "screen_info": screen_info,
+        }
+    if "request_messages" in payload or "prompt_blocks" in payload:
+        emit_trace(config, state, "reflect", "reflect_prompt_debug", payload)
+
+
+def _strip_images_for_reflect_prompt_debug(messages: list[dict]) -> list[dict]:
+    return [MessageBuilder.remove_images_from_message(dict(message)) for message in messages]
+
+
 def _takeover_threshold(config: RunnableConfig) -> int:
     configurable = config.get("configurable", {})
     try:
@@ -570,6 +623,22 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
         before_observation=before_verifier_observation,
         after_observation=after_verifier_observation,
     )
+    pending_finish = bool(state.get("pending_finish")) or (
+        isinstance(action_parsed, dict) and action_parsed.get("_metadata") == "finish"
+    )
+    task_goal_contract = ensure_task_goal_contract(state)
+    finish_validation = None
+    if pending_finish:
+        finish_claim_message = None
+        if isinstance(action_parsed, dict):
+            finish_claim_message = action_parsed.get("message")
+        finish_validation = validate_finish_claim(
+            contract=task_goal_contract,
+            verifier_status=verifier_result.status,
+            verifier_evidence=verifier_result.evidence,
+            after_observation=after_verifier_observation,
+            finish_claim=finish_claim_message if isinstance(finish_claim_message, str) else None,
+        )
     verifier_result_dict = _sanitize_verifier_result_dict(
         verifier_result,
         task_context=task,
@@ -603,10 +672,31 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
                 task_context=task,
             ),
             "verifier_result": verifier_result_dict,
+            "task_goal_contract": task_goal_trace_payload(state),
+            "finish_validation": finish_validation,
         },
     )
 
-    deterministic_reflection = _reflection_from_verifier(verifier_result)
+    deterministic_reflection = None
+    if pending_finish and finish_validation is not None:
+        if finish_validation.get("status") == "success":
+            deterministic_reflection = ReflectionResult(
+                "succeeded",
+                None,
+                "finish",
+                "finish claim validated by task goal contract",
+                True,
+            )
+        elif finish_validation.get("status") == "failure" or task_goal_contract.goal_type != "generic_task":
+            deterministic_reflection = ReflectionResult(
+                "failed",
+                "goal_not_satisfied",
+                "continue",
+                "finish claim rejected: final goal evidence missing",
+                True,
+            )
+    else:
+        deterministic_reflection = _reflection_from_verifier(verifier_result)
 
     # 2. Build reflection prompt with language selection
     if lang == "en":
@@ -625,6 +715,10 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
         lang=lang,
         task_context=task,
     )
+    task_goal_text = task_goal_prompt_block(
+        {"task": task, "task_goal_contract": task_goal_contract.to_trace_payload()},
+        lang=lang,
+    )
     if deterministic_reflection is None:
         verifier_signals = str(
             _sanitize_verifier_result_dict(verifier_result, task_context=task)
@@ -636,6 +730,7 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
             reflect_text = (
                 f"Original task: {task_for_prompt}\n"
                 f"Current step: {step_count} / {max_steps}\n"
+                f"{task_goal_text}\n"
                 f"Action just executed: {action_str}\n"
                 f"Execution result: {result_str}\n"
                 f"{expected_outcome_text}\n"
@@ -650,6 +745,7 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
             reflect_text = (
                 f"原始任务：{task_for_prompt}\n"
                 f"当前步数：{step_count} / {max_steps}\n"
+                f"{task_goal_text}\n"
                 f"刚执行的动作：{action_str}\n"
                 f"执行结果：{result_str}\n"
                 f"{expected_outcome_text}\n"
@@ -669,6 +765,17 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
                 image_mime_type=getattr(screenshot, "mime_type", "image/png"),
             ),
         ]
+        _maybe_emit_reflect_prompt_debug(
+            config,
+            state,
+            reflect_messages=reflect_messages,
+            reflect_text=reflect_text,
+            expected_outcome_text=expected_outcome_text,
+            verifier_signals=verifier_signals,
+            before_summary=before_summary,
+            after_summary=after_summary,
+            screen_info=screen_info,
+        )
 
         try:
             try:
@@ -751,6 +858,27 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
         }
     if verifier_result.hard_failure or final_verdict != "succeeded":
         task_finished = False
+    if (
+        pending_finish
+        and finish_validation is not None
+        and finish_validation.get("status") == "unknown"
+        and task_goal_contract.goal_type == "generic_task"
+        and task_finished
+        and parsed_reflection.has_evidence
+        and final_verdict == "succeeded"
+    ):
+        finish_validation = {
+            **finish_validation,
+            "status": "success",
+            "matched_terminal_evidence": list(finish_validation.get("matched_terminal_evidence") or [])
+            + ["model_reflection_evidence"],
+            "missing_terminal_evidence": [],
+        }
+    if pending_finish and finish_validation is not None and finish_validation.get("status") != "success":
+        task_finished = False
+        final_verdict = "failed"
+        final_failure_cause = "goal_not_satisfied"
+        parsed_reflection.suggested_strategy = "continue"
 
     context_updates = {"context_mode": context_mode}
     if context_enabled(context_mode):
@@ -838,6 +966,10 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
             "verifier_status": verifier_result.status,
             "verifier_failure_cause": verifier_result.failure_cause,
             "verifier_evidence": verifier_evidence,
+            "task_goal_contract": task_goal_trace_payload(state),
+            "pending_finish": pending_finish,
+            "finish_validation_status": finish_validation.get("status") if finish_validation else None,
+            "finish_validation_evidence": finish_validation,
             "context_mode": context_mode,
             "context_truncated": context_updates.get("context_truncated", False),
             "failure_memory_hit_count": context_updates.get("failure_memory_hit_count", 0),
@@ -861,6 +993,10 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
         "verifier_status": verifier_result.status,
         "verifier_failure_cause": verifier_result.failure_cause,
         "verifier_evidence": verifier_evidence,
+        "pending_finish": False,
+        "finish_validation_status": finish_validation.get("status") if finish_validation else None,
+        "finish_validation_evidence": finish_validation,
+        "task_goal_contract": task_goal_trace_payload(state),
         "retry_count": retry_count,
         "finished": task_finished,
         **takeover_update,

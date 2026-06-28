@@ -32,6 +32,10 @@ from phone_agent.graph.screenshot_status import (
     screenshot_failure_message,
     screenshot_is_sensitive,
 )
+from phone_agent.graph.task_goal import (
+    ensure_task_goal_contract,
+    task_goal_prompt_block,
+)
 from phone_agent.graph.trace import emit_trace
 from phone_agent.grounding.factory import build_mark_providers
 from phone_agent.grounding.provider import ScreenBinding
@@ -158,6 +162,56 @@ def _build_parse_retry_messages(messages: list[dict], parse_error: str) -> list[
         f"Error class: {parse_error.split(':', 1)[0]}"
     )
     return list(messages) + [MessageBuilder.create_user_message(text=retry_text)]
+
+
+def _maybe_emit_plan_prompt_debug(
+    config: RunnableConfig,
+    state: "AgentState",
+    *,
+    request_messages: list[dict],
+    task: str,
+    task_goal_block: str,
+    screen_info: str,
+    objects_block: str,
+    marks_block: str,
+    context_block: str,
+    reflection_context: str = "",
+) -> None:
+    """Emit opt-in prompt/request debug traces for local diagnosis."""
+
+    configurable = config.get("configurable", {}) if config else {}
+    request_debug_messages = _strip_images_for_prompt_debug(request_messages)
+    payload: dict[str, Any] = {
+        "request_message_count": len(request_messages),
+        "request_message_roles": [message.get("role") for message in request_messages],
+        "prompt_block_chars": {
+            "task": len(task or ""),
+            "task_goal_block": len(task_goal_block or ""),
+            "screen_info": len(screen_info or ""),
+            "reflection_context": len(reflection_context or ""),
+            "objects_block": len(objects_block or ""),
+            "marks_block": len(marks_block or ""),
+            "context_block": len(context_block or ""),
+        },
+    }
+    if configurable.get("trace_request_messages"):
+        payload["request_messages"] = request_debug_messages
+    if configurable.get("trace_prompt_blocks"):
+        payload["prompt_blocks"] = {
+            "task": task,
+            "task_goal_block": task_goal_block,
+            "screen_info": screen_info,
+            "reflection_context": reflection_context,
+            "objects_block": objects_block,
+            "marks_block": marks_block,
+            "context_block": context_block,
+        }
+    if "request_messages" in payload or "prompt_blocks" in payload:
+        emit_trace(config, state, "plan", "plan_prompt_debug", payload)
+
+
+def _strip_images_for_prompt_debug(messages: list[dict]) -> list[dict]:
+    return [MessageBuilder.remove_images_from_message(dict(message)) for message in messages]
 
 
 GROUNDING_ERROR_CODES = {
@@ -489,6 +543,12 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
 
     step_count = state["step_count"]
     task = state["task"]
+    task_goal_contract = ensure_task_goal_contract(state)
+    task_goal_trace = task_goal_contract.to_trace_payload()
+    task_goal_block = task_goal_prompt_block(
+        {"task": task, "task_goal_contract": task_goal_trace},
+        lang=lang,
+    )
     messages = list(state["messages"])  # copy
 
     # 1. Capture screen
@@ -655,6 +715,9 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
         "plan_start",
         {
             "task": task,
+            "task_goal_contract": task_goal_trace,
+            "task_goal_injected": True,
+            "task_goal_block_chars": len(task_goal_block),
             "current_app": current_app,
             "mark_provider_observation": observation.mark_provider_observation,
             **context_metrics,
@@ -663,6 +726,9 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
 
     # 2. Build new messages (only the new ones, reducer will append)
     new_messages = []
+    reflection_context = ""
+    objects_block = ""
+    marks_block = ""
     if step_count == 0:
         custom_prompt = configurable.get("system_prompt")
         system_prompt = custom_prompt or get_system_prompt(
@@ -676,7 +742,7 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
         new_messages.append(MessageBuilder.create_system_message(system_prompt))
 
         screen_info = MessageBuilder.build_screen_info(current_app)
-        text_content = f"{task}\n\n{screen_info}"
+        text_content = f"{task}\n\n{task_goal_block}\n\n{screen_info}"
         objects_block = observation.object_registry.prompt_block(mark_registry=mark_registry, lang=lang) if observation.object_registry else ""
         if objects_block:
             text_content = f"{text_content}\n\n{objects_block}"
@@ -696,9 +762,9 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
         screen_info = MessageBuilder.build_screen_info(current_app)
         reflection_context = _build_reflection_context(state)
         if reflection_context:
-            text_content = f"** Screen Info **\n\n{screen_info}\n\n{reflection_context}"
+            text_content = f"{task_goal_block}\n\n** Screen Info **\n\n{screen_info}\n\n{reflection_context}"
         else:
-            text_content = f"** Screen Info **\n\n{screen_info}"
+            text_content = f"{task_goal_block}\n\n** Screen Info **\n\n{screen_info}"
         objects_block = observation.object_registry.prompt_block(mark_registry=mark_registry, lang=lang) if observation.object_registry else ""
         if objects_block:
             text_content = f"{text_content}\n\n{objects_block}"
@@ -719,6 +785,18 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
     full_messages = list(state["messages"]) + new_messages
     request_messages, context_selection = compact_messages_for_request(
         full_messages, context_selection
+    )
+    _maybe_emit_plan_prompt_debug(
+        config,
+        state,
+        request_messages=request_messages,
+        task=task,
+        task_goal_block=task_goal_block,
+        screen_info=screen_info,
+        reflection_context=reflection_context,
+        objects_block=objects_block,
+        marks_block=marks_block,
+        context_block=context_block,
     )
     context_metrics = context_selection.metrics()
     parse_retry_limit = int(configurable.get("parse_retry", 1) or 0)
@@ -1024,6 +1102,9 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
             "grounding_candidate_count": grounding_candidate_count,
             "selected_grounding_candidate_id": selected_grounding_candidate_id,
             "expected_outcome": expected_outcome_trace,
+            "task_goal_contract": task_goal_trace,
+            "task_goal_injected": True,
+            "task_goal_block_chars": len(task_goal_block),
             "mark_registry": mark_registry.trace_summary(),
             "screen_structure_summary": observation.mark_provider_observation.get("screen_structure_summary")
             or {"status": "missing_sidecar"},
@@ -1076,6 +1157,7 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
                 "grounding_candidate_count": grounding_candidate_count,
                 "selected_grounding_candidate_id": selected_grounding_candidate_id,
                 "expected_outcome": expected_outcome,
+                "task_goal_contract": task_goal_trace,
                 "failure_cause": "model_parse_failed",
                 **error_fields,
                 "parse_metadata": {
@@ -1117,6 +1199,7 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
             "grounding_candidate_count": grounding_candidate_count,
             "selected_grounding_candidate_id": selected_grounding_candidate_id,
             "expected_outcome": expected_outcome,
+            "task_goal_contract": task_goal_trace,
             "action_result": {
                 "success": False,
                 "should_finish": True,
@@ -1160,6 +1243,7 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
         "grounding_candidate_count": grounding_candidate_count,
         "selected_grounding_candidate_id": selected_grounding_candidate_id,
         "expected_outcome": expected_outcome,
+        "task_goal_contract": task_goal_trace,
         **error_fields,
         "action_confirmed": False,
         "context_mode": context_mode,

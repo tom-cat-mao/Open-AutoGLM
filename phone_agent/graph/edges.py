@@ -36,7 +36,8 @@ def after_execute(
     - "confirm" / "takeover" if a pending HITL interrupt is waiting to be
       dispatched (resume path only — terminal guard above prevents this
       from firing when the run is already done)
-    - "end" if action is finish or missing
+    - "reflect" if a finish claim is pending validation
+    - "end" if action is missing
     - "reflect" if action_confirmed (already dispatched on resume)
     - "takeover" if action is Take_over
     - "confirm" if action is Tap with message (sensitive operation)
@@ -62,6 +63,8 @@ def after_execute(
     action = state.get("action_parsed")
     if not action:
         return "end"
+    if state.get("pending_finish"):
+        return "reflect"
     if action.get("_metadata") == "finish":
         return "end"
 

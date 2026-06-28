@@ -148,18 +148,22 @@ SOURCE_RULES = [
             "verifier_unknown",
             "verifier_failure",
             "focused_editable_or_keyboard_visible",
+            "goal_not_satisfied",
+            "finish_validation_unknown",
+            "finish_validation_failure",
         },
         "layer": "reflection",
         "severity": "P2",
-        "title": "反思或后置条件验证不稳定",
+        "title": "反思、后置条件或最终目标验证不稳定",
         "files": [
+            "phone_agent/graph/task_goal.py",
             "phone_agent/graph/expected_outcome.py",
             "phone_agent/graph/nodes/reflect.py",
             "phone_agent/graph/verifier.py",
             "phone_agent/graph/context.py",
         ],
-        "suggestion": "检查 ExpectedOutcome、matched/missing postconditions、weak_signals 与模型反思合并优先级；动态区域变化不能单独证明成功。",
-        "verify": "运行搜索框点击、输入、视频打开和动态首页变化 case，对比 expected_outcome、verifier_evidence 与 reflection_verdict。",
+        "suggestion": "检查 TaskGoalContract、finish_validation、ExpectedOutcome、matched/missing postconditions、weak_signals 与模型反思合并优先级；动态区域变化不能单独证明成功。",
+        "verify": "运行搜索框点击、输入、视频打开和动态首页变化 case，对比 task_goal_contract、finish_validation、expected_outcome、verifier_evidence 与 reflection_verdict。",
     },
 ]
 
@@ -294,6 +298,24 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         default=parse_bool(os.getenv("PHONE_AGENT_TRACE_RAW_MODEL_RESPONSE"), False),
         help="Write raw model response text into local trace/report metadata for debugging",
+    )
+    parser.add_argument(
+        "--trace-request-messages",
+        action="store_true",
+        default=parse_bool(os.getenv("PHONE_AGENT_TRACE_REQUEST_MESSAGES"), False),
+        help="Write final model request messages into local trace/report metadata for debugging",
+    )
+    parser.add_argument(
+        "--trace-prompt-blocks",
+        action="store_true",
+        default=parse_bool(os.getenv("PHONE_AGENT_TRACE_PROMPT_BLOCKS"), False),
+        help="Write prompt construction blocks into local trace/report metadata for debugging",
+    )
+    parser.add_argument(
+        "--trace-unredacted-prompt",
+        action="store_true",
+        default=parse_bool(os.getenv("PHONE_AGENT_TRACE_UNREDACTED_PROMPT"), False),
+        help="Dangerous local debug mode: do not redact traced request messages or prompt blocks",
     )
     parser.add_argument("--lang", choices=["cn", "en"], default=os.getenv("PHONE_AGENT_LANG", "cn"))
     parser.add_argument("--output-dir", default=str(DEFAULT_OUTPUT_DIR))
@@ -493,6 +515,12 @@ def build_eval_command(args: argparse.Namespace, task_path: Path, trace_dir: Pat
     ]
     if args.trace_raw_model_response:
         cmd.append("--trace-raw-model-response")
+    if args.trace_request_messages:
+        cmd.append("--trace-request-messages")
+    if args.trace_prompt_blocks:
+        cmd.append("--trace-prompt-blocks")
+    if args.trace_unredacted_prompt:
+        cmd.append("--trace-unredacted-prompt")
     if args.stream:
         cmd.append("--stream")
     if args.model_extra_body:
@@ -515,6 +543,9 @@ def build_env(args: argparse.Namespace) -> dict[str, str]:
     env["PHONE_AGENT_THINKING_MODE"] = args.thinking_mode
     env["PHONE_AGENT_THINKING_PARAM"] = args.thinking_param
     env["PHONE_AGENT_TRACE_RAW_MODEL_RESPONSE"] = "true" if args.trace_raw_model_response else "false"
+    env["PHONE_AGENT_TRACE_REQUEST_MESSAGES"] = "true" if args.trace_request_messages else "false"
+    env["PHONE_AGENT_TRACE_PROMPT_BLOCKS"] = "true" if args.trace_prompt_blocks else "false"
+    env["PHONE_AGENT_TRACE_UNREDACTED_PROMPT"] = "true" if args.trace_unredacted_prompt else "false"
     if args.model_extra_body:
         env["PHONE_AGENT_MODEL_EXTRA_BODY"] = args.model_extra_body
     env["PHONE_AGENT_CONTEXT_MODE"] = args.context_mode
@@ -619,6 +650,7 @@ def latest_trace_status(trace_dir: Path) -> dict[str, Any]:
                     "failure_cause": payload.get("failure_cause"),
                     "reflection_verdict": payload.get("reflection_verdict"),
                     "suggested_strategy": payload.get("suggested_strategy"),
+                    "finish_validation_status": payload.get("finish_validation_status"),
                     "current_app": payload.get("current_app"),
                 }
     except Exception as exc:
@@ -710,6 +742,7 @@ def summarize_trace(events: list[dict[str, Any]]) -> dict[str, Any]:
     grounding = []
     verifier = []
     expected_outcomes = []
+    finish_validations = []
     fallback_chains = []
     timeline = []
     for event in events:
@@ -735,6 +768,8 @@ def summarize_trace(events: list[dict[str, Any]]) -> dict[str, Any]:
             fallback_chains.extend(extract_fallback_chains(payload))
         if payload.get("expected_outcome") or payload.get("parse_metadata", {}).get("expected_outcome_present"):
             expected_outcomes.append(compact)
+        if payload.get("finish_validation") or payload.get("finish_validation_status"):
+            finish_validations.append(compact)
         if (
             payload.get("verifier_result")
             or payload.get("verifier_status")
@@ -750,6 +785,7 @@ def summarize_trace(events: list[dict[str, Any]]) -> dict[str, Any]:
         "grounding": grounding[:50],
         "fallback_chains": fallback_chains[:50],
         "expected_outcomes": expected_outcomes[:50],
+        "finish_validations": finish_validations[:50],
         "verifier": verifier[:50],
         "timeline": timeline[:200],
     }
@@ -863,6 +899,9 @@ def collect_signals(record: dict[str, Any], trace_summary: dict[str, Any]) -> se
         value = record.get(key)
         if value:
             signals.add(str(value))
+    finish_status = record.get("finish_validation_status")
+    if finish_status:
+        signals.add(f"finish_validation_{finish_status}")
     verifier_status = record.get("verifier_status")
     if verifier_status:
         signals.add(f"verifier_{verifier_status}")
@@ -906,6 +945,13 @@ def collect_signals(record: dict[str, Any], trace_summary: dict[str, Any]) -> se
                     signals.add(str(item_value))
             if evidence.get("dynamic_change_only"):
                 signals.add("dynamic_change_only")
+        finish_validation = payload.get("finish_validation") or payload.get("finish_validation_evidence")
+        if isinstance(finish_validation, dict):
+            status = finish_validation.get("status")
+            if status:
+                signals.add(f"finish_validation_{status}")
+            for item_value in finish_validation.get("missing_terminal_evidence") or []:
+                signals.add(str(item_value))
     for item in trace_summary.get("grounding", []):
         payload = item.get("payload") or {}
         obs = payload.get("grounding_observation")
@@ -942,6 +988,7 @@ def build_recommendations(findings: list[dict[str, Any]], record: dict[str, Any]
                 "grounding_failure_code": record.get("grounding_failure_code"),
                 "verifier_status": record.get("verifier_status"),
                 "verifier_failure_cause": record.get("verifier_failure_cause"),
+                "finish_validation_status": record.get("finish_validation_status"),
             },
         })
     return recommendations
@@ -968,6 +1015,13 @@ def build_summary(
         "verdict": verdict,
         "run_dir": str(run_dir),
         "command": redact_command(command),
+        "dangerous_debug": {
+            "trace_raw_model_response": bool(args.trace_raw_model_response),
+            "trace_request_messages": bool(args.trace_request_messages),
+            "trace_prompt_blocks": bool(args.trace_prompt_blocks),
+            "trace_unredacted_prompt": bool(args.trace_unredacted_prompt),
+            "warning": "Prompt/request debug may include sensitive local UI text. Image payloads are stripped from prompt debug traces by default.",
+        },
         "preflight": preflight_summary(run_dir / "preflight.json"),
         "returncode": command_result.returncode,
         "duration_sec": round(command_result.duration, 3),
@@ -1117,6 +1171,15 @@ HTML_TEMPLATE = r"""<!doctype html>
     .badge.success { background: #DCFCE7; color: var(--success); border-color: #86EFAC; }
     .badge.failed { background: #FEE2E2; color: var(--failed); border-color: #FCA5A5; }
     .badge.blocked { background: #FEF3C7; color: var(--blocked); border-color: #FCD34D; }
+    .alert {
+      border-radius: 8px;
+      padding: 10px 12px;
+      margin: 0 0 12px;
+      font-weight: 700;
+      word-break: break-all;
+      overflow-wrap: break-word;
+    }
+    .alert.danger { background: #FEE2E2; color: var(--failed); border: 1px solid #FCA5A5; }
     .toolbar {
       display: flex;
       gap: 8px;
@@ -1288,6 +1351,7 @@ function renderOverview() {
   const r = summary.result || {};
   const artifacts = summary.artifacts || {};
   const preflight = summary.preflight || {};
+  const debug = summary.dangerous_debug || {};
   const latestExpected = (summary.trace_summary?.expected_outcomes || []).slice(-1)[0]?.payload?.expected_outcome || r.expected_outcome || {};
   const latestVerifier = r.verifier_evidence || (summary.trace_summary?.verifier || []).slice(-1)[0]?.payload?.verifier_evidence || {};
   const fallbackRows = summary.trace_summary?.fallback_chains || [];
@@ -1295,6 +1359,7 @@ function renderOverview() {
     <div class="grid-2">
       <div class="card">
         <h2>运行结论</h2>
+        ${debug.trace_unredacted_prompt ? '<div class="alert danger">危险调试已启用：trace-unredacted-prompt 会记录未脱敏 prompt 文本；截图 image_url 已从 prompt debug 中剥离。</div>' : ''}
         <table>
           <tr><th>字段</th><th>值</th></tr>
           ${row('目标', summary.target)}
@@ -1304,6 +1369,8 @@ function renderOverview() {
           ${row('错误码', r.error_code)}
           ${row('Verifier Status', r.verifier_status)}
           ${row('Verifier Cause', r.verifier_failure_cause)}
+          ${row('Finish Validation', r.finish_validation_status)}
+          ${row('Prompt Debug', debug.trace_unredacted_prompt ? 'UNREDACTED TEXT ENABLED' : 'redacted/default')}
           ${row('Trace ID', r.trace_id)}
           ${row('Trace Path', r.trace_path)}
           ${row('命令', (summary.command || []).join(' '))}

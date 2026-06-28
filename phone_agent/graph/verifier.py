@@ -570,6 +570,7 @@ def _selected_object_signals(expected: dict[str, Any], observation: dict[str, An
     object_evidence_hash = expected.get("object_evidence_hash")
     title_hash = expected.get("title_hash")
     expected_page_type = str(expected.get("expected_page_type") or "")
+    expected_rank = expected.get("expected_rank")
     if not any(isinstance(value, str) and value for value in (object_type, object_evidence_hash, title_hash, expected_page_type)):
         return {}
     hashes = [value for value in (object_evidence_hash, title_hash) if isinstance(value, str) and value]
@@ -579,6 +580,7 @@ def _selected_object_signals(expected: dict[str, Any], observation: dict[str, An
     any_detail = _contains_detail_or_player_signal(observation, text_blob, "detail_or_player")
     signals: dict[str, Any] = {
         "selected_object_expected_page_type": expected_page_type or None,
+        "selected_object_expected_rank": expected_rank if isinstance(expected_rank, int) else None,
         "selected_object_hash_match": hash_match,
         "selected_object_detail_signal": detail_signal,
     }

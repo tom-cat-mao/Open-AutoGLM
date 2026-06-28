@@ -26,6 +26,10 @@ Environment Variables:
     PHONE_AGENT_MAX_STEPS: Maximum steps per task (default: 100)
     PHONE_AGENT_DEVICE_ID: ADB device ID for multi-device setups
     PHONE_AGENT_CONTEXT_MODE: Context harness mode (off/observe/inject, default: inject)
+    PHONE_AGENT_TRACE_RAW_MODEL_RESPONSE: Trace raw model responses for local debugging
+    PHONE_AGENT_TRACE_REQUEST_MESSAGES: Trace final model request messages for local debugging
+    PHONE_AGENT_TRACE_PROMPT_BLOCKS: Trace prompt construction blocks for local debugging
+    PHONE_AGENT_TRACE_UNREDACTED_PROMPT: Dangerous local debug mode for unredacted prompt traces
     PHONE_AGENT_GROUNDING_PROVIDER: Mark provider (off/fake/locateanything/hybrid, default: hybrid)
     PHONE_AGENT_ACCESSIBILITY_MARKS: Include UiAutomator marks as device screen marks
     PHONE_AGENT_ACCESSIBILITY_MAX_MARKS: Maximum UiAutomator marks per screen
@@ -723,6 +727,34 @@ Examples:
     )
 
     parser.add_argument(
+        "--trace-raw-model-response",
+        action="store_true",
+        default=parse_env_bool("PHONE_AGENT_TRACE_RAW_MODEL_RESPONSE", False),
+        help="Write raw model response text into local traces for debugging",
+    )
+
+    parser.add_argument(
+        "--trace-request-messages",
+        action="store_true",
+        default=parse_env_bool("PHONE_AGENT_TRACE_REQUEST_MESSAGES", False),
+        help="Write final model request messages into local traces for debugging",
+    )
+
+    parser.add_argument(
+        "--trace-prompt-blocks",
+        action="store_true",
+        default=parse_env_bool("PHONE_AGENT_TRACE_PROMPT_BLOCKS", False),
+        help="Write prompt construction blocks into local traces for debugging",
+    )
+
+    parser.add_argument(
+        "--trace-unredacted-prompt",
+        action="store_true",
+        default=parse_env_bool("PHONE_AGENT_TRACE_UNREDACTED_PROMPT", False),
+        help="Dangerous local debug mode: do not redact traced request messages or prompt blocks",
+    )
+
+    parser.add_argument(
         "--accessibility-marks",
         action="store_true",
         default=parse_env_bool("PHONE_AGENT_ACCESSIBILITY_MARKS", False),
@@ -1009,6 +1041,7 @@ def main():
         thinking_param=args.thinking_param,
         lang=args.lang,
         output_mode=args.output_mode,
+        trace_raw_model_response=args.trace_raw_model_response,
     )
 
     agent_config = AgentConfig(
@@ -1016,6 +1049,10 @@ def main():
         device_id=args.device_id,
         verbose=not args.quiet,
         lang=args.lang,
+        trace_raw_model_response=args.trace_raw_model_response,
+        trace_request_messages=args.trace_request_messages,
+        trace_prompt_blocks=args.trace_prompt_blocks,
+        trace_unredacted_prompt=args.trace_unredacted_prompt,
         context_mode=args.context_mode,
         grounding_provider_name=args.grounding_provider,
         accessibility_marks=args.accessibility_marks,

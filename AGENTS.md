@@ -22,7 +22,7 @@ phone_agent/
   actions/          # Action IR pipeline: adapter, validator, repair, safety gate
   model/            # ModelClient (OpenAI-compatible)
   adb/              # Android device abstraction
-  grounding/        # Mark providers: accessibility tree, LocateAnything, remote
+  grounding/        # Mark providers: accessibility tree, LocateAnything
   config/           # System prompts, app registries, i18n
   checkpoint/       # SQLite checkpoint + redaction
 main.py             # CLI entry point
@@ -72,10 +72,11 @@ Full subsystem constraints are in `.trae/rules/*.mdc` — load them when touchin
 | 7 | **ActionIR Pipeline** | Adapter → Validator → (Repair → Validator) → Safety Gate → Executor. Repair never after Safety Gate. Executor only receives validated + safety-approved IR. Fail-closed at every stage. |
 | 8 | **Grounding** | Only `target_mark_id` is executable. `LocateAnything`/`Fake`/`OCR`/`UIAutomator`/`SoM` only generate marks. `target_text_hint` is a hint, not an executable target. Default `PHONE_AGENT_GROUNDING_PROVIDER=hybrid` (accessibility tree first, LocateAnything fallback). |
 | 9 | **Grounding Fail-Closed** | Grounding failure (bad screenshot, provider missing, low confidence, bad bbox, stale/hash mismatch, multi-candidate) → fail-closed (wait/takeover/reobserve). Never fall back to raw VLM coordinate tap or pass black image to model. |
-| 10 | **Privacy** | Phone/email/order/captcha/API key/JWT/base64 in state → regex-redact on write. Remote provider raw hints → explicit opt-in only. Trace/checkpoint → no raw screenshot, hint, API key, or response. |
+| 10 | **Privacy** | Phone/email/order/captcha/API key/JWT/base64 in state → regex-redact on write. Trace/checkpoint → no raw screenshot, hint, API key, or response. |
 | 11 | **Context** | `context_mode=inject` (default). Context injection must not bypass HITL. `prompt_version` only supports `context_harness_v1`. |
 | 12 | **Device** | All device ops through `DeviceFactory` → `phone_agent/adb/`. No direct ADB calls. |
 | 13 | **Reflection** | `reflect_node` maintains `reflection_verdict`/`failure_cause`/`suggested_strategy`. Plan must read structured failure reason and strategy next round. Postcondition verifier must validate ExpectedOutcome before anything else. |
+| 13a | **Finish Gate** | `finish` is a claim, not execution success. Execute must set `pending_finish`; Reflect must validate `TaskGoalContract` terminal evidence before `finished=True`. Unknown/missing final evidence → `goal_not_satisfied` and replan. |
 | 14 | **No Force Push** | Never `git push --force` to `main` or `feature/langgraph-refactor`. |
 | 15 | **No Auto-Commit** | Don't create commits unless explicitly requested. |
 

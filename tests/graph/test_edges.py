@@ -71,6 +71,20 @@ def test_after_execute_routes_skip_actions_to_replan(base_state) -> None:
         assert after_execute(base_state) == "replan"
 
 
+def test_after_execute_routes_finish_claim_to_reflect(base_state) -> None:
+    base_state["action_parsed"] = {"_metadata": "finish", "message": "done"}
+    base_state["pending_finish"] = True
+
+    assert after_execute(base_state) == "reflect"
+
+
+def test_after_execute_stale_finish_without_pending_finish_ends(base_state) -> None:
+    base_state["action_parsed"] = {"_metadata": "finish", "message": "old"}
+    base_state["pending_finish"] = False
+
+    assert after_execute(base_state) == "end"
+
+
 def test_after_interrupt_confirm_accept_routes_pending_execute(base_state) -> None:
     base_state["pending_execute"] = True
     base_state["interrupt_result"] = True

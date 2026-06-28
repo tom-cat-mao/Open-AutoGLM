@@ -122,3 +122,28 @@ def test_parse_args_rejects_invalid_output_mode_env(monkeypatch) -> None:
         assert exc.code == 2
     else:
         raise AssertionError("parse_args should reject invalid PHONE_AGENT_OUTPUT_MODE")
+
+
+def test_eval_summary_counts_finish_and_intent_grounding(monkeypatch, tmp_path) -> None:
+    tasks_file = tmp_path / "tasks.json"
+    tasks_file.write_text(json.dumps([{"id": "t1", "task": "finish", "category": "smoke", "max_steps": 1}]), encoding="utf-8")
+
+    def fake_run_agent_task(task, args):
+        return run_eval_module.RunResult(
+            success=True,
+            finished=True,
+            steps=1,
+            hitl_count=0,
+            finish_validation_status="success",
+            grounding_provider="mark_registry",
+            grounding_latency_ms=12,
+        )
+
+    monkeypatch.setattr(run_eval_module, "run_agent_task", fake_run_agent_task)
+    monkeypatch.setattr("sys.argv", ["run_eval.py", "--tasks", str(tasks_file)])
+
+    output = run_eval(parse_args())
+
+    assert output["summary"]["finish_validation_counts"] == {"success": 1}
+    assert output["summary"]["intent_grounding_count"] == 1
+    assert output["summary"]["provider_grounding_count"] == 1

@@ -81,13 +81,16 @@ def test_execute_takeover_sets_interrupt(base_state) -> None:
     assert result["interrupt_message"] == "验证码"
 
 
-def test_execute_finish_ends_and_appends_message(base_state) -> None:
+def test_execute_finish_records_pending_claim_and_appends_message(base_state) -> None:
     base_state["action_parsed"] = {"_metadata": "finish", "message": "done"}
     base_state["action_raw"] = '{"type":"finish","message":"done"}'
 
     result = execute_node(base_state, {"configurable": {"verbose": False}})
 
-    assert result["finished"] is True
+    assert result["finished"] is False
+    assert result["pending_finish"] is True
+    assert result["finish_validation_status"] == "pending"
+    assert result["action_result"]["should_finish"] is False
     assert result["action_result"]["message"] == "done"
     assert result["messages"][-1]["role"] == "assistant"
 

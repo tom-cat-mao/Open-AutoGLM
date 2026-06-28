@@ -147,6 +147,9 @@ def run_agent_task(task: EvalTask, args: argparse.Namespace) -> RunResult:
             trace_enabled=not args.no_trace,
             trace_dir=args.trace_dir,
             trace_raw_model_response=args.trace_raw_model_response,
+            trace_request_messages=args.trace_request_messages,
+            trace_prompt_blocks=args.trace_prompt_blocks,
+            trace_unredacted_prompt=args.trace_unredacted_prompt,
             context_mode=args.context_mode,
             grounding_provider_name=args.grounding_provider,
             accessibility_timeout=args.accessibility_timeout,
@@ -262,6 +265,7 @@ def run_eval(args: argparse.Namespace) -> dict[str, Any]:
     total_retries = 0
     total_grounding_latency_ms = 0
     grounding_count = 0
+    intent_grounding_count = 0
     total_context_chars = 0
     context_truncated_count = 0
     total_messages_before = 0
@@ -271,6 +275,7 @@ def run_eval(args: argparse.Namespace) -> dict[str, Any]:
     total_failure_memory_hits = 0
     total_repeated_failures = 0
     verifier_status_counts: dict[str, int] = {}
+    finish_validation_counts: dict[str, int] = {}
     selected_section_counts: dict[str, int] = {}
     for item in records:
         total_retries += int(item.get("retry_count") or 0)
@@ -288,12 +293,17 @@ def run_eval(args: argparse.Namespace) -> dict[str, Any]:
         verifier_status = item.get("verifier_status")
         if verifier_status:
             verifier_status_counts[str(verifier_status)] = verifier_status_counts.get(str(verifier_status), 0) + 1
+        finish_validation = item.get("finish_validation_status")
+        if finish_validation:
+            finish_validation_counts[str(finish_validation)] = finish_validation_counts.get(str(finish_validation), 0) + 1
         cause = item.get("failure_cause")
         if cause:
             failure_cause_histogram[str(cause)] = failure_cause_histogram.get(str(cause), 0) + 1
         grounding_failure = item.get("grounding_failure_code")
         if grounding_failure:
             grounding_failure_histogram[str(grounding_failure)] = grounding_failure_histogram.get(str(grounding_failure), 0) + 1
+        if item.get("grounding_provider") == "mark_registry":
+            intent_grounding_count += 1
         if item.get("grounding_latency_ms") is not None:
             grounding_count += 1
             total_grounding_latency_ms += int(item.get("grounding_latency_ms") or 0)
@@ -309,7 +319,9 @@ def run_eval(args: argparse.Namespace) -> dict[str, Any]:
             "retry_count": total_retries,
             "failure_cause_histogram": failure_cause_histogram,
             "grounding_failure_histogram": grounding_failure_histogram,
+            "provider_grounding_count": grounding_count,
             "grounding_count": grounding_count,
+            "intent_grounding_count": intent_grounding_count,
             "avg_grounding_latency_ms": total_grounding_latency_ms / grounding_count if grounding_count else 0.0,
             "context_mode": args.context_mode,
             "context_strategy": records[0].get("context_strategy") if records else "unknown",
@@ -325,6 +337,7 @@ def run_eval(args: argparse.Namespace) -> dict[str, Any]:
             "failure_memory_hit_count": total_failure_memory_hits,
             "repeated_failure_count": total_repeated_failures,
             "verifier_status_counts": verifier_status_counts,
+            "finish_validation_counts": finish_validation_counts,
             "dry_run": args.dry_run,
             "trace_dir": args.trace_dir,
             "output_mode": args.output_mode,
@@ -473,6 +486,24 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         default=parse_bool(os.getenv("PHONE_AGENT_TRACE_RAW_MODEL_RESPONSE"), False),
         help="Write raw model response text into local trace metadata for debugging",
+    )
+    parser.add_argument(
+        "--trace-request-messages",
+        action="store_true",
+        default=parse_bool(os.getenv("PHONE_AGENT_TRACE_REQUEST_MESSAGES"), False),
+        help="Write final model request messages into local trace metadata for debugging",
+    )
+    parser.add_argument(
+        "--trace-prompt-blocks",
+        action="store_true",
+        default=parse_bool(os.getenv("PHONE_AGENT_TRACE_PROMPT_BLOCKS"), False),
+        help="Write prompt construction blocks into local trace metadata for debugging",
+    )
+    parser.add_argument(
+        "--trace-unredacted-prompt",
+        action="store_true",
+        default=parse_bool(os.getenv("PHONE_AGENT_TRACE_UNREDACTED_PROMPT"), False),
+        help="Dangerous local debug mode: do not redact traced request messages or prompt blocks",
     )
     args = parser.parse_args()
     if args.output_mode not in {"json_schema", "tool_calls", "auto"}:

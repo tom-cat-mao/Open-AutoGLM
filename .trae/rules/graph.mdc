@@ -13,11 +13,11 @@ execution_status: completed
 iteration: 1
 planner_mode: null
 revision_scope: null
-last_planner_update: "Restarted RALPLAN plan revised with Architect and Critic findings."
-last_architect_review: "Architect confirmed code architecture is executable after state reset; sanitizer allowlist and allow_raw_hints=false are hard gates."
+last_planner_update: "PhoneAgent pseudo-success fix completed from RALPLAN-approved design."
+last_architect_review: "Architect and Critic approved TaskGoalContract + finish validation gate before implementation."
 last_critic_verdict: APPROVE
 approved_for_execution: true
-notes: "Autopilot execution and final QA completed for optional remote OpenAI-compatible grounding provider and benchmark support; default hybrid unchanged; runtime composition uses build_mark_providers()."
+notes: "Task identity is injected every Plan turn; finish is pending until Reflect validates final goal evidence. Hybrid Accessibility + LocateAnything remains default grounding."
 ```
 
 # Roadmap
@@ -25,248 +25,22 @@ notes: "Autopilot execution and final QA completed for optional remote OpenAI-co
 ## 已完成 Phase
 
 - LangGraph PhoneAgent core loop、ExpectedOutcome、Context Harness、structured JSON/tool_calls adapter、ActionIR Validator/Repair/Safety Gate、trace/checkpoint redaction 已进入代码事实。
-- Grounding 当前代码事实：`MarkProvider` 仍是单个 provider 的 Protocol；runtime plan/reflect 主路径使用 `build_mark_providers()` 注入 `list[MarkProvider]` 到 `build_observation()`；默认 `PHONE_AGENT_GROUNDING_PROVIDER=hybrid` 由 `build_mark_providers()` 返回 `FallbackMarkProvider([AccessibilityTreeProvider, LocateAnythingMLXProvider])`。
+- Grounding 当前代码事实：`MarkProvider` 是单个 provider 的 Protocol；runtime plan/reflect 主路径使用 `build_mark_providers()` 注入 `list[MarkProvider]` 到 `build_observation()`；默认 `PHONE_AGENT_GROUNDING_PROVIDER=hybrid` 由 `build_mark_providers()` 返回 `FallbackMarkProvider([AccessibilityTreeProvider, LocateAnythingMLXProvider])`。
 - `build_mark_provider()` 单数 factory 仍存在，但只适合 legacy/single-provider fallback；它不处理 `hybrid`，不应作为新能力主接入口。
-- Accessibility Tree hybrid、ScreenStructure/ObjectRegistry、object selector grounding、LocateAnything structured visual sidecar、hybrid_factory/fallback_chain 诊断已完成或部分完成。
-- Grounding benchmark 已在 `bench/grounding/` 建立：manifest 使用 0-1000 bbox；scoring/reporting 可离线复评 predictions；正式 runner 包括本地 `run_locateanything.py` 与 remote/OpenAI-compatible `run_remote_provider.py`。
-- Remote OpenAI Grounding Provider + `hybrid_remote` 已就位：`RemoteOpenAIGroundingProvider` 实现 `MarkProvider` Protocol，`build_mark_providers()` 支持 `remote_openai` / `stepfun` / `hybrid_remote` / `accessibility_remote`；`run_remote_provider.py` benchmark runner 可横评 local LA vs StepFun；隐私 sanitizer、allowlist metadata、fail-closed parser 均已实现。
+- Accessibility Tree hybrid、ScreenStructure/ObjectRegistry、object selector grounding、LocateAnything structured visual sidecar、hybrid_factory/fallback_chain 诊断已完成。
+- Grounding benchmark 已在 `bench/grounding/` 建立：manifest 使用 0-1000 bbox；scoring/reporting 可离线复评 predictions；本地 runner 为 `run_locateanything.py`。
+- Pseudo-success 防护已完成：`TaskGoalContract` 每轮 Plan 注入任务目标契约；`finish` 只生成 `pending_finish` claim 并路由 Reflect；`validate_finish_claim()` 必须看到 final observation / verifier evidence 满足 terminal evidence 后才允许 `finished=True`；缺证据时写入 `failure_cause=goal_not_satisfied` 并 replan。
 - 仍需保留既有 hardening 未闭环项：hint-mismatched provider marks 不得进入 executable `marks`、diagnostic code 字段需 strict sanitizer、hybrid child `parse_summary` 汇总、accessibility failure taxonomy 同步。
 
-## RALPLAN-DR 摘要
+## 约束 Checklist
 
-### Principles
-
-1. **Plural runtime path only**: 新增远程 grounding 能力必须接入 `build_mark_providers()` 与 `build_observation(mark_providers=[...])`，不得把 `build_mark_provider()` 单数入口扩展为 hybrid/remote 组合主路径。
-2. **Provider protocol stays singular**: `MarkProvider` 作为 Protocol 不废弃；新增能力应实现单个 provider class，再由 plural factory 组合。
-3. **Tree-first and fail-closed**: `hybrid_remote` 必须保持 Accessibility Tree 优先；远程 VLM 只作为 fallback/candidate provider，低置信、多框、格式错、超时、hash mismatch 均 fail-closed，不回退主 VLM raw coordinate。
-4. **Privacy by default for remote**: 远程 provider 默认只发送当前截图和 redacted/bounded hint；raw hint 远程发送必须显式 opt-in，trace/checkpoint/report 不记录 raw screenshot、API key、raw hint、raw response。
-5. **Benchmark before default switch**: StepFun 3.7 Flash 只能先作为可选 provider 与 benchmark target；未通过固定 manifest 横评前不得替换默认 local LocateAnything/hybrid 行为。
-
-### Decision Drivers
-
-1. 用户目标是评估并可选替换本地 LocateAnything 为 OpenAI-compatible 或 Anthropic Messages API，预期模型为 `step-3.7-flash`。
-2. 当前主模型 client 已支持 OpenAI-compatible Chat Completions，但 grounding provider 仍是本地 MLX LocateAnything；复用主 client 需避免把 action planning 协议与 bbox grounding 协议混在一起。
-3. StepFun 文档显示 `step-3.7-flash` 支持原生图片理解、OpenAI-compatible Chat Completions、Anthropic-compatible Messages，以及手机 GUI Agent 场景；但它不是 LocateAnything PBD 专用模型，必须用严格 bbox output contract 与 parser 兜底。
-4. 当前 benchmark scoring/reporting 与 manifest 是 provider-agnostic；runner 层需要抽象，才能用同一 manifest 对比 LocateAnything 与远程 API 模型。
-
-### Research Evidence Notes
-
-| Source | Evidence used |
-|---|---|
-| Local code inspection | `phone_agent/graph/nodes/plan.py` 与 `reflect.py` 调用 `build_mark_providers()`；`phone_agent/grounding/factory.py` 仅 plural path 处理 `hybrid`；`build_observation()` 接收 `mark_providers: list[MarkProvider]` 并逐个调用 `provide_marks()`。 |
-| Local docs | README 已声明 `PHONE_AGENT_GROUNDING_PROVIDER=hybrid` 默认由 `build_mark_providers()` 构建 FallbackMarkProvider；`target_text_hint` 只能作为 provider hint。 |
-| StepFun docs | Chat Completions endpoint 为 `https://api.stepfun.com/v1/chat/completions`，支持 `image_url` multipart；Messages API 兼容 Anthropic Messages；Vision docs 推荐 Step 3.7 Flash，支持图片/视频理解与 256K context；Mobile Agent docs 用 OpenAI-compatible Step API 调用 `step-3.7-flash`。 |
-| Benchmark code | `bench/grounding/datasets.py`、`scoring.py`、`reporting.py` 与 provider 无关；`run_locateanything.py` runner 当前直接实例化 `LocateAnythingMLXProvider`。 |
-
-### Viable Options
-
-| Option | Pros | Cons | Verdict |
-|---|---|---|---|
-| A. 直接改 `LocateAnythingMLXProvider` 为远程 API | 改动少、沿用 runner 名称 | 混淆本地 LA 与远程模型语义；破坏 Metal/MLX 回滚；文档和测试误导 | Reject |
-| B. 在 `build_mark_provider()` 单数入口新增 remote/hybrid | 表面兼容旧单数测试 | 与当前 graph 主路径和用户质疑相冲突；容易再次让 single factory 承诺组合能力 | Reject |
-| C. 新增 `RemoteOpenAIGroundingProvider`，由 `build_mark_providers()` 支持 `remote_openai` / `hybrid_remote` | 最贴近当前架构；复用 OpenAI-compatible；保留本地 LA；可灰度 | 需要新增 provider、配置、parser/prompt、测试和文档 | Selected |
-| D. 同时实现 OpenAI-compatible 与 Anthropic Messages 两套 remote provider | 覆盖最全 | 首轮复杂度高；Anthropic shape 与当前项目主 client 不一致，容易放大风险 | Follow-up |
-| E. 只新增 benchmark runner，不接 runtime provider | 风险最低，可先量化 | 无法满足 runtime 可选替换目标；后续仍需接入 provider | Partial |
-
-### Selected Approach
-
-选择 **C + E**：先实现 OpenAI-compatible remote grounding provider，并同步泛化 benchmark runner。Anthropic Messages 作为协议扩展点设计，不在首轮强行实现完整 runtime provider。
-
-目标运行策略：
-
-```text
-Plan/Reflect Observation
-  -> build_mark_providers(config)
-  -> provider name:
-       remote_openai      => [RemoteOpenAIGroundingProvider]
-       hybrid_remote      => [FallbackMarkProvider([AccessibilityTreeProvider, RemoteOpenAIGroundingProvider])]
-       hybrid             => existing [FallbackMarkProvider([AccessibilityTreeProvider, LocateAnythingMLXProvider])]
-  -> Remote provider sends current screenshot + bounded/redacted hint to StepFun Chat Completions
-  -> Prompt requires exactly one 0-1000 xyxy bbox in strict response format
-  -> Parser validates bbox; ambiguity/invalid/timeout fail-closed
-  -> MarkProviderResult marks/candidates feed MarkRegistry
-  -> Executor still only consumes target_mark_id compiled through MarkRegistry
-```
-
-Benchmark strategy：
-
-```text
-Fixed manifest (0-1000 GT)
-  -> run_locateanything.py for local LA baseline
-  -> run_remote_provider.py for step-3.7-flash predictions
-  -> score_predictions.py for offline apples-to-apples scoring
-  -> compare parse_success_rate / center_hit_rate / acc_iou_0_3 / acc_iou_0_5 / mean_iou / latency p95 / failure codes
-```
-
-### ADR
-
-- **Decision**: 新增 remote OpenAI-compatible grounding provider 与 remote benchmark runner；运行时主接入口只扩展 `build_mark_providers()`，不把 `build_mark_provider()` 单数升级为组合入口。
-- **Drivers**: StepFun 3.7 Flash 具备多模态与 OpenAI-compatible 能力；当前 architecture 已把 provider output 与 MarkRegistry/ActionIR 执行边界分离；benchmark scoring 已可复用。
-- **Alternatives**: 修改 LocateAnything provider；扩展 single factory；一次性支持 Anthropic；只做 benchmark。
-- **Why chosen**: 可灰度、可回滚、最少破坏既有 local LA/hybrid；能同时满足 runtime 可选替换与 benchmark 量化。
-- **Consequences**: 会新增配置面、远程网络错误 taxonomy、API secret redaction、provider prompt contract 与 focused tests；默认 provider 仍保持 `hybrid`。
-- **Follow-ups**: Anthropic Messages provider、provider comparison dashboard、真实设备 trace replay benchmark、remote raw hint opt-in policy review。
-
-## 已完成 Phase: Optional Remote API Grounding Provider + Benchmark Support
-
-### Step 1 - Clarify Provider Contract And Factory Entry Boundaries
-
-- **根因**: 当前代码同时存在 `MarkProvider` Protocol、`build_mark_provider()` 单数 factory 与 `build_mark_providers()` plural runtime path；新 remote 能力若接错入口会重演 hybrid/singular mismatch。
-- **修改文件候选**: `phone_agent/grounding/factory.py`, `README.md`, `docs/grounding-architecture.html`, `.trae/rules/graph.mdc`, `.trae/rules/tools.mdc`, `tests/actions/test_grounding_provider.py`。
-- **计划**:
-  1. 保留 `MarkProvider` Protocol 命名，不标记废弃。
-  2. 在 factory docstring/docs 中明确：`build_mark_providers()` 是 graph/runtime composition 主入口；`build_mark_provider()` 仅用于 legacy/single provider fallback，不支持 hybrid composition。
-  3. 新增任何 remote/hybrid_remote 配置只接入 `build_mark_providers()`。
-  4. 测试覆盖 `build_mark_provider({"grounding_provider_name":"hybrid_remote"}) is None` 或不承诺组合；`build_mark_providers()` 返回正确 list。
-- **验收标准**:
-  - plan/reflect 仍只调用 `build_mark_providers()`。
-  - 默认 `hybrid` 行为不变。
-  - 文档能回答“MarkProvider 没废弃，废弃/弱化的是 single factory 主路径”。
-
-### Step 2 - Add Remote OpenAI-Compatible Grounding Provider
-
-- **根因**: 本地 LocateAnything 依赖 Apple Silicon + Metal + mlx-vlm；用户需要可选远程 API provider，目标模型 `step-3.7-flash`。
-- **修改文件候选**: `phone_agent/grounding/remote_openai.py`, `phone_agent/grounding/__init__.py`, `phone_agent/grounding/factory.py`, `phone_agent/grounding/parser.py`, `tests/actions/test_grounding_provider.py`, `tests/graph/test_state.py`。
-- **计划**:
-  1. 新增 `RemoteOpenAIGroundingProvider` 实现 `MarkProvider` Protocol。
-  2. 配置字段：`remote_grounding_base_url` / `PHONE_AGENT_REMOTE_GROUNDING_BASE_URL`，`remote_grounding_api_key_env` / `PHONE_AGENT_REMOTE_GROUNDING_API_KEY_ENV` 指向的 `PHONE_AGENT_REMOTE_GROUNDING_API_KEY`，`remote_grounding_model` / `PHONE_AGENT_REMOTE_GROUNDING_MODEL`，默认模型可为 `step-3.7-flash` 但不启用为默认 provider。
-  3. 增加 `remote_grounding_max_size` / `PHONE_AGENT_REMOTE_GROUNDING_MAX_SIZE`，默认不超过 LocateAnything 的 960 长边预算，发送前统一重编码，避免原始截图体积、EXIF 或超大图直接出站。
-  4. Provider constructor 支持注入 OpenAI-compatible client / request callable，测试必须使用 fake client，不访问真实网络。
-  5. 输入使用当前截图 data URL + bounded provider hint；默认 `allow_raw_hints=False` 并使用 redacted hint，`remote_grounding_allow_raw_hints=true` 才允许 raw hint。
-  6. prompt contract 要求输出单一 bbox，优先兼容现有 `<box><x1><y1><x2><y2></box>` parser；如支持 JSON bbox，必须新增明确 parser 分支，且多框/坏格式仍 fail-closed。
-  7. 成功返回一个 `MarkCandidate(mark_id="remote_1_1", bbox=[...], center=[...], source="remote_openai", text_summary=<bounded safe summary>)`。
-  8. 失败 taxonomy：`remote_missing_config`、`remote_missing_hint`、`remote_timeout`、`remote_http_error`、`remote_invalid_response`、`remote_invalid_bbox`、`grounding_ambiguous`、`grounding_no_candidate`。
-- **验收标准**:
-  - 单元测试 mock OpenAI client/request callable，不访问真实网络。
-  - 发送给远程 API 的图片已按 `remote_grounding_max_size` 缩放重编码，metadata 只记录尺寸/hash/长度。
-  - 多框/无框/越界/坏 JSON/非 0-1000 坐标均 fail-closed。
-  - provider metadata 不包含 API key env value、raw hint、raw response、base64 image。
-  - `MarkProviderResult` 的 `screen_id/raw_screenshot_hash/provider_input_hash` 满足 observation binding 校验。
-
-### Step 3 - Add Runtime Provider Modes Through `build_mark_providers()`
-
-- **根因**: 需要 runtime 可选替换或 fallback，而不破坏默认 `hybrid`。
-- **修改文件候选**: `phone_agent/grounding/factory.py`, `main.py`, `phone_agent/agent.py`, `tests/actions/test_grounding_provider.py`, `tests/graph/test_agent_run_result.py`。
-- **计划**:
-  1. 新增 provider names：`remote_openai`、`stepfun`、`hybrid_remote`、`accessibility_remote`。
-  2. `remote_openai` / `stepfun` 返回 `[RemoteOpenAIGroundingProvider]`。
-  3. `hybrid_remote` / `accessibility_remote` 返回 `[FallbackMarkProvider([AccessibilityTreeProvider, RemoteOpenAIGroundingProvider], composition_metadata=...)]`。
-  4. 保持 `hybrid` 仍指向 AccessibilityTree + LocateAnything。
-  5. `AgentConfig` 与 graph configurable 传递 remote grounding 参数；CLI 增加可选 remote grounding 参数，但 tool schema 不暴露 provider/client/API key。
-  6. `check_model_api()` 仍只检查主模型，不把 remote grounding API key 误用于主模型诊断；remote provider 只在实际启用时懒初始化。
-  7. Reflect 默认仍强制 `grounding_provider_name="accessibility"`，除非 `reflect_enable_vlm_grounding` 显式开启；remote provider 不得默认进入 reflect after-observation。
-- **验收标准**:
-  - `PHONE_AGENT_GROUNDING_PROVIDER=hybrid` 默认不变。
-  - `PHONE_AGENT_GROUNDING_PROVIDER=hybrid_remote` 在 dump callback 存在时 provider order 为 accessibility_tree -> remote_openai。
-  - missing dump callback 有 synthetic skip row，远程 provider 可作为 fallback，但 trace 解释 tree 未运行。
-  - CLI/config 只传 runtime config，不改变 tool-visible schema。
-
-### Step 4 - Privacy, Sanitization, And Observability Gate
-
-- **根因**: 远程 provider 会把截图和 hint 发出进程，隐私风险高于本地 LocateAnything。
-- **修改文件候选**: `phone_agent/grounding/remote_openai.py`, `phone_agent/graph/observation.py`, `phone_agent/graph/trace.py`, `phone_agent/checkpoint/serde.py`, `tests/graph/test_state.py`, `tests/graph/test_plan_reflect.py`。
-- **计划**:
-  1. remote provider metadata 只允许 code/count/bool/hash/length/latency/model/base_url_host，不记录完整 URL query、API key、raw prompt、raw response、raw hint、raw screenshot。
-  2. `provider_input_hash` 使用发送前图片 bytes/hash + prompt contract hash，不可反推图像。
-  3. 新增或强化等价 sanitizer helper：覆盖 `fallback.py::_safe_composition_metadata()`、`observation.py::_summarize_provider_result()` 及其 fallback/hybrid metadata 输出，对 provider/failure_code/provider_order 做 safe-identifier 或枚举 allowlist。
-  4. trace 中 remote provider summary 包含 provider、model、latency、failure_code、candidate_count、bbox count、hint_length、raw_hint_sent bool。
-  5. raw remote response 仅在单独显式 local debug flag 下可写本地调试文件；默认不进 trace/checkpoint/report。
-- **验收标准**:
-  - malicious provider metadata 中的手机号/API key/raw XML/raw response 被丢弃或归一为 safe code。
-  - 开启 remote provider 后 checkpoint 序列化不泄漏 raw hint/API key/base64。
-  - URL 显示使用现有 `redact_url_for_display()` 或等价逻辑。
-
-### Step 5 - Benchmark Runner Generalization For Remote API
-
-- **根因**: 当前 benchmark scoring 是通用的，但 runner 绑定 LocateAnything，无法横评 StepFun API 效果。
-- **修改文件候选**: `bench/grounding/run_remote_provider.py`, `bench/grounding/run_locateanything.py`, `bench/grounding/README.md`, `README.md`, `.trae/rules/tools.mdc`, 新增或复用现有 benchmark test 命名体系（例如 `tests/test_grounding_bench_remote_runner.py`）。
-- **计划**:
-  1. 新增 `run_remote_provider.py`，读取相同 manifest/post-training args，实例化 `RemoteOpenAIGroundingProvider`。
-  2. 输出 prediction JSONL schema 与 `run_locateanything.py` 对齐：`case_id`、`provider`、`model`、`success`、`parsed`、`bbox`、`boxes`、`latency_ms`、`candidate_count`、`failure_code`、`parse_error`、`provider_input_hash`。
-  3. 支持 `--base-url`、`--api-key-env`、`--model step-3.7-flash`、`--timeout`、`--max-size`、`--output`、`--summary-output`、`--manifest`、`--post-training-data`。
-  4. 复用 `score_predictions.py` 做离线复评，不复制 scoring 逻辑。
-  5. 文档要求固定同一 manifest 比较 local LA vs StepFun；报告 center-hit 与 IoU/latency/failure-code。
-- **验收标准**:
-  - mock provider runner 测试不访问网络。
-  - 固定 manifest 可分别生成 LA predictions 与 StepFun predictions，并用同一 `score_predictions.py` 复评。
-  - API key 只从 env 读取，不写入 predictions/summary。
-  - `bench_output/` 仍默认不提交。
-
-### Step 6 - Optional Anthropic Messages Extension Design Stub
-
-- **根因**: StepFun Messages API 兼容 Anthropic Messages，但当前项目主 client 与 provider实现以 OpenAI-compatible 为主；用户要求评估 Anthropic message 接口可行性。
-- **修改文件候选**: `docs/grounding-architecture.html`, `README.md`, `.trae/rules/graph.mdc`; 可选后续 `phone_agent/grounding/remote_anthropic.py`。
-- **计划**:
-  1. 本 phase 文档写清 Anthropic Messages 是 supported design target，不作为首轮 runtime 默认实现。
-  2. 抽象 remote provider prompt/parser 共享层，避免后续 Anthropic provider 复制 bbox parser 与 sanitizer。
-  3. 如果实现 stub，只允许未配置时不可用，不接入默认 provider names。
-- **验收标准**:
-  - 文档说明 OpenAI-compatible 是首轮实现，Anthropic Messages 是 follow-up。
-  - 不引入未测试的 Anthropic dependency 到默认 runtime。
-
-### Step 7 - Focused Tests And Regression Suite
-
-- **根因**: remote grounding 涉及网络、隐私、parser 与 provider composition，必须 fixture 化。
-- **修改文件候选**: `tests/actions/test_grounding_provider.py`, `tests/graph/test_state.py`, `tests/graph/test_plan_reflect.py`, `tests/model/test_client.py`, benchmark runner tests。
-- **计划**:
-  1. Provider tests：success bbox、JSON bbox、native `<box>`、invalid format、多框、out-of-range、timeout、HTTP error、missing config、missing hint。
-  2. Factory tests：`remote_openai`、`stepfun`、`hybrid_remote`、missing accessibility dump synthetic row、default hybrid unchanged、single factory non-composition。
-  3. Observation tests：remote marks 进入 MarkRegistry；bad binding/hash fail-closed；metadata sanitized。
-  4. Plan/reflect tests：plan path可启用 remote；reflect 默认不启用 remote VLM，除非 explicit flag。
-  5. Benchmark tests：mock remote runner 输出 predictions schema，可被 scoring/reporting 消费。
-- **验收标准**:
-  - 默认 tests 不需要真实 StepFun API、ADB、MLX、Metal。
-  - 推荐验证命令：`.venv/bin/python -m pytest tests/actions/test_grounding_provider.py tests/graph/test_state.py tests/graph/test_plan_reflect.py tests/model/test_client.py`，另跑 benchmark runner mock tests。
-
-### Step 8 - Documentation And Configuration Sync
-
-- **根因**: 新 provider 会改变一线使用方式和 benchmark 方法，必须同步 README/docs/rules。
-- **修改文件候选**: `README.md`, `docs/grounding-architecture.html`, `docs/future-roadmap.md`, `bench/grounding/README.md`, `.trae/rules/tools.mdc`, `.trae/traecli.toml`, `AGENTS.md`。
-- **计划**:
-  1. README Grounding section 增加 remote provider 配置示例、StepFun 示例、raw hint opt-in 警告、默认 provider 不变说明。
-  2. Grounding architecture docs 增加 `RemoteOpenAIGroundingProvider`、`hybrid_remote` flow、failure taxonomy 与 trace schema。
-  3. Benchmark docs 增加 local vs remote 横评命令。
-  4. `.trae/rules/tools.mdc` 增加 remote benchmark 入口；AGENTS 摘要增加 remote provider 隐私约束。
-  5. 文档明确 `build_mark_providers()` 是 runtime composition 入口。
-- **验收标准**:
-  - 用户可从文档直接回答：如何启用 StepFun、如何 benchmark、哪些字段不会泄漏、如何回滚到 local LA。
-  - 不提交 API key、runtime trace、bench_output、大型数据文件。
-
-## Pre-mortem
-
-| Failure scenario | Preventive design |
-|---|---|
-| 远程模型返回自然语言或多个候选，runtime 误点 | parser 只接受一个有效 0-1000 bbox；多候选/无候选 fail-closed；不回退 raw coordinate |
-| 为支持 remote 而扩展 `build_mark_provider()`，再次造成 hybrid/single mismatch | 所有组合能力只接 `build_mark_providers()`；测试明确 single factory 不承诺 hybrid_remote |
-| raw hint/API key/base64/response 泄漏到 trace/checkpoint | remote metadata allowlist；API key 只从 env/config 注入；raw debug 默认关闭；sanitizer 单测 |
-
-## Expanded Test Plan
-
-| Layer | Tests |
-|---|---|
-| Unit | remote provider parser、failure taxonomy、prompt contract、provider_input_hash、config resolution |
-| Integration | `build_mark_providers()` remote/hybrid_remote composition、observation -> MarkRegistry、plan/reflect config behavior |
-| Benchmark | mock remote runner predictions schema、`score_predictions.py` 复评兼容、summary failure_code 聚合 |
-| Observability | fallback_chain/hybrid_factory/remote metadata sanitized；trace/checkpoint 不含 secrets/raw response/raw hint |
-| E2E manual | 可选真实 StepFun smoke：2-5 个非隐私 manifest case，输出到 `bench_output/`，不提交 |
-
-# 约束 Checklist
-
-- [x] RALPLAN 阶段只允许修改 `.trae/rules/graph.mdc`；业务代码等待 Critic APPROVE 与用户明确批准。
 - [x] `MarkProvider` Protocol 不废弃；新增 provider 仍实现该单体接口。
-- [x] Runtime/provider composition 主路径必须是 `build_mark_providers()`；新 remote/hybrid_remote 不依赖 `build_mark_provider()` 单数入口。
-- [x] 默认 `PHONE_AGENT_GROUNDING_PROVIDER=hybrid` 不变；StepFun/remote 只能显式 opt-in。
-- [x] `target_mark_id -> MarkRegistry -> ActionIR` 仍是唯一执行边界；remote bbox 只能生成 marks，不能直接执行 tap。
-- [x] `target_text_hint` 只能作为 provider hint；远程 raw hint 默认不发送，除非显式 opt-in。
-- [x] 远程 provider 不暴露到 tool schema；API key/base URL/model 通过 graph config/env 注入。
-- [x] 远程 grounding failure fail-closed；多候选、无候选、越界、超时、HTTP error、bad response 不回退主 VLM 坐标。
-- [x] Reflect 默认不触发远程 VLM grounding；除非 `reflect_enable_vlm_grounding` 显式开启。
-- [x] Benchmark 使用同一 0-1000 manifest 横评 local LA 与 StepFun；`score_predictions.py` 继续作为固定 manifest 离线复评入口。
+- [x] Runtime/provider composition 主路径必须是 `build_mark_providers()`。
+- [x] 默认 `PHONE_AGENT_GROUNDING_PROVIDER=hybrid`（AccessibilityTree + LocateAnythingMLX fallback）。
+- [x] `target_mark_id -> MarkRegistry -> ActionIR` 是唯一执行边界；grounding 只生成 marks，不直接执行 tap。
+- [x] `target_text_hint` 只能作为 provider hint。
+- [x] Grounding failure fail-closed；多候选、无候选、越界、格式错不回退主 VLM 坐标。
+- [x] Tree-first: Accessibility Tree 为 hybrid 第一层；解析失败、hint 不匹配、provider 缺失不能回退到主 VLM raw coordinate。
+- [x] trace/checkpoint 不含 raw screenshot、raw hint、API key、raw response；metadata 只允许 code/count/bool/hash/length/latency/model 字段。
+- [x] `finish` 不是执行成功；必须经过 TaskGoalContract final evidence gate，未知或缺证据 fail-closed/replan。
 - [x] `bench_output/`、API key、runtime traces、真实截图数据默认不提交。
-- [x] `hybrid` default must remain behaviorally unchanged unless explicitly configured.
-- [x] `hybrid_remote` must prove provider order: accessibility first, remote only as fallback.
-- [x] Remote runner must score the same fixed manifest as LocateAnything via `score_predictions.py`.
-- [x] No default test may require StepFun credentials, ADB, MLX, Metal, or network.
-- [x] Sanitized remote metadata uses only code/count/bool/hash/length/latency/model/host fields.
-- [x] Architect review confirmed factory boundary, default hybrid preservation, privacy design, and benchmark seam are executable; process state reset before Critic.
-- [x] Critic APPROVE received after restarted RALPLAN; stop at pending user approval before execution.

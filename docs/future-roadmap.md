@@ -6,12 +6,13 @@
 
 ## 当前状态
 
-- **Phase 1-14 + Hybrid Accessibility Grounding Hardening**: ✅ 已完成当前 graph roadmap 中已批准的主要实现范围；Phase 11A/11B/11C 完成 Context & Observability Harness，Phase 12A/12B/12C 完成结构化模型输出适配，Phase 13A-13E 完成 Canonical Action IR & Safety Pipeline 阶梯架构，Phase 14A-14E 完成 LangGraph-native Context Engineering Harness；legacy text DSL 删除、mark binding、多候选 grounding fail-closed、bounded context window、hybrid/accessibility 诊断字段已落地。最新审查仍要求补齐 hybrid executable mark 过滤、diagnostic code 字段 strict sanitizer、child `parse_summary` 透传、accessibility failure code taxonomy；long-term memory 与 LangChain provider abstraction 仍待另行规划
+- **Phase 1-14 + Hybrid Accessibility Grounding Hardening + Pseudo-success Finish Gate**: ✅ 已完成当前 graph roadmap 中已批准的主要实现范围；Phase 11A/11B/11C 完成 Context & Observability Harness，Phase 12A/12B/12C 完成结构化模型输出适配，Phase 13A-13E 完成 Canonical Action IR & Safety Pipeline 阶梯架构，Phase 14A-14E 完成 LangGraph-native Context Engineering Harness；legacy text DSL 删除、mark binding、多候选 grounding fail-closed、bounded context window、hybrid/accessibility 诊断字段已落地。最新伪成功修复已加入 `TaskGoalContract` 每轮注入、`finish -> pending_finish -> reflect` 最终目标验证、`finish_validation_status` eval/trace 指标，以及 object-selected Tap 默认后置条件升级。仍需保留既有 hardening 未闭环项：hybrid executable mark 过滤、diagnostic code 字段 strict sanitizer、child `parse_summary` 透传、accessibility failure code taxonomy；long-term memory 与 LangChain provider abstraction 仍待另行规划
 - **测试**: 已恢复可执行 graph/actions/evals 回归测试与安装门禁；当前本地门禁为 `.venv/bin/pytest tests -q` 全绿
 - **架构**: LangGraph Plan-Execute-Reflect StateGraph
 - **图拓扑**: `plan → execute → [confirm|takeover|reflect|replan|end]`
 - **结构化 API**: 已提供 `PhoneAgent.run_structured()` / `RunResult`，`run()` 继续保持字符串返回兼容
 - **可观测性**: 已提供默认本地 JSONL trace，`RunResult` / eval JSON 可通过 `trace_id` 与 `trace_path` 关联 trace 文件；默认脱敏敏感截图、prompt/API key 与隐私文本
+- **最终目标验证**: Plan 每轮注入 trace-safe `TaskGoalContract`，保存任务 hash、目标类型、app hint、ordinal 与 terminal evidence；`finish` 只记录 pending claim，不直接置 `finished=True`，reflect 基于 final observation 与 verifier evidence 做 `finish_validation`，缺少最终证据时以 `goal_not_satisfied` 继续 replan。
 - **短期 Context Harness**: 已支持 `context_mode=off|observe|inject`，默认 `inject`；记录 `screen_belief`、`action_outcome_summary`、`failure_memory`、`summarized_history`、`short_term_memory`、`action_ledger` 与 context 指标；inject 模式通过单一 `build_plan_context_block()` 从 raw state 字段重建并 regex 替换敏感文本后注入 Plan；state 写入路径只做 regex 替换、不 stub，stub 策略仅在 `phone_agent/checkpoint/serde.py::RedactingSerializer` 的 checkpoint egress 触发；request-only compaction 不改写 `state["messages"]`，保留最新截图并裁剪旧请求文本
 - **策略反思**: 已支持结构化 `reflection_verdict`、`failure_cause`、`suggested_strategy`，下一轮 plan 可读取失败原因和建议策略
 - **评测地基**: 已提供 `evals/run_eval.py --dry-run` smoke harness，以及 `bench/grounding/` LocateAnything benchmark 体系；当前支持 post-training raw JSONL 转 manifest、固定 suite、prediction JSONL、summary JSON、离线复评与 target type / area bucket 分组指标

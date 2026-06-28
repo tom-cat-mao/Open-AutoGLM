@@ -39,12 +39,23 @@ PRIVATE_TEXT_KEYS = {
     "observed_text",
     "parse_error",
     "context_block",
+    "mark_prompt_block",
+    "objects_block",
+    "prompt_blocks",
+    "reflection_context",
+    "reflect_request_messages",
+    "request_messages",
     "target_text_hint",
     "text_hint",
 }
 RAW_DEBUG_KEYS = {
     "raw_model_response",
     "raw_model_tool_calls",
+}
+RAW_REQUEST_DEBUG_KEYS = {
+    "prompt_blocks",
+    "reflect_request_messages",
+    "request_messages",
 }
 
 
@@ -61,9 +72,16 @@ def sanitize_for_trace(
     redact: bool = True,
     key: str | None = None,
     allow_raw_debug: bool = False,
+    allow_raw_request_debug: bool = False,
 ) -> Any:
     """Return a JSON-safe value with sensitive fields redacted."""
     normalized_key = key.lower() if key else ""
+    if normalized_key in RAW_REQUEST_DEBUG_KEYS:
+        if allow_raw_request_debug:
+            return value
+        if isinstance(value, str):
+            return _redacted_text(value)
+        return "<redacted>"
     if normalized_key in RAW_DEBUG_KEYS:
         if allow_raw_debug:
             return value
@@ -76,13 +94,37 @@ def sanitize_for_trace(
         return _redacted_text(value)
     if isinstance(value, dict):
         return {
-            str(k): sanitize_for_trace(v, redact, str(k), allow_raw_debug)
+            str(k): sanitize_for_trace(
+                v,
+                redact,
+                str(k),
+                allow_raw_debug,
+                allow_raw_request_debug,
+            )
             for k, v in value.items()
         }
     if isinstance(value, list):
-        return [sanitize_for_trace(item, redact, key, allow_raw_debug) for item in value]
+        return [
+            sanitize_for_trace(
+                item,
+                redact,
+                key,
+                allow_raw_debug,
+                allow_raw_request_debug,
+            )
+            for item in value
+        ]
     if isinstance(value, tuple):
-        return [sanitize_for_trace(item, redact, key, allow_raw_debug) for item in value]
+        return [
+            sanitize_for_trace(
+                item,
+                redact,
+                key,
+                allow_raw_debug,
+                allow_raw_request_debug,
+            )
+            for item in value
+        ]
     if not redact:
         return value
     return value
@@ -97,12 +139,14 @@ class JsonlTraceWriter:
         trace_dir: str | Path = ".traces",
         redact: bool = True,
         allow_raw_debug: bool = False,
+        allow_raw_request_debug: bool = False,
         strict: bool = False,
     ) -> None:
         self.trace_id = trace_id or str(uuid.uuid4())
         self.trace_dir = Path(trace_dir)
         self.redact = redact
         self.allow_raw_debug = allow_raw_debug
+        self.allow_raw_request_debug = allow_raw_request_debug
         self.strict = strict
         self.path = self.trace_dir / f"{self.trace_id}.jsonl"
         self.enabled = True
@@ -135,6 +179,7 @@ class JsonlTraceWriter:
                     payload or {},
                     self.redact,
                     allow_raw_debug=self.allow_raw_debug,
+                    allow_raw_request_debug=self.allow_raw_request_debug,
                 ),
             }
             with self.path.open("a", encoding="utf-8") as file:
