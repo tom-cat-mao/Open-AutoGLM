@@ -30,7 +30,7 @@ ACTION_SCHEMA = """# Action Schema（唯一动作契约）
 - Wait: `{"type":"do","action":"wait","duration":"1 seconds"}`，等待应尽量短，单次不超过 60 seconds。
 - Note / Call_API / Interact: `{"type":"do","action":"note|call_api|interact","message":"..."}`。
 - Take_over: `{"type":"do","action":"take_over","message":"需要用户接管的原因"}`。
-- Finish: `{"type":"finish","message":"任务完成或无法继续的原因"}`。
+- Finish: `{"type":"finish","message":"任务完成或无法继续的原因","matched_terminal_evidence":["成功标准名1","成功标准名2"]}`。仅在任务目标契约列出了成功标准时才包含 matched_terminal_evidence，点名每个满足的标准。
 """
 
 TASK_POLICIES = """# 操作策略
@@ -83,7 +83,7 @@ JSON_OUTPUT_CONTRACT = """# 输出格式：JSON schema
 - {"type":"intent","action":"double_tap","target_mark_id":"m3"}
 - {"type":"intent","action":"long_press","target_mark_id":"m4"}
 - {"type":"do","action":"call_api","message":"总结当前页面"}
-- {"type":"finish","message":"任务已完成"}
+- {"type":"finish","message":"任务已完成","matched_terminal_evidence":["criterion1"]}
 """
 
 TOOL_CALLS_OUTPUT_CONTRACT = """# 输出格式：tool_calls

@@ -21,8 +21,8 @@ def create_agent_graph():
     START → goal → plan → execute → [confirm|takeover|reflect|replan|end]
                                    ├─ confirm → after_interrupt → [execute|reflect|end]
                                    ├─ takeover → after_interrupt → [reflect|end]
-                                   ├─ reflect → should_continue → [takeover|replan|end]
-                                   ├─ replan → plan (skip reflect for Wait/Note/Call_API/Interact)
+                                   ├─ reflect → should_continue → [takeover|replan→goal|end]
+                                   ├─ replan → goal → plan (skip reflect for Wait/Note/Call_API/Interact)
                                    └─ end → END
     ```
     """
@@ -52,7 +52,7 @@ def create_agent_graph():
     graph.add_conditional_edges(
         "reflect",
         should_continue,
-        {"replan": "plan", "takeover": "takeover", "end": END},
+        {"replan": "goal", "takeover": "takeover", "end": END},
     )
     graph.add_conditional_edges(
         "confirm",

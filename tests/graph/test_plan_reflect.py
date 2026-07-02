@@ -1263,6 +1263,12 @@ def test_plan_error_trace_includes_observation_sidecar_summaries(
 def test_reflect_node_cn_and_en_task_finished_detection(
     base_state, fake_device
 ) -> None:
+    """Reflect correctly parses CN/EN finish suggestions.
+
+    Under the P0-3 fix, model self-attestation (suggested_strategy=finish on a
+    non-pending_finish do action) is blocked — only pending_finish can lead to
+    finished=True.  This test verifies parsing, not the finish gate.
+    """
     for lang, action in (
         (
             "cn",
@@ -1301,7 +1307,9 @@ def test_reflect_node_cn_and_en_task_finished_detection(
         )
 
         assert result["action_succeeded"] is True
-        assert result["finished"] is True
+        # P0-3: non-pending_finish model self-attestation must not finish
+        assert result["finished"] is False
+        assert result["failure_cause"] == "goal_not_satisfied"
 
 
 def test_parse_reflection_action_structured_json_only() -> None:
@@ -2716,8 +2724,11 @@ def test_plan_node_injects_task_goal_after_message_compaction(base_state, fake_d
     assert "任务目标契约" in text
     assert "bilibili" in text  # target_app_hint from heuristic compiler
     assert "vlm_judge_at_finish" in text  # verification_strategy
-    assert result["goal_contract"]["target_app_hint"] == "bilibili"
-    assert result["goal_contract"]["ordinal"] == 2
+    # P0-2: plan no longer writes goal_contract to state (goal_node owns it)
+    assert "goal_contract" not in result or result.get("goal_contract") is None
+    # But the contract in base_state should be preserved (plan doesn't overwrite)
+    assert base_state["goal_contract"]["target_app_hint"] == "bilibili"
+    assert base_state["goal_contract"]["ordinal"] == 2
 
 
 def test_reflect_node_rejects_pending_finish_without_final_goal_evidence(base_state, fake_device) -> None:

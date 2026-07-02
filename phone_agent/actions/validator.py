@@ -100,11 +100,20 @@ def validate_action(action: dict[str, Any] | ActionIR) -> dict[str, Any]:
 
 
 def _validate_finish(action: dict[str, Any]) -> None:
-    allowed = {"_metadata", "message"}
+    allowed = {"_metadata", "message", "matched_terminal_evidence"}
     extras = set(action) - allowed
     if extras:
         raise ActionValidationError("unsafe_value", f"unsupported finish fields: {sorted(extras)}")
     _require_str(action, "message")
+    evidence = action.get("matched_terminal_evidence")
+    if evidence is not None:
+        if not isinstance(evidence, list):
+            raise ActionValidationError("unsafe_value", "matched_terminal_evidence must be a list")
+        for item in evidence:
+            if not isinstance(item, str) or not item.strip():
+                raise ActionValidationError(
+                    "unsafe_value", "matched_terminal_evidence items must be non-empty strings"
+                )
 
 
 def _reject_dangerous_fields(action: dict[str, Any]) -> None:

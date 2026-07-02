@@ -440,3 +440,46 @@ def test_goal_node_recompiles_when_needs_recompile() -> None:
     assert result["needs_recompile"] is False
     # Compiled a new contract (heuristic since no model_client)
     assert result["goal_contract"]["task_hash"] != "old"
+
+
+def test_ensure_goal_contract_rejects_trace_payload() -> None:
+    """P2-4: trace payload (redacted_objective is dict, not str) must be rejected."""
+    contract = GoalContract(
+        task_hash="h",
+        redacted_objective="real objective",
+        objective_length=3,
+        success_criteria=[SuccessCriterion(name="c1", description="d", verification="vlm_judge")],
+        compile_status="compiled",
+        compile_source="external",
+    )
+    trace = contract.to_trace_payload()
+    # trace payload has redacted_objective as a dict, not a str
+    assert isinstance(trace["redacted_objective"], dict)
+
+    state = {"goal_contract": trace}
+    assert ensure_goal_contract(state) is None
+
+
+def test_validator_accepts_finish_with_matched_terminal_evidence() -> None:
+    """P0-1: validator must accept matched_terminal_evidence on finish actions."""
+    from phone_agent.actions.validator import validate_action
+
+    action = {
+        "_metadata": "finish",
+        "message": "task done",
+        "matched_terminal_evidence": ["criterion1", "criterion2"],
+    }
+    validated = validate_action(action)
+    assert validated["matched_terminal_evidence"] == ["criterion1", "criterion2"]
+
+
+def test_validator_rejects_non_list_matched_terminal_evidence() -> None:
+    from phone_agent.actions.validator import ActionValidationError, validate_action
+
+    with pytest.raises(ActionValidationError) as exc_info:
+        validate_action({
+            "_metadata": "finish",
+            "message": "done",
+            "matched_terminal_evidence": "not a list",
+        })
+    assert exc_info.value.code == "unsafe_value"

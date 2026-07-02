@@ -251,6 +251,9 @@ def ensure_goal_contract(state: dict[str, Any]) -> GoalContract | None:
     if isinstance(value, GoalContract):
         return value if value.compile_status in {"compiled", "user_override"} else None
     if isinstance(value, dict):
+        # Detect trace payload (redacted_objective is a dict, not str) and reject
+        if isinstance(value.get("redacted_objective"), dict):
+            return None  # trace payload, not a usable contract
         contract = GoalContract.from_dict(value)
         return contract if contract.compile_status in {"compiled", "user_override"} else None
     return None

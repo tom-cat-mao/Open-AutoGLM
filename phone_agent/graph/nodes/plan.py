@@ -1154,7 +1154,6 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
                 "grounding_candidate_count": grounding_candidate_count,
                 "selected_grounding_candidate_id": selected_grounding_candidate_id,
                 "expected_outcome": expected_outcome,
-                "task_goal_contract": task_goal_trace,
                 "failure_cause": "model_parse_failed",
                 **error_fields,
                 "parse_metadata": {
@@ -1196,7 +1195,6 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
             "grounding_candidate_count": grounding_candidate_count,
             "selected_grounding_candidate_id": selected_grounding_candidate_id,
             "expected_outcome": expected_outcome,
-            "task_goal_contract": task_goal_trace,
             "action_result": {
                 "success": False,
                 "should_finish": True,
@@ -1240,9 +1238,6 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
         "grounding_candidate_count": grounding_candidate_count,
         "selected_grounding_candidate_id": selected_grounding_candidate_id,
         "expected_outcome": expected_outcome,
-        "goal_contract": task_goal_trace,
-        "goal_contract_status": state.get("goal_contract_status"),
-        "goal_compile_source": state.get("goal_compile_source"),
         **error_fields,
         "action_confirmed": False,
         "context_mode": context_mode,

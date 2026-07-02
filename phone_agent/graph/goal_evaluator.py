@@ -241,6 +241,8 @@ class AggregatingGoalEvaluator:
         return {"status": "missing", "reason": "no_object_hash_signal"}
 
     def _check_object_rank(self, crit: SuccessCriterion, contract: GoalContract, verifier_evidence: dict[str, Any] | None) -> dict[str, Any]:
+        if contract.ordinal is None:
+            return {"status": "missing", "reason": "no_ordinal_in_contract"}
         signals = (verifier_evidence or {}).get("selected_object_signals") or {}
         expected_rank = signals.get("selected_object_expected_rank")
         if signals.get("selected_object_match") and expected_rank == contract.ordinal:

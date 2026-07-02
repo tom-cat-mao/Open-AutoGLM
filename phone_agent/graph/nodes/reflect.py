@@ -46,15 +46,16 @@ if TYPE_CHECKING:
 REFLECT_SYSTEM_PROMPT_CN = """你是一个手机自动化任务的反思专家。你的职责是观察动作执行后的屏幕截图，判断动作是否生效，并给出下一步建议。
 
 你必须只输出一个 JSON 对象，不要 Markdown、XML、函数调用或多余文本：
-{"verdict":"succeeded|failed|partial","failure_cause":"none|element_not_found|wrong_page|app_not_responding|network_or_loading|permission_or_login_or_captcha|unsafe_or_sensitive|coordinate_or_tap_offset|context_lost|repeated_action|model_parse_failed|unknown","suggested_strategy":"continue|retry|retry_with_offset|go_back|swipe_to_find|wait|takeover|finish","message":"xxx"}
+{"verdict":"succeeded|failed|partial","failure_cause":"none|element_not_found|wrong_page|app_not_responding|network_or_loading|permission_or_login_or_captcha|unsafe_or_sensitive|coordinate_or_tap_offset|context_lost|repeated_action|model_parse_failed|unknown","suggested_strategy":"continue|retry|retry_with_offset|go_back|swipe_to_find|wait|takeover|finish","message":"xxx","named_evidence":[{"criterion":"criterion_name","screen_reference":"mark_id or sha256 stub"}]}
 
 判断标准：
 1. 动作生效：页面满足预期后置条件（如输入框聚焦、目标文本出现、目标页面打开、目标应用打开）
 2. 动作未生效：页面没有变化，或变化与预期不符
 3. 部分成功：页面有变化但任务尚未完全进入预期状态
-4. 任务完成：如果当前页面显示任务已经完成，输出 {"verdict":"succeeded","failure_cause":"none","suggested_strategy":"finish","message":"任务已完成"}
+4. 任务完成：如果当前页面显示任务已经完成，输出 {"verdict":"succeeded","failure_cause":"none","suggested_strategy":"finish","message":"任务已完成","named_evidence":[{"criterion":"成功标准名","screen_reference":"屏幕证据引用"}]}
 
 重要约束：
+- named_evidence 仅在 suggested_strategy="finish" 时需要输出，列出 finish claim 对应的目标契约成功标准名与屏幕证据引用（mark_id 或 sha256 stub）。
 - 只有在截图明确显示加载中、空白页、网络错误、进度条/转圈、或执行结果表示应用无响应时，才使用 failure_cause="network_or_loading" 和 suggested_strategy="wait"。
 - 如果刚执行的是 Launch/启动应用，且当前屏幕信息或截图已显示目标应用/设置页/目标页面已打开，即使任务还没完成，也应判定为 succeeded + continue，而不是 partial + wait。
 - 不要因为页面内容很多、设置项列表尚需下一步操作，就误判为加载中；可继续操作的稳定页面应输出 continue。
@@ -64,15 +65,16 @@ REFLECT_SYSTEM_PROMPT_CN = """你是一个手机自动化任务的反思专家�
 REFLECT_SYSTEM_PROMPT_EN = """You are a mobile automation reflection expert. Your job is to observe the screenshot after an action and judge whether the action succeeded, then give next-step advice.
 
 You MUST output exactly one JSON object. Do not output Markdown, XML, function calls, or extra text:
-{"verdict":"succeeded|failed|partial","failure_cause":"none|element_not_found|wrong_page|app_not_responding|network_or_loading|permission_or_login_or_captcha|unsafe_or_sensitive|coordinate_or_tap_offset|context_lost|repeated_action|model_parse_failed|unknown","suggested_strategy":"continue|retry|retry_with_offset|go_back|swipe_to_find|wait|takeover|finish","message":"xxx"}
+{"verdict":"succeeded|failed|partial","failure_cause":"none|element_not_found|wrong_page|app_not_responding|network_or_loading|permission_or_login_or_captcha|unsafe_or_sensitive|coordinate_or_tap_offset|context_lost|repeated_action|model_parse_failed|unknown","suggested_strategy":"continue|retry|retry_with_offset|go_back|swipe_to_find|wait|takeover|finish","message":"xxx","named_evidence":[{"criterion":"criterion_name","screen_reference":"mark_id or sha256 stub"}]}
 
 Judgment criteria:
 1. Action succeeded: expected postconditions are satisfied (for example focused input, expected text, target page, or target app)
 2. Action failed: the page did not change, or the change was unexpected
 3. Partial success: the page changed but is not yet in the expected state
-4. Task completed: if the current page shows the task is done, output {"verdict":"succeeded","failure_cause":"none","suggested_strategy":"finish","message":"Task completed"}
+4. Task completed: if the current page shows the task is done, output {"verdict":"succeeded","failure_cause":"none","suggested_strategy":"finish","message":"Task completed","named_evidence":[{"criterion":"criterion_name","screen_reference":"screen evidence reference"}]}
 
 Important constraints:
+- named_evidence is only required when suggested_strategy="finish"; list the goal contract criterion names and their screen evidence references (mark_id or sha256 stub).
 - Use failure_cause="network_or_loading" and suggested_strategy="wait" only when the screenshot clearly shows loading, a blank page, a network error, a spinner/progress indicator, or the execution result indicates the app is not responding.
 - If the action just executed is Launch and the current screen info or screenshot already shows the target app/settings/target page is open, judge it as succeeded + continue even if the overall task still needs more steps; do not return partial + wait.
 - Do not treat a stable page with many settings/list items as loading. If the page is actionable, return continue.
@@ -700,7 +702,6 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
             "verifier_result": verifier_result_dict,
             "goal_contract": goal_trace_payload(state),
             "finish_validation": finish_validation.to_dict() if finish_validation else None,
-            "finish_validation": finish_validation,
         },
     )
 
@@ -929,6 +930,13 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
         }
     if verifier_result.hard_failure or final_verdict != "succeeded":
         task_finished = False
+    # Only pending_finish path can finish the task; model self-attestation
+    # ("suggested_strategy=finish" on a regular do action) must not bypass the goal gate
+    if task_finished and not pending_finish:
+        task_finished = False
+        final_verdict = "failed"
+        final_failure_cause = "goal_not_satisfied"
+        parsed_reflection.suggested_strategy = "continue"
     # GoalEvaluator fail-closed: unknown and failure both block finish
     if (
         pending_finish
@@ -1056,7 +1064,6 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
         "pending_finish": False,
         "finish_validation_status": finish_validation.status if finish_validation else None,
         "finish_validation_evidence": finish_validation.to_dict() if finish_validation else None,
-        "goal_contract": goal_trace_payload(state),
         "retry_count": retry_count,
         "finished": task_finished,
         **takeover_update,

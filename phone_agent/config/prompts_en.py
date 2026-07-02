@@ -28,7 +28,7 @@ ACTION_SCHEMA = """# Action Schema (single action contract)
 - Wait: `{"type":"do","action":"wait","duration":"1 seconds"}`, keep waits short and never exceed 60 seconds.
 - Note / Call_API / Interact: `{"type":"do","action":"note|call_api|interact","message":"..."}`.
 - Take_over: `{"type":"do","action":"take_over","message":"why user takeover is needed"}`.
-- Finish: `{"type":"finish","message":"task completed or reason to stop"}`.
+- Finish: `{"type":"finish","message":"task completed or reason to stop","matched_terminal_evidence":["criterion_name1","criterion_name2"]}`. Only include matched_terminal_evidence when the task goal contract lists success criteria; name each satisfied criterion.
 """
 
 TASK_POLICIES = """# Operation policies
@@ -81,7 +81,7 @@ Examples:
 - {"type":"intent","action":"double_tap","target_mark_id":"m3"}
 - {"type":"intent","action":"long_press","target_mark_id":"m4"}
 - {"type":"do","action":"call_api","message":"summarize current page"}
-- {"type":"finish","message":"Task completed"}
+- {"type":"finish","message":"Task completed","matched_terminal_evidence":["criterion1"]}
 """
 
 TOOL_CALLS_OUTPUT_CONTRACT = """# Output format: tool_calls

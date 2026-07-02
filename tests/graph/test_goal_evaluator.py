@@ -90,6 +90,20 @@ def test_object_rank_match_mismatch() -> None:
     assert "rank_2" in result.missing
 
 
+def test_object_rank_match_with_null_ordinal_is_missing() -> None:
+    """P2-2: ordinal=None must not spuriously match when expected_rank is also None."""
+    contract = _contract(
+        [
+            SuccessCriterion(name="rank_none", description="no ordinal", verification="object_rank_match"),
+        ],
+        ordinal=None,
+    )
+    evidence = {"selected_object_signals": {"selected_object_match": True, "selected_object_expected_rank": None}}
+    result = evaluate_finish_claim(contract=contract, verifier_evidence=evidence)
+    assert result.status == "failure"
+    assert "rank_none" in result.missing
+
+
 # ----------------------------------------------------------------------
 # vlm_judge — three-part check
 # ----------------------------------------------------------------------

@@ -625,12 +625,17 @@ class ModelClient:
                 "type": "function",
                 "function": {
                     "name": "finish",
-                    "description": "Finish the phone automation task.",
+                    "description": "Finish the phone automation task. Include matched_terminal_evidence listing the goal contract success criteria names satisfied by the final screen evidence.",
                     "parameters": {
                         "type": "object",
                         "properties": {
                             "type": {"type": "string", "enum": ["finish"]},
                             "message": {"type": "string"},
+                            "matched_terminal_evidence": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "Names of GoalContract success criteria satisfied by the final screen evidence",
+                            },
                         },
                         "required": ["type", "message"],
                     },
