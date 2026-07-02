@@ -6,6 +6,11 @@ from typing import Any
 import pytest
 
 from phone_agent.graph.context import default_context_budget, default_screen_belief
+from phone_agent.graph.goal_compiler import HeuristicGoalCompiler
+
+
+def _build_heuristic_goal_contract(task: str) -> dict:
+    return HeuristicGoalCompiler().compile(task=task).to_dict()
 
 
 @dataclass
@@ -92,9 +97,15 @@ def fake_device() -> FakeDeviceFactory:
 
 @pytest.fixture
 def base_state() -> dict[str, Any]:
+    task = "测试任务"
     return {
-        "task": "测试任务",
+        "task": task,
         "task_goal_contract": None,
+        "goal_contract": _build_heuristic_goal_contract(task),
+        "goal_contract_status": "compiled",
+        "goal_compile_source": "heuristic",
+        "goal_compile_attempts": 0,
+        "needs_recompile": False,
         "messages": [
             {
                 "role": "user",

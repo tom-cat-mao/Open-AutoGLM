@@ -32,9 +32,9 @@ from phone_agent.graph.screenshot_status import (
     screenshot_failure_message,
     screenshot_is_sensitive,
 )
-from phone_agent.graph.task_goal import (
-    ensure_task_goal_contract,
-    task_goal_prompt_block,
+from phone_agent.graph.goal import (
+    build_goal_prompt_block,
+    goal_trace_payload,
 )
 from phone_agent.graph.trace import emit_trace
 from phone_agent.grounding.factory import build_mark_providers
@@ -543,12 +543,9 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
 
     step_count = state["step_count"]
     task = state["task"]
-    task_goal_contract = ensure_task_goal_contract(state)
-    task_goal_trace = task_goal_contract.to_trace_payload()
-    task_goal_block = task_goal_prompt_block(
-        {"task": task, "task_goal_contract": task_goal_trace},
-        lang=lang,
-    )
+    # Build goal block from new GoalContract (compiled by goal_node)
+    task_goal_block = build_goal_prompt_block(state, lang=lang)
+    task_goal_trace = goal_trace_payload(state) or {}
     messages = list(state["messages"])  # copy
 
     # 1. Capture screen
@@ -1243,7 +1240,9 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
         "grounding_candidate_count": grounding_candidate_count,
         "selected_grounding_candidate_id": selected_grounding_candidate_id,
         "expected_outcome": expected_outcome,
-        "task_goal_contract": task_goal_trace,
+        "goal_contract": task_goal_trace,
+        "goal_contract_status": state.get("goal_contract_status"),
+        "goal_compile_source": state.get("goal_compile_source"),
         **error_fields,
         "action_confirmed": False,
         "context_mode": context_mode,

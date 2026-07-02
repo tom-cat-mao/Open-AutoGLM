@@ -19,8 +19,14 @@ state are in `.trae/rules/graph.mdc` (load on demand).
 phone_agent/
   agent.py          # PhoneAgent entry point
   graph/            # LangGraph StateGraph: nodes, edges, state, tools, trace, observation
-  actions/          # Action IR pipeline: adapter, validator, repair, safety gate
-  model/            # ModelClient (OpenAI-compatible)
+    goal.py             # Declarative GoalContract + SuccessCriterion data model
+    goal_compiler.py    # Goal contract compilation chain: External > LLM > Heuristic
+    goal_evaluator.py   # GoalEvaluator: validates finish claims against GoalContract criteria
+    nodes/goal_node.py  # Compiles GoalContract once at task start; optional HITL approval
+    nodes/plan.py       # Plan node (injects goal_contract_block as separate cacheable message)
+    nodes/reflect.py    # Reflect node (GoalEvaluator integration, reflect context window)
+    actions/          # Action IR pipeline: adapter, validator, repair, safety gate
+  model/            # ModelClient (OpenAI-compatible, prompt cache support)
   adb/              # Android device abstraction
   grounding/        # Mark providers: accessibility tree, LocateAnything
   config/           # System prompts, app registries, i18n
@@ -76,7 +82,7 @@ Full subsystem constraints are in `.trae/rules/*.mdc` — load them when touchin
 | 11 | **Context** | `context_mode=inject` (default). Context injection must not bypass HITL. `prompt_version` only supports `context_harness_v1`. |
 | 12 | **Device** | All device ops through `DeviceFactory` → `phone_agent/adb/`. No direct ADB calls. |
 | 13 | **Reflection** | `reflect_node` maintains `reflection_verdict`/`failure_cause`/`suggested_strategy`. Plan must read structured failure reason and strategy next round. Postcondition verifier must validate ExpectedOutcome before anything else. |
-| 13a | **Finish Gate** | `finish` is a claim, not execution success. Execute must set `pending_finish`; Reflect must validate `TaskGoalContract` terminal evidence before `finished=True`. Unknown/missing final evidence → `goal_not_satisfied` and replan. |
+| 13a | **Finish Gate** | `finish` is a claim, not execution success. Execute must set `pending_finish`; Reflect must validate `GoalContract` `SuccessCriterion` evidence before `finished=True`. `finish.matched_terminal_evidence` must name each required criterion; `GoalEvaluator` checks programmatic signals (accessibility/object-rank/app-activity/focus) and vlm_judge named+grounded evidence; programmatic contradiction overrides vlm_judge self-attestation. Unknown/missing final evidence → `goal_not_satisfied` and replan; unknown never auto-upgrades to success. |
 | 14 | **No Force Push** | Never `git push --force` to `main` or `feature/langgraph-refactor`. |
 | 15 | **No Auto-Commit** | Don't create commits unless explicitly requested. |
 
@@ -85,6 +91,7 @@ Full subsystem constraints are in `.trae/rules/*.mdc` — load them when touchin
 | When you touch... | Load... |
 |---|---|
 | `phone_agent/graph/**`, `phone_agent/agent.py` | `.trae/rules/graph.mdc` + `.trae/rules/architecture.mdc` |
+| `phone_agent/graph/goal*.py` | `.trae/rules/graph.mdc` (GoalContract + compiler + evaluator) |
 | `phone_agent/actions/**` | `.trae/rules/actions.mdc` |
 | `phone_agent/adb/**`, `device_factory.py` | `.trae/rules/devices.mdc` |
 | Any Python file | `.trae/rules/style.mdc` (naming, typing, testing) |

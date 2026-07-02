@@ -41,7 +41,12 @@ class AgentState(TypedDict):
 
     # === 任务 ===
     task: str  # 用户原始任务
-    task_goal_contract: Optional[dict]  # trace-safe durable task goal contract
+    task_goal_contract: Optional[dict]  # legacy: trace-safe task goal contract (deprecated, use goal_contract)
+    goal_contract: Optional[dict]  # declarative GoalContract dict (compiled by goal_node)
+    goal_contract_status: Optional[str]  # pending / compiled / failed / user_override
+    goal_compile_source: Optional[str]  # llm / heuristic / heuristic_fallback / external
+    goal_compile_attempts: int  # number of compile attempts
+    needs_recompile: bool  # reflect can request goal recompilation
     step_count: int  # 当前步数
     max_steps: int  # 最大步数
     lang: str  # 语言

@@ -15,6 +15,7 @@ from phone_agent.graph.context import (
     get_context_mode,
     normalize_failure_cause,
     sanitize_context_payload,
+    select_reflect_context,
     _redacted_private_text,
     update_gui_memory,
     update_failure_memory,
@@ -27,12 +28,12 @@ from phone_agent.graph.screenshot_status import (
     screenshot_failure_message,
     screenshot_is_sensitive,
 )
-from phone_agent.graph.task_goal import (
-    ensure_task_goal_contract,
-    task_goal_prompt_block,
-    task_goal_trace_payload,
-    validate_finish_claim,
+from phone_agent.graph.goal import (
+    ensure_goal_contract as _ensure_goal_contract_compat,
+    build_goal_prompt_block,
+    goal_trace_payload,
 )
+from phone_agent.graph.goal_evaluator import evaluate_finish_claim, GoalEvaluation
 from phone_agent.graph.trace import emit_trace
 from phone_agent.graph.verifier import merge_verifier_with_reflection, verify_action_outcome
 from phone_agent.grounding.factory import build_mark_providers
@@ -101,6 +102,7 @@ class ReflectionResult:
     suggested_strategy: str | None
     message: str
     has_evidence: bool = False
+    named_evidence: list[dict[str, str]] | None = None
 
 
 def _reflection_from_verifier(verifier_result) -> ReflectionResult | None:
@@ -190,7 +192,20 @@ def parse_reflection_action(raw_action: str) -> ReflectionResult:
     if suggested_strategy not in VALID_STRATEGIES:
         suggested_strategy = "retry"
     parsed_cause = None if verdict == "succeeded" and failure_cause == "none" else failure_cause
-    return ReflectionResult(verdict, parsed_cause, suggested_strategy, message, has_evidence)
+    named_evidence_raw = data.get("named_evidence") if isinstance(data, dict) else None
+    named_evidence = None
+    if isinstance(named_evidence_raw, list):
+        named_evidence = [
+            {
+                "criterion": str(item.get("criterion", "") ),
+                "screen_reference": str(item.get("screen_reference", "")),
+            }
+            for item in named_evidence_raw
+            if isinstance(item, dict)
+        ]
+    if named_evidence:
+        has_evidence = True
+    return ReflectionResult(verdict, parsed_cause, suggested_strategy, message, has_evidence, named_evidence)
 
 
 def _screenshot_failure_update(
@@ -626,18 +641,29 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
     pending_finish = bool(state.get("pending_finish")) or (
         isinstance(action_parsed, dict) and action_parsed.get("_metadata") == "finish"
     )
-    task_goal_contract = ensure_task_goal_contract(state)
-    finish_validation = None
-    if pending_finish:
-        finish_claim_message = None
+    goal_contract = _ensure_goal_contract_compat(state)
+    finish_validation: GoalEvaluation | None = None
+    if pending_finish and goal_contract is not None:
+        finish_claim_matched = []
         if isinstance(action_parsed, dict):
-            finish_claim_message = action_parsed.get("message")
-        finish_validation = validate_finish_claim(
-            contract=task_goal_contract,
+            raw_evidence = action_parsed.get("matched_terminal_evidence")
+            if isinstance(raw_evidence, list):
+                finish_claim_matched = [str(e) for e in raw_evidence if isinstance(e, str)]
+        finish_validation = evaluate_finish_claim(
+            contract=goal_contract,
             verifier_status=verifier_result.status,
             verifier_evidence=verifier_result.evidence,
             after_observation=after_verifier_observation,
-            finish_claim=finish_claim_message if isinstance(finish_claim_message, str) else None,
+            device_signals=device_verifier_signals,
+            finish_claim_matched=finish_claim_matched,
+        )
+    elif pending_finish:
+        # No contract compiled yet — fail-closed
+        finish_validation = GoalEvaluation(
+            status="failure",
+            matched=[],
+            missing=["goal_contract_unavailable"],
+            evidence={"reason": "goal_contract_not_compiled"},
         )
     verifier_result_dict = _sanitize_verifier_result_dict(
         verifier_result,
@@ -672,29 +698,32 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
                 task_context=task,
             ),
             "verifier_result": verifier_result_dict,
-            "task_goal_contract": task_goal_trace_payload(state),
+            "goal_contract": goal_trace_payload(state),
+            "finish_validation": finish_validation.to_dict() if finish_validation else None,
             "finish_validation": finish_validation,
         },
     )
 
     deterministic_reflection = None
     if pending_finish and finish_validation is not None:
-        if finish_validation.get("status") == "success":
+        finish_status = finish_validation.status
+        if finish_status == "success":
             deterministic_reflection = ReflectionResult(
                 "succeeded",
                 None,
                 "finish",
-                "finish claim validated by task goal contract",
+                "finish claim validated by goal contract criteria",
                 True,
             )
-        elif finish_validation.get("status") == "failure" or task_goal_contract.goal_type != "generic_task":
+        elif finish_status == "failure":
             deterministic_reflection = ReflectionResult(
                 "failed",
                 "goal_not_satisfied",
                 "continue",
-                "finish claim rejected: final goal evidence missing",
+                "finish claim rejected: goal evidence missing",
                 True,
             )
+        # unknown → fall through to run VLM so named_evidence can be collected and re-evaluated
     else:
         deterministic_reflection = _reflection_from_verifier(verifier_result)
 
@@ -715,10 +744,11 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
         lang=lang,
         task_context=task,
     )
-    task_goal_text = task_goal_prompt_block(
-        {"task": task, "task_goal_contract": task_goal_contract.to_trace_payload()},
-        lang=lang,
+    goal_contract_block = build_goal_prompt_block(state, lang=lang)
+    reflect_context_selection = select_reflect_context(
+        state, mode=context_mode, lang=lang, prompt_version=configurable.get("prompt_version"),
     )
+    reflect_context_block = reflect_context_selection.context_block
     if deterministic_reflection is None:
         verifier_signals = str(
             _sanitize_verifier_result_dict(verifier_result, task_context=task)
@@ -726,11 +756,13 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
         before_summary = str(safe_before_verifier_observation)
         after_summary = str(safe_after_verifier_observation)
         screen_info = MessageBuilder.build_screen_info(current_app)
+        # dynamic user prompt: includes task context, action, results, observations
+        # goal_contract block is injected as a separate user message before this one
+        # to enable prompt prefix caching
         if lang == "en":
             reflect_text = (
                 f"Original task: {task_for_prompt}\n"
                 f"Current step: {step_count} / {max_steps}\n"
-                f"{task_goal_text}\n"
                 f"Action just executed: {action_str}\n"
                 f"Execution result: {result_str}\n"
                 f"{expected_outcome_text}\n"
@@ -738,14 +770,18 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
                 f"Before-observation summary: {before_summary}\n"
                 f"After-observation summary: {after_summary}\n"
                 f"Current screen info: {screen_info}\n\n"
+            )
+            if reflect_context_block:
+                reflect_text = f"{reflect_text}\n{reflect_context_block}\n\n"
+            reflect_text = (
+                f"{reflect_text}"
                 f"Output JSON with action_effect, task_progress, matched_postconditions, "
-                f"missing_postconditions, dynamic_change_only, evidence, next_strategy."
+                f"missing_postconditions, dynamic_change_only, evidence, next_strategy, named_evidence."
             )
         else:
             reflect_text = (
                 f"原始任务：{task_for_prompt}\n"
                 f"当前步数：{step_count} / {max_steps}\n"
-                f"{task_goal_text}\n"
                 f"刚执行的动作：{action_str}\n"
                 f"执行结果：{result_str}\n"
                 f"{expected_outcome_text}\n"
@@ -753,18 +789,30 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
                 f"动作前观测摘要：{before_summary}\n"
                 f"动作后观测摘要：{after_summary}\n"
                 f"当前屏幕信息：{screen_info}\n\n"
+            )
+            if reflect_context_block:
+                reflect_text = f"{reflect_text}\n{reflect_context_block}\n\n"
+            reflect_text = (
+                f"{reflect_text}"
                 f"请输出 JSON，字段为 action_effect、task_progress、matched_postconditions、"
-                f"missing_postconditions、dynamic_change_only、evidence、next_strategy。"
+                f"missing_postconditions、dynamic_change_only、evidence、next_strategy、named_evidence。"
             )
 
+        # Build messages: system(static) + goal_contract_block(static task-wide, separate msg for cache) + dynamic user
         reflect_messages = [
             MessageBuilder.create_system_message(system_prompt),
+        ]
+        if goal_contract_block:
+            reflect_messages.append(
+                MessageBuilder.create_user_message(text=goal_contract_block)
+            )
+        reflect_messages.append(
             MessageBuilder.create_user_message(
                 text=reflect_text,
                 image_base64=screenshot.base64_data,
                 image_mime_type=getattr(screenshot, "mime_type", "image/png"),
-            ),
-        ]
+            )
+        )
         _maybe_emit_reflect_prompt_debug(
             config,
             state,
@@ -824,6 +872,29 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
     action_succeeded = parsed_reflection.verdict == "succeeded"
     task_finished = parsed_reflection.suggested_strategy == "finish"
 
+    # Re-evaluate finish claim with VLM named evidence when initial evaluation was unknown
+    if (
+        pending_finish
+        and goal_contract is not None
+        and finish_validation is not None
+        and finish_validation.status == "unknown"
+        and parsed_reflection.named_evidence is not None
+    ):
+        finish_claim_matched = []
+        if isinstance(action_parsed, dict):
+            raw_evidence = action_parsed.get("matched_terminal_evidence")
+            if isinstance(raw_evidence, list):
+                finish_claim_matched = [str(e) for e in raw_evidence if isinstance(e, str)]
+        finish_validation = evaluate_finish_claim(
+            contract=goal_contract,
+            verifier_status=verifier_result.status,
+            verifier_evidence=verifier_result.evidence,
+            after_observation=after_verifier_observation,
+            device_signals=device_verifier_signals,
+            finish_claim_matched=finish_claim_matched,
+            reflect_named_evidence=parsed_reflection.named_evidence,
+        )
+
     reflection_fields = merge_verifier_with_reflection(
         verifier_result,
         {
@@ -858,23 +929,12 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
         }
     if verifier_result.hard_failure or final_verdict != "succeeded":
         task_finished = False
+    # GoalEvaluator fail-closed: unknown and failure both block finish
     if (
         pending_finish
         and finish_validation is not None
-        and finish_validation.get("status") == "unknown"
-        and task_goal_contract.goal_type == "generic_task"
-        and task_finished
-        and parsed_reflection.has_evidence
-        and final_verdict == "succeeded"
+        and finish_validation.status != "success"
     ):
-        finish_validation = {
-            **finish_validation,
-            "status": "success",
-            "matched_terminal_evidence": list(finish_validation.get("matched_terminal_evidence") or [])
-            + ["model_reflection_evidence"],
-            "missing_terminal_evidence": [],
-        }
-    if pending_finish and finish_validation is not None and finish_validation.get("status") != "success":
         task_finished = False
         final_verdict = "failed"
         final_failure_cause = "goal_not_satisfied"
@@ -966,10 +1026,10 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
             "verifier_status": verifier_result.status,
             "verifier_failure_cause": verifier_result.failure_cause,
             "verifier_evidence": verifier_evidence,
-            "task_goal_contract": task_goal_trace_payload(state),
+            "goal_contract": goal_trace_payload(state),
             "pending_finish": pending_finish,
-            "finish_validation_status": finish_validation.get("status") if finish_validation else None,
-            "finish_validation_evidence": finish_validation,
+            "finish_validation_status": finish_validation.status if finish_validation else None,
+            "finish_validation_evidence": finish_validation.to_dict() if finish_validation else None,
             "context_mode": context_mode,
             "context_truncated": context_updates.get("context_truncated", False),
             "failure_memory_hit_count": context_updates.get("failure_memory_hit_count", 0),
@@ -994,9 +1054,9 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
         "verifier_failure_cause": verifier_result.failure_cause,
         "verifier_evidence": verifier_evidence,
         "pending_finish": False,
-        "finish_validation_status": finish_validation.get("status") if finish_validation else None,
-        "finish_validation_evidence": finish_validation,
-        "task_goal_contract": task_goal_trace_payload(state),
+        "finish_validation_status": finish_validation.status if finish_validation else None,
+        "finish_validation_evidence": finish_validation.to_dict() if finish_validation else None,
+        "goal_contract": goal_trace_payload(state),
         "retry_count": retry_count,
         "finished": task_finished,
         **takeover_update,

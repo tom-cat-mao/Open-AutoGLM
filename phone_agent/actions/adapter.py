@@ -142,11 +142,20 @@ def adapt_json_action(payload: str | dict[str, Any]) -> dict[str, Any]:
                 raise ActionAdapterError("mark_required", "tap-like intent requires target_mark_id or object selector")
         return intent
     if action_type == "finish":
-        _reject_unexpected_provider_fields(data, {"type", "_metadata", "message"})
+        _reject_unexpected_provider_fields(data, {"type", "_metadata", "message", "matched_terminal_evidence"})
         message = data.get("message")
         if not isinstance(message, str):
             raise ActionAdapterError("missing_field", "finish.message must be a string")
-        return {"_metadata": "finish", "message": message}
+        action: dict[str, Any] = {"_metadata": "finish", "message": message}
+        raw_evidence = data.get("matched_terminal_evidence")
+        if raw_evidence is not None:
+            if not isinstance(raw_evidence, list):
+                raise ActionAdapterError("unsafe_value", "matched_terminal_evidence must be a list")
+            for item in raw_evidence:
+                if not isinstance(item, str) or not item.strip():
+                    raise ActionAdapterError("unsafe_value", "matched_terminal_evidence items must be non-empty strings")
+            action["matched_terminal_evidence"] = [item.strip() for item in raw_evidence]
+        return action
     if action_type != "do":
         raise ActionAdapterError("unknown_action", "action type must be do or finish")
 

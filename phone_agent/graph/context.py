@@ -17,6 +17,8 @@ DEFAULT_CONTEXT_BUDGET: dict[str, int] = {
     "action_outcome_items": 1,
     "context_block_chars": 1500,
     "request_recent_messages": 6,
+    "reflect_recent_outcomes": 3,
+    "reflect_context_block_chars": 1200,
 }
 DEFAULT_PROMPT_VERSION = "context_harness_v1"
 CONTEXT_SECTION_IDS = (
@@ -779,6 +781,177 @@ def select_plan_context(
         context_block_chars=int(metrics.get("context_block_chars") or 0),
         context_truncated=bool(metrics.get("context_truncated")),
     )
+
+
+# ----------------------------------------------------------------------
+# Reflect context (parallel to plan context, narrower, with trajectory)
+# ----------------------------------------------------------------------
+
+REFLECT_CONTEXT_SECTION_IDS = (
+    "screen_belief",
+    "last_action_outcome",
+    "failure_memory",
+    "summarized_history",
+    "gui_memory.task_progress",
+)
+
+
+def select_reflect_context(
+    state: dict[str, Any], *, mode: str, lang: str = "cn", prompt_version: str | None = None
+) -> ContextSelectionResult:
+    """Select trace-safe context sections for the reflect prompt.
+
+    Mirrors ``select_plan_context`` but with a narrower section set and a
+    bounded recent-outcomes trajectory block. ``observe`` mode is read-only;
+    ``inject`` builds a regex-redacted block via ``build_reflect_context_block``.
+    """
+    normalized_mode = normalize_context_mode(mode)
+    sections = [section for section in REFLECT_CONTEXT_SECTION_IDS if _section_has_value(state, section)]
+    if normalized_mode == "off":
+        return ContextSelectionResult(
+            context_mode=normalized_mode,
+            context_strategy="off",
+            prompt_version=prompt_version or DEFAULT_PROMPT_VERSION,
+            selected_sections=[],
+        )
+    if not should_inject_context(normalized_mode):
+        return ContextSelectionResult(
+            context_mode=normalized_mode,
+            context_strategy="observe_only",
+            prompt_version=prompt_version or DEFAULT_PROMPT_VERSION,
+            selected_sections=sections,
+        )
+    block, metrics = build_reflect_context_block(state, lang, consumer="reflect_prompt")
+    return ContextSelectionResult(
+        context_mode=normalized_mode,
+        context_strategy="inject_redacted_block",
+        prompt_version=prompt_version or DEFAULT_PROMPT_VERSION,
+        selected_sections=sections,
+        context_block=block,
+        context_block_chars=int(metrics.get("context_block_chars") or 0),
+        context_truncated=bool(metrics.get("context_truncated")),
+    )
+
+
+def build_reflect_context_block(
+    state: dict[str, Any],
+    lang: str = "cn",
+    *,
+    consumer: ContextConsumer = "reflect_prompt",
+) -> tuple[str, dict[str, Any]]:
+    """Build a bounded context block for the reflect prompt.
+
+    Includes screen_belief + last_action_outcome + latest failure_memory +
+    summarized_history + gui_memory.task_progress + last K=3 action_outcome
+    summaries from ``action_ledger`` (trajectory memory, which the current
+    single-shot reflect lacks).
+    """
+    task_context = state.get("task") if isinstance(state.get("task"), str) else None
+    budget = state.get("context_budget") or DEFAULT_CONTEXT_BUDGET
+    component_truncated = False
+    title = (
+        "** Reflect Context (belief only; trajectory memory) **"
+        if lang == "en"
+        else "** 反思上下文（仅为信念与轨迹记忆） **"
+    )
+
+    parts: list[str] = []
+
+    # screen_belief
+    screen_belief = state.get("screen_belief") or {}
+    if isinstance(screen_belief, dict) and _is_informative_belief(
+        {
+            "summary": screen_belief.get("summary") or "unknown",
+            "confidence": screen_belief.get("confidence") or "unknown",
+            "loading_or_blocked": bool(screen_belief.get("loading_or_blocked")),
+            "unsafe_or_sensitive": bool(screen_belief.get("unsafe_or_sensitive")),
+        }
+    ):
+        belief_summary = sanitize_context_payload(
+            screen_belief.get("summary") or "unknown",
+            consumer=consumer,
+            task_context=task_context,
+        )
+        parts.append(
+            f"screen_belief: {json.dumps({'summary': belief_summary, 'confidence': screen_belief.get('confidence') or 'unknown', 'loading_or_blocked': bool(screen_belief.get('loading_or_blocked')), 'unsafe_or_sensitive': bool(screen_belief.get('unsafe_or_sensitive'))}, ensure_ascii=False)}"
+        )
+
+    # last_action_outcome
+    outcome = state.get("action_outcome_summary")
+    if isinstance(outcome, dict) and _is_informative_outcome(
+        {
+            "action": outcome.get("action"),
+            "execution_success": outcome.get("execution_success"),
+            "result_message": outcome.get("result_message_summary"),
+            "reflection_verdict": outcome.get("reflection_verdict"),
+            "failure_cause": outcome.get("failure_cause"),
+            "suggested_strategy": outcome.get("suggested_strategy"),
+        }
+    ):
+        parts.append(
+            f"last_action_outcome: {json.dumps(sanitize_context_payload(outcome, consumer=consumer, task_context=task_context), ensure_ascii=False)}"
+        )
+
+    # latest_failure_memory
+    failure_memory = state.get("failure_memory") or []
+    if isinstance(failure_memory, list) and failure_memory:
+        last = failure_memory[-1]
+        if isinstance(last, dict):
+            parts.append(
+                f"latest_failure_memory: {json.dumps(sanitize_context_payload(last, consumer=consumer, task_context=task_context), ensure_ascii=False)}"
+            )
+
+    # summarized_history
+    raw_history = str(state.get("summarized_history") or "")
+    if raw_history:
+        safe_history = sanitize_context_payload(raw_history, consumer=consumer, task_context=task_context)
+        trimmed_history, hist_truncated = trim_text(safe_history, budget["summarized_history_chars"])
+        if hist_truncated:
+            component_truncated = True
+        parts.append(f"summarized_history: {trimmed_history}")
+
+    # gui_memory.task_progress
+    gui_memory = state.get("gui_memory") or {}
+    if isinstance(gui_memory, dict):
+        task_progress = gui_memory.get("task_progress")
+        if task_progress:
+            parts.append(
+                f"task_progress: {json.dumps(sanitize_context_payload(task_progress, consumer=consumer, task_context=task_context), ensure_ascii=False)}"
+            )
+
+    # trajectory: last K action_outcome summaries from action_ledger
+    k = int(budget.get("reflect_recent_outcomes", 3) or 3)
+    action_ledger = state.get("action_ledger") or []
+    if isinstance(action_ledger, list) and action_ledger:
+        recent = action_ledger[-k:]
+        trajectory = []
+        for item in recent:
+            if not isinstance(item, dict):
+                continue
+            trajectory.append(
+                {
+                    "action": item.get("action"),
+                    "reflection_verdict": item.get("reflection_verdict"),
+                    "failure_cause": item.get("failure_cause"),
+                    "suggested_strategy": item.get("suggested_strategy"),
+                }
+            )
+        if trajectory:
+            parts.append(
+                f"recent_outcomes (last {len(trajectory)}): {json.dumps(trajectory, ensure_ascii=False)}"
+            )
+
+    if not parts:
+        return "", {"context_block_chars": 0, "context_truncated": False}
+
+    block, block_truncated = trim_text(
+        title + "\n" + "\n".join(parts),
+        int(budget.get("reflect_context_block_chars", 1200) or 1200),
+    )
+    return block, {
+        "context_block_chars": len(block),
+        "context_truncated": block_truncated or component_truncated,
+    }
 
 
 def compact_messages_for_request(

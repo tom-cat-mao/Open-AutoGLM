@@ -16,7 +16,7 @@ from phone_agent.graph.context import (
     sanitize_context_payload,
 )
 from phone_agent.graph.tools import dispatch_tool
-from phone_agent.graph.task_goal import finish_claim_summary
+from phone_agent.graph.goal import finish_claim_summary
 from phone_agent.graph.trace import emit_trace
 from phone_agent.model.client import MessageBuilder
 
@@ -204,13 +204,16 @@ def execute_node(state: "AgentState", config: RunnableConfig) -> dict:
             message=action_parsed.get("message"),
         )
         messages = _strip_and_append(messages, thinking, action_raw)
+        matched_evidence = action_parsed.get("matched_terminal_evidence") or []
         finish_claim = finish_claim_summary(result.message or "")
+        if isinstance(matched_evidence, list) and matched_evidence:
+            finish_claim["matched_terminal_evidence"] = [str(e) for e in matched_evidence]
         emit_trace(
             config,
             state,
             "execute",
             "execute_finish_pending",
-            {"finish_claim": finish_claim, "pending_finish": True},
+            {"finish_claim": finish_claim, "pending_finish": True, "matched_terminal_evidence": matched_evidence},
         )
         return {
             "action_result": result.__dict__,

@@ -77,6 +77,8 @@ def test_run_result_defaults_and_serialization() -> None:
         "retry_policy": None,
         "finish_validation_status": None,
         "finish_validation_evidence": None,
+        "goal_contract_status": None,
+        "goal_compile_source": None,
     }
 
 

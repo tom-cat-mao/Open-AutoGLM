@@ -45,6 +45,11 @@ class ModelConfig:
     output_mode: OutputMode = "json_schema"
     stream_stdout: bool = False
     trace_raw_model_response: bool = False
+    # Prompt cache settings (OpenAI-style prompt_cache_key or Anthropic-style cache_control).
+    # When non-null/True, the client injects cache hints to enable prefix caching on the
+    # goal_contract static message block. Defaults to off for backward compatibility.
+    prompt_cache_key: str | None = None
+    enable_cache_control: bool = False
 
     def __post_init__(self) -> None:
         """Validate runtime configuration values not enforced by type hints."""
@@ -136,6 +141,22 @@ class ModelClient:
             "extra_body": extra_body,
             "stream": self.config.stream,
         }
+        # Prompt cache hints (OpenAI path: prompt_cache_key; Anthropic path: cache_control)
+        if self.config.prompt_cache_key:
+            request_kwargs["prompt_cache_key"] = self.config.prompt_cache_key
+        if self.config.enable_cache_control:
+            # Mark the second message (goal_contract static block if present) as cacheable
+            # for Anthropic-compatible providers that honor cache_control.
+            messages_copy = [
+                {**msg, "content": list(msg["content"]) if isinstance(msg.get("content"), list) else msg.get("content")}
+                for msg in messages
+            ]
+            if len(messages_copy) >= 2 and isinstance(messages_copy[1].get("content"), str):
+                messages_copy[1] = {
+                    **messages_copy[1],
+                    "extra_body": {"cache_control": {"type": "ephemeral"}},
+                }
+            request_kwargs["messages"] = cast(Any, messages_copy)
         if effective_output_mode == "tool_calls":
             request_kwargs["tools"] = self._build_tool_specs()
             request_kwargs["tool_choice"] = "auto"

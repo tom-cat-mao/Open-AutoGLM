@@ -3,6 +3,7 @@
 from langgraph.graph import StateGraph, START, END
 
 from phone_agent.graph.state import AgentState
+from phone_agent.graph.nodes.goal_node import goal_node
 from phone_agent.graph.nodes.plan import plan_node
 from phone_agent.graph.nodes.execute import execute_node
 from phone_agent.graph.nodes.reflect import reflect_node
@@ -17,23 +18,25 @@ def create_agent_graph():
 
     Graph topology:
     ```
-    START → plan → execute → [confirm|takeover|reflect|replan|end]
-                             ├─ confirm → after_interrupt → [execute|reflect|end]
-                             ├─ takeover → after_interrupt → [reflect|end]
-                             ├─ reflect → should_continue → [takeover|replan|end]
-                             ├─ replan → plan (skip reflect for Wait/Note/Call_API/Interact)
-                             └─ end → END
+    START → goal → plan → execute → [confirm|takeover|reflect|replan|end]
+                                   ├─ confirm → after_interrupt → [execute|reflect|end]
+                                   ├─ takeover → after_interrupt → [reflect|end]
+                                   ├─ reflect → should_continue → [takeover|replan|end]
+                                   ├─ replan → plan (skip reflect for Wait/Note/Call_API/Interact)
+                                   └─ end → END
     ```
     """
     graph = StateGraph(AgentState)
 
+    graph.add_node("goal", goal_node)
     graph.add_node("plan", plan_node)
     graph.add_node("execute", execute_node)
     graph.add_node("reflect", reflect_node)
     graph.add_node("confirm", confirm_node)
     graph.add_node("takeover", takeover_node)
 
-    graph.add_edge(START, "plan")
+    graph.add_edge(START, "goal")
+    graph.add_edge("goal", "plan")
     graph.add_edge("plan", "execute")
     graph.add_conditional_edges(
         "execute",

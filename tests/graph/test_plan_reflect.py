@@ -2691,7 +2691,12 @@ def test_custom_system_prompt_skips_app_registry(base_state, fake_device) -> Non
 
 
 def test_plan_node_injects_task_goal_after_message_compaction(base_state, fake_device) -> None:
+    from phone_agent.graph.goal_compiler import HeuristicGoalCompiler
+
     base_state["task"] = "去b站看逗比的雀巢的第二个视频"
+    # Inject a heuristic goal contract to match the task
+    base_state["goal_contract"] = HeuristicGoalCompiler().compile(task=base_state["task"]).to_dict()
+    base_state["goal_contract_status"] = "compiled"
     base_state["step_count"] = 3
     base_state["messages"] = [
         {"role": "system", "content": "sys"},
@@ -2709,9 +2714,10 @@ def test_plan_node_injects_task_goal_after_message_compaction(base_state, fake_d
 
     text = model.messages[-1]["content"][-1]["text"]
     assert "任务目标契约" in text
-    assert "open_or_watch_ranked_content" in text
-    assert "ordinal=2" in text
-    assert result["task_goal_contract"]["goal_type"] == "open_or_watch_ranked_content"
+    assert "bilibili" in text  # target_app_hint from heuristic compiler
+    assert "vlm_judge_at_finish" in text  # verification_strategy
+    assert result["goal_contract"]["target_app_hint"] == "bilibili"
+    assert result["goal_contract"]["ordinal"] == 2
 
 
 def test_reflect_node_rejects_pending_finish_without_final_goal_evidence(base_state, fake_device) -> None:
@@ -2745,10 +2751,31 @@ def test_reflect_node_rejects_pending_finish_without_final_goal_evidence(base_st
 
 
 def test_reflect_node_accepts_pending_finish_with_final_goal_evidence(base_state, fake_device) -> None:
+    from phone_agent.graph.goal import GoalContract, SuccessCriterion
+
     base_state["task"] = "去b站看逗比的雀巢的第二个视频"
-    base_state["action_parsed"] = {"_metadata": "finish", "message": "已打开第二个视频"}
+    base_state["action_parsed"] = {
+        "_metadata": "finish",
+        "message": "已打开第二个视频",
+        "matched_terminal_evidence": ["player_visible", "selected_rank_2"],
+    }
     base_state["action_result"] = {"success": True, "should_finish": False, "message": "已打开第二个视频"}
     base_state["pending_finish"] = True
+    base_state["goal_contract"] = GoalContract(
+        task_hash="h",
+        redacted_objective="看b站第二个视频",
+        objective_length=14,
+        success_criteria=[
+            SuccessCriterion(name="player_visible", description="播放器可见", verification="vlm_judge", required=True),
+            SuccessCriterion(name="selected_rank_2", description="第2个视频", verification="object_rank_match", required=True),
+        ],
+        target_app_hint="bilibili",
+        ordinal=2,
+        verification_strategy="hybrid",
+        compile_status="compiled",
+        compile_source="external",
+    ).to_dict()
+    base_state["goal_contract_status"] = "compiled"
     base_state["expected_outcome"] = {
         "kind": "generic",
         "must_observe": [],
@@ -2763,7 +2790,7 @@ def test_reflect_node_accepts_pending_finish_with_final_goal_evidence(base_state
         "expected_page_type": "detail_or_player",
         "expected_rank": 2,
     }
-    model = FakeModelClient(FakeModelResponse("unused", '{"verdict":"failed","failure_cause":"unknown","suggested_strategy":"retry","message":"miss"}'))
+    model = FakeModelClient(FakeModelResponse("unused", '{"verdict":"succeeded","failure_cause":"none","suggested_strategy":"finish","message":"done","named_evidence":[{"criterion":"player_visible","screen_reference":"mark_id=player"}]}'))
 
     result = reflect_node(
         base_state,
@@ -2836,16 +2863,34 @@ def test_expected_outcome_selected_video_object_defaults_to_page_opened(base_sta
 
 
 def test_reflect_node_generic_pending_finish_can_use_model_evidence(base_state, fake_device) -> None:
+    from phone_agent.graph.goal import GoalContract, SuccessCriterion
+
     base_state["task"] = "完成普通页面任务"
-    base_state["action_parsed"] = {"_metadata": "finish", "message": "已完成"}
+    base_state["action_parsed"] = {
+        "_metadata": "finish",
+        "message": "已完成",
+        "matched_terminal_evidence": ["task_done"],
+    }
     base_state["action_result"] = {"success": True, "should_finish": False, "message": "已完成"}
     base_state["pending_finish"] = True
+    base_state["goal_contract"] = GoalContract(
+        task_hash="h",
+        redacted_objective="完成普通页面任务",
+        objective_length=8,
+        success_criteria=[
+            SuccessCriterion(name="task_done", description="完成标识可见", verification="vlm_judge", required=True),
+        ],
+        verification_strategy="vlm_judge_at_finish",
+        compile_status="compiled",
+        compile_source="external",
+    ).to_dict()
+    base_state["goal_contract_status"] = "compiled"
     model = FakeModelClient(
         FakeModelResponse(
             "ok",
-            '{"action_effect":"succeeded","task_progress":"finished",'
-            '"matched_postconditions":["done"],"missing_postconditions":[], '
-            '"dynamic_change_only":false,"evidence":"完成标识可见","next_strategy":"finish"}',
+            '{"verdict":"succeeded","failure_cause":"none","suggested_strategy":"finish",'
+            '"message":"完成标识可见","named_evidence":'
+            '[{"criterion":"task_done","screen_reference":"mark_id=done"}]}',
         )
     )
 
@@ -2864,17 +2909,38 @@ def test_reflect_node_generic_pending_finish_can_use_model_evidence(base_state, 
         },
     )
 
-    assert "任务目标契约" in model.messages[-1]["content"][-1]["text"]
     assert result["finished"] is True
     assert result["finish_validation_status"] == "success"
-    assert "model_reflection_evidence" in result["finish_validation_evidence"]["matched_terminal_evidence"]
+    assert "task_done" in result["finish_validation_evidence"]["matched_terminal_evidence"]
 
 
 def test_reflect_node_rejects_ranked_finish_without_expected_rank_match(base_state, fake_device) -> None:
+    from phone_agent.graph.goal import GoalContract, SuccessCriterion
+
     base_state["task"] = "去b站看逗比的雀巢的第二个视频"
-    base_state["action_parsed"] = {"_metadata": "finish", "message": "已打开视频"}
+    base_state["action_parsed"] = {
+        "_metadata": "finish",
+        "message": "已打开视频",
+        "matched_terminal_evidence": ["player_visible", "selected_rank_2"],
+    }
     base_state["action_result"] = {"success": True, "should_finish": False, "message": "已打开视频"}
     base_state["pending_finish"] = True
+    base_state["goal_contract"] = GoalContract(
+        task_hash="h",
+        redacted_objective="看b站第二个视频",
+        objective_length=14,
+        success_criteria=[
+            SuccessCriterion(name="player_visible", description="播放器可见", verification="vlm_judge", required=True),
+            SuccessCriterion(name="selected_rank_2", description="第2个视频", verification="object_rank_match", required=True),
+        ],
+        target_app_hint="bilibili",
+        ordinal=2,
+        verification_strategy="hybrid",
+        compile_status="compiled",
+        compile_source="external",
+    ).to_dict()
+    base_state["goal_contract_status"] = "compiled"
+    # expected_rank = 1 but ordinal = 2 → rank mismatch
     base_state["expected_outcome"] = {
         "kind": "generic",
         "must_observe": [],
@@ -2889,7 +2955,13 @@ def test_reflect_node_rejects_ranked_finish_without_expected_rank_match(base_sta
         "expected_page_type": "detail_or_player",
         "expected_rank": 1,
     }
-    model = FakeModelClient(FakeModelResponse("unused", '{"verdict":"succeeded","failure_cause":"none","suggested_strategy":"finish","message":"done"}'))
+    model = FakeModelClient(
+        FakeModelResponse(
+            "unused",
+            '{"verdict":"succeeded","failure_cause":"none","suggested_strategy":"finish","message":"done",'
+            '"named_evidence":[{"criterion":"player_visible","screen_reference":"mark_id=player"}]}',
+        )
+    )
 
     result = reflect_node(
         base_state,
@@ -2909,6 +2981,5 @@ def test_reflect_node_rejects_ranked_finish_without_expected_rank_match(base_sta
 
     assert result["finished"] is False
     assert result["finish_validation_status"] in {"failure", "unknown"}
-    assert "selected_rank=2" in result["finish_validation_evidence"]["missing_terminal_evidence"]
-    assert result["verifier_evidence"]["selected_object_signals"]["selected_object_match"] is True
-    assert "selected_rank_match" not in result["verifier_evidence"]["selected_object_signals"]
+    assert result["failure_cause"] == "goal_not_satisfied"
+    assert "selected_rank_2" in result["finish_validation_evidence"]["missing_terminal_evidence"]

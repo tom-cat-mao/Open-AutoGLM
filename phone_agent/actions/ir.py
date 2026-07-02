@@ -23,9 +23,10 @@ class DoActionDict(TypedDict, total=False):
     duration: str
 
 
-class FinishActionDict(TypedDict):
+class FinishActionDict(TypedDict, total=False):
     _metadata: Literal["finish"]
     message: str
+    matched_terminal_evidence: list[str]
 
 
 ActionDict = Union[DoActionDict, FinishActionDict]

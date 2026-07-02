@@ -19,7 +19,6 @@ from phone_agent.graph.context import (
     should_inject_context,
 )
 from phone_agent.graph.state import AgentState
-from phone_agent.graph.task_goal import build_task_goal_contract
 from phone_agent.graph.trace import JsonlTraceWriter
 from phone_agent.grounding.factory import DEFAULT_GROUNDING_PROVIDER_NAME
 
@@ -47,6 +46,9 @@ class AgentConfig:
     accessibility_marks: bool = False
     accessibility_timeout: float = 3.0
     accessibility_max_marks: int = 80
+    goal_compile_retry: int = 1
+    require_goal_approval: bool = False
+    enable_prompt_cache: bool = False
     locateanything_context_max_chars: int = 0
     locateanything_structure_mode: str | None = None
     locateanything_max_visual_candidates: int = 30
@@ -113,6 +115,8 @@ class RunResult:
     retry_policy: str | None = None
     finish_validation_status: str | None = None
     finish_validation_evidence: dict[str, Any] | None = None
+    goal_contract_status: str | None = None
+    goal_compile_source: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize the result to a JSON-friendly dictionary."""
@@ -224,7 +228,12 @@ class PhoneAgent:
             context_strategy = "observe_only"
         return {
             "task": task,
-            "task_goal_contract": build_task_goal_contract(task).to_trace_payload(),
+            "task_goal_contract": None,
+            "goal_contract": None,
+            "goal_contract_status": "pending",
+            "goal_compile_source": None,
+            "goal_compile_attempts": 0,
+            "needs_recompile": False,
             "messages": [],
             "step_count": 0,
             "max_steps": self.agent_config.max_steps,
@@ -342,6 +351,9 @@ class PhoneAgent:
                 "accessibility_marks": self.agent_config.accessibility_marks,
                 "accessibility_timeout": self.agent_config.accessibility_timeout,
                 "accessibility_max_marks": self.agent_config.accessibility_max_marks,
+                "goal_compile_retry": self.agent_config.goal_compile_retry,
+                "require_goal_approval": self.agent_config.require_goal_approval,
+                "enable_prompt_cache": self.agent_config.enable_prompt_cache,
                 "locateanything_context_max_chars": self.agent_config.locateanything_context_max_chars,
                 "locateanything_structure_mode": self.agent_config.locateanything_structure_mode,
                 "locateanything_max_visual_candidates": self.agent_config.locateanything_max_visual_candidates,
@@ -397,6 +409,8 @@ class PhoneAgent:
             retry_policy=state.get("retry_policy"),
             finish_validation_status=state.get("finish_validation_status"),
             finish_validation_evidence=state.get("finish_validation_evidence"),
+            goal_contract_status=state.get("goal_contract_status"),
+            goal_compile_source=state.get("goal_compile_source"),
             **context_metrics,
         )
 
