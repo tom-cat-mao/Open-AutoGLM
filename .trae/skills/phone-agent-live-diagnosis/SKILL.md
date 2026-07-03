@@ -67,14 +67,51 @@ Useful options:
 --base-url http://localhost:8000/v1
 --model autoglm-phone-9b
 --apikey EMPTY
+--user-agent "Open-AutoGLM/0.1"
 --output-mode json_schema
 --context-mode inject
 --grounding-provider hybrid
 --accessibility-timeout 3
 --accessibility-max-marks 80
 --locateanything-context-max-chars 0
+--locateanything-structure-mode off
+--locateanything-max-visual-candidates 30
+--locateanything-visual-category-budget 5
+--locateanything-max-structure-calls 5
 --output-dir outputs/live-diagnosis
 ```
+
+Model gateway environment:
+
+```bash
+export PHONE_AGENT_BASE_URL=http://localhost:8000/v1
+export PHONE_AGENT_MODEL=autoglm-phone-9b
+export PHONE_AGENT_API_KEY=EMPTY
+export PHONE_AGENT_HTTP_HEADERS='{"Header":"Value"}'
+export PHONE_AGENT_USER_AGENT='Open-AutoGLM/0.1'
+export PHONE_AGENT_CF_ACCESS_CLIENT_ID=...
+export PHONE_AGENT_CF_ACCESS_CLIENT_SECRET=...
+```
+
+Grounding environment:
+
+```bash
+export PHONE_AGENT_GROUNDING_PROVIDER=hybrid
+export PHONE_AGENT_ACCESSIBILITY_TIMEOUT=3.0
+export PHONE_AGENT_ACCESSIBILITY_MAX_MARKS=80
+export PHONE_AGENT_LOCATEANYTHING_MODEL=models/LocateAnything-3B-4bit
+export PHONE_AGENT_LOCATEANYTHING_MAX_SIZE=960
+export PHONE_AGENT_LOCATEANYTHING_CONTEXT_MAX_CHARS=0
+export PHONE_AGENT_LOCATEANYTHING_STRUCTURE_MODE=off  # off | target | screen
+export PHONE_AGENT_LOCATEANYTHING_MAX_VISUAL_CANDIDATES=30
+export PHONE_AGENT_LOCATEANYTHING_VISUAL_CATEGORY_BUDGET=5
+export PHONE_AGENT_LOCATEANYTHING_MAX_STRUCTURE_CALLS=5
+```
+
+Do not configure old remote grounding variables for the current local runtime path:
+`PHONE_AGENT_REMOTE_GROUNDING_BASE_URL`, `PHONE_AGENT_REMOTE_GROUNDING_API_KEY`,
+`PHONE_AGENT_REMOTE_GROUNDING_MODEL`, `PHONE_AGENT_REMOTE_GROUNDING_PROFILE`.
+If they are present, the diagnosis preflight reports them as deprecated.
 
 ## Workflow
 
@@ -135,7 +172,7 @@ When diagnosis points to a layer, inspect the corresponding files:
 | grounding | `phone_agent/actions/grounding.py`, `phone_agent/grounding/`, `phone_agent/graph/observation.py`, `phone_agent/graph/marks.py` |
 | safety/HITL | `phone_agent/actions/safety.py`, `phone_agent/graph/edges.py`, `phone_agent/graph/nodes/confirm.py`, `phone_agent/graph/nodes/takeover.py` |
 | execution | `phone_agent/graph/nodes/execute.py`, `phone_agent/graph/tools/`, `phone_agent/adb/device.py`, `phone_agent/adb/input.py` |
-| reflection | `phone_agent/graph/nodes/reflect.py`, `phone_agent/graph/verifier.py` |
+| reflection/finish gate | `phone_agent/graph/goal.py`, `phone_agent/graph/goal_compiler.py`, `phone_agent/graph/goal_evaluator.py`, `phone_agent/graph/nodes/goal_node.py`, `phone_agent/graph/nodes/reflect.py`, `phone_agent/graph/verifier.py` |
 | context | `phone_agent/graph/context.py`, `phone_agent/graph/nodes/plan.py` |
 | eval/trace | `evals/run_eval.py`, `phone_agent/graph/trace.py`, `phone_agent/agent.py` |
 
@@ -159,4 +196,6 @@ Reports must be interactive HTML, not only Markdown. Use a data-dense dashboard 
 - Do not auto-edit business code from this skill unless the user separately asks for a fix.
 - Prefer `.venv/bin/python`; fall back only if `.venv` is unavailable.
 - Real LocateAnything needs Apple Silicon + Metal. In TraeCLI sandbox, MLX may import but fail at runtime with `[metal::load_device] No Metal device available`; when `--grounding-provider hybrid|locateanything` needs real LocateAnything, request escalated command execution and record the MLX preflight result instead of calling it a model failure.
-- Reports must surface `ExpectedOutcome`, `verifier_status`, `verifier_evidence.matched_postconditions`, `verifier_evidence.missing_postconditions`, `weak_signals`, `dynamic_change_only`, and provider `fallback_chain` when present.
+- Reports must surface `ExpectedOutcome`, `GoalContract`, `goal_contract_status`, `goal_compile_source`, `finish_validation_evidence.matched_terminal_evidence`, `finish_validation_evidence.missing_terminal_evidence`, `verifier_status`, `verifier_evidence.matched_postconditions`, `verifier_evidence.missing_postconditions`, `weak_signals`, `dynamic_change_only`, and provider `fallback_chain` when present.
+- `finish` is only a claim. A run is not complete until `GoalEvaluator` validates all required `SuccessCriterion` entries named in `finish.matched_terminal_evidence`; missing/unknown evidence is a diagnosis finding, not success.
+- Preflight should warn when multiple ADB devices are connected without `--device-id`, the configured device is absent, ADB Keyboard is not active, or deprecated remote grounding environment variables are set.

@@ -57,8 +57,8 @@ smart-search search "query" --format json
 - **Always `.venv/bin/python` / `.venv/bin/pytest` / `.venv/bin/pip`** — never system Python.
 - **File search**: use `rg` / `rg --files`; do not use `find` or `grep`.
 - **Web research**: use `smart-search-cli` skill or Context7 for third-party API docs. Never use TraeCLI built-in WebSearch/WebFetch unless smart-search is unavailable.
-- **Real device diagnosis**: use `.trae/skills/phone-agent-live-diagnosis/SKILL.md`; default entry: `.venv/bin/python .trae/skills/phone-agent-live-diagnosis/scripts/run_diagnosis.py "<target>"`.
-- **Escalation**: sandbox/network/GPU/Metal/ADB/Operation not permitted → retry with `sandbox_permissions="require_escalated"` and a user-readable justification. Only set narrow `prefix_rule` for non-destructive, reusable commands. Never set `prefix_rule` for `rm`, `git reset`, or other destructive commands.
+- **Real device diagnosis**: prefer `.agents/skills/phone-agent-live-diagnosis/SKILL.md` (ZCode-discoverable skill); default entry: `.venv/bin/python .agents/skills/phone-agent-live-diagnosis/scripts/run_diagnosis.py "<target>"`. The legacy copy under `.trae/skills/phone-agent-live-diagnosis/` remains for TraeCLI.
+- **Escalation**: sandbox/network/GPU/Metal/ADB/Operation not permitted → in ZCode, rerun the failing diagnosis command via the Bash tool with `dangerouslyDisableSandbox: true` and a user-readable justification; in TraeCLI, retry with `sandbox_permissions="require_escalated"`. Never relax the sandbox for `rm`, `git reset`, `git push --force`, or other destructive commands.
 - **Planning/review**: use OMX canonical workflow: `$ralplan` = Planner → Architect → Critic; `$autopilot` = deep-interview → ralplan → ultragoal → code-review → ultraqa. Do not load heavy design workflows for ordinary tasks.
 - **OMX subagents**: use `.codex/agents/`; skills from `.codex/skills/`. AGENTS.md is the orchestration brain.
 

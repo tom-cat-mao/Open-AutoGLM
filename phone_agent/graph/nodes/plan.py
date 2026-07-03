@@ -1058,8 +1058,17 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
     grounding_candidates = grounding_observation.get("candidates") or []
     grounding_candidate_count = int(grounding_observation.get("candidate_count") or len(grounding_candidates) or 0)
     selected_grounding_candidate_id = grounding_observation.get("selected_candidate_id")
+    # Assistant history must show the model the provider-facing IntentIR it
+    # actually emitted (intent_raw), not the post-grounding internal ActionIR
+    # (action_parsed). Replaying the internal {"_metadata":"do","element":[...]}
+    # shape teaches the model to copy that shape on subsequent steps, which the
+    # adapter then rejects with mark_required. intent_raw is captured before
+    # grounding at plan.py:362 and is exactly what the model sent us.
+    history_action = _action_for_history(intent_raw) if intent_raw is not None else (
+        _action_for_history(action_parsed) if action_parsed is not None else None
+    )
     action_raw_payload: dict = {
-        "action": _action_for_history(action_parsed) if action_parsed is not None else None,
+        "action": history_action,
         "parse_success": parse_error is None,
     }
     if expected_outcome is not None:

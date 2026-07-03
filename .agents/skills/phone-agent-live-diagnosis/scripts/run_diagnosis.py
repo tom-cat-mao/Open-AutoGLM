@@ -19,10 +19,27 @@ from pathlib import Path
 from typing import Any
 
 
-ROOT = Path(__file__).resolve().parents[4]
 SKILL_DIR = Path(__file__).resolve().parents[1]
+
+
+def resolve_repo_root() -> Path:
+    """Resolve the Open-AutoGLM repo root.
+
+    The skill ships under ``<repo>/.agents/skills/phone-agent-live-diagnosis/scripts``
+    so ``parents[4]`` is the repo root. ``PHONE_AGENT_REPO_ROOT`` overrides this for
+    callers that invoke the script through symlinks or from a copied tree.
+    """
+
+    override = os.getenv("PHONE_AGENT_REPO_ROOT")
+    if override:
+        path = Path(override).expanduser().resolve()
+        if path.is_dir():
+            return path
+    return Path(__file__).resolve().parents[4]
+
+
+ROOT = resolve_repo_root()
 DEFAULT_OUTPUT_DIR = ROOT / "outputs" / "live-diagnosis"
-ADB_KEYBOARD_SERVICE = "com.android.adbkeyboard/.AdbIME"
 
 
 SOURCE_RULES = [
@@ -47,28 +64,17 @@ SOURCE_RULES = [
         "verify": "在安全页、黑屏页和普通页各运行一次 diagnosis，检查 plan 阶段是否停止且未把占位图继续送入模型。",
     },
     {
-        "signals": {
-            "invalid_json",
-            "parse_error",
-            "unsupported_tool_call",
-            "model_request_failed",
-            "403",
-            "cloudflare",
-            "waf_blocked",
-            "cf_access_partial",
-        },
+        "signals": {"invalid_json", "parse_error", "unsupported_tool_call", "model_request_failed"},
         "layer": "parse",
         "severity": "P1",
         "title": "模型输出或结构化解析失败",
         "files": [
-            "main.py",
-            "evals/run_eval.py",
             "phone_agent/model/client.py",
             "phone_agent/actions/adapter.py",
             "phone_agent/graph/nodes/plan.py",
         ],
-        "suggestion": "核对 output_mode、response_format/tool_calls 聚合、adapter 白名单，以及 PHONE_AGENT_HTTP_HEADERS/USER_AGENT/CF Access 网关配置；失败时只允许格式重试，不应伪装为 finish。",
-        "verify": "用 json_schema/tool_calls/auto 分别运行同一目标，并用同一 base-url/model/header 配置比较 parse_metadata、parse_retry_success 与 HTTP 错误。",
+        "suggestion": "核对 output_mode、response_format/tool_calls 聚合与 adapter 白名单；失败时只允许格式重试，不应伪装为 finish。",
+        "verify": "用 json_schema/tool_calls/auto 分别运行同一目标，比较 parse_metadata 与 parse_retry_success。",
     },
     {
         "signals": {
@@ -85,11 +91,6 @@ SOURCE_RULES = [
             "bad_bbox",
             "provider_unavailable",
             "missing_provider_hash",
-            "visual_object_ambiguous",
-            "visual_object_not_executable",
-            "visual_structure_missing",
-            "visual_structure_partial",
-            "structure_mode_unexpected",
         },
         "layer": "grounding",
         "severity": "P0",
@@ -102,10 +103,9 @@ SOURCE_RULES = [
             "phone_agent/grounding/factory.py",
             "phone_agent/graph/observation.py",
             "phone_agent/graph/marks.py",
-            "phone_agent/graph/objects.py",
         ],
-        "suggestion": "检查 hybrid provider 是否记录 fallback_chain、LocateAnything visual sidecar 参数是否生效、visual selector 是否 eligible；失败不得回退到主 VLM 坐标。",
-        "verify": "分别跑 native 设置页和 WebView/自绘页，并用 --locateanything-structure-mode off/target/screen 对比 accessibility、LocateAnything fallback 与 object_registry_summary。",
+        "suggestion": "检查 hybrid provider 是否记录 fallback_chain、是否只在 hint 可用时停止 fallback；失败不得回退到主 VLM 坐标。",
+        "verify": "分别跑 native 设置页和 WebView/自绘页，确认 accessibility 与 LocateAnything fallback 行为符合预期。",
     },
     {
         "signals": {"unknown_app", "unknown_action", "missing_field", "unsafe_value", "invalid_metadata"},
@@ -169,10 +169,9 @@ SOURCE_RULES = [
             "goal_not_satisfied",
             "finish_validation_unknown",
             "finish_validation_failure",
-            "not_named_in_finish_claim",
-            "no_named_evidence_from_reflect",
-            "goal_contract_unavailable",
-            "programmatic_contradiction",
+            "needs_recompile",
+            "matched_terminal_evidence",
+            "missing_terminal_evidence",
         },
         "layer": "reflection",
         "severity": "P2",
@@ -187,7 +186,7 @@ SOURCE_RULES = [
             "phone_agent/graph/verifier.py",
             "phone_agent/graph/context.py",
         ],
-        "suggestion": "检查 GoalContract、SuccessCriterion、finish.matched_terminal_evidence、GoalEvaluator、ExpectedOutcome 与模型反思 named_evidence 的合并优先级；动态区域变化不能单独证明成功。",
+        "suggestion": "检查 GoalContract、finish_validation、ExpectedOutcome、matched/missing terminal_evidence、matched/missing postconditions、weak_signals 与模型反思合并优先级；vlm_judge 标准未在 matched_terminal_evidence 中点名视为 missing（硬门）；动态区域变化不能单独证明成功；needs_recompile 当前无 writer，mid-task 合约切换仅通过 configurable[\"task_goal_contract_override\"]。",
         "verify": "运行搜索框点击、输入、视频打开和动态首页变化 case，对比 goal_contract、finish_validation、expected_outcome、verifier_evidence 与 reflection_verdict。",
     },
 ]
@@ -200,7 +199,6 @@ LAYER_FALLBACKS = {
     "safety": SOURCE_RULES[4],
     "execution": SOURCE_RULES[5],
     "reflection": SOURCE_RULES[6],
-    "goal": SOURCE_RULES[6],
     "context": {
         "layer": "context",
         "severity": "P2",
@@ -261,9 +259,6 @@ def main() -> int:
         shutil.copy2(trace_path, run_dir / "trace.jsonl")
 
     trace_summary = summarize_trace(trace_events)
-    trace_summary["model_gateway"] = preflight.get("model_gateway", {})
-    trace_summary["deprecated_env_warnings"] = preflight.get("deprecated_env_warnings", [])
-    trace_summary["locateanything_structure_mode"] = preflight.get("locateanything_structure_mode", "off")
     write_json(run_dir / "trace_summary.json", trace_summary)
 
     code_findings = build_code_findings(record, trace_summary)
@@ -310,7 +305,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--base-url", default=os.getenv("PHONE_AGENT_BASE_URL", "http://localhost:8000/v1"))
     parser.add_argument("--model", default=os.getenv("PHONE_AGENT_MODEL", "autoglm-phone-9b"))
     parser.add_argument("--apikey", default=os.getenv("PHONE_AGENT_API_KEY", "EMPTY"))
-    parser.add_argument("--user-agent", default=os.getenv("PHONE_AGENT_USER_AGENT"))
     parser.add_argument("--output-mode", choices=["json_schema", "tool_calls", "auto"], default=os.getenv("PHONE_AGENT_OUTPUT_MODE", "json_schema"))
     parser.add_argument("--model-timeout", type=float, default=float(os.getenv("PHONE_AGENT_MODEL_TIMEOUT", "60")))
     parser.add_argument("--model-max-retries", type=int, default=int(os.getenv("PHONE_AGENT_MODEL_MAX_RETRIES", "2")))
@@ -323,21 +317,29 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--accessibility-timeout", type=float, default=float(os.getenv("PHONE_AGENT_ACCESSIBILITY_TIMEOUT", "3.0")))
     parser.add_argument("--accessibility-max-marks", type=int, default=int(os.getenv("PHONE_AGENT_ACCESSIBILITY_MAX_MARKS", "80")))
     parser.add_argument("--locateanything-context-max-chars", type=int, default=int(os.getenv("PHONE_AGENT_LOCATEANYTHING_CONTEXT_MAX_CHARS", "0")))
-    parser.add_argument("--locateanything-structure-mode", choices=["off", "target", "screen"], default=None)
+    parser.add_argument(
+        "--locateanything-structure-mode",
+        choices=["off", "target", "screen"],
+        default=os.getenv("PHONE_AGENT_LOCATEANYTHING_STRUCTURE_MODE", "off"),
+        help="Optional LocateAnything visual structure mode (off | target | screen)",
+    )
     parser.add_argument(
         "--locateanything-max-visual-candidates",
         type=int,
-        default=int(os.getenv("PHONE_AGENT_LOCATEANYTHING_MAX_VISUAL_CANDIDATES", "30")),
+        default=int(os.getenv("PHONE_AGENT_LOCATEANYTHING_MAX_VISUAL_CANDIDATES", "20")),
+        help="Maximum visual sidecar candidates emitted by LocateAnything structure mode",
     )
     parser.add_argument(
         "--locateanything-visual-category-budget",
         type=int,
-        default=int(os.getenv("PHONE_AGENT_LOCATEANYTHING_VISUAL_CATEGORY_BUDGET", "5")),
+        default=int(os.getenv("PHONE_AGENT_LOCATEANYTHING_VISUAL_CATEGORY_BUDGET", "8")),
+        help="Maximum bounded visual categories queried in screen structure mode",
     )
     parser.add_argument(
         "--locateanything-max-structure-calls",
         type=int,
-        default=int(os.getenv("PHONE_AGENT_LOCATEANYTHING_MAX_STRUCTURE_CALLS", "5")),
+        default=int(os.getenv("PHONE_AGENT_LOCATEANYTHING_MAX_STRUCTURE_CALLS", "3")),
+        help="Maximum LocateAnything calls used for screen structure sidecar generation",
     )
     parser.add_argument(
         "--trace-raw-model-response",
@@ -434,90 +436,6 @@ def load_project_env() -> None:
         os.environ[key] = value
 
 
-def model_gateway_summary(args: argparse.Namespace) -> dict[str, Any]:
-    """Return trace-safe model gateway configuration presence."""
-
-    return {
-        "base_url": args.base_url,
-        "model": args.model,
-        "api_key_configured": bool(args.apikey and args.apikey != "EMPTY"),
-        "user_agent_configured": bool(args.user_agent or os.getenv("PHONE_AGENT_USER_AGENT")),
-        "http_headers_configured": bool(os.getenv("PHONE_AGENT_HTTP_HEADERS")),
-        "cf_access_configured": bool(
-            os.getenv("PHONE_AGENT_CF_ACCESS_CLIENT_ID")
-            and os.getenv("PHONE_AGENT_CF_ACCESS_CLIENT_SECRET")
-        ),
-        "cf_access_partial": bool(os.getenv("PHONE_AGENT_CF_ACCESS_CLIENT_ID"))
-        != bool(os.getenv("PHONE_AGENT_CF_ACCESS_CLIENT_SECRET")),
-    }
-
-
-def deprecated_env_warnings() -> list[dict[str, str]]:
-    """Report old environment variables that the current local runtime ignores."""
-
-    warnings = []
-    for key in (
-        "PHONE_AGENT_REMOTE_GROUNDING_BASE_URL",
-        "PHONE_AGENT_REMOTE_GROUNDING_API_KEY",
-        "PHONE_AGENT_REMOTE_GROUNDING_MODEL",
-        "PHONE_AGENT_REMOTE_GROUNDING_PROFILE",
-    ):
-        if os.getenv(key):
-            warnings.append({
-                "key": key,
-                "status": "deprecated_for_current_local_grounding",
-                "replacement": "PHONE_AGENT_GROUNDING_PROVIDER=hybrid with local PHONE_AGENT_LOCATEANYTHING_*",
-            })
-    return warnings
-
-
-def adb_device_selection_check(adb_devices: dict[str, Any], device_id: str | None) -> dict[str, Any]:
-    """Summarize connected ADB device selection without shelling out again."""
-
-    stdout = str(adb_devices.get("stdout") or "")
-    rows = [
-        line.strip()
-        for line in stdout.splitlines()
-        if line.strip() and not line.lower().startswith("list of devices")
-    ]
-    device_rows = [line for line in rows if "\tdevice" in line or " device " in f" {line} "]
-    ids = [line.split()[0] for line in device_rows if line.split()]
-    selected_present = device_id in ids if device_id else None
-    return {
-        "connected_device_count": len(ids),
-        "connected_device_ids": ids[:8],
-        "device_id": device_id,
-        "selected_present": selected_present,
-        "warning": device_selection_warning(ids, device_id),
-    }
-
-
-def device_selection_warning(ids: list[str], device_id: str | None) -> str | None:
-    if device_id and device_id not in ids:
-        return "configured_device_not_found"
-    if not device_id and len(ids) > 1:
-        return "multiple_devices_without_explicit_device_id"
-    if not ids:
-        return "no_adb_device"
-    return None
-
-
-def adb_keyboard_check(default_ime: dict[str, Any], ime_services: dict[str, Any]) -> dict[str, Any]:
-    """Summarize ADB Keyboard installation and activation state."""
-
-    default_value = str(default_ime.get("stdout") or "").strip()
-    services_text = f"{ime_services.get('stdout') or ''}\n{ime_services.get('stderr') or ''}"
-    installed = ADB_KEYBOARD_SERVICE in services_text or "com.android.adbkeyboard" in services_text
-    active = default_value == ADB_KEYBOARD_SERVICE
-    return {
-        "service": ADB_KEYBOARD_SERVICE,
-        "installed_or_visible": installed,
-        "active": active,
-        "default_input_method": default_value,
-        "warning": None if active else ("adb_keyboard_not_installed_or_not_visible" if not installed else "adb_keyboard_not_active"),
-    }
-
-
 def collect_preflight(args: argparse.Namespace) -> dict[str, Any]:
     adb_path = shutil.which("adb")
     python_path = str(ROOT / ".venv" / "bin" / "python") if (ROOT / ".venv" / "bin" / "python").exists() else sys.executable
@@ -530,11 +448,6 @@ def collect_preflight(args: argparse.Namespace) -> dict[str, Any]:
         "output_mode": args.output_mode,
         "context_mode": args.context_mode,
         "grounding_provider": args.grounding_provider,
-        "locateanything_structure_mode": args.locateanything_structure_mode
-        or os.getenv("PHONE_AGENT_LOCATEANYTHING_STRUCTURE_MODE")
-        or "off",
-        "model_gateway": model_gateway_summary(args),
-        "deprecated_env_warnings": deprecated_env_warnings(),
         "checks": {},
     }
     data["checks"]["python_version"] = safe_cmd([python_path, "--version"])
@@ -550,22 +463,12 @@ def collect_preflight(args: argparse.Namespace) -> dict[str, Any]:
     if adb_path:
         data["checks"]["adb_version"] = safe_cmd([adb_path, "version"])
         data["checks"]["adb_devices"] = safe_cmd([adb_path, "devices", "-l"])
-        data["checks"]["device_selection"] = adb_device_selection_check(
-            data["checks"]["adb_devices"],
-            args.device_id,
-        )
         if args.device_id:
             prefix = [adb_path, "-s", args.device_id]
         else:
             prefix = [adb_path]
         data["checks"]["wm_size"] = safe_cmd(prefix + ["shell", "wm", "size"])
         data["checks"]["current_focus"] = safe_cmd(prefix + ["shell", "dumpsys", "window"])
-        data["checks"]["default_input_method"] = safe_cmd(prefix + ["shell", "settings", "get", "secure", "default_input_method"])
-        data["checks"]["ime_services"] = safe_cmd(prefix + ["shell", "dumpsys", "input_method"])
-        data["checks"]["adb_keyboard"] = adb_keyboard_check(
-            data["checks"]["default_input_method"],
-            data["checks"]["ime_services"],
-        )
     return data
 
 
@@ -641,6 +544,14 @@ def build_eval_command(args: argparse.Namespace, task_path: Path, trace_dir: Pat
         str(args.accessibility_max_marks),
         "--locateanything-context-max-chars",
         str(args.locateanything_context_max_chars),
+        "--locateanything-structure-mode",
+        args.locateanything_structure_mode,
+        "--locateanything-max-visual-candidates",
+        str(args.locateanything_max_visual_candidates),
+        "--locateanything-visual-category-budget",
+        str(args.locateanything_visual_category_budget),
+        "--locateanything-max-structure-calls",
+        str(args.locateanything_max_structure_calls),
         "--lang",
         args.lang,
         "--base-url",
@@ -658,20 +569,6 @@ def build_eval_command(args: argparse.Namespace, task_path: Path, trace_dir: Pat
         "--thinking-param",
         args.thinking_param,
     ]
-    if args.user_agent:
-        cmd.extend(["--user-agent", args.user_agent])
-    if args.locateanything_structure_mode:
-        cmd.extend(["--locateanything-structure-mode", args.locateanything_structure_mode])
-    cmd.extend(
-        [
-            "--locateanything-max-visual-candidates",
-            str(args.locateanything_max_visual_candidates),
-            "--locateanything-visual-category-budget",
-            str(args.locateanything_visual_category_budget),
-            "--locateanything-max-structure-calls",
-            str(args.locateanything_max_structure_calls),
-        ]
-    )
     if args.trace_raw_model_response:
         cmd.append("--trace-raw-model-response")
     if args.trace_request_messages:
@@ -712,10 +609,7 @@ def build_env(args: argparse.Namespace) -> dict[str, str]:
     env["PHONE_AGENT_ACCESSIBILITY_TIMEOUT"] = str(args.accessibility_timeout)
     env["PHONE_AGENT_ACCESSIBILITY_MAX_MARKS"] = str(args.accessibility_max_marks)
     env["PHONE_AGENT_LOCATEANYTHING_CONTEXT_MAX_CHARS"] = str(args.locateanything_context_max_chars)
-    if args.user_agent:
-        env["PHONE_AGENT_USER_AGENT"] = args.user_agent
-    if args.locateanything_structure_mode:
-        env["PHONE_AGENT_LOCATEANYTHING_STRUCTURE_MODE"] = args.locateanything_structure_mode
+    env["PHONE_AGENT_LOCATEANYTHING_STRUCTURE_MODE"] = args.locateanything_structure_mode
     env["PHONE_AGENT_LOCATEANYTHING_MAX_VISUAL_CANDIDATES"] = str(args.locateanything_max_visual_candidates)
     env["PHONE_AGENT_LOCATEANYTHING_VISUAL_CATEGORY_BUDGET"] = str(args.locateanything_visual_category_budget)
     env["PHONE_AGENT_LOCATEANYTHING_MAX_STRUCTURE_CALLS"] = str(args.locateanything_max_structure_calls)
@@ -909,7 +803,6 @@ def summarize_trace(events: list[dict[str, Any]]) -> dict[str, Any]:
     verifier = []
     expected_outcomes = []
     finish_validations = []
-    goal_contracts = []
     fallback_chains = []
     timeline = []
     for event in events:
@@ -935,8 +828,6 @@ def summarize_trace(events: list[dict[str, Any]]) -> dict[str, Any]:
             fallback_chains.extend(extract_fallback_chains(payload))
         if payload.get("expected_outcome") or payload.get("parse_metadata", {}).get("expected_outcome_present"):
             expected_outcomes.append(compact)
-        if payload.get("goal_contract") or payload.get("task_goal_contract"):
-            goal_contracts.append(compact)
         if payload.get("finish_validation") or payload.get("finish_validation_status"):
             finish_validations.append(compact)
         if (
@@ -954,7 +845,6 @@ def summarize_trace(events: list[dict[str, Any]]) -> dict[str, Any]:
         "grounding": grounding[:50],
         "fallback_chains": fallback_chains[:50],
         "expected_outcomes": expected_outcomes[:50],
-        "goal_contracts": goal_contracts[:50],
         "finish_validations": finish_validations[:50],
         "verifier": verifier[:50],
         "timeline": timeline[:200],
@@ -1072,7 +962,6 @@ def collect_signals(record: dict[str, Any], trace_summary: dict[str, Any]) -> se
     finish_status = record.get("finish_validation_status")
     if finish_status:
         signals.add(f"finish_validation_{finish_status}")
-    collect_finish_validation_signals(signals, record.get("finish_validation_evidence"))
     verifier_status = record.get("verifier_status")
     if verifier_status:
         signals.add(f"verifier_{verifier_status}")
@@ -1084,26 +973,12 @@ def collect_signals(record: dict[str, Any], trace_summary: dict[str, Any]) -> se
                 signals.add(str(item))
         if evidence.get("dynamic_change_only"):
             signals.add("dynamic_change_only")
-    if record.get("error"):
-        collect_text_error_signals(signals, str(record.get("error")))
-    if record.get("final_message"):
-        collect_text_error_signals(signals, str(record.get("final_message")))
-    gateway = trace_summary.get("model_gateway")
-    if isinstance(gateway, dict) and gateway.get("cf_access_partial"):
-        signals.add("cf_access_partial")
-    expected_visual_structure = str(trace_summary.get("locateanything_structure_mode") or "").lower() in {
-        "target",
-        "screen",
-    }
     for item in trace_summary.get("errors", []):
         payload = item.get("payload") or {}
         for key in ("error_layer", "error_code", "failure_cause", "grounding_error_code", "parse_error_code", "validation_error_code"):
             value = payload.get(key)
             if value:
                 signals.add(str(value))
-        for key in ("error", "message", "final_message"):
-            if payload.get(key):
-                collect_text_error_signals(signals, str(payload.get(key)))
     for item in trace_summary.get("verifier", []):
         payload = item.get("payload") or {}
         status = payload.get("verifier_status")
@@ -1135,18 +1010,16 @@ def collect_signals(record: dict[str, Any], trace_summary: dict[str, Any]) -> se
             status = finish_validation.get("status")
             if status:
                 signals.add(f"finish_validation_{status}")
+            if finish_validation.get("needs_recompile"):
+                signals.add("needs_recompile")
             for item_value in finish_validation.get("missing_terminal_evidence") or []:
                 signals.add(str(item_value))
-            collect_finish_validation_signals(signals, finish_validation)
-    for item in trace_summary.get("finish_validations", []):
-        payload = item.get("payload") or {}
-        status = payload.get("finish_validation_status")
-        if status:
-            signals.add(f"finish_validation_{status}")
-        collect_finish_validation_signals(
-            signals,
-            payload.get("finish_validation") or payload.get("finish_validation_evidence"),
-        )
+            matched = finish_validation.get("matched_terminal_evidence")
+            if isinstance(matched, list) and matched:
+                signals.add("matched_terminal_evidence")
+            missing = finish_validation.get("missing_terminal_evidence")
+            if isinstance(missing, list) and missing:
+                signals.add("missing_terminal_evidence")
     for item in trace_summary.get("grounding", []):
         payload = item.get("payload") or {}
         obs = payload.get("grounding_observation")
@@ -1157,85 +1030,12 @@ def collect_signals(record: dict[str, Any], trace_summary: dict[str, Any]) -> se
                     signals.add(str(value))
             metadata = obs.get("metadata")
             if isinstance(metadata, dict):
-                collect_visual_structure_signals(signals, metadata)
                 chain = metadata.get("fallback_chain")
                 if isinstance(chain, list):
                     for row in chain:
                         if isinstance(row, dict) and row.get("failure_code"):
                             signals.add(str(row["failure_code"]))
-        collect_visual_structure_signals(
-            signals,
-            payload.get("screen_structure_summary"),
-            expected_visual_structure=expected_visual_structure,
-        )
-        collect_visual_structure_signals(
-            signals,
-            payload.get("object_registry_summary"),
-            expected_visual_structure=expected_visual_structure,
-        )
     return signals
-
-
-def collect_text_error_signals(signals: set[str], text: str) -> None:
-    lowered = text.lower()
-    if "403" in lowered:
-        signals.add("403")
-    if "cloudflare" in lowered:
-        signals.add("cloudflare")
-    if "waf" in lowered or "1020" in lowered:
-        signals.add("waf_blocked")
-
-
-def collect_visual_structure_signals(
-    signals: set[str],
-    value: Any,
-    *,
-    expected_visual_structure: bool = False,
-) -> None:
-    if not isinstance(value, dict):
-        return
-    for key in ("status", "failure_code", "invalid_structure_mode"):
-        if value.get(key):
-            signals.add(str(value[key]))
-    if expected_visual_structure and value.get("status") == "missing_sidecar":
-        signals.add("visual_structure_missing")
-    if value.get("invalid_structure_mode"):
-        signals.add("structure_mode_unexpected")
-    if value.get("visual_structure_partial"):
-        signals.add("visual_structure_partial")
-    failures = value.get("visual_structure_failure_codes")
-    if isinstance(failures, list):
-        for item in failures:
-            signals.add(str(item))
-
-
-def collect_finish_validation_signals(signals: set[str], value: Any) -> None:
-    if not isinstance(value, dict):
-        return
-    status = value.get("status")
-    if status:
-        signals.add(f"finish_validation_{status}")
-    for key in ("missing_terminal_evidence", "matched_terminal_evidence", "soft_matched"):
-        items = value.get(key)
-        if isinstance(items, list):
-            for item in items:
-                signals.add(str(item))
-    evidence = value.get("evidence")
-    if not isinstance(evidence, dict):
-        return
-    for item in evidence.get("finish_claim_matched") or []:
-        signals.add(str(item))
-    per_criterion = evidence.get("per_criterion")
-    if isinstance(per_criterion, dict):
-        for criterion, detail in per_criterion.items():
-            if not isinstance(detail, dict):
-                continue
-            if detail.get("status") == "missing":
-                signals.add(str(criterion))
-            for key in ("reason", "override_reason"):
-                reason = detail.get(key)
-                if reason:
-                    signals.add(str(reason))
 
 
 def build_recommendations(findings: list[dict[str, Any]], record: dict[str, Any]) -> list[dict[str, Any]]:
@@ -1334,12 +1134,6 @@ def preflight_summary(path: Path) -> dict[str, Any]:
         parsed = mlx.get("parsed") if isinstance(mlx.get("parsed"), dict) else {}
         payload["mlx_metal_ok"] = bool(parsed.get("metal_ok"))
         payload["mlx_metal_error"] = parsed.get("error")
-    device_selection = checks.get("device_selection") if isinstance(checks.get("device_selection"), dict) else {}
-    adb_keyboard = checks.get("adb_keyboard") if isinstance(checks.get("adb_keyboard"), dict) else {}
-    payload["device_selection_warning"] = device_selection.get("warning")
-    payload["connected_device_count"] = device_selection.get("connected_device_count")
-    payload["adb_keyboard_active"] = adb_keyboard.get("active")
-    payload["adb_keyboard_warning"] = adb_keyboard.get("warning")
     return payload
 
 
@@ -1352,7 +1146,7 @@ def redact_command(cmd: list[str]) -> list[str]:
             skip_next = False
             continue
         redacted.append(item)
-        if item in {"--apikey", "--model-extra-body"}:
+        if item in {"--apikey"}:
             skip_next = True
     return redacted
 
@@ -1628,10 +1422,6 @@ function renderOverview() {
   const debug = summary.dangerous_debug || {};
   const latestExpected = (summary.trace_summary?.expected_outcomes || []).slice(-1)[0]?.payload?.expected_outcome || r.expected_outcome || {};
   const latestVerifier = r.verifier_evidence || (summary.trace_summary?.verifier || []).slice(-1)[0]?.payload?.verifier_evidence || {};
-  const latestGoalEvent = (summary.trace_summary?.goal_contracts || []).slice(-1)[0]?.payload || {};
-  const latestGoal = latestGoalEvent.goal_contract || latestGoalEvent.task_goal_contract || {};
-  const latestFinishEvent = (summary.trace_summary?.finish_validations || []).slice(-1)[0]?.payload || {};
-  const finishEvidence = r.finish_validation_evidence || latestFinishEvent.finish_validation_evidence || latestFinishEvent.finish_validation || {};
   const fallbackRows = summary.trace_summary?.fallback_chains || [];
   document.getElementById('overview').innerHTML = `
     <div class="grid-2">
@@ -1648,8 +1438,6 @@ function renderOverview() {
           ${row('Verifier Status', r.verifier_status)}
           ${row('Verifier Cause', r.verifier_failure_cause)}
           ${row('Finish Validation', r.finish_validation_status)}
-          ${row('Goal Contract Status', r.goal_contract_status)}
-          ${row('Goal Compile Source', r.goal_compile_source)}
           ${row('Prompt Debug', debug.trace_unredacted_prompt ? 'UNREDACTED TEXT ENABLED' : 'redacted/default')}
           ${row('Trace ID', r.trace_id)}
           ${row('Trace Path', r.trace_path)}
@@ -1666,17 +1454,10 @@ function renderOverview() {
         <h2>环境预检</h2>
         <table>
           ${row('Device ID', preflight.device_id)}
-          ${row('Connected Devices', preflight.connected_device_count)}
-          ${row('Device Selection Warning', preflight.device_selection_warning)}
           ${row('ADB', preflight.adb_path)}
-          ${row('ADB Keyboard Active', preflight.adb_keyboard_active)}
-          ${row('ADB Keyboard Warning', preflight.adb_keyboard_warning)}
           ${row('Grounding Provider', preflight.grounding_provider)}
-          ${row('LocateAnything Structure', preflight.locateanything_structure_mode)}
           ${row('MLX Metal OK', preflight.mlx_metal_ok)}
           ${row('MLX Metal Error', preflight.mlx_metal_error)}
-          ${row('Model Gateway', JSON.stringify(preflight.model_gateway || {}))}
-          ${row('Deprecated Env', JSON.stringify(preflight.deprecated_env_warnings || []))}
         </table>
       </div>
       <div class="card">
@@ -1687,17 +1468,6 @@ function renderOverview() {
           ${row('Missing', JSON.stringify(latestVerifier.missing_postconditions || []))}
           ${row('Weak Signals', JSON.stringify(latestVerifier.weak_signals || {}))}
           ${row('Dynamic Only', latestVerifier.dynamic_change_only)}
-        </table>
-      </div>
-      <div class="card">
-        <h2>GoalContract / Finish Gate</h2>
-        <table>
-          ${row('GoalContract', JSON.stringify(latestGoal))}
-          ${row('Finish Status', finishEvidence.status || r.finish_validation_status)}
-          ${row('Matched Terminal Evidence', JSON.stringify(finishEvidence.matched_terminal_evidence || []))}
-          ${row('Missing Terminal Evidence', JSON.stringify(finishEvidence.missing_terminal_evidence || []))}
-          ${row('Soft Matched', JSON.stringify(finishEvidence.soft_matched || []))}
-          ${row('Per Criterion', JSON.stringify(finishEvidence.evidence?.per_criterion || {}))}
         </table>
       </div>
       <div class="card">
