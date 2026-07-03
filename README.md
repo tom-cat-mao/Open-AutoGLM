@@ -7,17 +7,18 @@
 核心采用 **Plan-Execute-Reflect** 三节点拓扑，由 LangGraph StateGraph 驱动：
 
 ```
-START → plan → execute → [confirm|takeover|reflect|replan|end]
-                         ├─ confirm → after_interrupt → [execute|reflect|end]
-                         ├─ takeover → after_interrupt → [reflect|end]
-                         ├─ reflect → should_continue → [replan|end]
-                         ├─ replan → plan
-                         └─ end → END
+START → goal → plan → execute → [confirm|takeover|reflect|replan|end]
+                               ├─ confirm → after_interrupt → [execute|reflect|end]
+                               ├─ takeover → after_interrupt → [reflect|end]
+                               ├─ reflect → should_continue → [replan→goal|takeover|end]
+                               ├─ replan → goal → plan (skip reflect for Wait/Note/Call_API/Interact)
+                               └─ end → END
 ```
 
+- **goal** — 任务开始时一次性编译声明式 `GoalContract`（External > LLM > Heuristic 兜底）；已编译且未请求重编译时为 no-op，可选 `require_goal_approval` interrupt
 - **plan** — 截图 + 模型推理 + 解析 action
 - **execute** — `dispatch_tool()` 路由到 `@tool` 函数执行动作
-- **reflect** — 再截图 + 模型判断动作是否生效
+- **reflect** — 再截图 + 模型判断动作是否生效；并对 `pending_finish` 调用 `GoalEvaluator` 验证 finish claim
 - **confirm / takeover** — LangGraph `interrupt()` 实现 Human-in-the-Loop；当前保证 interrupt 路由语义，持久 resume 将在后续 checkpoint/resume 阶段完善
 
 ### 项目结构
@@ -164,6 +165,14 @@ Plan 阶段支持 provider response envelope：`{"action": {...}, "expected_outc
 Reflect 阶段会基于动作后的截图/current_app 重新构建 after observation，并携带动作前/动作后的脱敏 observation 摘要运行 deterministic verifier；高置信 deterministic success/failure 会直接映射到结构化 reflection，只有 unknown/低置信才把 stub/hash 后的 verifier signal、ExpectedOutcome summary、before/after observation summary 与当前截图作为 isolated verifier request 交给模型判断。该请求不追加到 `state["messages"]`，也不参与 request compaction 的持久状态。Reflect 默认只使用 accessibility/device marks，不触发 LocateAnything fallback，除非显式开启 `reflect_enable_vlm_grounding`。`screen_changed` 已降级为 weak signal，不能单独证明 Tap/Type/搜索/打开视频/Swipe 成功。广告、banner、推荐流、热词、计数器等动态区域默认视为噪声；搜索框/输入框类 `input_focused` 后置条件会参考 focused/editable/keyboard/top activity 等只读信号。只有按 action/outcome 绑定的强进展（如 Type 后目标文本出现、input_focused 的 focused/keyboard 信号）才会阻止机械 takeover；trace 只记录 `verifier_evidence` 中 stubbed/redacted matched/missing postconditions、progress/weak signals 与 redacted summaries。
 
 Plan 每一轮都会注入一个声明式 `GoalContract`（由 `goal_node` 在任务开始时一次性编译，通过 External/LLM/Heuristic 编译链），包含 `SuccessCriterion[]`、`constraints`、`non_goals`、`target_app_hint`、`ordinal`、`verification_strategy` 等；契约独立于历史消息 compaction 保留，trace-safe（只暴露 hash/长度 stub）。`finish` 不再直接等同成功：`finish` 动作必须在 `matched_terminal_evidence` 中点名契约 criterion，execute 只记录 `pending_finish` 与脱敏 `finish_claim`，然后路由到 reflect。reflect 的 `GoalEvaluator` 对每条 criterion 按 verification 分发核验——`accessibility_text_match`/`object_hash_match`/`object_rank_match`/`app_or_activity_match`/`focus_or_keyboard` 复用既有 verifier 信号（程序化），`vlm_judge` 走三段校验（finish 点名 + reflect JSON `named_evidence` 含 grounded `screen_reference` + 程序化反证优先）；任一 required criterion 未 matched → `failure_cause="goal_not_satisfied"` replan，unknown 不自动升级 success（删除了原 generic_task 的后门）。reflect 同时引入统一 context 窗口管理（`select_reflect_context` + 最近 K=3 action_outcome 摘要），并将 `goal_contract_block` 提到独立 message 块以利 prompt prefix cache。trace/eval 只记录 `finish_validation_status`、per-criterion matched/missing、task hash 与长度/哈希 stub，不记录 raw task/entity/title。
+
+#### Finish Gate 语义（fail-closed）
+
+- `finish` 是**声明**而非执行成功：模型只能在 `action.finish.matched_terminal_evidence` 中点名它认为已满足的 required criterion；execute 设置 `pending_finish=True` 后路由到 reflect，由 `GoalEvaluator` 复核。
+- `GoalEvaluator` 中 `vlm_judge` criterion 的第一段校验是硬门槛 —— 若 criterion 在 `matched_terminal_evidence` 中未被点名，直接判 `missing`（不是 `unknown`），不会触发 VLM 补 `named_evidence` 的二次校验路径。当前实机上的已知限制是：模型若在 finish 时漏点任一 required vlm_judge criterion，任务会无限 replan 而不会被告知漏了哪条 criterion；后续计划在 plan 节点把"上次 finish 被拒原因 + 缺失 criterion 列表"反馈到下一轮 prompt。
+- 程序化 criterion（accessibility/object_rank/app_or_activity/focus）的反证 **优先于** vlm_judge self-attestation；任一程序化信号 `missing` 且对应 criterion 与 vlm_judge 同名时，会把该 vlm_judge 的 matched 结果覆盖为 missing。
+- `needs_recompile` 字段当前**没有写入路径**（仅 `agent.py` 初始化为 `False`），reflect 不会自动触发 goal 重编译；如需在任务中途替换契约，使用 `configurable["task_goal_contract_override"]` 注入外部契约。
+- `should_continue` 的 `replan` 路由现在是 `goal → plan`（非直接 `plan`）；`goal_node` 在已编译且 `needs_recompile=False` 时 no-op 返回 `{}`，等价于直接进入 plan，但保留编译热路径以备后续接通自动重编译。
 
 ### Model Output Adapter
 

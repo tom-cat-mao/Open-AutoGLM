@@ -12,7 +12,9 @@ def should_continue(state: AgentState) -> Literal["end", "replan", "takeover"]:
     Routes:
     - "end" if finished, error, or max_steps reached
     - "takeover" if reflect requested a takeover interrupt
-    - "replan" otherwise (go back to plan node)
+    - "replan" otherwise (route to goal → plan; goal_node no-ops when the
+      contract is already compiled and needs_recompile is False, otherwise
+      it re-runs the compilation chain)
     """
     if state.get("finished"):
         return "end"

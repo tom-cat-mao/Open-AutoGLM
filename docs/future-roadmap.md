@@ -13,6 +13,11 @@
 - **结构化 API**: 已提供 `PhoneAgent.run_structured()` / `RunResult`，`run()` 继续保持字符串返回兼容
 - **可观测性**: 已提供默认本地 JSONL trace，`RunResult` / eval JSON 可通过 `trace_id` 与 `trace_path` 关联 trace 文件；默认脱敏敏感截图、prompt/API key 与隐私文本
 - **最终目标验证**: `goal_node` 在 step 0 一次性编译声明式 `GoalContract`（`SuccessCriterion[]` + `constraints` + `non_goals` + `target_app_hint` + `ordinal` + `verification_strategy`），通过 External > LLM > Heuristic 编译链；`finish` 必须在 `matched_terminal_evidence` 中点名 criterion，execute 只记录 pending claim，reflect 的 `GoalEvaluator` 对每条 criterion 按 verification 分发核验（accessibility/object-rank/app-activity/focus 为程序化；vlm_judge 走三段校验，程序化反证优先），缺证据/unknown → `goal_not_satisfied` replan，不自动升级 success。
+- **Finish Gate 已知限制（待闭环）**:
+  - `vlm_judge` criterion 的 finish 点名是硬门槛：若 criterion 未出现在 `matched_terminal_evidence` 中，直接判 `missing`（非 `unknown`），不会进入"VLM 补 `named_evidence` 二次复核"路径。模型在 finish 时漏点任一 required vlm_judge criterion → 任务无限 replan。后续计划在 plan 节点把"上次 finish 被拒原因 + 缺失 criterion 列表"反馈到下一轮 prompt。
+  - `needs_recompile` 字段当前**无写入路径**（仅 `agent.py` 初始化为 `False`），reflect 不会自动触发 goal 重编译；中途替换契约需通过 `configurable["task_goal_contract_override"]` 注入。
+  - `should_continue` 的 `replan` 路由现在是 `goal → plan`；`goal_node` 在已编译且 `needs_recompile=False` 时 no-op，等价于直接进入 plan，保留编译热路径以备后续接通自动重编译。
+  - reflect 第二次 finish 复核（VLM 给 `named_evidence` 后再评估）若降级为 `failure`，下一轮 plan 当前**不会感知**前一次 finish 被拒原因；存在重复发同 finish 的循环风险，待 `last_finish_rejection` state 字段补齐后闭环。
 - **短期 Context Harness**: 已支持 `context_mode=off|observe|inject`，默认 `inject`；记录 `screen_belief`、`action_outcome_summary`、`failure_memory`、`summarized_history`、`short_term_memory`、`action_ledger` 与 context 指标；inject 模式通过单一 `build_plan_context_block()` 从 raw state 字段重建并 regex 替换敏感文本后注入 Plan；state 写入路径只做 regex 替换、不 stub，stub 策略仅在 `phone_agent/checkpoint/serde.py::RedactingSerializer` 的 checkpoint egress 触发；request-only compaction 不改写 `state["messages"]`，保留最新截图并裁剪旧请求文本
 - **策略反思**: 已支持结构化 `reflection_verdict`、`failure_cause`、`suggested_strategy`，下一轮 plan 可读取失败原因和建议策略
 - **评测地基**: 已提供 `evals/run_eval.py --dry-run` smoke harness，以及 `bench/grounding/` LocateAnything benchmark 体系；当前支持 post-training raw JSONL 转 manifest、固定 suite、prediction JSONL、summary JSON、离线复评与 target type / area bucket 分组指标
