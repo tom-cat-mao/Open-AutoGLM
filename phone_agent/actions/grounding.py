@@ -187,6 +187,33 @@ def ground_intent_to_action(
         sensitivity = _mark_sensitivity(intent, mark)
         if grounding_metadata is not None and grounding_metadata.get("selected_object"):
             grounding_metadata["selected_object"]["sensitivity_route"] = sensitivity
+        # Mark-based Tap should also produce object_selected_evidence when the
+        # mark is bound to a ScreenObject with an ordinal_index. Without this,
+        # expected_outcome.expected_rank / object_evidence_hash / title_hash /
+        # expected_page_type stay null for mark-based Taps (the common path),
+        # and GoalEvaluator._check_object_rank can never reach `matched` even
+        # when the agent really did tap the Nth item. See P0 #13a.
+        if (
+            grounding_metadata is not None
+            and not grounding_metadata.get("selected_object_evidence")
+            and object_registry is not None
+        ):
+            bound_object = _resolve_object_for_mark(mark_id, object_registry)
+            if bound_object is not None:
+                evidence = object_selected_evidence(bound_object)
+                if evidence:
+                    grounding_metadata["selected_object_evidence"] = evidence
+                    grounding_metadata.setdefault(
+                        "selected_object",
+                        {
+                            "object_id_hash": evidence.get("selected_object_id_hash"),
+                            "object_type": bound_object.object_type,
+                            "primary_mark_id": bound_object.primary_mark_id,
+                            "list_id": bound_object.list_id,
+                            "ordinal_index": bound_object.ordinal_index,
+                            "sensitivity_route": sensitivity,
+                        },
+                    )
         if sensitivity == "takeover":
             try:
                 return validate_action(
@@ -235,6 +262,31 @@ def _require_mark_registry(registry: MarkRegistry | None) -> MarkRegistry:
 
 def _has_object_selector(intent: dict[str, Any]) -> bool:
     return any(key in intent for key in ("target_object_id", "ordinal", "object_role", "object_filter"))
+
+
+def _resolve_object_for_mark(
+    mark_id: str, object_registry: ObjectRegistry | dict[str, Any] | None
+) -> ScreenObject | None:
+    """Find the ScreenObject bound to a mark_id (mark-based Tap path).
+
+    Used to backfill object_selected_evidence (object_evidence_hash /
+    title_hash / expected_page_type / expected_rank) for mark-based Taps,
+    so that GoalEvaluator._check_object_rank can match `ordinal=N` even
+    when the model did not use an object selector.
+    """
+    if object_registry is None:
+        return None
+    registry = (
+        object_registry
+        if isinstance(object_registry, ObjectRegistry)
+        else ObjectRegistry.from_dict(object_registry)
+    )
+    if not registry.objects:
+        return None
+    for obj in registry.objects.values():
+        if obj.primary_mark_id == mark_id or mark_id in (obj.atomic_mark_ids or []):
+            return obj
+    return None
 
 
 def _resolve_object_selector(

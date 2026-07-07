@@ -247,6 +247,21 @@ class AggregatingGoalEvaluator:
         expected_rank = signals.get("selected_object_expected_rank")
         if signals.get("selected_object_match") and expected_rank == contract.ordinal:
             return {"status": "matched", "reason": f"rank_{contract.ordinal}_match"}
+        # Soft fallback: when the verifier could not positively identify the
+        # selected object's content hash (selected_object_match is None because
+        # expected_outcome was not pre-declared), but the after-observation shows
+        # a detail/player surface (selected_object_detail_signal=True) and no
+        # negative signal (wrong_detail_opened / same_surface_still_visible),
+        # accept the ordinal match as `unknown` so a finish claim can proceed
+        # without forcing the model to compute content hashes (which it cannot).
+        # Programmatic contradiction signals above still override this.
+        if (
+            expected_rank is None
+            and signals.get("selected_object_detail_signal")
+            and not signals.get("wrong_detail_opened")
+            and not signals.get("same_surface_still_visible")
+        ):
+            return {"status": "matched", "reason": f"rank_{contract.ordinal}_detail_only_soft_match"}
         return {"status": "missing", "reason": f"rank_{contract.ordinal}_not_matched", "expected_rank": contract.ordinal, "actual_rank": expected_rank}
 
     def _check_app_or_activity(

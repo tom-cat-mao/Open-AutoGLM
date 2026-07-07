@@ -579,6 +579,16 @@ def build_plan_context_block(
     action_result = state.get("action_result") or {}
     raw_action = action_parsed.get("action") if isinstance(action_parsed, dict) else None
     raw_message = action_result.get("message") if isinstance(action_result, dict) else None
+    # Translate reflect's suggested_strategy into a plan-safe hint. The plan
+    # node must not be told "finish" by context — that is the model self-attesting
+    # via a prior reflect, which under P0 #13a cannot authorize a finish. Only
+    # `continue` / `retry` / `wait` / `takeover` / `go_back` / `swipe_to_find`
+    # reach the plan context verbatim; `finish` is downgraded to `continue` so
+    # the goal gate, not the context, decides when a finish claim is allowed.
+    raw_suggested_strategy = state.get("suggested_strategy")
+    plan_safe_strategy = (
+        "continue" if raw_suggested_strategy == "finish" else raw_suggested_strategy
+    )
     outcome = {
         "step_count": int(state.get("step_count") or 0),
         "action": sanitize_context_payload(raw_action, "action", consumer=consumer, task_context=task_context)
@@ -588,7 +598,7 @@ def build_plan_context_block(
         if isinstance(raw_message, str) else (raw_message or ""),
         "reflection_verdict": state.get("reflection_verdict"),
         "failure_cause": state.get("failure_cause"),
-        "suggested_strategy": state.get("suggested_strategy"),
+        "suggested_strategy": plan_safe_strategy,
     }
 
     failure_memory = [

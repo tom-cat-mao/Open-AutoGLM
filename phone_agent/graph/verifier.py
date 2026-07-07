@@ -588,6 +588,23 @@ def _selected_object_signals(expected: dict[str, Any], observation: dict[str, An
         signals["same_surface_still_visible"] = True
     elif hash_match and (detail_signal or expected_page_type not in {"detail_or_player", "page_opened"}):
         signals["selected_object_match"] = True
+    elif (
+        any_detail
+        and not hash_match
+        and expected_page_type in {"detail_or_player", "page_opened"}
+        and isinstance(expected_rank, int)
+        and not feed_signal
+        and not hashes
+    ):
+        # Detail/player page transition with no content hash declared at all:
+        # the model cannot compute object_evidence_hash/title_hash on its own
+        # (those are harness-internal SHA256 stubs over evidence_summary). When
+        # the model declared expected_page_type AND expected_rank, and the
+        # after-observation shows a detail page (not a feed/search surface),
+        # accept it as a rank match instead of wrong_detail_opened. If a hash
+        # WAS declared but did not match, fall through to wrong_detail_opened
+        # (the model explicitly expected a specific item and we can't confirm it).
+        signals["selected_object_match"] = True
     elif any_detail and not hash_match and expected_page_type in {"detail_or_player", "page_opened"}:
         signals["wrong_detail_opened"] = True
     return signals

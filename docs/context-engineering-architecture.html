@@ -376,6 +376,7 @@
   <div class="legend-item"><div class="legend-dot" style="background:var(--green-bg);border:2px solid var(--green)"></div> 脱敏/隐私层</div>
   <div class="legend-item"><div class="legend-dot" style="background:var(--red-bg);border:2px solid var(--red)"></div> 外部边界</div>
   <div class="legend-item"><div class="legend-dot" style="background:var(--purple-bg);border:2px solid var(--purple)"></div> Grounding 上下文</div>
+  <div class="legend-item"><div class="legend-dot" style="background:var(--purple-bg);border:2px solid var(--purple)"></div> Goal 目标契约</div>
   <div class="legend-item"><div class="legend-dot" style="background:var(--gray-light);border:2px solid var(--gray-border)"></div> 持久化/输出</div>
 </div>
 
@@ -384,16 +385,33 @@
   <h2 class="section-title">1. 核心循环中的 Context 生命周期</h2>
   <div class="flow-container">
 
+    <!-- Row 0: Goal Node -->
+    <div class="flow-row">
+      <div class="flow-box box-purple" style="flex:1">
+        <h3>Goal Node — 任务目标契约编译（仅首轮）</h3>
+        <ul>
+          <li><code>compile_goal_contract()</code> 三级回退：External &gt; LLM &gt; Heuristic</li>
+          <li>产出不可变 <code>GoalContract</code>（success_criteria / constraints / non_goals）</li>
+          <li><code>frozen</code> dataclass + <code>ensure_goal_contract()</code> 双重校验</li>
+          <li>已编译且 <code>needs_recompile=False</code> 时直接 no-op（replan 不重建）</li>
+          <li>可选 HITL：<code>require_goal_approval</code> 走 <code>interrupt()</code></li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="arrow-down">&darr; <span class="arrow-label">goal_contract + needs_recompile</span> &darr;</div>
+
     <!-- Row 1: Plan Node -->
     <div class="flow-row">
       <div class="flow-box box-blue" style="flex:1">
         <h3>Plan Node</h3>
         <ul>
+          <li><code>build_goal_prompt_block()</code> 注入 GoalContract 提示块</li>
           <li><code>select_plan_context()</code> 选择有效 section</li>
           <li><code>build_plan_context_block()</code> 构建 inject block</li>
           <li><code>compact_messages_for_request()</code> 请求级压缩</li>
           <li><code>_build_reflection_context()</code> 反思上下文注入</li>
-          <li>组装 <code>context_block</code> + <code>marks_block</code> 到 user message</li>
+          <li>组装 <code>goal_block</code> + <code>context_block</code> + <code>marks_block</code> 到 user message</li>
         </ul>
       </div>
     </div>
@@ -436,9 +454,74 @@
   </div>
 </div>
 
-<!-- Section 2: Three Context Modes -->
+<!-- Section 2: Goal Contract Subsystem -->
 <div class="section">
-  <h2 class="section-title">2. 三种 Context 模式</h2>
+  <h2 class="section-title">2. Goal 目标契约子系统</h2>
+
+  <p style="font-size:13px;margin-bottom:16px;color:var(--gray)">
+    目标被建模为一个<strong>声明式契约（GoalContract）</strong>，取代早期基于关键词的任务目标。它在 <code>START &rarr; goal &rarr; plan</code> 拓扑中由 <code>goal_node</code> <strong>仅首轮编译一次</strong>，跨 replan 循环复用，并独立于消息历史压缩。对应 P0 约束 #13 / #13a（Finish Gate）。
+  </p>
+
+  <div class="flow-container" style="margin-bottom:20px">
+    <div class="flow-row">
+      <div class="flow-box box-purple" style="flex:1">
+        <h3>编译链 — compile_goal_contract()</h3>
+        <ul>
+          <li><strong>External</strong>：<code>configurable["task_goal_contract_override"]</code> 注入预建契约（benchmark/eval），<code>compile_status="user_override"</code></li>
+          <li><strong>LLM</strong>：单次结构化 JSON 输出，解析失败重试 1 次；失败返回 <code>failed</code> 哨兵</li>
+          <li><strong>Heuristic</strong>：永不失败，提取 app/ordinal/entity，产出弱契约 <code>vlm_judge_at_finish</code></li>
+          <li><em>不变量：最终永不返回 <code>failed</code></em> —— LLM 失败必回退 Heuristic</li>
+        </ul>
+      </div>
+      <div class="arrow-right">&rarr;</div>
+      <div class="flow-box box-purple" style="flex:1">
+        <h3>GoalContract（frozen）</h3>
+        <ul>
+          <li><code>success_criteria</code>：每条含 <code>name / description / verification / required</code></li>
+          <li><code>verification</code> &isin; 7 种：accessibility_text_match / object_hash_match / object_rank_match / app_or_activity_match / focus_or_keyboard / vlm_judge / external_probe</li>
+          <li><code>constraints</code> / <code>non_goals</code> / <code>target_app_hint</code> / <code>ordinal</code></li>
+          <li><code>task_hash</code> 为 sha256[:16]；原始任务文本<strong>永不</strong>存入对象（隐私约束 #10）</li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="arrow-down">&darr; <span class="arrow-label">goal_contract 写入 state</span> &darr;</div>
+
+    <div class="flow-row">
+      <div class="flow-box box-green" style="flex:1">
+        <h3>Finish Gate — GoalEvaluator（fail-closed）</h3>
+        <ul>
+          <li>每条 criterion 分派到程序化检查或 <code>vlm_judge</code> 三要件</li>
+          <li><code>vlm_judge</code> 要件：(1) 在 <code>matched_terminal_evidence</code> 点名 (2) 有 <code>screen_reference</code> 证据 (3) 未被程序化矛盾覆盖</li>
+          <li>两遍评估：程序化必填缺失可翻转已 matched 的 <code>vlm_judge</code> 为 missing（<code>programmatic_contradiction</code>）</li>
+          <li>状态：全部 required 匹配&rarr;<code>success</code>；有 required 缺失&rarr;<code>failure</code>；否则&rarr;<code>unknown</code></li>
+          <li><em>unknown / failure 都阻断 finish，unknown 绝不自动升级</em></li>
+        </ul>
+      </div>
+    </div>
+  </div>
+
+  <table class="policy-table" style="margin-bottom:20px">
+    <thead>
+      <tr><th>阶段</th><th>模块</th><th>关键职责</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>数据模型</td><td><code>graph/goal.py</code></td><td><code>GoalContract</code> / <code>SuccessCriterion</code>；<code>to_dict</code> / <code>to_trace_payload</code>（哈希桩）/ <code>to_prompt_block</code>；<code>ensure_goal_contract()</code> 校验</td></tr>
+      <tr><td>编译</td><td><code>graph/goal_compiler.py</code></td><td>External / LLM / Heuristic 三级回退；<code>HeuristicGoalCompiler</code> 永不失败</td></tr>
+      <tr><td>编译节点</td><td><code>graph/nodes/goal_node.py</code></td><td>首轮编译一次；replan no-op；可选 <code>interrupt()</code> HITL 审批</td></tr>
+      <tr><td>验证</td><td><code>graph/goal_evaluator.py</code></td><td><code>AggregatingGoalEvaluator</code>：逐 criterion 检查 + 程序化矛盾覆盖 + fail-closed 聚合</td></tr>
+      <tr><td>消费</td><td><code>graph/nodes/plan.py</code> / <code>graph/nodes/reflect.py</code></td><td>plan 注入 <code>goal_block</code>；reflect 在 <code>pending_finish</code> 时调用 <code>evaluate_finish_claim()</code></td></tr>
+    </tbody>
+  </table>
+
+  <p style="font-size:12px;color:var(--red)">
+    注意：<code>finish</code> 是声明（claim）而非执行成功 —— <code>execute_node</code> 仅置 <code>pending_finish</code>，真正 <code>finished=True</code> 须经 reflect 的 GoalEvaluator 验证。<code>needs_recompile</code> 目前无 writer 置 True，中途换契约仅能经 <code>task_goal_contract_override</code>。
+  </p>
+</div>
+
+<!-- Section 3: Three Context Modes -->
+<div class="section">
+  <h2 class="section-title">3. 三种 Context 模式</h2>
   <div class="mode-cards">
     <div class="mode-card">
       <h4>Off</h4>
@@ -477,7 +560,7 @@
 
 <!-- Section 3: Consumer-Aware Redaction Architecture -->
 <div class="section">
-  <h2 class="section-title">3. Consumer-Aware 分层脱敏架构</h2>
+  <h2 class="section-title">4. Consumer-Aware 分层脱敏架构</h2>
 
   <div class="flow-container">
     <p style="font-size:13px;margin-bottom:16px;color:var(--gray)">
@@ -561,7 +644,7 @@
 
 <!-- Section 4: Context Block Construction Pipeline -->
 <div class="section">
-  <h2 class="section-title">4. Context Block 构建流水线</h2>
+  <h2 class="section-title">5. Context Block 构建流水线</h2>
   <div class="flow-container">
 
     <div class="pipeline">
@@ -663,7 +746,7 @@
 
 <!-- Section 5: Redaction Detail -->
 <div class="section">
-  <h2 class="section-title">5. 脱敏机制详解</h2>
+  <h2 class="section-title">6. 脱敏机制详解</h2>
   <div class="flow-container">
 
     <h4 style="margin-bottom:12px;color:var(--blue-dark)">5.1 Regex 内联替换 — <code>redact_context_text()</code></h4>
@@ -716,7 +799,7 @@
 
 <!-- Section 6: Egress Boundaries -->
 <div class="section">
-  <h2 class="section-title">6. 外部边界脱敏</h2>
+  <h2 class="section-title">7. 外部边界脱敏</h2>
   <div class="flow-container">
 
     <div class="flow-row" style="margin-bottom:20px">
@@ -770,7 +853,7 @@
 
 <!-- Section 7: State Fields -->
 <div class="section">
-  <h2 class="section-title">7. AgentState 中的 Context 字段</h2>
+  <h2 class="section-title">8. AgentState 中的 Context 字段</h2>
   <div class="flow-container">
     <table class="policy-table">
       <thead>
@@ -795,6 +878,11 @@
         <tr><td><code>approx_tokens_before/after</code></td><td>int</td><td>压缩前后近似 token 数</td><td>Plan (compact_messages_for_request)</td></tr>
         <tr><td><code>failure_memory_hit_count</code></td><td>int</td><td>失败记忆命中次数</td><td>Reflect</td></tr>
         <tr><td><code>repeated_failure_count</code></td><td>int</td><td>重复失败计数</td><td>Reflect</td></tr>
+        <tr style="background:var(--purple-bg)"><td colspan="4" style="color:var(--purple);font-weight:700">Goal 目标契约字段（与 Context 并列于 AgentState）</td></tr>
+        <tr><td><code>goal_contract</code></td><td>dict | None</td><td>编译后的 GoalContract dict（success_criteria 等）</td><td>Goal Node (compile_goal_contract)</td></tr>
+        <tr><td><code>goal_contract_status</code></td><td>str</td><td>pending / compiled / failed / user_override</td><td>Goal Node</td></tr>
+        <tr><td><code>needs_recompile</code></td><td>bool</td><td>请求重编译（当前无 writer 置 True；仅经 override 换契约）</td><td>保留字段</td></tr>
+        <tr><td><code>pending_finish</code></td><td>bool</td><td>finish 声明（非执行成功），触发 reflect 的 GoalEvaluator 验证</td><td>Execute Node</td></tr>
       </tbody>
     </table>
   </div>
@@ -802,7 +890,7 @@
 
 <!-- Section 8: Module Map -->
 <div class="section">
-  <h2 class="section-title">8. 模块依赖关系</h2>
+  <h2 class="section-title">9. 模块依赖关系</h2>
   <div class="dataflow">
 
     <div class="df-layer">
@@ -837,6 +925,28 @@
         <div class="df-node highlight">
           <h5>graph/state.py</h5>
           <p><code>AgentState</code> TypedDict + <code>messages_reducer</code></p>
+        </div>
+      </div>
+    </div>
+
+    <div class="df-layer">
+      <div class="df-layer-title">Goal 目标契约子系统</div>
+      <div class="df-nodes">
+        <div class="df-node highlight">
+          <h5>graph/goal.py</h5>
+          <p><code>GoalContract</code> / <code>SuccessCriterion</code> + 序列化 / <code>ensure_goal_contract()</code></p>
+        </div>
+        <div class="df-node highlight">
+          <h5>graph/goal_compiler.py</h5>
+          <p>External / LLM / Heuristic 三级编译链</p>
+        </div>
+        <div class="df-node highlight">
+          <h5>graph/goal_evaluator.py</h5>
+          <p><code>AggregatingGoalEvaluator</code> — Finish Gate 验证</p>
+        </div>
+        <div class="df-node highlight">
+          <h5>graph/nodes/goal_node.py</h5>
+          <p>首轮编译一次 + 可选 HITL 审批</p>
         </div>
       </div>
     </div>
@@ -924,7 +1034,7 @@
 
 <!-- Section 9: Key Invariants -->
 <div class="section">
-  <h2 class="section-title">9. 关键不变式</h2>
+  <h2 class="section-title">10. 关键不变式</h2>
   <div class="flow-container">
     <table class="policy-table">
       <thead>
@@ -981,25 +1091,50 @@
           <td>Stub 策略保守</td>
           <td>checkpoint consumer 下，不在 SAFE_CONTEXT_TEXT_KEYS 中的未知 key 一律 stub，宁可多脱敏不漏脱</td>
         </tr>
+        <tr>
+          <td>11</td>
+          <td>Goal 编译一次</td>
+          <td><code>goal_node</code> 仅首轮编译 <code>GoalContract</code>；replan 循环且 <code>needs_recompile=False</code> 时为 no-op。编译链永不返回 <code>failed</code>（LLM 失败必回退 Heuristic）</td>
+        </tr>
+        <tr>
+          <td>12</td>
+          <td>原始任务文本不入契约</td>
+          <td><code>GoalContract</code> 仅存 <code>task_hash</code>（sha256[:16]）与脱敏 <code>redacted_objective</code>；trace 用哈希桩，满足隐私约束 #10</td>
+        </tr>
+        <tr>
+          <td>13</td>
+          <td>Finish Gate fail-closed</td>
+          <td><code>finish</code> 是声明而非执行成功；<code>execute</code> 仅置 <code>pending_finish</code>，reflect 须经 GoalEvaluator 验证。unknown / failure 都阻断 finish；程序化矛盾覆盖 vlm_judge 自证</td>
+        </tr>
       </tbody>
     </table>
   </div>
 </div>
 
-<!-- Section 10: Data Flow Summary -->
+<!-- Section 11: Data Flow Summary -->
 <div class="section">
-  <h2 class="section-title">10. 端到端数据流总览</h2>
+  <h2 class="section-title">11. 端到端数据流总览</h2>
   <div class="flow-container" style="font-family:var(--font-mono);font-size:12px;line-height:2.2;white-space:pre-wrap;overflow-x:auto">
-<span style="color:var(--gray)">/* 一轮完整循环中的 Context 数据流 */</span>
+<span style="color:var(--gray)">/* 一轮完整循环中的数据流（含 Goal 契约） */</span>
+
+<span style="color:var(--purple)">Goal Node（仅首轮）</span>
+  │
+  ├─ <span style="color:var(--green)">compile_goal_contract(state, config)</span>
+  │     ├─ External: task_goal_contract_override → user_override
+  │     ├─ LLM: 结构化 JSON，失败重试 1 次 → failed 哨兵
+  │     └─ Heuristic: 永不失败 → vlm_judge_at_finish 弱契约（回退）
+  ├─ 可选 <span style="color:var(--green)">interrupt()</span> → require_goal_approval HITL
+  └─ 写入 goal_contract / goal_contract_status → state（replan 时为 no-op）
 
 <span style="color:var(--blue-primary)">Plan Node</span>
   │
+  ├─ 0. <span style="color:var(--green)">build_goal_prompt_block(state)</span> → <span style="color:var(--purple)">goal_block</span>（注入 GoalContract 提示）
   ├─ 1. <span style="color:var(--green)">get_context_mode(state, config)</span> → context_mode
   ├─ 2. <span style="color:var(--green)">select_plan_context(state, mode)</span>
   │     ├─ off → ContextSelectionResult(strategy="off")
   │     ├─ observe → ContextSelectionResult(strategy="observe_only", sections=[...])
   │     └─ inject → build_plan_context_block(state) → ContextSelectionResult(block="...", strategy="inject_redacted_block")
-  ├─ 3. 组装 user message: task + screen_info + marks_block + <span style="color:var(--amber)">context_block</span>
+  ├─ 3. 组装 user message: task + screen_info + marks_block + <span style="color:var(--purple)">goal_block</span> + <span style="color:var(--amber)">context_block</span>
   ├─ 4. <span style="color:var(--green)">compact_messages_for_request(full_messages, selection)</span>
   │     ├─ 剥离历史图片（保留最新截图）
   │     ├─ 裁剪至 request_recent_messages=6
@@ -1010,6 +1145,7 @@
 <span style="color:var(--blue-primary)">Execute Node</span>
   │
   ├─ <span style="color:var(--green)">_context_update()</span> → action_outcome_summary
+  ├─ finish action → 置 <span style="color:var(--purple)">pending_finish=True</span> + <span style="color:var(--purple)">matched_terminal_evidence</span>（仅声明，非成功）
   ├─ <span style="color:var(--green)">sanitize_context_payload(gesture_trace, consumer="trace_payload")</span>
   ├─ <span style="color:var(--green)">MessageBuilder.remove_images_from_message()</span>
   └─ 重建 messages 列表（replace mode）
@@ -1023,6 +1159,8 @@
   ├─ <span style="color:var(--green)">update_gui_memory()</span> → gui_memory (visited/tried/scroll/progress)
   ├─ <span style="color:var(--green)">detect_repeated_failure()</span> → hit/repeated counts
   ├─ <span style="color:var(--green)">sanitize_context_payload(action, consumer="reflect_prompt", task_context=task)</span>
+  ├─ if <span style="color:var(--purple)">pending_finish</span>: <span style="color:var(--green)">evaluate_finish_claim(contract, ...)</span> → GoalEvaluation（success/failure/unknown）
+  ├─ Finish Gate: pending_finish 且 status≠success → 阻断 finish（goal_not_satisfied）
   └─ 返回 context_updates → state 写回
 
 <span style="color:var(--gray)">/* 外部边界 */</span>
