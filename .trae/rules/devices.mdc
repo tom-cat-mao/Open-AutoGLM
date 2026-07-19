@@ -16,7 +16,9 @@ phone_agent/adb/          # Android
 
 The module provides:
 - `get_screenshot(device_id, timeout)` -> `ScreenshotData(base64_data, width, height)`
-- `get_current_app(device_id)` -> `str` (app name)
+- `get_foreground_app(device_id)` -> `ForegroundAppObservation` (package/activity identity fact)
+- `get_current_app(device_id)` -> `str` (compatibility display; unknown returns the observed package, never guessed Home)
+- `get_installed_app_inventory(device_id)` -> `InstalledAppInventory`
 - `tap(x, y, device_id, delay)`
 - `double_tap(x, y, device_id, delay)`
 - `long_press(x, y, duration_ms, device_id, delay)`
@@ -39,6 +41,7 @@ class DeviceType(Enum):
 - Factory delegates all device operations to `phone_agent.adb`
 - Global singleton: `get_device_factory()` returns cached instance
 - `set_device_type(device_type)` must be called before first use (done in `main.py`)
+- `capture_observation()` brackets screenshot capture with foreground-before/after reads. A mismatch retries within the configured bound; exhaustion raises `ObservationCaptureError(code="observation_unstable")`. Only a stable sample receives a monotonic observation epoch.
 
 ### How Factory Delegates
 
@@ -63,6 +66,11 @@ device_factory.tap(x, y, device_id)
   - `get_top_activity()` derives the focused package/activity component for page-level verifier hints.
   - `is_keyboard_visible()` reads `adb shell dumpsys input_method`; only `mInputShown=true` or `mWindowVisible=true` count as strong keyboard visibility.
   - These helpers are diagnostic only; failures/timeouts must degrade to missing signals, not crash the graph or authorize execution.
+- **App identity boundaries**:
+  - `AppRegistry` resolves package, canonical identity, display names, and aliases.
+  - `InstalledAppInventory` records device installation facts.
+  - `LaunchPolicy` controls authorization separately; recognizing or observing an app does not authorize launch.
+  - Unknown foreground packages remain observable package facts. Only registered launcher packages render as `System Home`.
 - **App launch**: `adb shell am start -n {package}/{activity}`
 - **TCP/IP**: `adb tcpip <port>` for wireless debugging
 

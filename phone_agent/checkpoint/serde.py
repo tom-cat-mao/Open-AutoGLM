@@ -3,7 +3,7 @@
 Wraps a LangGraph checkpoint serializer (default ``JsonPlusSerializer``) and
 applies the **checkpoint** sanitization policy at dumps time: every string
 value under a key listed in ``PRIVATE_CONTEXT_TEXT_KEYS`` is replaced with a
-``{redacted, length, sha256}`` stub; all other strings are regex-redacted.
+``{redacted, length}`` stub; all other strings are regex-redacted.
 
 The wrapper is a no-op for loads (checkpoint bytes already contain stubs, and
 ``loads`` simply reconstructs the dict).  It does NOT change the in-memory
@@ -49,13 +49,22 @@ def _redact_for_checkpoint(value: Any, key: str | None = None) -> Any:
     """
     from phone_agent.graph.context import sanitize_context_payload
 
-    return sanitize_context_payload(_collapse_sidecars_for_checkpoint(value), key, consumer="checkpoint")
+    return sanitize_context_payload(
+        _collapse_sidecars_for_checkpoint(value), key, consumer="checkpoint"
+    )
 
 
 def _collapse_sidecars_for_checkpoint(value: Any, key: str | None = None) -> Any:
     """Replace full structure/object sidecars with summaries before checkpoint egress."""
 
+    if key == "goal_evidence_ledger":
+        # Progress is restored only from a separately bound trusted_goal_resume projection.
+        return []
     if isinstance(value, dict):
+        if key in {"goal_contract", "task_goal_contract"}:
+            return _goal_contract_summary(value)
+        if key == "task_requirement_set":
+            return _task_requirement_summary(value)
         if key == "screen_structure":
             return _screen_structure_summary(value)
         if key == "screen_structures":
@@ -66,7 +75,9 @@ def _collapse_sidecars_for_checkpoint(value: Any, key: str | None = None) -> Any
         for child_key, child in value.items():
             if child_key == "observation" and isinstance(child, dict):
                 child = _collapse_observation_sidecars(child)
-            collapsed[child_key] = _collapse_sidecars_for_checkpoint(child, str(child_key))
+            collapsed[child_key] = _collapse_sidecars_for_checkpoint(
+                child, str(child_key)
+            )
         return collapsed
     if isinstance(value, list):
         return [_collapse_sidecars_for_checkpoint(item, key) for item in value]
@@ -76,16 +87,24 @@ def _collapse_sidecars_for_checkpoint(value: Any, key: str | None = None) -> Any
 def _collapse_observation_sidecars(value: dict[str, Any]) -> dict[str, Any]:
     collapsed = dict(value)
     if isinstance(collapsed.get("screen_structure"), dict):
-        collapsed["screen_structure"] = _screen_structure_summary(collapsed["screen_structure"])
+        collapsed["screen_structure"] = _screen_structure_summary(
+            collapsed["screen_structure"]
+        )
     if isinstance(collapsed.get("screen_structures"), list):
-        collapsed["screen_structures"] = _screen_structures_summary(collapsed["screen_structures"])
+        collapsed["screen_structures"] = _screen_structures_summary(
+            collapsed["screen_structures"]
+        )
     if isinstance(collapsed.get("object_registry"), dict):
-        collapsed["object_registry"] = _object_registry_summary(collapsed["object_registry"])
+        collapsed["object_registry"] = _object_registry_summary(
+            collapsed["object_registry"]
+        )
     return collapsed
 
 
 def _screen_structures_summary(value: list[Any]) -> dict[str, Any]:
-    summaries = [_screen_structure_summary(item) for item in value if isinstance(item, dict)]
+    summaries = [
+        _screen_structure_summary(item) for item in value if isinstance(item, dict)
+    ]
     kind_counts: dict[str, int] = {}
     for item in summaries:
         kind = str(item.get("structure_kind") or "unknown")
@@ -141,6 +160,40 @@ def _object_registry_summary(value: dict[str, Any]) -> dict[str, Any]:
         "source_kind_counts": source_counts,
         "eligible_selector_count": eligible_count,
         "truncation_summary": value.get("truncation_summary") or {},
+    }
+
+
+def _goal_contract_summary(value: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "schema": "goal_contract_checkpoint_metadata_v1",
+        "criterion_ids": [
+            str(item.get("name"))
+            for item in value.get("success_criteria") or []
+            if isinstance(item, dict) and item.get("name")
+        ],
+        "predicate_ids": [
+            str((item.get("predicate") or {}).get("predicate_id"))
+            for item in value.get("success_criteria") or []
+            if isinstance(item, dict)
+            and isinstance(item.get("predicate"), dict)
+            and (item.get("predicate") or {}).get("predicate_id")
+        ],
+        "compile_status": value.get("compile_status"),
+        "compile_source": value.get("compile_source"),
+    }
+
+
+def _task_requirement_summary(value: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "schema": "task_requirement_checkpoint_metadata_v1",
+        "operation_kind": value.get("operation_kind"),
+        "target_app_identity": value.get("target_app_identity"),
+        "ordinal": value.get("ordinal"),
+        "required_terminal_state": value.get("required_terminal_state"),
+        "source_span_count": value.get("source_span_count"),
+        "confidence_bucket": value.get("confidence_bucket"),
+        "ambiguities": value.get("ambiguities") or [],
+        "extractor_version": value.get("extractor_version"),
     }
 
 

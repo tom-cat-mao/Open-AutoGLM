@@ -124,14 +124,21 @@ def test_dispatch_wait_and_misc_without_device(monkeypatch) -> None:
     wait_module = importlib.import_module("phone_agent.graph.tools.wait")
     monkeypatch.setattr(wait_module.time, "sleep", lambda _: None)
 
-    for action in (
+    wait_result = dispatch_tool(
         {"_metadata": "do", "action": "Wait", "duration": "0 seconds"},
+        1000,
+        2000,
+        device_factory=object(),
+    )
+    assert wait_result.success is True
+
+    for action in (
         {"_metadata": "do", "action": "Note", "message": "note"},
         {"_metadata": "do", "action": "Call_API", "message": "api"},
         {"_metadata": "do", "action": "Interact", "message": "need user"},
     ):
         result = dispatch_tool(action, 1000, 2000, device_factory=object())
-        assert result.success is True
+        assert result.success is False
 
 
 def test_adb_launch_app_uses_am_start_not_monkey(monkeypatch) -> None:

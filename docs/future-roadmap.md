@@ -6,7 +6,7 @@
 
 ## 当前状态
 
-- **Phase 1-14 + Hybrid Accessibility Grounding Hardening + Goal Contract Rebuild**: ✅ 已完成当前 graph roadmap 中已批准的主要实现范围；Phase 11A/11B/11C 完成 Context & Observability Harness，Phase 12A/12B/12C 完成结构化模型输出适配，Phase 13A-13E 完成 Canonical Action IR & Safety Pipeline 阶梯架构，Phase 14A-14E 完成 LangGraph-native Context Engineering Harness；legacy text DSL 删除、mark binding、多候选 grounding fail-closed、bounded context window、hybrid/accessibility 诊断字段已落地。最新 **Goal Contract Rebuild** 已完成：旧 `TaskGoalContract`（关键词分类 + `validate_finish_claim()` 中的中文 contains 匹配 → 只覆盖 5 类硬编码 task）已删除，替换为声明式 `GoalContract` (`phone_agent/graph/goal.py`) + `SuccessCriterion[]` + `GoalContractCompiler` (`goal_compiler.py`) 编译链 (External > LLM > Heuristic 兜底) + `GoalEvaluator` (`goal_evaluator.py`) 的推倒重来。`START → goal_node → plan_node → ...`，`goal_node` 编译一次（step 0），可选 `require_goal_approval` interrupt；`finish` 动作扩展 `matched_terminal_evidence: list[str]`；reflect 对每条 criterion 按 verification 分发核验（程序化复用既有 verifier 原语 + vlm_judge 三段校验），fail-closed unknown → replan（不自动升级 success，删除了原 generic_task 后门）。reflect 引入统一 context 窗口管理（`select_reflect_context` + 最近 K=3 action_outcome），`goal_contract_block` 提到独立 message 块以利 prompt prefix cache。仍需保留既有 hardening 未闭环项：hybrid executable mark 过滤、diagnostic code 字段 strict sanitizer、child `parse_summary` 透传、accessibility failure code taxonomy；long-term memory 与 LangChain provider abstraction 仍待另行规划
+- **Phase 1-14 + Hybrid Accessibility Grounding Hardening + Goal Contract Rebuild**: ✅ 已完成当前 graph roadmap 中已批准的主要实现范围；legacy text DSL 删除、mark binding、多候选 grounding fail-closed、bounded context window、hybrid/accessibility 诊断字段已落地。PhoneAgent generalization Phase 1-8 已完成 AppIdentity/stable observation、ToolCapability/ActionReceipt、typed Predicate/Goal/evidence、受 authority ceiling 约束的 FactCollector/optional adapters、versioned Safety/Verification policies、trusted Goal resume，以及 cross-domain/metamorphic/privacy/rollback 离线门禁。完整私密 Goal 仅存在于每次 run 注入的 `RuntimeGoalContext`；state/trace/checkpoint 不保留语义值或低熵普通摘要。legacy page vocabulary 已降为默认关闭的 shadow telemetry，不能改变 verifier/Goal/routing。runtime checkpointer 尚未启用；Phase 9 真机验证明确延期，不由离线结果代替。
 - **测试**: 已恢复可执行 graph/actions/evals 回归测试与安装门禁；当前本地门禁为 `.venv/bin/pytest tests -q` 全绿
 - **架构**: LangGraph Plan-Execute-Reflect StateGraph
 - **图拓扑**: `START → goal_node → plan → execute → [confirm|takeover|reflect|replan|end]`
@@ -216,7 +216,7 @@ PHONE_AGENT_ACCESSIBILITY_MARKS=true \
 **已落地方案**:
 - `phone_agent/model/client.py`: response normalizer、Markdown code fence/空白清理、`output_mode`、streaming `tool_calls` delta 聚合、parse metadata；旧 text DSL 响应被拒绝。
 - `phone_agent/actions/adapter.py`: provider-facing JSON / 已聚合 `tool_calls` 到 canonical action 的白名单 adapter，提供 `invalid_json`、`unknown_action`、`missing_field`、`unsafe_value`、`unsupported_tool_call` 等稳定错误码。
-- `phone_agent/actions/result.py`: `ActionResult` 独立为执行结果类型；旧 `phone_agent/actions/handler.py` 与 `parse_action()` / `do()` / `finish()` text DSL helper 已删除。
+- `phone_agent/actions/result.py`: `ActionResult` 仅保留为低层 dispatch 兼容投影；`ActionReceipt` 是 Execute 的权威 dispatch 记录，不能作为 transition 或 Goal 成功。旧 `phone_agent/actions/handler.py` 与 `parse_action()` / `do()` / `finish()` text DSL helper 已删除。
 - `plan_node` / `execute_node`: parse/adapter/validation/grounding/execution failure 返回 `action_parsed=None` 或 terminal failed `ActionResult`，不会包装成成功 `finish`，也不会 dispatch 未验证 tool。
 - `trace`: 记录 configured mode、detected format、adapter used、parse success/error code；`parse_error` 与隐私文本默认脱敏。
 

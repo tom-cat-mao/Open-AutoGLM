@@ -20,6 +20,7 @@ from phone_agent.graph.context import (
 )
 from phone_agent.graph.state import AgentState
 from phone_agent.graph.trace import JsonlTraceWriter
+from phone_agent.graph.runtime_goal import RuntimeGoalContext
 from phone_agent.grounding.factory import DEFAULT_GROUNDING_PROVIDER_NAME
 
 
@@ -215,7 +216,9 @@ class PhoneAgent:
             str(trace_writer.path) if trace_writer else None,
         )
         if trace_writer:
-            trace_writer.emit("agent", "run_end", run_result.steps, run_result.to_dict())
+            trace_writer.emit(
+                "agent", "run_end", run_result.steps, run_result.to_dict()
+            )
         return run_result
 
     def _build_initial_state(self, task: str, screenshot: Any) -> AgentState:
@@ -233,6 +236,9 @@ class PhoneAgent:
             "goal_contract_status": "pending",
             "goal_compile_source": None,
             "goal_compile_attempts": 0,
+            "task_requirement_set": None,
+            "contract_adequacy_status": None,
+            "contract_adequacy_reasons": [],
             "needs_recompile": False,
             "messages": [],
             "step_count": 0,
@@ -261,17 +267,20 @@ class PhoneAgent:
             "grounding_candidate_count": 0,
             "selected_grounding_candidate_id": None,
             "expected_outcome": None,
+            "expected_transition": None,
             "error_layer": None,
             "error_code": None,
             "recoverable": None,
             "retry_policy": None,
             "action_result": None,
+            "action_receipt": None,
             "pending_finish": False,
             "finish_claim": None,
             "finish_validation_status": None,
             "finish_validation_evidence": None,
+            "goal_evidence_ledger": [],
             "reflection": None,
-            "action_succeeded": True,
+            "action_succeeded": False,
             "reflection_verdict": None,
             "failure_cause": None,
             "suggested_strategy": None,
@@ -359,6 +368,7 @@ class PhoneAgent:
                 "locateanything_max_visual_candidates": self.agent_config.locateanything_max_visual_candidates,
                 "locateanything_visual_category_budget": self.agent_config.locateanything_visual_category_budget,
                 "locateanything_max_structure_calls": self.agent_config.locateanything_max_structure_calls,
+                "runtime_goal_context": RuntimeGoalContext(),
             }
         }
 
@@ -402,7 +412,9 @@ class PhoneAgent:
             grounding_failure_code=state.get("grounding_failure_code"),
             grounding_screen_hash=state.get("grounding_screen_hash"),
             grounding_candidate_count=int(state.get("grounding_candidate_count") or 0),
-            selected_grounding_candidate_id=state.get("selected_grounding_candidate_id"),
+            selected_grounding_candidate_id=state.get(
+                "selected_grounding_candidate_id"
+            ),
             error_layer=state.get("error_layer"),
             error_code=state.get("error_code"),
             recoverable=state.get("recoverable"),

@@ -6,6 +6,8 @@ from typing import TYPE_CHECKING
 
 from langchain_core.runnables import RunnableConfig
 
+from phone_agent.device_factory import ObservationCaptureError
+from phone_agent.config.policy import DEFAULT_VERIFICATION_POLICY, VerificationPolicy
 from phone_agent.graph.context import (
     FAILURE_TAXONOMY,
     build_action_outcome_summary,
@@ -21,21 +23,40 @@ from phone_agent.graph.context import (
     update_failure_memory,
     update_summarized_history,
 )
+from phone_agent.graph.compatibility_adapters import observe_legacy_page_signals
 from phone_agent.graph.expected_outcome import expected_outcome_prompt_block
+from phone_agent.graph.fact_providers import (
+    ExternalProbeFactProvider,
+    ExtractorFactProvider,
+    FactCollector,
+    FactRequest,
+    OptionalAdapterRegistry,
+    default_core_fact_providers,
+)
+from phone_agent.graph.device_observation import capture_device_observation
 from phone_agent.graph.observation import build_mark_provider_hints, build_observation
 from phone_agent.graph.screenshot_status import (
     screenshot_failure_code,
-    screenshot_failure_message,
     screenshot_is_sensitive,
 )
 from phone_agent.graph.goal import (
     ensure_goal_contract as _ensure_goal_contract_compat,
     build_goal_prompt_block,
+    goal_runtime_reference,
     goal_trace_payload,
 )
-from phone_agent.graph.goal_evaluator import evaluate_finish_claim, GoalEvaluation
+from phone_agent.graph.goal_evidence import append_evaluation_entries
+from phone_agent.graph.goal_evaluator import (
+    GoalEvaluation,
+    evaluate_finish_claim,
+    pure_goal_evaluator,
+)
+from phone_agent.graph.runtime_observation import RuntimeObservationContext
 from phone_agent.graph.trace import emit_trace
-from phone_agent.graph.verifier import merge_verifier_with_reflection, verify_action_outcome
+from phone_agent.graph.verifier import (
+    merge_verifier_with_reflection,
+    verify_action_outcome,
+)
 from phone_agent.grounding.factory import build_mark_providers
 from phone_agent.model.client import MessageBuilder
 
@@ -46,7 +67,7 @@ if TYPE_CHECKING:
 REFLECT_SYSTEM_PROMPT_CN = """你是一个手机自动化任务的反思专家。你的职责是观察动作执行后的屏幕截图，判断动作是否生效，并给出下一步建议。
 
 你必须只输出一个 JSON 对象，不要 Markdown、XML、函数调用或多余文本：
-{"verdict":"succeeded|failed|partial","failure_cause":"none|element_not_found|wrong_page|app_not_responding|network_or_loading|permission_or_login_or_captcha|unsafe_or_sensitive|coordinate_or_tap_offset|context_lost|repeated_action|model_parse_failed|unknown","suggested_strategy":"continue|retry|retry_with_offset|go_back|swipe_to_find|wait|takeover|finish","message":"xxx","named_evidence":[{"criterion":"criterion_name","screen_reference":"mark_id or sha256 stub"}]}
+{"verdict":"succeeded|failed|partial","failure_cause":"none|element_not_found|wrong_page|app_not_responding|network_or_loading|permission_or_login_or_captcha|unsafe_or_sensitive|coordinate_or_tap_offset|context_lost|repeated_action|model_parse_failed|unknown","suggested_strategy":"continue|retry|retry_with_offset|go_back|swipe_to_find|wait|takeover|finish","message":"xxx","named_evidence":[{"criterion":"criterion_name","screen_reference":"safe evidence id","observed_value":"current visible value","source":"accessibility|screen_object|mark|visual_region|whole_screen|external_probe|device"}]}
 
 判断标准：
 1. 动作生效：页面满足预期后置条件（如输入框聚焦、目标文本出现、目标页面打开、目标应用打开）
@@ -55,7 +76,7 @@ REFLECT_SYSTEM_PROMPT_CN = """你是一个手机自动化任务的反思专家�
 4. 任务完成：如果当前页面显示任务已经完成，输出 {"verdict":"succeeded","failure_cause":"none","suggested_strategy":"finish","message":"任务已完成","named_evidence":[{"criterion":"成功标准名","screen_reference":"屏幕证据引用"}]}
 
 重要约束：
-- named_evidence 仅在 suggested_strategy="finish" 时需要输出，列出 finish claim 对应的目标契约成功标准名与屏幕证据引用（mark_id 或 sha256 stub）。
+- named_evidence 仅在 suggested_strategy="finish" 时需要输出，列出 finish claim 对应的目标契约成功标准名与屏幕证据引用；typed criterion 还必须给出当前可见 observed_value 和 evidence source。observed_value 仅用于当前 node 匹配，不写入 state/trace。
 - 只有在截图明确显示加载中、空白页、网络错误、进度条/转圈、或执行结果表示应用无响应时，才使用 failure_cause="network_or_loading" 和 suggested_strategy="wait"。
 - 如果刚执行的是 Launch/启动应用，且当前屏幕信息或截图已显示目标应用/设置页/目标页面已打开，即使任务还没完成，也应判定为 succeeded + continue，而不是 partial + wait。
 - 不要因为页面内容很多、设置项列表尚需下一步操作，就误判为加载中；可继续操作的稳定页面应输出 continue。
@@ -65,7 +86,7 @@ REFLECT_SYSTEM_PROMPT_CN = """你是一个手机自动化任务的反思专家�
 REFLECT_SYSTEM_PROMPT_EN = """You are a mobile automation reflection expert. Your job is to observe the screenshot after an action and judge whether the action succeeded, then give next-step advice.
 
 You MUST output exactly one JSON object. Do not output Markdown, XML, function calls, or extra text:
-{"verdict":"succeeded|failed|partial","failure_cause":"none|element_not_found|wrong_page|app_not_responding|network_or_loading|permission_or_login_or_captcha|unsafe_or_sensitive|coordinate_or_tap_offset|context_lost|repeated_action|model_parse_failed|unknown","suggested_strategy":"continue|retry|retry_with_offset|go_back|swipe_to_find|wait|takeover|finish","message":"xxx","named_evidence":[{"criterion":"criterion_name","screen_reference":"mark_id or sha256 stub"}]}
+{"verdict":"succeeded|failed|partial","failure_cause":"none|element_not_found|wrong_page|app_not_responding|network_or_loading|permission_or_login_or_captcha|unsafe_or_sensitive|coordinate_or_tap_offset|context_lost|repeated_action|model_parse_failed|unknown","suggested_strategy":"continue|retry|retry_with_offset|go_back|swipe_to_find|wait|takeover|finish","message":"xxx","named_evidence":[{"criterion":"criterion_name","screen_reference":"safe evidence id","observed_value":"current visible value","source":"accessibility|screen_object|mark|visual_region|whole_screen|external_probe|device"}]}
 
 Judgment criteria:
 1. Action succeeded: expected postconditions are satisfied (for example focused input, expected text, target page, or target app)
@@ -74,7 +95,7 @@ Judgment criteria:
 4. Task completed: if the current page shows the task is done, output {"verdict":"succeeded","failure_cause":"none","suggested_strategy":"finish","message":"Task completed","named_evidence":[{"criterion":"criterion_name","screen_reference":"screen evidence reference"}]}
 
 Important constraints:
-- named_evidence is only required when suggested_strategy="finish"; list the goal contract criterion names and their screen evidence references (mark_id or sha256 stub).
+- named_evidence is only required when suggested_strategy="finish". For typed criteria include the current visible observed_value and evidence source; observed_value is node-local and must not enter state or trace.
 - Use failure_cause="network_or_loading" and suggested_strategy="wait" only when the screenshot clearly shows loading, a blank page, a network error, a spinner/progress indicator, or the execution result indicates the app is not responding.
 - If the action just executed is Launch and the current screen info or screenshot already shows the target app/settings/target page is open, judge it as succeeded + continue even if the overall task still needs more steps; do not return partial + wait.
 - Do not treat a stable page with many settings/list items as loading. If the page is actionable, return continue.
@@ -93,8 +114,12 @@ VALID_STRATEGIES = {
     "takeover",
     "finish",
 }
-VERIFIED_REFLECTION_SKIP_CONFIDENCE = 0.9
-DEFAULT_TAKEOVER_RETRY_THRESHOLD = 3
+VERIFIED_REFLECTION_SKIP_CONFIDENCE = DEFAULT_VERIFICATION_POLICY.value(
+    "verified_reflection_skip_confidence"
+)
+DEFAULT_TAKEOVER_RETRY_THRESHOLD = int(
+    DEFAULT_VERIFICATION_POLICY.value("takeover_retry_count")
+)
 
 
 @dataclass
@@ -104,7 +129,7 @@ class ReflectionResult:
     suggested_strategy: str | None
     message: str
     has_evidence: bool = False
-    named_evidence: list[dict[str, str]] | None = None
+    named_evidence: list[dict[str, object]] | None = None
 
 
 def _reflection_from_verifier(verifier_result) -> ReflectionResult | None:
@@ -118,7 +143,10 @@ def _reflection_from_verifier(verifier_result) -> ReflectionResult | None:
             "deterministic verifier hard failure",
             True,
         )
-    if verifier_result.status == "success" and verifier_result.confidence >= VERIFIED_REFLECTION_SKIP_CONFIDENCE:
+    if (
+        verifier_result.status == "success"
+        and verifier_result.confidence >= VERIFIED_REFLECTION_SKIP_CONFIDENCE
+    ):
         return ReflectionResult(
             "succeeded",
             None,
@@ -161,11 +189,18 @@ def parse_reflection_action(raw_action: str) -> ReflectionResult:
         has_missing = bool(missing)
         has_positive_evidence = bool(matched) or bool(evidence)
         has_evidence = has_positive_evidence
-        if action_effect in {"succeeded", "success"} and not dynamic_only and not has_missing and has_positive_evidence:
+        if (
+            action_effect in {"succeeded", "success"}
+            and not dynamic_only
+            and not has_missing
+            and has_positive_evidence
+        ):
             verdict = "succeeded"
             failure_cause = "none"
             suggested_strategy = str(data.get("next_strategy", "continue"))
-        elif action_effect in {"succeeded", "success"} and (dynamic_only or has_missing):
+        elif action_effect in {"succeeded", "success"} and (
+            dynamic_only or has_missing
+        ):
             verdict = "failed"
             failure_cause = "wrong_page" if has_missing else "unknown"
             suggested_strategy = str(data.get("next_strategy", "retry"))
@@ -193,21 +228,38 @@ def parse_reflection_action(raw_action: str) -> ReflectionResult:
     failure_cause = normalize_failure_cause(failure_cause)
     if suggested_strategy not in VALID_STRATEGIES:
         suggested_strategy = "retry"
-    parsed_cause = None if verdict == "succeeded" and failure_cause == "none" else failure_cause
+    parsed_cause = (
+        None if verdict == "succeeded" and failure_cause == "none" else failure_cause
+    )
     named_evidence_raw = data.get("named_evidence") if isinstance(data, dict) else None
     named_evidence = None
     if isinstance(named_evidence_raw, list):
-        named_evidence = [
-            {
-                "criterion": str(item.get("criterion", "") ),
-                "screen_reference": str(item.get("screen_reference", "")),
+        named_evidence = []
+        for item in named_evidence_raw:
+            if not isinstance(item, dict):
+                continue
+            evidence_item: dict[str, object] = {
+                "criterion": str(item.get("criterion", ""))[:128],
+                "screen_reference": str(item.get("screen_reference", ""))[:128],
             }
-            for item in named_evidence_raw
-            if isinstance(item, dict)
-        ]
+            if "observed_value" in item:
+                evidence_item["observed_value"] = item.get("observed_value")
+            if item.get("source") in {
+                "accessibility",
+                "screen_object",
+                "mark",
+                "visual_region",
+                "whole_screen",
+                "external_probe",
+                "device",
+            }:
+                evidence_item["source"] = item.get("source")
+            named_evidence.append(evidence_item)
     if named_evidence:
         has_evidence = True
-    return ReflectionResult(verdict, parsed_cause, suggested_strategy, message, has_evidence, named_evidence)
+    return ReflectionResult(
+        verdict, parsed_cause, suggested_strategy, message, has_evidence, named_evidence
+    )
 
 
 def _screenshot_failure_update(
@@ -222,13 +274,21 @@ def _screenshot_failure_update(
 
     code = screenshot_failure_code(screenshot) or "screenshot_unavailable"
     sensitive = screenshot_is_sensitive(screenshot)
-    failure_cause = "unsafe_or_sensitive" if sensitive or code == "secure_screenshot_blocked" else "context_lost"
-    suggested_strategy = "takeover" if failure_cause == "unsafe_or_sensitive" else "retry"
+    failure_cause = (
+        "unsafe_or_sensitive"
+        if sensitive or code == "secure_screenshot_blocked"
+        else "context_lost"
+    )
+    suggested_strategy = (
+        "takeover" if failure_cause == "unsafe_or_sensitive" else "retry"
+    )
     error_fields = {
         "error_layer": "grounding",
         "error_code": code,
         "recoverable": True,
-        "retry_policy": "takeover" if failure_cause == "unsafe_or_sensitive" else "reobserve",
+        "retry_policy": (
+            "takeover" if failure_cause == "unsafe_or_sensitive" else "reobserve"
+        ),
     }
     error_message = f"Screenshot unavailable: {code}"
     result_dict = {"success": False, "should_finish": True, "message": error_message}
@@ -270,6 +330,8 @@ def _build_after_observation(
     config: RunnableConfig,
     screenshot: object,
     current_app: str,
+    foreground: object | None,
+    observation_epoch: int,
     device_factory: object,
     device_id: str | None,
 ) -> object:
@@ -283,9 +345,15 @@ def _build_after_observation(
     if accessibility_enabled is None:
         import os
 
-        accessibility_enabled = os.getenv("PHONE_AGENT_ACCESSIBILITY_MARKS", "").lower() in {"1", "true", "yes", "on"}
+        accessibility_enabled = os.getenv(
+            "PHONE_AGENT_ACCESSIBILITY_MARKS", ""
+        ).lower() in {"1", "true", "yes", "on"}
     provider_name = str(configurable.get("grounding_provider_name") or "").lower()
-    hybrid_provider_enabled = provider_name in {"hybrid", "accessibility_locateanything", "uiautomator_locateanything"}
+    hybrid_provider_enabled = provider_name in {
+        "hybrid",
+        "accessibility_locateanything",
+        "uiautomator_locateanything",
+    }
     if (
         screen_marks is None
         and accessibility_enabled
@@ -307,7 +375,10 @@ def _build_after_observation(
                 state,
                 "reflect",
                 "after_accessibility_marks_error",
-                {"failure_code": type(exc).__name__, "message": "after accessibility marks unavailable"},
+                {
+                    "failure_code": type(exc).__name__,
+                    "message": "after accessibility marks unavailable",
+                },
             )
 
     provider_configurable = dict(configurable)
@@ -316,17 +387,19 @@ def _build_after_observation(
     if (
         provider_configurable.get("accessibility_tree_dump") is None
         and not provider_configurable.get("skip_accessibility_provider")
-        and hasattr(device_factory, "module")
-        and hasattr(device_factory.module, "dump_uiautomator_xml")
+        and hasattr(device_factory, "dump_uiautomator_xml")
     ):
-        provider_configurable["accessibility_tree_dump"] = lambda timeout=None: device_factory.module.dump_uiautomator_xml(
-            device_id,
-            timeout=timeout,
+        provider_configurable["accessibility_tree_dump"] = lambda timeout=None: (
+            device_factory.dump_uiautomator_xml(
+                device_id,
+                timeout=timeout,
+            )
         )
     provider_hints = build_mark_provider_hints(
         task=state.get("task"),
         reflection=state.get("reflection"),
-        provider_hints=configurable.get("mark_provider_hints") or configurable.get("grounding_hints"),
+        provider_hints=configurable.get("mark_provider_hints")
+        or configurable.get("grounding_hints"),
     )
     return build_observation(
         screenshot=screenshot,
@@ -335,15 +408,21 @@ def _build_after_observation(
         mark_providers=build_mark_providers(provider_configurable),
         provider_hints=provider_hints,
         provider_timeout=float(configurable.get("grounding_timeout", 10.0) or 10.0),
+        foreground=foreground,
+        observation_epoch=observation_epoch,
     )
 
 
-def _bounded_observation_summary(payload: dict | None, *, task_context: str | None = None) -> dict:
+def _bounded_observation_summary(
+    payload: dict | None, *, task_context: str | None = None
+) -> dict:
     """Return prompt/trace-safe screen evidence without raw screenshots or trees."""
 
     if not isinstance(payload, dict):
         return {}
-    safe = sanitize_context_payload(payload, consumer="reflect_prompt", task_context=task_context)
+    safe = sanitize_context_payload(
+        payload, consumer="reflect_prompt", task_context=task_context
+    )
     if not isinstance(safe, dict):
         return {}
     marks = safe.get("marks")
@@ -352,12 +431,22 @@ def _bounded_observation_summary(payload: dict | None, *, task_context: str | No
     return safe
 
 
-def _state_before_observation_payload(state: "AgentState", *, task_context: str | None = None) -> dict:
+def _state_before_observation_payload(
+    state: "AgentState", *, task_context: str | None = None
+) -> dict:
     observation = state.get("observation")
     if not isinstance(observation, dict):
         return {}
-    snapshot = observation.get("snapshot") if isinstance(observation.get("snapshot"), dict) else {}
-    registry = observation.get("mark_registry") if isinstance(observation.get("mark_registry"), dict) else {}
+    snapshot = (
+        observation.get("snapshot")
+        if isinstance(observation.get("snapshot"), dict)
+        else {}
+    )
+    registry = (
+        observation.get("mark_registry")
+        if isinstance(observation.get("mark_registry"), dict)
+        else {}
+    )
     marks_value = registry.get("marks") if isinstance(registry, dict) else []
     if isinstance(marks_value, dict):
         iterable_marks = marks_value.values()
@@ -383,7 +472,18 @@ def _state_before_observation_payload(state: "AgentState", *, task_context: str 
     payload = {
         "snapshot": {
             key: snapshot.get(key)
-            for key in ("screen_id", "screen_hash", "current_app", "semantic_screen_id", "mark_set_version")
+            for key in (
+                "screen_id",
+                "screen_hash",
+                "current_app",
+                "foreground_package",
+                "foreground_activity",
+                "foreground_canonical_id",
+                "foreground_known",
+                "semantic_screen_id",
+                "observation_epoch",
+                "mark_set_version",
+            )
             if snapshot.get(key) is not None
         },
         "marks": marks,
@@ -416,7 +516,9 @@ def _collect_device_verifier_signals(
     for owner in (device_factory, module):
         if owner is None:
             continue
-        if "focused_window" not in signals and hasattr(owner, "get_focused_window_or_app"):
+        if "focused_window" not in signals and hasattr(
+            owner, "get_focused_window_or_app"
+        ):
             try:
                 signals["focused_window"] = owner.get_focused_window_or_app(device_id)
             except Exception:
@@ -434,7 +536,9 @@ def _collect_device_verifier_signals(
     return signals
 
 
-def _verifier_observation_payload(observation, *, task_context: str | None = None) -> dict:
+def _verifier_observation_payload(
+    observation, *, task_context: str | None = None
+) -> dict:
     """Build after-observation text for in-memory verifier matching only."""
 
     marks = []
@@ -452,12 +556,16 @@ def _verifier_observation_payload(observation, *, task_context: str | None = Non
     }
 
 
-def _sanitize_verifier_observation_payload(payload: dict, *, task_context: str | None = None) -> dict:
+def _sanitize_verifier_observation_payload(
+    payload: dict, *, task_context: str | None = None
+) -> dict:
     """Return prompt/trace-safe verifier observation without raw UI text."""
 
     if not isinstance(payload, dict):
         return {}
-    safe = sanitize_context_payload(payload, consumer="checkpoint", task_context=task_context)
+    safe = sanitize_context_payload(
+        payload, consumer="checkpoint", task_context=task_context
+    )
     if not isinstance(safe, dict):
         return {}
     marks = safe.get("marks")
@@ -479,10 +587,14 @@ SAFE_VERIFIER_EVIDENCE_STRINGS = {
 }
 
 
-def _sanitize_verifier_evidence(evidence: dict, *, task_context: str | None = None) -> dict:
+def _sanitize_verifier_evidence(
+    evidence: dict, *, task_context: str | None = None
+) -> dict:
     """Sanitize verifier evidence while preserving stable machine codes."""
 
-    safe = sanitize_context_payload(evidence, consumer="trace_payload", task_context=task_context)
+    safe = sanitize_context_payload(
+        evidence, consumer="trace_payload", task_context=task_context
+    )
     if not isinstance(safe, dict):
         return {}
     for key in ("matched_postconditions", "missing_postconditions"):
@@ -495,17 +607,27 @@ def _sanitize_verifier_evidence(evidence: dict, *, task_context: str | None = No
 def _sanitize_postcondition_item(item):
     if not isinstance(item, str):
         return sanitize_context_payload(item, consumer="trace_payload")
-    if item in SAFE_VERIFIER_EVIDENCE_STRINGS or item.startswith("sha256:") or item.startswith("forbidden:sha256:"):
+    if (
+        item in SAFE_VERIFIER_EVIDENCE_STRINGS
+        or item.startswith("sha256:")
+        or item.startswith("forbidden:sha256:")
+    ):
         return item
     return _redacted_private_text(item)
 
 
-def _sanitize_verifier_result_dict(verifier_result, *, task_context: str | None = None) -> dict:
+def _sanitize_verifier_result_dict(
+    verifier_result, *, task_context: str | None = None
+) -> dict:
     data = verifier_result.to_dict()
     if isinstance(data.get("evidence"), dict):
-        data["evidence"] = _sanitize_verifier_evidence(data["evidence"], task_context=task_context)
+        data["evidence"] = _sanitize_verifier_evidence(
+            data["evidence"], task_context=task_context
+        )
     if isinstance(data.get("signals"), dict):
-        data["signals"] = sanitize_context_payload(data["signals"], consumer="checkpoint", task_context=task_context)
+        data["signals"] = sanitize_context_payload(
+            data["signals"], consumer="checkpoint", task_context=task_context
+        )
     return data
 
 
@@ -553,13 +675,22 @@ def _maybe_emit_reflect_prompt_debug(
 
 
 def _strip_images_for_reflect_prompt_debug(messages: list[dict]) -> list[dict]:
-    return [MessageBuilder.remove_images_from_message(dict(message)) for message in messages]
+    return [
+        MessageBuilder.remove_images_from_message(dict(message)) for message in messages
+    ]
 
 
 def _takeover_threshold(config: RunnableConfig) -> int:
     configurable = config.get("configurable", {})
+    policy = configurable.get("verification_policy")
+    if isinstance(policy, VerificationPolicy):
+        return max(1, int(policy.value("takeover_retry_count")))
     try:
-        value = int(configurable.get("verifier_takeover_threshold", DEFAULT_TAKEOVER_RETRY_THRESHOLD))
+        value = int(
+            configurable.get(
+                "verifier_takeover_threshold", DEFAULT_TAKEOVER_RETRY_THRESHOLD
+            )
+        )
     except (TypeError, ValueError):
         return DEFAULT_TAKEOVER_RETRY_THRESHOLD
     return max(1, value)
@@ -587,14 +718,36 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
     action_parsed = state.get("action_parsed")
     action_result = state.get("action_result")
     task = state["task"]
-    task_for_prompt = str(sanitize_context_payload(task, "task", consumer="checkpoint", task_context=task))
+    task_for_prompt = str(
+        sanitize_context_payload(task, "task", consumer="checkpoint", task_context=task)
+    )
     step_count = state["step_count"]
     max_steps = state["max_steps"]
     context_mode = get_context_mode(state, config)
 
     # 1. Capture screen again
-    screenshot = device_factory.get_screenshot(device_id)
-    current_app = device_factory.get_current_app(device_id)
+    try:
+        device_capture = capture_device_observation(
+            device_factory,
+            device_id,
+            timeout=int(configurable.get("screenshot_timeout", 10) or 10),
+            max_attempts=int(configurable.get("observation_capture_attempts", 2) or 2),
+        )
+    except ObservationCaptureError as exc:
+        return {
+            "reflection": f"Observation unavailable: {exc.code}",
+            "action_succeeded": False,
+            "reflection_verdict": "retry",
+            "failure_cause": "context_lost",
+            "suggested_strategy": "wait",
+            "grounding_error": exc.code,
+            "grounding_failure_code": exc.code,
+            "retry_count": int(state.get("retry_count") or 0) + 1,
+            "pending_finish": False,
+            "finish_validation_status": "unknown",
+        }
+    screenshot = device_capture.screenshot
+    current_app = device_capture.current_app
     if screenshot_failure_code(screenshot):
         return _screenshot_failure_update(
             state=state,
@@ -608,6 +761,8 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
         config=config,
         screenshot=screenshot,
         current_app=current_app,
+        foreground=device_capture.foreground,
+        observation_epoch=device_capture.observation_epoch,
         device_factory=device_factory,
         device_id=device_id,
     )
@@ -639,18 +794,26 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
         action_result=action_result,
         before_observation=before_verifier_observation,
         after_observation=after_verifier_observation,
+        page_signal_adapter=None,
     )
+    if configurable.get("enable_legacy_page_signal_adapter", False):
+        observe_legacy_page_signals(
+            expected=state.get("expected_outcome"),
+            observation=after_verifier_observation,
+        )
     pending_finish = bool(state.get("pending_finish")) or (
         isinstance(action_parsed, dict) and action_parsed.get("_metadata") == "finish"
     )
-    goal_contract = _ensure_goal_contract_compat(state)
+    goal_contract = _ensure_goal_contract_compat(state, config)
     finish_validation: GoalEvaluation | None = None
+    finish_claim_matched: list[str] = []
     if pending_finish and goal_contract is not None:
-        finish_claim_matched = []
         if isinstance(action_parsed, dict):
             raw_evidence = action_parsed.get("matched_terminal_evidence")
             if isinstance(raw_evidence, list):
-                finish_claim_matched = [str(e) for e in raw_evidence if isinstance(e, str)]
+                finish_claim_matched = [
+                    str(e) for e in raw_evidence if isinstance(e, str)
+                ]
         finish_validation = evaluate_finish_claim(
             contract=goal_contract,
             verifier_status=verifier_result.status,
@@ -700,8 +863,10 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
                 task_context=task,
             ),
             "verifier_result": verifier_result_dict,
-            "goal_contract": goal_trace_payload(state),
-            "finish_validation": finish_validation.to_dict() if finish_validation else None,
+            "goal_contract": goal_trace_payload(state, config),
+            "finish_validation": (
+                finish_validation.to_dict() if finish_validation else None
+            ),
         },
     )
 
@@ -734,20 +899,35 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
     else:
         system_prompt = REFLECT_SYSTEM_PROMPT_CN
 
-    action_str = str(
-        sanitize_context_payload(action_parsed, consumer="checkpoint", task_context=task)
-    ) if action_parsed else "None"
-    result_str = str(
-        sanitize_context_payload(action_result, consumer="checkpoint", task_context=task)
-    ) if action_result else "None"
+    action_str = (
+        str(
+            sanitize_context_payload(
+                action_parsed, consumer="checkpoint", task_context=task
+            )
+        )
+        if action_parsed
+        else "None"
+    )
+    result_str = (
+        str(
+            sanitize_context_payload(
+                action_result, consumer="checkpoint", task_context=task
+            )
+        )
+        if action_result
+        else "None"
+    )
     expected_outcome_text = expected_outcome_prompt_block(
         state.get("expected_outcome"),
         lang=lang,
         task_context=task,
     )
-    goal_contract_block = build_goal_prompt_block(state, lang=lang)
+    goal_contract_block = build_goal_prompt_block(state, lang=lang, config=config)
     reflect_context_selection = select_reflect_context(
-        state, mode=context_mode, lang=lang, prompt_version=configurable.get("prompt_version"),
+        state,
+        mode=context_mode,
+        lang=lang,
+        prompt_version=configurable.get("prompt_version"),
     )
     reflect_context_block = reflect_context_selection.context_block
     if deterministic_reflection is None:
@@ -832,7 +1012,9 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
                     reflect_messages, output_mode="json_schema", validate_action=False
                 )
             except TypeError as type_error:
-                if "output_mode" not in str(type_error) and "validate_action" not in str(type_error):
+                if "output_mode" not in str(
+                    type_error
+                ) and "validate_action" not in str(type_error):
                     raise
                 response = model_client.request(reflect_messages)
             raw_action = response.action.strip()
@@ -853,14 +1035,17 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
                 },
             )
             raw_action = ""
-            parsed_reflection = ReflectionResult("failed", "model_reflection_failed", "retry", error_message)
+            parsed_reflection = ReflectionResult(
+                "failed", "model_reflection_failed", "retry", error_message
+            )
             reflection = error_message
     else:
         raw_action = json.dumps(
             {
                 "verdict": deterministic_reflection.verdict,
                 "failure_cause": deterministic_reflection.failure_cause or "none",
-                "suggested_strategy": deterministic_reflection.suggested_strategy or "continue",
+                "suggested_strategy": deterministic_reflection.suggested_strategy
+                or "continue",
                 "message": deterministic_reflection.message,
             },
             ensure_ascii=False,
@@ -885,7 +1070,9 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
         if isinstance(action_parsed, dict):
             raw_evidence = action_parsed.get("matched_terminal_evidence")
             if isinstance(raw_evidence, list):
-                finish_claim_matched = [str(e) for e in raw_evidence if isinstance(e, str)]
+                finish_claim_matched = [
+                    str(e) for e in raw_evidence if isinstance(e, str)
+                ]
         finish_validation = evaluate_finish_claim(
             contract=goal_contract,
             verifier_status=verifier_result.status,
@@ -937,6 +1124,108 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
         final_verdict = "failed"
         final_failure_cause = "goal_not_satisfied"
         parsed_reflection.suggested_strategy = "continue"
+
+    state_contract = state.get("goal_contract")
+    has_runtime_goal_binding = isinstance(state_contract, dict) and isinstance(
+        state_contract.get("runtime_reference"), str
+    )
+    goal_evidence_ledger = (
+        list(state.get("goal_evidence_ledger") or [])
+        if has_runtime_goal_binding
+        else []
+    )
+    runtime_contract_id = (
+        goal_runtime_reference(state) if goal_contract is not None else None
+    )
+    if finish_validation is not None and goal_contract is not None:
+        goal_evidence_ledger = append_evaluation_entries(
+            goal_evidence_ledger,
+            evaluation=finish_validation.to_dict(),
+            contract_id=runtime_contract_id,
+            screen_id=after_observation.snapshot.screen_id,
+            observation_epoch=after_observation.snapshot.observation_epoch,
+            predicate_ids={
+                criterion.name: (
+                    criterion.predicate.predicate_id
+                    if criterion.predicate is not None
+                    else None
+                )
+                for criterion in goal_contract.success_criteria
+            },
+        )
+    if goal_contract is not None:
+        requests = tuple(
+            FactRequest(criterion.name, criterion.predicate)
+            for criterion in goal_contract.success_criteria
+            if criterion.predicate is not None
+            and criterion.predicate.expected_value is not None
+        )
+        if requests:
+            providers = list(default_core_fact_providers())
+            visual_extractor = configurable.get("visual_fact_extractor")
+            if callable(visual_extractor):
+                providers.append(
+                    ExtractorFactProvider(
+                        "visual_region",
+                        visual_extractor,
+                        provider_id="core.visual_region",
+                        provider_version="visual_region_v1",
+                    )
+                )
+            whole_screen_extractor = configurable.get("whole_screen_fact_extractor")
+            if callable(whole_screen_extractor):
+                providers.append(
+                    ExtractorFactProvider(
+                        "whole_screen",
+                        whole_screen_extractor,
+                        provider_id="core.whole_screen",
+                        provider_version="whole_screen_v1",
+                    )
+                )
+            goal_probes = configurable.get("goal_probes")
+            if isinstance(goal_probes, dict):
+                providers.append(ExternalProbeFactProvider(goal_probes))
+            adapter_registry = configurable.get("optional_fact_adapter_registry")
+            if isinstance(adapter_registry, OptionalAdapterRegistry):
+                providers.extend(adapter_registry.providers)
+            runtime_context = RuntimeObservationContext(
+                screenshot=screenshot,
+                observation=after_observation,
+                screen_id=after_observation.snapshot.screen_id,
+                observation_epoch=after_observation.snapshot.observation_epoch,
+            )
+            try:
+                collected_results = FactCollector(tuple(providers)).collect_and_resolve(
+                    runtime_context,
+                    requests,
+                    contract_id=runtime_contract_id,
+                )
+            finally:
+                runtime_context.invalidate()
+            goal_evidence_ledger = append_evaluation_entries(
+                goal_evidence_ledger,
+                evaluation={"evidence": {"per_criterion": collected_results}},
+                contract_id=runtime_contract_id,
+                screen_id=after_observation.snapshot.screen_id,
+                observation_epoch=after_observation.snapshot.observation_epoch,
+                predicate_ids={
+                    request.criterion_id: request.predicate.predicate_id
+                    for request in requests
+                },
+            )
+    if finish_validation is not None and goal_contract is not None:
+        if goal_contract.success_criteria and all(
+            criterion.predicate is not None
+            for criterion in goal_contract.success_criteria
+        ):
+            finish_validation = pure_goal_evaluator.evaluate(
+                contract=goal_contract,
+                contract_id=runtime_contract_id,
+                evidence_ledger=goal_evidence_ledger,
+                finish_claim_matched=finish_claim_matched,
+                screen_id=after_observation.snapshot.screen_id,
+                observation_epoch=after_observation.snapshot.observation_epoch,
+            )
     # GoalEvaluator fail-closed: unknown and failure both block finish
     if (
         pending_finish
@@ -951,10 +1240,12 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
     context_updates = {"context_mode": context_mode}
     if context_enabled(context_mode):
         loading = parsed_reflection.failure_cause in {
-            "network_or_loading", "app_not_responding",
+            "network_or_loading",
+            "app_not_responding",
         }
         sensitive = parsed_reflection.failure_cause in {
-            "unsafe_or_sensitive", "permission_or_login_or_captcha",
+            "unsafe_or_sensitive",
+            "permission_or_login_or_captcha",
         }
         if parsed_reflection.verdict == "succeeded":
             confidence = "high"
@@ -982,6 +1273,7 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
             "suggested_strategy": parsed_reflection.suggested_strategy,
         }
         outcome = build_action_outcome_summary(outcome_state)
+        outcome["action_receipt"] = state.get("action_receipt")
         existing_failure_memory = list(state.get("failure_memory") or [])
         repeated = detect_repeated_failure(existing_failure_memory, outcome)
         failure_memory = update_failure_memory(
@@ -1005,7 +1297,8 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
                 "grounding_observation": state.get("grounding_observation"),
             },
             "action_ledger": (list(state.get("action_ledger") or []) + [outcome])[-10:],
-            "context_truncated": bool(state.get("context_truncated")) or history_truncated,
+            "context_truncated": bool(state.get("context_truncated"))
+            or history_truncated,
             "failure_memory_hit_count": int(state.get("failure_memory_hit_count") or 0)
             + (1 if repeated else 0),
             "repeated_failure_count": int(state.get("repeated_failure_count") or 0)
@@ -1034,19 +1327,26 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
             "verifier_status": verifier_result.status,
             "verifier_failure_cause": verifier_result.failure_cause,
             "verifier_evidence": verifier_evidence,
-            "goal_contract": goal_trace_payload(state),
+            "goal_contract": goal_trace_payload(state, config),
             "pending_finish": pending_finish,
-            "finish_validation_status": finish_validation.status if finish_validation else None,
-            "finish_validation_evidence": finish_validation.to_dict() if finish_validation else None,
+            "finish_validation_status": (
+                finish_validation.status if finish_validation else None
+            ),
+            "finish_validation_evidence": (
+                finish_validation.to_dict() if finish_validation else None
+            ),
+            "goal_evidence_ledger_count": len(goal_evidence_ledger),
             "context_mode": context_mode,
             "context_truncated": context_updates.get("context_truncated", False),
-            "failure_memory_hit_count": context_updates.get("failure_memory_hit_count", 0),
+            "failure_memory_hit_count": context_updates.get(
+                "failure_memory_hit_count", 0
+            ),
             "repeated_failure_count": context_updates.get("repeated_failure_count", 0),
         },
     )
 
     return {
-        "screenshot_b64": screenshot.base64_data,
+        "screenshot_b64": None,
         "current_app": current_app,
         "screen_id": after_observation.snapshot.screen_id,
         "screen_hash": after_observation.snapshot.screen_hash,
@@ -1062,8 +1362,13 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
         "verifier_failure_cause": verifier_result.failure_cause,
         "verifier_evidence": verifier_evidence,
         "pending_finish": False,
-        "finish_validation_status": finish_validation.status if finish_validation else None,
-        "finish_validation_evidence": finish_validation.to_dict() if finish_validation else None,
+        "finish_validation_status": (
+            finish_validation.status if finish_validation else None
+        ),
+        "finish_validation_evidence": (
+            finish_validation.to_dict() if finish_validation else None
+        ),
+        "goal_evidence_ledger": goal_evidence_ledger,
         "retry_count": retry_count,
         "finished": task_finished,
         **takeover_update,

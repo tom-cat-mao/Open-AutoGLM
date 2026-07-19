@@ -5,6 +5,8 @@ from typing import TYPE_CHECKING
 
 from langchain_core.runnables import RunnableConfig
 
+from phone_agent.actions.capability import ToolCapability, get_tool_capability
+from phone_agent.actions.receipt import ActionReceipt
 from phone_agent.actions.result import ActionResult
 from phone_agent.actions.gesture import compile_action_to_gesture
 from phone_agent.actions.safety import decide_safety
@@ -38,19 +40,6 @@ def _strip_and_append(
     return messages
 
 
-def _clear_stale_reflection_for_skip_action(action_name: str | None) -> dict:
-    """Clear reflection advice after actions that replan without reflect."""
-    if action_name not in {"Wait", "Note", "Call_API", "Interact"}:
-        return {}
-    return {
-        "reflection": None,
-        "action_succeeded": True,
-        "reflection_verdict": None,
-        "failure_cause": None,
-        "suggested_strategy": None,
-    }
-
-
 def _layered_error(layer: str, code: str, *, recoverable: bool = False, retry_policy: str = "none") -> dict:
     """Build stable layered error fields for terminal execute failures."""
 
@@ -60,6 +49,79 @@ def _layered_error(layer: str, code: str, *, recoverable: bool = False, retry_po
         "recoverable": recoverable,
         "retry_policy": retry_policy,
     }
+
+
+def _receipt_for_result(
+    capability: ToolCapability,
+    result: ActionResult,
+    *,
+    correlation_id: str | None,
+) -> ActionReceipt:
+    """Describe dispatch only; the receipt never claims a UI transition."""
+
+    dispatch_status = "accepted" if result.success else "rejected"
+    return ActionReceipt.create(
+        capability,
+        dispatch_status,
+        correlation_id=correlation_id,
+        side_effect_receipt={"tool_dispatch_status": dispatch_status},
+    )
+
+
+def _dispatch_with_receipt(
+    action: dict,
+    capability: ToolCapability,
+    *,
+    screen_width: int,
+    screen_height: int,
+    device_id: str | None,
+    device_factory: object | None,
+    correlation_id: str | None,
+    verbose: bool,
+) -> tuple[ActionResult, ActionReceipt, dict]:
+    """Dispatch an implemented capability and return receipt plus compatibility result."""
+
+    try:
+        result = dispatch_tool(
+            action,
+            screen_width,
+            screen_height,
+            device_id,
+            device_factory=device_factory,
+        )
+    except Exception as exc:
+        if verbose:
+            traceback.print_exc()
+        result = ActionResult(
+            success=False, should_finish=True, message=f"Action failed: {exc}"
+        )
+        receipt = ActionReceipt.create(
+            capability,
+            "unknown",
+            correlation_id=correlation_id,
+            side_effect_receipt={"tool_dispatch_status": "unknown"},
+        )
+        return result, receipt, _layered_error("execution", "dispatch_failed")
+    return (
+        result,
+        _receipt_for_result(
+            capability, result, correlation_id=correlation_id
+        ),
+        {},
+    )
+
+
+def _receipt_ledger_update(
+    state: "AgentState", action_name: str | None, receipt: ActionReceipt
+) -> dict:
+    """Append dispatch evidence without asserting transition or Goal progress."""
+
+    entry = {
+        "record_type": "action_receipt",
+        "action": action_name,
+        "receipt": receipt.to_dict(),
+    }
+    return {"action_ledger": (list(state.get("action_ledger") or []) + [entry])[-10:]}
 
 
 def execute_node(state: "AgentState", config: RunnableConfig) -> dict:
@@ -82,6 +144,7 @@ def execute_node(state: "AgentState", config: RunnableConfig) -> dict:
     screen_height = state["screen_height"]
     device_id = state.get("device_id")
     context_mode = get_context_mode(state, config)
+    correlation_id = configurable.get("correlation_id")
 
     def _context_update(result_dict: dict, state_overrides: dict | None = None) -> dict:
         if not context_enabled(context_mode):
@@ -187,14 +250,36 @@ def execute_node(state: "AgentState", config: RunnableConfig) -> dict:
             message=f"Action rejected by safety gate: {safety_decision.reason}",
         )
         emit_trace(config, state, "execute", "execute_error", {"message": result.message})
+        capability = get_tool_capability(str(action_parsed.get("action")))
+        receipt = (
+            ActionReceipt.create(
+                capability,
+                "rejected",
+                correlation_id=correlation_id,
+                side_effect_receipt={"reason_code": "action_safety_rejected"},
+            )
+            if capability is not None
+            else None
+        )
         return {
             "action_result": result.__dict__,
+            "action_receipt": receipt.to_dict() if receipt else None,
+            **(
+                _receipt_ledger_update(
+                    state, action_parsed.get("action"), receipt
+                )
+                if receipt
+                else {}
+            ),
             "messages": messages,
             "finished": True,
             "error": result.message,
             "failure_cause": "action_safety_rejected",
             **_layered_error("safety", "action_safety_rejected"),
-            **_context_update(result.__dict__),
+            **_context_update(
+                result.__dict__,
+                {"action_receipt": receipt.to_dict() if receipt else None},
+            ),
         }
 
     if action_parsed.get("_metadata") == "finish":
@@ -271,35 +356,77 @@ def execute_node(state: "AgentState", config: RunnableConfig) -> dict:
                 **_context_update(result.__dict__),
             }
         # CRITICAL-1: do NOT call _strip_and_append again (images already stripped on first pass)
-        try:
-            result = dispatch_tool(
-                action_parsed,
-                screen_width,
-                screen_height,
-                device_id,
-                device_factory=device_factory,
-            )
-        except Exception as e:
-            if verbose:
-                traceback.print_exc()
-            execution_error = _layered_error("execution", "dispatch_failed")
+        capability = get_tool_capability(str(action_parsed.get("action")))
+        if capability is None or capability.implementation_status != "implemented":
+            code = "capability_missing" if capability is None else "capability_unavailable"
             result = ActionResult(
-                success=False, should_finish=True, message=f"Action failed: {e}"
+                success=False,
+                should_finish=True,
+                message=f"Confirmed action cannot dispatch: {code}",
             )
-        else:
-            execution_error = {}
+            receipt = (
+                ActionReceipt.create(
+                    capability,
+                    "rejected",
+                    correlation_id=correlation_id,
+                    side_effect_receipt={"reason_code": code},
+                )
+                if capability is not None
+                else None
+            )
+            return {
+                "action_result": result.__dict__,
+                "action_receipt": receipt.to_dict() if receipt else None,
+                **(
+                    _receipt_ledger_update(
+                        state, action_parsed.get("action"), receipt
+                    )
+                    if receipt
+                    else {}
+                ),
+                "messages": messages,
+                "finished": True,
+                "error": result.message,
+                "pending_execute": False,
+                "action_confirmed": False,
+                "failure_cause": code,
+                **_layered_error("execution", code),
+                **_context_update(
+                    result.__dict__,
+                    {"action_receipt": receipt.to_dict() if receipt else None},
+                ),
+            }
+        result, receipt, execution_error = _dispatch_with_receipt(
+            action_parsed,
+            capability,
+            screen_width=screen_width,
+            screen_height=screen_height,
+            device_id=device_id,
+            device_factory=device_factory,
+            correlation_id=correlation_id,
+            verbose=verbose,
+        )
         emit_trace(
             config,
             state,
             "execute",
             "execute_result",
-            {"action": action_parsed.get("action"), "result": result.__dict__, "pending_execute": True},
+            {
+                "action": action_parsed.get("action"),
+                "result": result.__dict__,
+                "action_receipt": receipt.to_dict(),
+                "pending_execute": True,
+            },
         )
 
         # CRITICAL-2: mark action_confirmed=True (keep action_parsed for reflect)
         finished = result.should_finish
         return {
             "action_result": result.__dict__,
+            "action_receipt": receipt.to_dict(),
+            **_receipt_ledger_update(
+                state, action_parsed.get("action"), receipt
+            ),
             "messages": messages,  # unchanged (already stripped + assistant appended)
             "finished": finished,
             "pending_execute": False,
@@ -307,12 +434,32 @@ def execute_node(state: "AgentState", config: RunnableConfig) -> dict:
             "pending_interrupt": None,
             "interrupt_result": None,
             **({"error": result.message, "failure_cause": "execution_failed", **execution_error} if execution_error else {}),
-            **_context_update(result.__dict__),
+            **_context_update(
+                result.__dict__, {"action_receipt": receipt.to_dict()}
+            ),
         }
 
     # 3. Human-in-the-Loop checks (Phase 2)
     action_name = action_parsed.get("action")
     if safety_decision.route == "takeover":
+        capability = get_tool_capability(str(action_name))
+        receipt = (
+            ActionReceipt.create(
+                capability,
+                "accepted",
+                correlation_id=correlation_id,
+                side_effect_receipt={
+                    "delegation_status": "awaiting_acknowledgement"
+                },
+            )
+            if capability is not None
+            else None
+        )
+        result = ActionResult(
+            success=False,
+            should_finish=False,
+            message=action_parsed.get("message", "User intervention required"),
+        )
         messages = _strip_and_append(messages, thinking, action_raw)
         emit_trace(
             config,
@@ -322,9 +469,17 @@ def execute_node(state: "AgentState", config: RunnableConfig) -> dict:
             {
                 "interrupt_message": action_parsed.get("message", "User intervention required"),
                 "safety_reason": safety_decision.reason,
+                "action_receipt": receipt.to_dict() if receipt else None,
             },
         )
         return {
+            "action_result": result.__dict__,
+            "action_receipt": receipt.to_dict() if receipt else None,
+            **(
+                _receipt_ledger_update(state, action_name, receipt)
+                if receipt
+                else {}
+            ),
             "messages": messages,
             "pending_interrupt": safety_decision.interrupt_type or "takeover",
             "interrupt_message": action_parsed.get(
@@ -332,6 +487,10 @@ def execute_node(state: "AgentState", config: RunnableConfig) -> dict:
             ),
             "hitl_count": state.get("hitl_count", 0) + 1,
             "context_mode": context_mode,
+            **_context_update(
+                result.__dict__,
+                {"action_receipt": receipt.to_dict() if receipt else None},
+            ),
         }
 
     if safety_decision.route == "confirm":
@@ -352,6 +511,92 @@ def execute_node(state: "AgentState", config: RunnableConfig) -> dict:
             "context_mode": context_mode,
         }
 
+    capability = get_tool_capability(str(action_name))
+    if capability is None:
+        result = ActionResult(
+            success=False,
+            should_finish=True,
+            message=f"Capability declaration missing: {action_name}",
+        )
+        return {
+            "action_result": result.__dict__,
+            "action_receipt": None,
+            "messages": messages,
+            "finished": True,
+            "error": result.message,
+            "failure_cause": "capability_missing",
+            **_layered_error("execution", "capability_missing"),
+            **_context_update(result.__dict__, {"action_receipt": None}),
+        }
+
+    if capability.implementation_status == "unavailable":
+        result = ActionResult(
+            success=False,
+            should_finish=True,
+            message=f"Capability unavailable: {action_name}",
+        )
+        receipt = ActionReceipt.create(
+            capability,
+            "rejected",
+            correlation_id=correlation_id,
+            side_effect_receipt={"reason_code": "capability_unavailable"},
+        )
+        messages = _strip_and_append(messages, thinking, action_raw)
+        emit_trace(
+            config,
+            state,
+            "execute",
+            "capability_rejected",
+            {"action": action_name, "action_receipt": receipt.to_dict()},
+        )
+        return {
+            "action_result": result.__dict__,
+            "action_receipt": receipt.to_dict(),
+            **_receipt_ledger_update(state, action_name, receipt),
+            "messages": messages,
+            "finished": True,
+            "error": result.message,
+            "failure_cause": "capability_unavailable",
+            **_layered_error("execution", "capability_unavailable"),
+            **_context_update(
+                result.__dict__, {"action_receipt": receipt.to_dict()}
+            ),
+        }
+
+    if capability.implementation_status == "delegated":
+        result = ActionResult(
+            success=False,
+            should_finish=False,
+            message=action_parsed.get("message", "User takeover required"),
+        )
+        receipt = ActionReceipt.create(
+            capability,
+            "accepted",
+            correlation_id=correlation_id,
+            side_effect_receipt={"delegation_status": "awaiting_acknowledgement"},
+        )
+        messages = _strip_and_append(messages, thinking, action_raw)
+        emit_trace(
+            config,
+            state,
+            "execute",
+            "delegated_action_interrupt",
+            {"action": action_name, "action_receipt": receipt.to_dict()},
+        )
+        return {
+            "action_result": result.__dict__,
+            "action_receipt": receipt.to_dict(),
+            **_receipt_ledger_update(state, action_name, receipt),
+            "messages": messages,
+            "pending_interrupt": capability.hitl_policy_id or "takeover",
+            "interrupt_message": result.message,
+            "hitl_count": state.get("hitl_count", 0) + 1,
+            "context_mode": context_mode,
+            **_context_update(
+                result.__dict__, {"action_receipt": receipt.to_dict()}
+            ),
+        }
+
     # 4. Execute action via tool dispatch
     gesture_trace = None
     try:
@@ -365,29 +610,26 @@ def execute_node(state: "AgentState", config: RunnableConfig) -> dict:
         "gesture_compiled",
         {"gesture": sanitize_context_payload(gesture_trace, consumer="trace_payload"), "coordinate_space": "relative_0_1000"},
     )
-    try:
-        result = dispatch_tool(
-            action_parsed,
-            screen_width,
-            screen_height,
-            device_id,
-            device_factory=device_factory,
-        )
-    except Exception as e:
-        if verbose:
-            traceback.print_exc()
-        execution_error = _layered_error("execution", "dispatch_failed")
-        result = ActionResult(
-            success=False, should_finish=True, message=f"Action failed: {e}"
-        )
-    else:
-        execution_error = {}
+    result, receipt, execution_error = _dispatch_with_receipt(
+        action_parsed,
+        capability,
+        screen_width=screen_width,
+        screen_height=screen_height,
+        device_id=device_id,
+        device_factory=device_factory,
+        correlation_id=correlation_id,
+        verbose=verbose,
+    )
     emit_trace(
         config,
         state,
         "execute",
         "execute_result",
-        {"action": action_parsed.get("action"), "result": result.__dict__},
+        {
+            "action": action_parsed.get("action"),
+            "result": result.__dict__,
+            "action_receipt": receipt.to_dict(),
+        },
     )
 
     # 5. Strip images and append assistant message
@@ -395,13 +637,14 @@ def execute_node(state: "AgentState", config: RunnableConfig) -> dict:
 
     # 6. Check should_finish
     finished = result.should_finish
-    skip_reflection_updates = _clear_stale_reflection_for_skip_action(action_name)
-
     return {
         "action_result": result.__dict__,
+        "action_receipt": receipt.to_dict(),
+        **_receipt_ledger_update(state, action_name, receipt),
         "messages": messages,
         "finished": finished,
         **({"error": result.message, "failure_cause": "execution_failed", **execution_error} if execution_error else {}),
-        **skip_reflection_updates,
-        **_context_update(result.__dict__, skip_reflection_updates),
+        **_context_update(
+            result.__dict__, {"action_receipt": receipt.to_dict()}
+        ),
     }

@@ -13,7 +13,11 @@ import re
 from typing import Any, Literal
 
 from phone_agent.graph.context import redact_context_text, sanitize_context_payload
-
+from phone_agent.graph.predicates import (
+    CORE_PREDICATE_CATALOG,
+    ExpectedTransition,
+    PredicateSpec,
+)
 
 OutcomeKind = Literal[
     "generic",
@@ -65,6 +69,14 @@ EXPECTED_OBJECT_FIELDS = {
     "expected_page_type",
     "expected_rank",
 }
+EXPECTED_OBJECT_DIGEST_FIELDS = {
+    "selected_object_id_hash",
+    "object_evidence_hash",
+    "title_stub",
+    "title_hash",
+    "container_lineage_hash",
+    "list_lineage_hash",
+}
 MAX_LIST_ITEMS = 12
 MAX_TEXT_CHARS = 160
 
@@ -102,6 +114,40 @@ class ExpectedOutcome:
             self.to_dict(),
             consumer="trace",
             task_context=task_context,
+        )
+
+    def to_expected_transition(self) -> ExpectedTransition:
+        """Translate legacy page-kind fields into conservative typed predicates."""
+
+        predicates: list[PredicateSpec] = []
+        if self.kind == "app_opened" and self.target_text_hint:
+            predicates.append(
+                CORE_PREDICATE_CATALOG.create_spec(
+                    "app.foreground_identity", self.target_text_hint
+                )
+            )
+        elif self.kind == "input_focused":
+            predicates.append(CORE_PREDICATE_CATALOG.create_spec("ui.focused", True))
+        elif self.kind == "content_shifted":
+            predicates.append(
+                CORE_PREDICATE_CATALOG.create_spec("screen.content_changed", True)
+            )
+        elif self.kind == "loading_finished":
+            predicates.append(
+                CORE_PREDICATE_CATALOG.create_spec("screen.loading_state", "finished")
+            )
+
+        for expected_hash in self.must_observe:
+            if isinstance(expected_hash, str) and expected_hash.startswith("sha256:"):
+                predicates.append(
+                    CORE_PREDICATE_CATALOG.create_spec(
+                        "ui.text_hash_present", expected_hash.removeprefix("sha256:")
+                    )
+                )
+
+        return ExpectedTransition(
+            predicates=tuple(predicates),
+            compatibility_source=f"legacy_expected_outcome:{self.kind}",
         )
 
 
@@ -154,12 +200,22 @@ def normalize_expected_outcome(
 
     return ExpectedOutcome(
         kind=kind,  # type: ignore[arg-type]
-        must_observe=_normalize_string_list(raw.get("must_observe"), default.must_observe),
-        must_not_observe=_normalize_string_list(raw.get("must_not_observe"), default.must_not_observe),
-        target_mark_id=_normalize_optional_string(raw.get("target_mark_id"), default.target_mark_id),
-        target_text_hint=_normalize_optional_string(raw.get("target_text_hint"), default.target_text_hint),
+        must_observe=_normalize_string_list(
+            raw.get("must_observe"), default.must_observe
+        ),
+        must_not_observe=_normalize_string_list(
+            raw.get("must_not_observe"), default.must_not_observe
+        ),
+        target_mark_id=_normalize_optional_string(
+            raw.get("target_mark_id"), default.target_mark_id
+        ),
+        target_text_hint=_normalize_optional_string(
+            raw.get("target_text_hint"), default.target_text_hint
+        ),
         timeout_hint=_normalize_timeout(raw.get("timeout_hint"), default.timeout_hint),
-        dynamic_regions=_normalize_string_list(raw.get("dynamic_regions"), default.dynamic_regions),
+        dynamic_regions=_normalize_string_list(
+            raw.get("dynamic_regions"), default.dynamic_regions
+        ),
         **object_fields,
     )
 
@@ -189,7 +245,9 @@ def sanitize_expected_outcome_dict(
     for key in EXPECTED_OBJECT_FIELDS:
         if key in raw:
             raw[key] = _normalize_expected_object_value(key, raw.get(key))
-    sanitized = sanitize_context_payload(raw, consumer="trace_payload", task_context=task_context)
+    sanitized = sanitize_context_payload(
+        raw, consumer="trace_payload", task_context=task_context
+    )
     if not isinstance(sanitized, dict):
         return None
     return sanitized
@@ -210,6 +268,40 @@ def runtime_expected_outcome_dict(
     if sanitized is None:
         return None
     return normalize_expected_outcome(sanitized).to_dict()
+
+
+def expected_outcome_trace_projection(
+    outcome: ExpectedOutcome | dict[str, Any] | None,
+    *,
+    task_context: str | None = None,
+) -> dict[str, Any] | None:
+    """Return ExpectedOutcome metadata without semantic comparison digests."""
+
+    sanitized = sanitize_expected_outcome_dict(outcome, task_context=task_context)
+    if sanitized is None:
+        return None
+    for key in EXPECTED_OBJECT_DIGEST_FIELDS:
+        value = sanitized.pop(key, None)
+        sanitized[f"{key}_present"] = (
+            value is not None and value != "" and value is not False
+        )
+    for key in ("must_observe", "must_not_observe", "dynamic_regions"):
+        values = sanitized.get(key)
+        sanitized[key] = [
+            {
+                "present": True,
+                "length": item.get("length"),
+            }
+            for item in values or []
+            if isinstance(item, dict)
+        ]
+    hint = sanitized.get("target_text_hint")
+    if isinstance(hint, dict):
+        sanitized["target_text_hint"] = {
+            "present": True,
+            "length": hint.get("length"),
+        }
+    return sanitized
 
 
 def _stub_text_list(value: Any) -> list[dict[str, Any]]:
@@ -249,7 +341,9 @@ def default_expected_outcome(
     target_text_hint = None
     if isinstance(intent, dict):
         target_mark_id = _normalize_optional_string(intent.get("target_mark_id"), None)
-        target_text_hint = _normalize_optional_string(intent.get("target_text_hint"), None)
+        target_text_hint = _normalize_optional_string(
+            intent.get("target_text_hint"), None
+        )
     if action_name == "Launch":
         return ExpectedOutcome(
             kind="app_opened",
@@ -263,12 +357,23 @@ def default_expected_outcome(
             kind="generic",
             target_mark_id=target_mark_id,
             target_text_hint=target_text_hint,
-            dynamic_regions=["ads", "banner", "recommendation_feed", "hot_words", "counters"],
+            dynamic_regions=[
+                "ads",
+                "banner",
+                "recommendation_feed",
+                "hot_words",
+                "counters",
+            ],
         )
     if action_name == "Swipe":
-        return ExpectedOutcome(kind="content_shifted", dynamic_regions=["ads", "banner", "hot_words"])
+        return ExpectedOutcome(
+            kind="content_shifted", dynamic_regions=["ads", "banner", "hot_words"]
+        )
     if action_name == "Wait":
-        return ExpectedOutcome(kind="loading_finished", must_not_observe=["loading", "spinner", "network_error"])
+        return ExpectedOutcome(
+            kind="loading_finished",
+            must_not_observe=["loading", "spinner", "network_error"],
+        )
     return ExpectedOutcome()
 
 
@@ -279,16 +384,29 @@ def _default_with_selected_object(
     kind = default.kind
     expected_page_type = selected_fields.get("expected_page_type")
     object_type = selected_fields.get("object_type")
-    if expected_page_type == "input_focused" or object_type in {"input", "search", "textfield"}:
+    if expected_page_type == "input_focused" or object_type in {
+        "input",
+        "search",
+        "textfield",
+    }:
         kind = "input_focused"
-    elif object_type in {"video", "card", "result", "item", "visual_card", "visual_target"}:
+    elif object_type in {
+        "video",
+        "card",
+        "result",
+        "item",
+        "visual_card",
+        "visual_target",
+    }:
         kind = "page_opened"
     elif kind == "generic" and expected_page_type:
         kind = "target_appeared"
     return ExpectedOutcome(**{**default.to_dict(), "kind": kind, **selected_fields})
 
 
-def _normalize_selected_object_fields(raw: dict[str, Any]) -> dict[str, str | int | None]:
+def _normalize_selected_object_fields(
+    raw: dict[str, Any],
+) -> dict[str, str | int | None]:
     result: dict[str, str | int | None] = {}
     for key in EXPECTED_OBJECT_FIELDS:
         normalized = _normalize_expected_object_value(key, raw.get(key))
@@ -315,7 +433,11 @@ def _normalize_expected_object_value(key: str, value: Any) -> str | int | None:
     if key.endswith("_hash") or key.endswith("_id_hash"):
         return text[:64] if re.fullmatch(r"[0-9a-fA-F]{6,64}", text) else None
     if key == "title_stub":
-        return text[:160] if re.fullmatch(r"len:\d{1,6} sha256:[0-9a-fA-F]{6,64}", text) else None
+        return (
+            text[:160]
+            if re.fullmatch(r"len:\d{1,6} sha256:[0-9a-fA-F]{6,64}", text)
+            else None
+        )
     return sanitize_context_payload(text, "message", consumer="trace_payload")[:64]
 
 

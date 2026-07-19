@@ -7,11 +7,11 @@ import hashlib
 import re
 from typing import Any, Literal
 
-from phone_agent.config.apps import APP_PACKAGES, normalize_app_name
+from phone_agent.config.apps import APP_PACKAGES, get_package_name, normalize_app_name
+from phone_agent.graph.compatibility_adapters import PageSignalAdapter
 from phone_agent.graph.context import sanitize_context_payload
 from phone_agent.graph.expected_outcome import normalize_expected_outcome
 from phone_agent.graph.marks import build_screen_id
-
 
 VerifierStatus = Literal["success", "failure", "unknown", "blocked"]
 
@@ -37,6 +37,7 @@ def verify_action_outcome(
     action_result: dict[str, Any] | None,
     before_observation: dict[str, Any] | None = None,
     after_observation: dict[str, Any] | None = None,
+    page_signal_adapter: PageSignalAdapter | None = None,
 ) -> VerifierResult:
     """Compute conservative deterministic outcome signals.
 
@@ -49,11 +50,17 @@ def verify_action_outcome(
     expected = normalize_expected_outcome(
         before_state.get("expected_outcome"),
         action=action if isinstance(action, dict) else None,
-        intent=before_state.get("intent_raw") if isinstance(before_state.get("intent_raw"), dict) else None,
+        intent=(
+            before_state.get("intent_raw")
+            if isinstance(before_state.get("intent_raw"), dict)
+            else None
+        ),
     )
     signals = {
         "action": action.get("action") if isinstance(action, dict) else None,
-        "execution_success": result.get("success") if isinstance(result, dict) else None,
+        "execution_success": (
+            result.get("success") if isinstance(result, dict) else None
+        ),
         "before_app": before_state.get("current_app"),
         "after_app": after_app,
         "expected_outcome_kind": expected.kind,
@@ -71,7 +78,11 @@ def verify_action_outcome(
             confidence=0.9,
             signals=signals,
             hard_failure=True,
-            failure_cause="app_not_responding" if "failed" in str(result.get("message", "")).lower() else "unknown",
+            failure_cause=(
+                "app_not_responding"
+                if "failed" in str(result.get("message", "")).lower()
+                else "unknown"
+            ),
             evidence={**evidence, "result_message_summary": result.get("message")},
         )
     if isinstance(action, dict) and action.get("action") == "Launch":
@@ -82,14 +93,23 @@ def verify_action_outcome(
             str(value or "")
             for value in (
                 after_app,
-                _find_string_key(after_observation, {"top_activity", "focused_window", "current_window"}),
+                _find_string_key(
+                    after_observation,
+                    {"top_activity", "focused_window", "current_window"},
+                ),
             )
         )
-        if target_package and (target_package == after_package or target_package in after_component):
+        if target_package and (
+            target_package == after_package or target_package in after_component
+        ):
             return VerifierResult(
                 status="success",
                 confidence=0.95,
-                signals={**signals, "launch_matched": True, "launch_match_type": "package"},
+                signals={
+                    **signals,
+                    "launch_matched": True,
+                    "launch_match_type": "package",
+                },
                 evidence={**evidence, "matched_postconditions": ["app_opened"]},
             )
         if target and target == after_app:
@@ -111,7 +131,9 @@ def verify_action_outcome(
     before_text_blob = _observation_text(before_observation)
     text_blob = _observation_text(after_observation)
     has_after_observation_text = bool(text_blob.strip())
-    selected_object_signals = _selected_object_signals(expected.to_dict(), after_observation, text_blob)
+    selected_object_signals = _selected_object_signals(
+        expected.to_dict(), after_observation, text_blob, page_signal_adapter
+    )
     if selected_object_signals:
         signals = {**signals, **selected_object_signals}
         evidence["selected_object_signals"] = selected_object_signals
@@ -159,7 +181,13 @@ def verify_action_outcome(
     forbidden = _match_forbidden_text(expected.must_not_observe, text_blob)
     evidence["matched_postconditions"] = matched
     evidence["missing_postconditions"] = missing + forbidden
-    if expected.kind in {"input_focused", "text_present", "page_opened", "target_appeared", "loading_finished"}:
+    if expected.kind in {
+        "input_focused",
+        "text_present",
+        "page_opened",
+        "target_appeared",
+        "loading_finished",
+    }:
         if expected.must_observe and not has_after_observation_text:
             evidence["missing_postconditions"] = ["after_observation_unavailable"]
             return VerifierResult(
@@ -186,7 +214,9 @@ def verify_action_outcome(
                     failure_cause="element_not_found",
                     evidence=evidence,
                 )
-            if focus_signals.get("focused_editable") or focus_signals.get("keyboard_visible"):
+            if focus_signals.get("focused_editable") or focus_signals.get(
+                "keyboard_visible"
+            ):
                 return VerifierResult(
                     status="success",
                     confidence=0.9,
@@ -197,7 +227,9 @@ def verify_action_outcome(
                     },
                 )
             if matched:
-                evidence["missing_postconditions"] = ["focused_editable_or_keyboard_visible"]
+                evidence["missing_postconditions"] = [
+                    "focused_editable_or_keyboard_visible"
+                ]
                 return VerifierResult(
                     status="unknown",
                     confidence=0.4,
@@ -235,7 +267,9 @@ def verify_action_outcome(
                 signals=signals,
                 evidence=evidence,
             )
-        if expected.kind == "text_present" and progress_signals.get("typed_text_present"):
+        if expected.kind == "text_present" and progress_signals.get(
+            "typed_text_present"
+        ):
             return VerifierResult(
                 status="success",
                 confidence=0.9,
@@ -245,8 +279,15 @@ def verify_action_outcome(
                     "matched_postconditions": ["typed_text_present"],
                 },
             )
-        if expected.kind in {"page_opened", "target_appeared"} and before_text_blob and before_text_blob != text_blob:
-            evidence["weak_signals"] = {**evidence["weak_signals"], "ui_tree_changed": True}
+        if (
+            expected.kind in {"page_opened", "target_appeared"}
+            and before_text_blob
+            and before_text_blob != text_blob
+        ):
+            evidence["weak_signals"] = {
+                **evidence["weak_signals"],
+                "ui_tree_changed": True,
+            }
     before_hash = before_state.get("screen_hash") or before_state.get("screen_id")
     after_hash = build_screen_id(
         current_app=after_app,
@@ -274,10 +315,14 @@ def verify_action_outcome(
     evidence["missing_postconditions"] = missing or (
         ["postcondition_unverified"] if expected.kind != "generic" else []
     )
-    return VerifierResult(status="unknown", confidence=0.0, signals=signals, evidence=evidence)
+    return VerifierResult(
+        status="unknown", confidence=0.0, signals=signals, evidence=evidence
+    )
 
 
-def merge_verifier_with_reflection(verifier: VerifierResult, reflection: dict[str, Any]) -> dict[str, Any]:
+def merge_verifier_with_reflection(
+    verifier: VerifierResult, reflection: dict[str, Any]
+) -> dict[str, Any]:
     """Apply precedence: hard failure > model reflection; unknown falls back."""
 
     if verifier.hard_failure:
@@ -285,24 +330,39 @@ def merge_verifier_with_reflection(verifier: VerifierResult, reflection: dict[st
             **reflection,
             "action_succeeded": False,
             "reflection_verdict": "failed",
-            "failure_cause": verifier.failure_cause or reflection.get("failure_cause") or "unknown",
+            "failure_cause": verifier.failure_cause
+            or reflection.get("failure_cause")
+            or "unknown",
         }
     if verifier.status == "success" and verifier.confidence >= 0.9:
-        return {**reflection, "action_succeeded": True, "reflection_verdict": "succeeded", "failure_cause": None}
+        return {
+            **reflection,
+            "action_succeeded": True,
+            "reflection_verdict": "succeeded",
+            "failure_cause": None,
+        }
     if verifier.status == "failure" and verifier.confidence >= 0.7:
         return {
             **reflection,
             "action_succeeded": False,
             "reflection_verdict": "failed",
-            "failure_cause": verifier.failure_cause or reflection.get("failure_cause") or "unknown",
+            "failure_cause": verifier.failure_cause
+            or reflection.get("failure_cause")
+            or "unknown",
         }
     missing = (verifier.evidence or {}).get("missing_postconditions")
-    if verifier.status == "unknown" and missing and reflection.get("reflection_verdict") == "succeeded":
+    if (
+        verifier.status == "unknown"
+        and missing
+        and reflection.get("reflection_verdict") == "succeeded"
+    ):
         return {
             **reflection,
             "action_succeeded": False,
             "reflection_verdict": "failed",
-            "failure_cause": reflection.get("failure_cause") or verifier.failure_cause or "unknown",
+            "failure_cause": reflection.get("failure_cause")
+            or verifier.failure_cause
+            or "unknown",
         }
     matched = (verifier.evidence or {}).get("matched_postconditions")
     if (
@@ -333,8 +393,12 @@ def _focus_signals(observation: dict[str, Any] | None) -> dict[str, Any]:
     if not isinstance(observation, dict):
         return {}
     signals: dict[str, Any] = {}
-    observed = _find_truthy_key(observation, {"focused", "is_focused", "focused_editable"})
-    keyboard_visible = _find_truthy_key(observation, {"keyboard_visible", "ime_visible", "soft_keyboard_visible"})
+    observed = _find_truthy_key(
+        observation, {"focused", "is_focused", "focused_editable"}
+    )
+    keyboard_visible = _find_truthy_key(
+        observation, {"keyboard_visible", "ime_visible", "soft_keyboard_visible"}
+    )
     editable_present = _contains_editable_node(observation)
     if observed:
         signals["focused_editable"] = True
@@ -342,7 +406,9 @@ def _focus_signals(observation: dict[str, Any] | None) -> dict[str, Any]:
         signals["editable_present"] = True
     if keyboard_visible is not None:
         signals["keyboard_visible"] = keyboard_visible
-    top_activity = _find_string_key(observation, {"top_activity", "focused_window", "current_window"})
+    top_activity = _find_string_key(
+        observation, {"top_activity", "focused_window", "current_window"}
+    )
     if top_activity:
         signals["top_activity"] = top_activity
     return signals
@@ -381,9 +447,17 @@ def _progress_signals(
         signals.get("focused_editable") or signals.get("keyboard_visible")
     ):
         strong_reasons.append("input_focus_signal")
-    if action_name in {"Type", "Type_Name"} and expected_kind == "text_present" and signals.get("typed_text_present"):
+    if (
+        action_name in {"Type", "Type_Name"}
+        and expected_kind == "text_present"
+        and signals.get("typed_text_present")
+    ):
         strong_reasons.append("typed_text_present")
-    if action_name in {"Type", "Type_Name"} and expected_kind == "input_focused" and signals.get("typed_text_present"):
+    if (
+        action_name in {"Type", "Type_Name"}
+        and expected_kind == "input_focused"
+        and signals.get("typed_text_present")
+    ):
         strong_reasons.append("typed_text_present")
     strong = bool(strong_reasons)
     if strong:
@@ -395,18 +469,30 @@ def _progress_signals(
 def _package_for_app_name(app_name: str) -> str | None:
     canonical = normalize_app_name(app_name)
     if canonical:
-        return APP_PACKAGES.get(canonical)
+        return get_package_name(canonical)
     return APP_PACKAGES.get(app_name)
 
 
 def _contains_search_button(value: Any) -> bool:
     if isinstance(value, dict):
-        role = str(value.get("role") or value.get("class") or value.get("class_name") or "").lower()
+        role = str(
+            value.get("role") or value.get("class") or value.get("class_name") or ""
+        ).lower()
         text = " ".join(
             str(value.get(key) or "")
-            for key in ("text", "text_summary", "label", "content_desc", "content-description", "visible_text", "value")
+            for key in (
+                "text",
+                "text_summary",
+                "label",
+                "content_desc",
+                "content-description",
+                "visible_text",
+                "value",
+            )
         ).lower()
-        if ("button" in role or "textview" in role) and ("search" in text or "搜索" in text):
+        if ("button" in role or "textview" in role) and (
+            "search" in text or "搜索" in text
+        ):
             return True
         return any(_contains_search_button(item) for item in value.values())
     if isinstance(value, list):
@@ -450,7 +536,9 @@ def _find_string_key(value: Any, keys: set[str]) -> str | None:
 
 def _contains_editable_node(value: Any) -> bool:
     if isinstance(value, dict):
-        role = str(value.get("role") or value.get("class") or value.get("class_name") or "").lower()
+        role = str(
+            value.get("role") or value.get("class") or value.get("class_name") or ""
+        ).lower()
         if "edittext" in role or "textfield" in role or "input" in role:
             return True
         if value.get("editable") is True:
@@ -474,7 +562,9 @@ VISIBLE_TEXT_KEYS = {
 }
 
 
-def _collect_visible_text(value: Any, chunks: list[str], key: str | None = None) -> None:
+def _collect_visible_text(
+    value: Any, chunks: list[str], key: str | None = None
+) -> None:
     normalized = (key or "").lower()
     if isinstance(value, str):
         if normalized in VISIBLE_TEXT_KEYS:
@@ -487,7 +577,9 @@ def _collect_visible_text(value: Any, chunks: list[str], key: str | None = None)
             _collect_visible_text(item, chunks, key)
 
 
-def _match_expected_text(expected: list[str], text_blob: str) -> tuple[list[str], list[str]]:
+def _match_expected_text(
+    expected: list[str], text_blob: str
+) -> tuple[list[str], list[str]]:
     matched: list[str] = []
     missing: list[str] = []
     for item in expected:
@@ -563,7 +655,12 @@ def _failure_cause_for_expected_kind(kind: str) -> str:
     return "unknown"
 
 
-def _selected_object_signals(expected: dict[str, Any], observation: dict[str, Any] | None, text_blob: str) -> dict[str, Any]:
+def _selected_object_signals(
+    expected: dict[str, Any],
+    observation: dict[str, Any] | None,
+    text_blob: str,
+    page_signal_adapter: PageSignalAdapter | None,
+) -> dict[str, Any]:
     if not isinstance(expected, dict):
         return {}
     object_type = expected.get("object_type")
@@ -571,74 +668,43 @@ def _selected_object_signals(expected: dict[str, Any], observation: dict[str, An
     title_hash = expected.get("title_hash")
     expected_page_type = str(expected.get("expected_page_type") or "")
     expected_rank = expected.get("expected_rank")
-    if not any(isinstance(value, str) and value for value in (object_type, object_evidence_hash, title_hash, expected_page_type)):
+    if not any(
+        isinstance(value, str) and value
+        for value in (object_type, object_evidence_hash, title_hash, expected_page_type)
+    ):
         return {}
-    hashes = [value for value in (object_evidence_hash, title_hash) if isinstance(value, str) and value]
-    hash_match = any(_text_blob_contains_hash(text_blob, digest[:12]) for digest in hashes)
-    detail_signal = _contains_detail_or_player_signal(observation, text_blob, expected_page_type)
-    feed_signal = _contains_feed_or_search_signal(observation, text_blob)
-    any_detail = _contains_detail_or_player_signal(observation, text_blob, "detail_or_player")
+    hashes = [
+        value
+        for value in (object_evidence_hash, title_hash)
+        if isinstance(value, str) and value
+    ]
+    hash_match = any(
+        _text_blob_contains_hash(text_blob, digest[:12]) for digest in hashes
+    )
+    legacy_shadow_detail = False
+    legacy_shadow_feed = False
+    if page_signal_adapter is not None:
+        legacy_shadow_detail = page_signal_adapter.detail_signal(
+            observation, text_blob, expected_page_type
+        )
+        legacy_shadow_feed = page_signal_adapter.feed_signal(observation, text_blob)
+    if expected_page_type == "input_focused":
+        detail_signal = bool(
+            _focus_signals(observation).get("focused_editable")
+            or _focus_signals(observation).get("keyboard_visible")
+        )
+    else:
+        detail_signal = False
     signals: dict[str, Any] = {
         "selected_object_expected_page_type": expected_page_type or None,
-        "selected_object_expected_rank": expected_rank if isinstance(expected_rank, int) else None,
+        "selected_object_expected_rank": (
+            expected_rank if isinstance(expected_rank, int) else None
+        ),
         "selected_object_hash_match": hash_match,
         "selected_object_detail_signal": detail_signal,
+        "legacy_shadow_detail_signal": legacy_shadow_detail,
+        "legacy_shadow_feed_signal": legacy_shadow_feed,
     }
-    if hash_match and feed_signal and expected_page_type in {"detail_or_player", "page_opened"}:
-        signals["same_surface_still_visible"] = True
-    elif hash_match and (detail_signal or expected_page_type not in {"detail_or_player", "page_opened"}):
+    if hash_match:
         signals["selected_object_match"] = True
-    elif (
-        any_detail
-        and not hash_match
-        and expected_page_type in {"detail_or_player", "page_opened"}
-        and isinstance(expected_rank, int)
-        and not feed_signal
-        and not hashes
-    ):
-        # Detail/player page transition with no content hash declared at all:
-        # the model cannot compute object_evidence_hash/title_hash on its own
-        # (those are harness-internal SHA256 stubs over evidence_summary). When
-        # the model declared expected_page_type AND expected_rank, and the
-        # after-observation shows a detail page (not a feed/search surface),
-        # accept it as a rank match instead of wrong_detail_opened. If a hash
-        # WAS declared but did not match, fall through to wrong_detail_opened
-        # (the model explicitly expected a specific item and we can't confirm it).
-        signals["selected_object_match"] = True
-    elif any_detail and not hash_match and expected_page_type in {"detail_or_player", "page_opened"}:
-        signals["wrong_detail_opened"] = True
     return signals
-
-
-def _contains_detail_or_player_signal(observation: dict[str, Any] | None, text_blob: str, expected_page_type: str) -> bool:
-    if expected_page_type == "input_focused":
-        return bool(_focus_signals(observation).get("focused_editable") or _focus_signals(observation).get("keyboard_visible"))
-    terms = {
-        "播放",
-        "播放器",
-        "全屏",
-        "暂停",
-        "弹幕",
-        "详情",
-        "作者",
-        "关注",
-        "评论",
-        "like",
-        "comment",
-        "player",
-        "pause",
-        "fullscreen",
-        "detail",
-    }
-    return any(term in text_blob for term in terms)
-
-
-def _contains_feed_or_search_signal(observation: dict[str, Any] | None, text_blob: str) -> bool:
-    terms = {"推荐", "首页", "搜索结果", "综合", "筛选", "feed", "search results", "recommend"}
-    if any(term in text_blob for term in terms):
-        return True
-    if isinstance(observation, dict):
-        object_registry = observation.get("object_registry")
-        if isinstance(object_registry, dict) and object_registry.get("object_count", 0):
-            return True
-    return False

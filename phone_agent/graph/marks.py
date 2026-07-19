@@ -10,13 +10,18 @@ from dataclasses import asdict, dataclass, field
 from typing import Any
 
 from phone_agent.graph.context import sanitize_context_payload
+from phone_agent.config.policy import DEFAULT_VERIFICATION_POLICY
 
 
 SAFE_MARK_ID_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,64}$")
 SAFE_METADATA_RE = re.compile(r"[^A-Za-z0-9_.:-]+")
 MAX_MARK_METADATA_CHARS = 32
-PERCEPTUAL_HASH_THRESHOLD = 8
-MARK_CONFIDENCE_THRESHOLD = 0.3
+PERCEPTUAL_HASH_THRESHOLD = int(
+    DEFAULT_VERIFICATION_POLICY.value("perceptual_hash_max_distance")
+)
+MARK_CONFIDENCE_THRESHOLD = DEFAULT_VERIFICATION_POLICY.value(
+    "mark_min_confidence"
+)
 PROMPT_SAFE_UI_TERMS = {
     "搜索",
     "搜一搜",

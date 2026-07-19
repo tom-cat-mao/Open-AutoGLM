@@ -9,8 +9,8 @@ from phone_agent.graph.context import default_context_budget, default_screen_bel
 from phone_agent.graph.goal_compiler import HeuristicGoalCompiler
 
 
-def _build_heuristic_goal_contract(task: str) -> dict:
-    return HeuristicGoalCompiler().compile(task=task).to_dict()
+def _build_heuristic_goal_contract(task: str):
+    return HeuristicGoalCompiler().compile(task=task)
 
 
 @dataclass
@@ -105,6 +105,9 @@ def base_state() -> dict[str, Any]:
         "goal_contract_status": "compiled",
         "goal_compile_source": "heuristic",
         "goal_compile_attempts": 0,
+        "task_requirement_set": None,
+        "contract_adequacy_status": None,
+        "contract_adequacy_reasons": [],
         "needs_recompile": False,
         "messages": [
             {
@@ -149,13 +152,16 @@ def base_state() -> dict[str, Any]:
         "grounding_candidate_count": 0,
         "selected_grounding_candidate_id": None,
         "expected_outcome": None,
+        "expected_transition": None,
         "action_result": None,
+        "action_receipt": None,
         "pending_finish": False,
         "finish_claim": None,
         "finish_validation_status": None,
         "finish_validation_evidence": None,
+        "goal_evidence_ledger": [],
         "reflection": None,
-        "action_succeeded": True,
+        "action_succeeded": False,
         "reflection_verdict": None,
         "failure_cause": None,
         "suggested_strategy": None,

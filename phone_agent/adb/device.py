@@ -4,7 +4,11 @@ import re
 import subprocess
 import time
 
-from phone_agent.config.apps import APP_PACKAGES
+from phone_agent.config.app_registry import (
+    ForegroundAppObservation,
+    InstalledAppInventory,
+)
+from phone_agent.config.apps import DEFAULT_APP_REGISTRY, DEFAULT_LAUNCH_TARGET_RESOLVER
 from phone_agent.config.timing import TIMING_CONFIG
 from phone_agent.grounding.accessibility import parse_uiautomator_marks
 
@@ -17,28 +21,18 @@ def get_current_app(device_id: str | None = None) -> str:
         device_id: Optional ADB device ID for multi-device setups.
 
     Returns:
-        The app name if recognized, otherwise "System Home".
+        Canonical display name when recognized, otherwise the observed package.
     """
-    adb_prefix = _get_adb_prefix(device_id)
+    return get_foreground_app(device_id).display_name
 
-    result = subprocess.run(
-        adb_prefix + ["shell", "dumpsys", "window"],
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-    )
-    output = result.stdout
-    if not output:
-        raise ValueError("No output from dumpsys window")
 
-    # Parse window focus info
-    for line in output.split("\n"):
-        if "mCurrentFocus" in line or "mFocusedApp" in line:
-            for app_name, package in APP_PACKAGES.items():
-                if package in line:
-                    return app_name
+def get_foreground_app(device_id: str | None = None) -> ForegroundAppObservation:
+    """Return the observed foreground package/activity without guessing."""
 
-    return "System Home"
+    component = get_focused_window_or_app(device_id)
+    if not component:
+        raise ValueError("No focused package/activity")
+    return DEFAULT_APP_REGISTRY.foreground_observation(component)
 
 
 def get_focused_window_or_app(device_id: str | None = None) -> str | None:
@@ -67,6 +61,18 @@ def get_top_activity(device_id: str | None = None) -> str | None:
     if not focused:
         return None
     return focused
+
+
+def get_installed_app_inventory(device_id: str | None = None) -> InstalledAppInventory:
+    """Return the installed Android package inventory for launch diagnostics."""
+
+    output = _run_adb_shell_text(device_id, ["pm", "list", "packages"], timeout=10)
+    packages = {
+        line.removeprefix("package:").strip()
+        for line in output.splitlines()
+        if line.startswith("package:") and line.removeprefix("package:").strip()
+    }
+    return InstalledAppInventory(frozenset(packages), device_id=device_id)
 
 
 def is_keyboard_visible(device_id: str | None = None) -> bool:
@@ -281,11 +287,12 @@ def launch_app(
     if delay is None:
         delay = TIMING_CONFIG.device.default_launch_delay
 
-    if app_name not in APP_PACKAGES:
+    target = DEFAULT_LAUNCH_TARGET_RESOLVER.resolve(app_name)
+    if target.status != "resolved" or not target.package_name:
         return False
 
     adb_prefix = _get_adb_prefix(device_id)
-    package = APP_PACKAGES[app_name]
+    package = target.package_name
 
     component = _resolve_launcher_component(adb_prefix, package)
     if component:
@@ -316,7 +323,9 @@ def launch_app(
     return result.returncode == 0 and "Error:" not in (result.stdout + result.stderr)
 
 
-def dump_uiautomator_xml(device_id: str | None = None, timeout: float | None = None) -> str:
+def dump_uiautomator_xml(
+    device_id: str | None = None, timeout: float | None = None
+) -> str:
     """Return the current Android UiAutomator hierarchy XML from stdout."""
 
     adb_prefix = _get_adb_prefix(device_id)

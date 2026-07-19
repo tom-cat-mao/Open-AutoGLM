@@ -19,18 +19,29 @@ state are in `.trae/rules/graph.mdc` (load on demand).
 phone_agent/
   agent.py          # PhoneAgent entry point
   graph/            # LangGraph StateGraph: nodes, edges, state, tools, trace, observation
-    goal.py             # Declarative GoalContract + SuccessCriterion data model
+    goal.py             # Declarative GoalContract + typed CriterionSpec data model
     goal_compiler.py    # Goal contract compilation chain: External > LLM > Heuristic
-    goal_evaluator.py   # GoalEvaluator: validates finish claims against GoalContract criteria
+    goal_requirements.py # Independent TaskRequirementSet + ContractAdequacyValidator
+    goal_evidence.py    # Bounded privacy-safe criterion evidence ledger
+    goal_evaluator.py   # Pure typed ledger fold + legacy migration evaluator
+    predicates.py       # Typed predicates, neutral facts, matchers, evidence authority
+    fact_providers.py   # Concrete node-local fact providers + authority resolution
+    runtime_goal.py     # Per-run private Goal values; never serialized
+    compatibility_adapters.py # Legacy vocabulary shadow telemetry only
+    runtime_observation.py # Node-local screenshot context; never serialized
     nodes/goal_node.py  # Compiles GoalContract once at task start; optional HITL approval
     nodes/plan.py       # Plan node (injects goal_contract_block as separate cacheable message)
     nodes/reflect.py    # Reflect node (GoalEvaluator integration, reflect context window)
     actions/          # Action IR pipeline: adapter, validator, repair, safety gate
+      capability.py   # ToolCapability registry; availability enforced after Safety Gate
+      receipt.py      # ActionReceipt dispatch evidence; never Goal progress
   model/            # ModelClient (OpenAI-compatible, prompt cache support)
   adb/              # Android device abstraction
   grounding/        # Mark providers: accessibility tree, LocateAnything
   config/           # System prompts, app registries, i18n
-  checkpoint/       # SQLite checkpoint + redaction
+    app_registry.py # AppIdentity, installed inventory, and LaunchPolicy boundaries
+    policy.py       # Versioned safety vocabulary and verification thresholds
+  checkpoint/       # Redaction + trusted Goal resume contract; runtime saver not enabled
 main.py             # CLI entry point
 bench/grounding/    # Grounding benchmark suite
 tests/              # pytest suite

@@ -12,6 +12,7 @@ from phone_agent.actions.repair import ActionRepairError, repair_action
 from phone_agent.actions.validator import ActionValidationError, validate_action
 from phone_agent.config import get_prompt_version, get_system_prompt
 from phone_agent.config.apps import get_app_registry_summary
+from phone_agent.device_factory import ObservationCaptureError
 from phone_agent.graph.context import (
     build_context_metrics,
     compact_messages_for_request,
@@ -21,11 +22,12 @@ from phone_agent.graph.context import (
     select_plan_context,
 )
 from phone_agent.graph.expected_outcome import (
+    expected_outcome_trace_projection,
     extract_provider_envelope,
     normalize_expected_outcome,
     runtime_expected_outcome_dict,
-    sanitize_expected_outcome_dict,
 )
+from phone_agent.graph.device_observation import capture_device_observation
 from phone_agent.graph.observation import build_mark_provider_hints, build_observation
 from phone_agent.graph.screenshot_status import (
     screenshot_failure_code,
@@ -140,7 +142,9 @@ def _validate_with_limited_repair(
         )
 
 
-def _safe_request(model_client, messages: list[dict], *, output_mode: str | None = None):
+def _safe_request(
+    model_client, messages: list[dict], *, output_mode: str | None = None
+):
     """Call model_client.request with backward-compatible kwargs."""
 
     if output_mode is None:
@@ -211,7 +215,9 @@ def _maybe_emit_plan_prompt_debug(
 
 
 def _strip_images_for_prompt_debug(messages: list[dict]) -> list[dict]:
-    return [MessageBuilder.remove_images_from_message(dict(message)) for message in messages]
+    return [
+        MessageBuilder.remove_images_from_message(dict(message)) for message in messages
+    ]
 
 
 GROUNDING_ERROR_CODES = {
@@ -296,7 +302,11 @@ def _screenshot_error_fields(code: str, sensitive: bool = False) -> dict:
         "error_layer": "grounding",
         "error_code": code,
         "recoverable": True,
-        "retry_policy": "takeover" if sensitive or code == "secure_screenshot_blocked" else "reobserve",
+        "retry_policy": (
+            "takeover"
+            if sensitive or code == "secure_screenshot_blocked"
+            else "reobserve"
+        ),
     }
 
 
@@ -327,13 +337,16 @@ def _parse_and_ground_response(
         structured_json_response = stripped_action.startswith("{")
         if stripped_action.startswith("{"):
             provider_payload = json.loads(stripped_action)
-            action_payload, raw_expected_outcome = extract_provider_envelope(provider_payload)
+            action_payload, raw_expected_outcome = extract_provider_envelope(
+                provider_payload
+            )
             action_parsed = adapt_json_action(action_payload)
         else:
             raise ActionAdapterError(
-                "invalid_json", "structured action execution requires JSON or provider tool_calls"
+                "invalid_json",
+                "structured action execution requires JSON or provider tool_calls",
             )
-    except json.JSONDecodeError as exc:
+    except json.JSONDecodeError:
         action_parsed = None
         parse_error = "Model parse failed: invalid_json: payload is not valid JSON"
         parse_metadata = {
@@ -432,7 +445,7 @@ def _parse_and_ground_response(
         expected_outcome,
         task_context=configurable.get("task_context"),
     )
-    expected_outcome_trace = sanitize_expected_outcome_dict(
+    expected_outcome_trace = expected_outcome_trace_projection(
         expected_outcome,
         task_context=configurable.get("task_context"),
     )
@@ -453,7 +466,9 @@ def _parse_and_ground_response(
     )
 
 
-def _selected_object_evidence_from_grounding(grounding_observation: dict[str, Any]) -> dict[str, Any] | None:
+def _selected_object_evidence_from_grounding(
+    grounding_observation: dict[str, Any],
+) -> dict[str, Any] | None:
     selected = grounding_observation.get("selected_object")
     if not isinstance(selected, dict):
         return None
@@ -466,32 +481,50 @@ def _selected_object_evidence_from_grounding(grounding_observation: dict[str, An
         "object_type": object_type,
         "container_lineage_hash": None,
         "list_lineage_hash": None,
-        "expected_page_type": "detail_or_player" if object_type in {"video", "card", "result"} else "page_opened",
+        "expected_page_type": (
+            "detail_or_player"
+            if object_type in {"video", "card", "result"}
+            else "page_opened"
+        ),
     }
 
 
 def _observation_state_fields(observation) -> dict[str, Any]:
     structure = observation.screen_structure
-    structures = getattr(observation, "screen_structures", []) or ([structure] if structure else [])
+    structures = getattr(observation, "screen_structures", []) or (
+        [structure] if structure else []
+    )
     objects = observation.object_registry
-    structure_summary = observation.mark_provider_observation.get("screen_structure_summary") or {"status": "missing_sidecar"}
+    structure_summary = observation.mark_provider_observation.get(
+        "screen_structure_summary"
+    ) or {"status": "missing_sidecar"}
     return {
         "screen_structure": structure.trace_summary() if structure else None,
         "screen_structures": [item.trace_summary() for item in structures],
         "object_registry": objects.trace_summary() if objects else None,
         "screen_structure_summary": structure_summary,
-        "object_registry_summary": objects.trace_summary() if objects else {"status": "missing_sidecar"},
-        "object_registry_binding": {
-            "screen_id": objects.screen_id if objects else None,
-            "semantic_screen_id": objects.semantic_screen_id if objects else None,
-            "object_set_version": objects.object_set_version if objects else None,
-            "structure_topology_digest": objects.structure_topology_digest if objects else None,
-            "mark_set_version": objects.mark_set_version if objects else None,
-        }
-        if objects
-        else None,
+        "object_registry_summary": (
+            objects.trace_summary() if objects else {"status": "missing_sidecar"}
+        ),
+        "object_registry_binding": (
+            {
+                "screen_id": objects.screen_id if objects else None,
+                "semantic_screen_id": objects.semantic_screen_id if objects else None,
+                "object_set_version": objects.object_set_version if objects else None,
+                "structure_topology_digest": (
+                    objects.structure_topology_digest if objects else None
+                ),
+                "mark_set_version": objects.mark_set_version if objects else None,
+            }
+            if objects
+            else None
+        ),
         "object_set_version": objects.object_set_version if objects else None,
-        "structure_topology_digest": objects.structure_topology_digest if objects else (structure.topology_digest if structure else None),
+        "structure_topology_digest": (
+            objects.structure_topology_digest
+            if objects
+            else (structure.topology_digest if structure else None)
+        ),
         "object_trace_summary": objects.trace_summary() if objects else None,
     }
 
@@ -500,9 +533,13 @@ def _plan_error_observation_fields(observation) -> dict[str, Any]:
     objects = observation.object_registry
     return {
         "mark_provider_observation": observation.mark_provider_observation,
-        "screen_structure_summary": observation.mark_provider_observation.get("screen_structure_summary")
+        "screen_structure_summary": observation.mark_provider_observation.get(
+            "screen_structure_summary"
+        )
         or {"status": "missing_sidecar"},
-        "object_registry_summary": objects.trace_summary() if objects else {"status": "missing_sidecar"},
+        "object_registry_summary": (
+            objects.trace_summary() if objects else {"status": "missing_sidecar"}
+        ),
     }
 
 
@@ -518,7 +555,9 @@ def _action_for_history(action: dict | None) -> dict | None:
     return safe
 
 
-def _recovery_action_for_parse_failure(state: "AgentState", parse_metadata: dict) -> dict[str, Any] | None:
+def _recovery_action_for_parse_failure(
+    state: "AgentState", parse_metadata: dict
+) -> dict[str, Any] | None:
     if parse_metadata.get("parse_error_code") not in {"invalid_json", "parse_error"}:
         return None
     if state.get("failure_cause") != "wrong_page":
@@ -544,13 +583,51 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
     step_count = state["step_count"]
     task = state["task"]
     # Build goal block from new GoalContract (compiled by goal_node)
-    task_goal_block = build_goal_prompt_block(state, lang=lang)
-    task_goal_trace = goal_trace_payload(state) or {}
-    messages = list(state["messages"])  # copy
-
+    task_goal_block = build_goal_prompt_block(state, lang=lang, config=config)
+    task_goal_trace = goal_trace_payload(state, config) or {}
     # 1. Capture screen
-    screenshot = device_factory.get_screenshot(device_id)
-    current_app = device_factory.get_current_app(device_id)
+    try:
+        device_capture = capture_device_observation(
+            device_factory,
+            device_id,
+            timeout=int(configurable.get("screenshot_timeout", 10) or 10),
+            max_attempts=int(configurable.get("observation_capture_attempts", 2) or 2),
+        )
+    except ObservationCaptureError as exc:
+        error_message = f"Observation unavailable: {exc.code}"
+        emit_trace(
+            config,
+            state,
+            "plan",
+            "plan_error",
+            {
+                "failure_cause": "context_lost",
+                "error_code": exc.code,
+                "attempts": exc.attempts,
+            },
+        )
+        return {
+            "messages": [],
+            "step_count": step_count + 1,
+            "thinking": "",
+            "action_raw": "",
+            "action_parsed": None,
+            "action_result": {
+                "success": False,
+                "should_finish": True,
+                "message": error_message,
+            },
+            "failure_cause": "context_lost",
+            "grounding_error": exc.code,
+            "grounding_failure_code": exc.code,
+            "error": error_message,
+            "finished": True,
+            "action_receipt": None,
+            "action_succeeded": False,
+            "action_confirmed": False,
+        }
+    screenshot = device_capture.screenshot
+    current_app = device_capture.current_app
     screenshot_error = screenshot_failure_code(screenshot)
     if screenshot_error:
         sensitive = screenshot_is_sensitive(screenshot)
@@ -558,12 +635,15 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
         failure_message = screenshot_failure_message(screenshot)
         error_message = f"Screenshot unavailable: {screenshot_error}"
         error_fields = _screenshot_error_fields(screenshot_error, sensitive=sensitive)
-        failure_cause = _failure_cause_for_screenshot(screenshot_error, sensitive=sensitive)
+        failure_cause = _failure_cause_for_screenshot(
+            screenshot_error, sensitive=sensitive
+        )
         context_metrics = build_context_metrics(
             {
                 **state,
                 "context_mode": context_mode,
-                "context_strategy": state.get("context_strategy") or (
+                "context_strategy": state.get("context_strategy")
+                or (
                     "inject_redacted_block"
                     if context_mode == "inject"
                     else ("observe_only" if context_mode == "observe" else "off")
@@ -596,8 +676,12 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
             "step_count": step_count + 1,
             "screenshot_b64": None,
             "current_app": current_app,
-            "screen_width": int(getattr(screenshot, "width", 0) or state.get("screen_width") or 0),
-            "screen_height": int(getattr(screenshot, "height", 0) or state.get("screen_height") or 0),
+            "screen_width": int(
+                getattr(screenshot, "width", 0) or state.get("screen_width") or 0
+            ),
+            "screen_height": int(
+                getattr(screenshot, "height", 0) or state.get("screen_height") or 0
+            ),
             "thinking": "",
             "action_raw": "",
             "action_parsed": None,
@@ -616,6 +700,8 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
             "failure_cause": failure_cause,
             **error_fields,
             "finished": True,
+            "action_receipt": None,
+            "action_succeeded": False,
             "action_confirmed": False,
             "context_mode": context_mode,
             **context_metrics,
@@ -625,10 +711,21 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
     if accessibility_enabled is None:
         import os
 
-        accessibility_enabled = os.getenv("PHONE_AGENT_ACCESSIBILITY_MARKS", "").lower() in {"1", "true", "yes", "on"}
+        accessibility_enabled = os.getenv(
+            "PHONE_AGENT_ACCESSIBILITY_MARKS", ""
+        ).lower() in {"1", "true", "yes", "on"}
     provider_name = str(configurable.get("grounding_provider_name") or "").lower()
-    hybrid_provider_enabled = provider_name in {"hybrid", "accessibility_locateanything", "uiautomator_locateanything"}
-    if screen_marks is None and accessibility_enabled and not hybrid_provider_enabled and hasattr(device_factory, "get_screen_marks"):
+    hybrid_provider_enabled = provider_name in {
+        "hybrid",
+        "accessibility_locateanything",
+        "uiautomator_locateanything",
+    }
+    if (
+        screen_marks is None
+        and accessibility_enabled
+        and not hybrid_provider_enabled
+        and hasattr(device_factory, "get_screen_marks")
+    ):
         try:
             screen_marks = device_factory.get_screen_marks(
                 device_id,
@@ -644,23 +741,28 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
                 state,
                 "plan",
                 "accessibility_marks_error",
-                {"failure_code": type(exc).__name__, "message": "accessibility marks unavailable"},
+                {
+                    "failure_code": type(exc).__name__,
+                    "message": "accessibility marks unavailable",
+                },
             )
     provider_configurable = dict(configurable)
     if (
         provider_configurable.get("accessibility_tree_dump") is None
         and not provider_configurable.get("skip_accessibility_provider")
-        and hasattr(device_factory, "module")
-        and hasattr(device_factory.module, "dump_uiautomator_xml")
+        and hasattr(device_factory, "dump_uiautomator_xml")
     ):
-        provider_configurable["accessibility_tree_dump"] = lambda timeout=None: device_factory.module.dump_uiautomator_xml(
-            device_id,
-            timeout=timeout,
+        provider_configurable["accessibility_tree_dump"] = lambda timeout=None: (
+            device_factory.dump_uiautomator_xml(
+                device_id,
+                timeout=timeout,
+            )
         )
     mark_provider_hints = build_mark_provider_hints(
         task=task,
         reflection=state.get("reflection"),
-        provider_hints=configurable.get("mark_provider_hints") or configurable.get("grounding_hints"),
+        provider_hints=configurable.get("mark_provider_hints")
+        or configurable.get("grounding_hints"),
     )
     observation = build_observation(
         screenshot=screenshot,
@@ -669,6 +771,8 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
         mark_providers=build_mark_providers(provider_configurable),
         provider_hints=mark_provider_hints,
         provider_timeout=float(configurable.get("grounding_timeout", 10.0) or 10.0),
+        foreground=device_capture.foreground,
+        observation_epoch=device_capture.observation_epoch,
     )
     screen_binding = ScreenBinding(
         screen_id=observation.snapshot.screen_id,
@@ -680,16 +784,20 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
         observation_epoch=observation.snapshot.observation_epoch,
         mark_set_version=observation.snapshot.mark_set_version,
         perceptual_hash=observation.snapshot.perceptual_hash,
-        structure_topology_digest=observation.object_registry.structure_topology_digest
-        if observation.object_registry
-        else (
-            observation.screen_structure.topology_digest
-            if observation.screen_structure
+        structure_topology_digest=(
+            observation.object_registry.structure_topology_digest
+            if observation.object_registry
+            else (
+                observation.screen_structure.topology_digest
+                if observation.screen_structure
+                else None
+            )
+        ),
+        object_set_version=(
+            observation.object_registry.object_set_version
+            if observation.object_registry
             else None
         ),
-        object_set_version=observation.object_registry.object_set_version
-        if observation.object_registry
-        else None,
     )
     mark_registry = observation.mark_registry
     context_mode = get_context_mode(state, config)
@@ -740,7 +848,13 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
 
         screen_info = MessageBuilder.build_screen_info(current_app)
         text_content = f"{task}\n\n{task_goal_block}\n\n{screen_info}"
-        objects_block = observation.object_registry.prompt_block(mark_registry=mark_registry, lang=lang) if observation.object_registry else ""
+        objects_block = (
+            observation.object_registry.prompt_block(
+                mark_registry=mark_registry, lang=lang
+            )
+            if observation.object_registry
+            else ""
+        )
         if objects_block:
             text_content = f"{text_content}\n\n{objects_block}"
         marks_block = mark_registry.prompt_block(lang)
@@ -762,7 +876,13 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
             text_content = f"{task_goal_block}\n\n** Screen Info **\n\n{screen_info}\n\n{reflection_context}"
         else:
             text_content = f"{task_goal_block}\n\n** Screen Info **\n\n{screen_info}"
-        objects_block = observation.object_registry.prompt_block(mark_registry=mark_registry, lang=lang) if observation.object_registry else ""
+        objects_block = (
+            observation.object_registry.prompt_block(
+                mark_registry=mark_registry, lang=lang
+            )
+            if observation.object_registry
+            else ""
+        )
         if objects_block:
             text_content = f"{text_content}\n\n{objects_block}"
         marks_block = mark_registry.prompt_block(lang)
@@ -783,6 +903,9 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
     request_messages, context_selection = compact_messages_for_request(
         full_messages, context_selection
     )
+    state_messages = [
+        MessageBuilder.remove_images_from_message(message) for message in new_messages
+    ]
     _maybe_emit_plan_prompt_debug(
         config,
         state,
@@ -801,7 +924,9 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
     request_parse_error = None
     request_retry_count = 0
     try:
-        response = _safe_request(model_client, request_messages, output_mode=configured_output_mode)
+        response = _safe_request(
+            model_client, request_messages, output_mode=configured_output_mode
+        )
     except ModelParseError as e:
         request_parse_metadata = getattr(e, "parse_metadata", {}) or {}
         request_parse_error = f"Model parse failed: {request_parse_metadata.get('parse_error_code') or 'parse_error'}"
@@ -839,7 +964,9 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
                     "parse_retry_success": False,
                 }
                 error_message = f"Model parse failed: {parse_metadata.get('parse_error_code') or 'parse_error'}"
-                error_fields = _error_fields(parse_metadata.get("parse_error_code") or "parse_error")
+                error_fields = _error_fields(
+                    parse_metadata.get("parse_error_code") or "parse_error"
+                )
                 emit_trace(
                     config,
                     state,
@@ -855,9 +982,9 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
                     },
                 )
                 return {
-                    "messages": new_messages,
+                    "messages": state_messages,
                     "step_count": step_count + 1,
-                    "screenshot_b64": screenshot.base64_data,
+                    "screenshot_b64": None,
                     "current_app": current_app,
                     "screen_id": observation.snapshot.screen_id,
                     "screen_hash": observation.snapshot.screen_hash,
@@ -869,12 +996,18 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
                     "thinking": "",
                     "action_raw": "",
                     "action_parsed": None,
-                    "action_result": {"success": False, "should_finish": True, "message": error_message},
+                    "action_result": {
+                        "success": False,
+                        "should_finish": True,
+                        "message": error_message,
+                    },
                     "error": error_message,
                     "failure_cause": "model_parse_failed",
                     **error_fields,
                     "parse_metadata": parse_metadata,
                     "finished": True,
+                    "action_receipt": None,
+                    "action_succeeded": False,
                     "action_confirmed": False,
                     "context_mode": context_mode,
                     **context_metrics,
@@ -882,7 +1015,9 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
         else:
             parse_metadata = request_parse_metadata
             error_message = request_parse_error or "Model parse failed: parse_error"
-            error_fields = _error_fields(parse_metadata.get("parse_error_code") or "parse_error")
+            error_fields = _error_fields(
+                parse_metadata.get("parse_error_code") or "parse_error"
+            )
             emit_trace(
                 config,
                 state,
@@ -898,9 +1033,9 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
                 },
             )
             return {
-                "messages": new_messages,
+                "messages": state_messages,
                 "step_count": step_count + 1,
-                "screenshot_b64": screenshot.base64_data,
+                "screenshot_b64": None,
                 "current_app": current_app,
                 "screen_id": observation.snapshot.screen_id,
                 "screen_hash": observation.snapshot.screen_hash,
@@ -912,12 +1047,18 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
                 "thinking": "",
                 "action_raw": "",
                 "action_parsed": None,
-                "action_result": {"success": False, "should_finish": True, "message": error_message},
+                "action_result": {
+                    "success": False,
+                    "should_finish": True,
+                    "message": error_message,
+                },
                 "error": error_message,
                 "failure_cause": "model_parse_failed",
                 **error_fields,
                 "parse_metadata": parse_metadata,
                 "finished": True,
+                "action_receipt": None,
+                "action_succeeded": False,
                 "action_confirmed": False,
                 "context_mode": context_mode,
                 **context_metrics,
@@ -929,7 +1070,8 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
         parse_metadata = getattr(e, "parse_metadata", {}) or {}
         error_fields = {
             "error_layer": "adapter",
-            "error_code": parse_metadata.get("parse_error_code") or "model_request_failed",
+            "error_code": parse_metadata.get("parse_error_code")
+            or "model_request_failed",
             "recoverable": True,
             "retry_policy": "parse_retry",
         }
@@ -949,9 +1091,9 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
             },
         )
         return {
-            "messages": new_messages,
+            "messages": state_messages,
             "step_count": step_count + 1,
-            "screenshot_b64": screenshot.base64_data,
+            "screenshot_b64": None,
             "current_app": current_app,
             "screen_id": observation.snapshot.screen_id,
             "screen_hash": observation.snapshot.screen_hash,
@@ -973,6 +1115,8 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
             **error_fields,
             "parse_metadata": parse_metadata,
             "finished": True,
+            "action_receipt": None,
+            "action_succeeded": False,
             "action_confirmed": False,
             "context_mode": context_mode,
             **context_metrics,
@@ -997,8 +1141,14 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
         object_registry=observation.object_registry,
     )
     retry_count = request_retry_count
-    current_error_layer = _layer_for_error(parse_metadata.get("parse_error_code"), grounding_error)
-    if parse_error and current_error_layer in {"parse", "adapter"} and retry_count < parse_retry_limit:
+    current_error_layer = _layer_for_error(
+        parse_metadata.get("parse_error_code"), grounding_error
+    )
+    if (
+        parse_error
+        and current_error_layer in {"parse", "adapter"}
+        and retry_count < parse_retry_limit
+    ):
         retry_count += 1
         emit_trace(
             config,
@@ -1013,7 +1163,9 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
         )
         retry_messages = _build_parse_retry_messages(request_messages, parse_error)
         try:
-            retry_response = _safe_request(model_client, retry_messages, output_mode=configured_output_mode)
+            retry_response = _safe_request(
+                model_client, retry_messages, output_mode=configured_output_mode
+            )
             (
                 retry_parsed,
                 retry_error,
@@ -1030,7 +1182,11 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
                 screen_binding,
                 object_registry=observation.object_registry,
             )
-            parse_metadata = {**retry_metadata, "parse_retry_count": retry_count, "parse_retry_success": retry_error is None}
+            parse_metadata = {
+                **retry_metadata,
+                "parse_retry_count": retry_count,
+                "parse_retry_success": retry_error is None,
+            }
             response = retry_response
             action_parsed = retry_parsed
             parse_error = retry_error
@@ -1049,23 +1205,38 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
     elif request_parse_metadata:
         parse_metadata = {**parse_metadata, **request_parse_metadata}
 
-    error_fields = _error_fields(parse_metadata.get("parse_error_code"), grounding_error) if parse_error else {
-        "error_layer": None,
-        "error_code": None,
-        "recoverable": None,
-        "retry_policy": None,
-    }
+    error_fields = (
+        _error_fields(parse_metadata.get("parse_error_code"), grounding_error)
+        if parse_error
+        else {
+            "error_layer": None,
+            "error_code": None,
+            "recoverable": None,
+            "retry_policy": None,
+        }
+    )
     grounding_candidates = grounding_observation.get("candidates") or []
-    grounding_candidate_count = int(grounding_observation.get("candidate_count") or len(grounding_candidates) or 0)
+    grounding_candidate_count = int(
+        grounding_observation.get("candidate_count") or len(grounding_candidates) or 0
+    )
     selected_grounding_candidate_id = grounding_observation.get("selected_candidate_id")
+    expected_transition = (
+        normalize_expected_outcome(expected_outcome)
+        .to_expected_transition()
+        .trace_projection()
+        if isinstance(expected_outcome, dict)
+        else None
+    )
     # Assistant history must show the model the provider-facing IntentIR it
     # actually emitted (intent_raw), not the post-grounding internal ActionIR
     # (action_parsed). Replaying the internal {"_metadata":"do","element":[...]}
     # shape teaches the model to copy that shape on subsequent steps, which the
     # adapter then rejects with mark_required. intent_raw is captured before
     # grounding at plan.py:362 and is exactly what the model sent us.
-    history_action = _action_for_history(intent_raw) if intent_raw is not None else (
-        _action_for_history(action_parsed) if action_parsed is not None else None
+    history_action = (
+        _action_for_history(intent_raw)
+        if intent_raw is not None
+        else (_action_for_history(action_parsed) if action_parsed is not None else None)
     )
     action_raw_payload: dict = {
         "action": history_action,
@@ -1091,8 +1262,14 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
             "current_app": current_app,
             "thinking": thinking_safe,
             "action_raw": action_raw_safe,
-            "action": action_parsed.get("action") if isinstance(action_parsed, dict) else None,
-            "metadata": action_parsed.get("_metadata") if isinstance(action_parsed, dict) else None,
+            "action": (
+                action_parsed.get("action") if isinstance(action_parsed, dict) else None
+            ),
+            "metadata": (
+                action_parsed.get("_metadata")
+                if isinstance(action_parsed, dict)
+                else None
+            ),
             "parse_success": parse_error is None,
             "parse_error": parse_error,
             "failure_cause": _failure_cause_for_layer(error_fields, parse_error),
@@ -1112,11 +1289,15 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
             "task_goal_injected": True,
             "task_goal_block_chars": len(task_goal_block),
             "mark_registry": mark_registry.trace_summary(),
-            "screen_structure_summary": observation.mark_provider_observation.get("screen_structure_summary")
+            "screen_structure_summary": observation.mark_provider_observation.get(
+                "screen_structure_summary"
+            )
             or {"status": "missing_sidecar"},
-            "object_registry_summary": observation.object_registry.trace_summary()
-            if observation.object_registry
-            else {"status": "missing_sidecar"},
+            "object_registry_summary": (
+                observation.object_registry.trace_summary()
+                if observation.object_registry
+                else {"status": "missing_sidecar"}
+            ),
             "repair_attempted": parse_metadata.get("repair_attempted", False),
             "repair_success": parse_metadata.get("repair_success"),
             "repair_error_code": parse_metadata.get("repair_error_code"),
@@ -1136,9 +1317,9 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
                 ensure_ascii=False,
             )
             return {
-                "messages": new_messages,
+                "messages": state_messages,
                 "step_count": step_count + 1,
-                "screenshot_b64": screenshot.base64_data,
+                "screenshot_b64": None,
                 "current_app": current_app,
                 "screen_id": observation.snapshot.screen_id,
                 "screen_hash": observation.snapshot.screen_hash,
@@ -1156,13 +1337,17 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
                 "grounding_provider": grounding_observation.get("provider"),
                 "grounding_latency_ms": grounding_observation.get("latency_ms"),
                 "grounding_failure_code": grounding_error,
-                "grounding_screen_hash": grounding_observation.get("raw_screenshot_hash") or observation.snapshot.screen_hash,
+                "grounding_screen_hash": grounding_observation.get(
+                    "raw_screenshot_hash"
+                )
+                or observation.snapshot.screen_hash,
                 "grounding_observation": grounding_observation or None,
                 "mark_provider_observation": observation.mark_provider_observation,
                 "grounding_candidates": grounding_candidates,
                 "grounding_candidate_count": grounding_candidate_count,
                 "selected_grounding_candidate_id": selected_grounding_candidate_id,
                 "expected_outcome": expected_outcome,
+                "expected_transition": expected_transition,
                 "failure_cause": "model_parse_failed",
                 **error_fields,
                 "parse_metadata": {
@@ -1172,14 +1357,16 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
                 },
                 "finished": False,
                 "error": None,
+                "action_receipt": None,
+                "action_succeeded": False,
                 "action_confirmed": False,
                 "context_mode": context_mode,
                 **context_metrics,
             }
         return {
-            "messages": new_messages,
+            "messages": state_messages,
             "step_count": step_count + 1,
-            "screenshot_b64": screenshot.base64_data,
+            "screenshot_b64": None,
             "current_app": current_app,
             "screen_id": observation.snapshot.screen_id,
             "screen_hash": observation.snapshot.screen_hash,
@@ -1197,13 +1384,15 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
             "grounding_provider": grounding_observation.get("provider"),
             "grounding_latency_ms": grounding_observation.get("latency_ms"),
             "grounding_failure_code": grounding_error,
-            "grounding_screen_hash": grounding_observation.get("raw_screenshot_hash") or observation.snapshot.screen_hash,
+            "grounding_screen_hash": grounding_observation.get("raw_screenshot_hash")
+            or observation.snapshot.screen_hash,
             "grounding_observation": grounding_observation or None,
             "mark_provider_observation": observation.mark_provider_observation,
             "grounding_candidates": grounding_candidates,
             "grounding_candidate_count": grounding_candidate_count,
             "selected_grounding_candidate_id": selected_grounding_candidate_id,
             "expected_outcome": expected_outcome,
+            "expected_transition": expected_transition,
             "action_result": {
                 "success": False,
                 "should_finish": True,
@@ -1214,15 +1403,17 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
             **error_fields,
             "parse_metadata": parse_metadata,
             "finished": True,
+            "action_receipt": None,
+            "action_succeeded": False,
             "action_confirmed": False,
             "context_mode": context_mode,
             **context_metrics,
         }
 
     return {
-        "messages": new_messages,
+        "messages": state_messages,
         "step_count": step_count + 1,
-        "screenshot_b64": screenshot.base64_data,
+        "screenshot_b64": None,
         "current_app": current_app,
         "screen_id": observation.snapshot.screen_id,
         "screen_hash": observation.snapshot.screen_hash,
@@ -1240,13 +1431,17 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
         "grounding_provider": grounding_observation.get("provider"),
         "grounding_latency_ms": grounding_observation.get("latency_ms"),
         "grounding_failure_code": grounding_error,
-        "grounding_screen_hash": grounding_observation.get("raw_screenshot_hash") or observation.snapshot.screen_hash,
+        "grounding_screen_hash": grounding_observation.get("raw_screenshot_hash")
+        or observation.snapshot.screen_hash,
         "grounding_observation": grounding_observation or None,
         "mark_provider_observation": observation.mark_provider_observation,
         "grounding_candidates": grounding_candidates,
         "grounding_candidate_count": grounding_candidate_count,
         "selected_grounding_candidate_id": selected_grounding_candidate_id,
         "expected_outcome": expected_outcome,
+        "expected_transition": expected_transition,
+        "action_receipt": None,
+        "action_succeeded": False,
         **error_fields,
         "action_confirmed": False,
         "context_mode": context_mode,

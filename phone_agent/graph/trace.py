@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
+import re
 import time
 import uuid
 from pathlib import Path
@@ -48,6 +48,20 @@ PRIVATE_TEXT_KEYS = {
     "target_text_hint",
     "text_hint",
 }
+SEMANTIC_DIGEST_KEYS = {
+    "sha256",
+    "task_hash",
+    "entities_sha",
+    "target_entity_hashes",
+    "constraint_hashes",
+    "description_sha256",
+    "selected_object_id_hash",
+    "object_evidence_hash",
+    "title_stub",
+    "title_hash",
+    "container_lineage_hash",
+    "list_lineage_hash",
+}
 RAW_DEBUG_KEYS = {
     "raw_model_response",
     "raw_model_tool_calls",
@@ -63,7 +77,6 @@ def _redacted_text(value: str) -> dict[str, Any]:
     return {
         "redacted": True,
         "length": len(value),
-        "sha256": hashlib.sha256(value.encode("utf-8")).hexdigest()[:12],
     }
 
 
@@ -76,6 +89,8 @@ def sanitize_for_trace(
 ) -> Any:
     """Return a JSON-safe value with sensitive fields redacted."""
     normalized_key = key.lower() if key else ""
+    if normalized_key in SEMANTIC_DIGEST_KEYS:
+        return "<redacted-digest>"
     if normalized_key in RAW_REQUEST_DEBUG_KEYS:
         if allow_raw_request_debug:
             return value
@@ -91,6 +106,10 @@ def sanitize_for_trace(
     if normalized_key in SENSITIVE_KEYS:
         return "<redacted>"
     if normalized_key in PRIVATE_TEXT_KEYS and isinstance(value, str):
+        return _redacted_text(value)
+    if isinstance(value, str) and re.search(
+        r"(?<!hmac-)sha256:[0-9a-fA-F]{6,64}", value
+    ):
         return _redacted_text(value)
     if isinstance(value, dict):
         return {

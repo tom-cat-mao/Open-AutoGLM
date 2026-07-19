@@ -1,11 +1,7 @@
 """Tests for the GoalEvaluator (Phase 3)."""
 
 from phone_agent.graph.goal import GoalContract, SuccessCriterion
-from phone_agent.graph.goal_evaluator import (
-    AggregatingGoalEvaluator,
-    GoalEvaluation,
-    evaluate_finish_claim,
-)
+from phone_agent.graph.goal_evaluator import evaluate_finish_claim
 
 
 def _contract(criteria, **kwargs):

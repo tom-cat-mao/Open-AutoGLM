@@ -9,8 +9,10 @@ from __future__ import annotations
 
 import hashlib
 import re
+import unicodedata
 from typing import Any, Protocol
 
+from phone_agent.config.apps import DEFAULT_APP_REGISTRY, get_app_registry_summary
 from phone_agent.graph.goal import (
     GoalContract,
     SuccessCriterion,
@@ -18,37 +20,52 @@ from phone_agent.graph.goal import (
     compute_task_hash,
     redact_objective,
 )
+from phone_agent.graph.goal_requirements import (
+    ContractAdequacyValidator,
+    TaskRequirementExtractor,
+    TaskRequirementSet,
+)
+from phone_agent.graph.predicates import CORE_PREDICATE_CATALOG
+
+
+class GoalCompilationError(ValueError):
+    """Fail-closed goal compilation error with a stable reason code."""
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
 
 
 # ----------------------------------------------------------------------
 # Heuristic extraction (ported from old task_goal.py — app/ordinal/entity only)
 # ----------------------------------------------------------------------
 
-APP_HINTS: dict[str, tuple[str, ...]] = {
-    "bilibili": ("b站", "哔哩", "bilibili"),
-    "wechat": ("微信", "wechat"),
-    "douyin": ("抖音", "douyin", "tiktok"),
-    "xiaohongshu": ("小红书", "rednote"),
-    "settings": ("设置", "settings"),
-}
-
 ORDINAL_PATTERNS: tuple[tuple[str, int], ...] = (
-    ("第一个", 1), ("第1个", 1), ("第一", 1),
-    ("第二个", 2), ("第2个", 2), ("第二", 2),
-    ("第三个", 3), ("第3个", 3), ("第三", 3),
-    ("第四个", 4), ("第4个", 4), ("第四", 4),
-    ("第五个", 5), ("第5个", 5), ("第五", 5),
+    ("第一个", 1),
+    ("第1个", 1),
+    ("第一", 1),
+    ("第二个", 2),
+    ("第2个", 2),
+    ("第二", 2),
+    ("第三个", 3),
+    ("第3个", 3),
+    ("第三", 3),
+    ("第四个", 4),
+    ("第4个", 4),
+    ("第四", 4),
+    ("第五个", 5),
+    ("第5个", 5),
+    ("第五", 5),
 )
 
 MAX_ENTITY_COUNT = 4
 
 
 def _detect_app_hint(text: str) -> str | None:
-    lowered = text.lower()
-    for app, terms in APP_HINTS.items():
-        if any(term.lower() in lowered for term in terms):
-            return app
-    return None
+    resolution = DEFAULT_APP_REGISTRY.resolve_text(text)
+    if resolution.status != "resolved" or resolution.identity is None:
+        return None
+    return resolution.identity.canonical_id
 
 
 def _detect_ordinal(text: str) -> int | None:
@@ -79,14 +96,26 @@ def _extract_entities_sha(text: str) -> list[str]:
 
 def _remove_known_goal_terms(text: str) -> str:
     cleaned = str(text or "")
-    for terms in APP_HINTS.values():
-        for term in terms:
+    resolution = DEFAULT_APP_REGISTRY.resolve_text(cleaned)
+    if resolution.status == "resolved" and resolution.identity is not None:
+        for term in sorted(resolution.identity.aliases, key=len, reverse=True):
             cleaned = re.sub(re.escape(term), " ", cleaned, flags=re.IGNORECASE)
     for pattern, _value in ORDINAL_PATTERNS:
         cleaned = cleaned.replace(pattern, " ")
     for term in (
-        "去", "看", "打开", "搜索", "查找", "播放", "进入", "视频",
-        "watch", "video", "play", "open", "search",
+        "去",
+        "看",
+        "打开",
+        "搜索",
+        "查找",
+        "播放",
+        "进入",
+        "视频",
+        "watch",
+        "video",
+        "play",
+        "open",
+        "search",
     ):
         cleaned = re.sub(re.escape(term), " ", cleaned, flags=re.IGNORECASE)
     return cleaned
@@ -100,7 +129,9 @@ def _remove_known_goal_terms(text: str) -> str:
 class GoalContractCompiler(Protocol):
     """Compile a task string into a GoalContract."""
 
-    def compile(self, *, task: str, hints: dict[str, Any] | None = None) -> GoalContract: ...
+    def compile(
+        self, *, task: str, hints: dict[str, Any] | None = None
+    ) -> GoalContract: ...
 
 
 # ----------------------------------------------------------------------
@@ -117,22 +148,16 @@ class HeuristicGoalCompiler:
     criterion naming and grounded evidence.
     """
 
-    def compile(self, *, task: str, hints: dict[str, Any] | None = None) -> GoalContract:
-        text = str(task or "").strip()
+    def compile(
+        self, *, task: str, hints: dict[str, Any] | None = None
+    ) -> GoalContract:
+        text = unicodedata.normalize("NFKC", str(task or "")).strip()
         app_hint = _detect_app_hint(text)
         ordinal = _detect_ordinal(text)
         entities_sha = _extract_entities_sha(text)
         redacted_obj = redact_objective(text)
 
         criteria: list[SuccessCriterion] = []
-        criteria.append(
-            SuccessCriterion(
-                name="task_completed",
-                description=redacted_obj or "Task objective visible on final screen",
-                verification="vlm_judge",
-                required=True,
-            )
-        )
         if app_hint:
             criteria.append(
                 SuccessCriterion(
@@ -140,7 +165,33 @@ class HeuristicGoalCompiler:
                     description=f"Target app '{app_hint}' is in foreground",
                     verification="app_or_activity_match",
                     required=True,
+                    predicate=CORE_PREDICATE_CATALOG.create_spec(
+                        "app.foreground_identity", app_hint
+                    ),
                 )
+            )
+        if ordinal is not None:
+            criteria.append(
+                SuccessCriterion(
+                    name="selected_object_rank",
+                    description=f"Selected object has rank {ordinal}",
+                    verification="object_rank_match",
+                    required=True,
+                    predicate=CORE_PREDICATE_CATALOG.create_spec(
+                        "ui.object_rank", ordinal
+                    ),
+                )
+            )
+        if not criteria or entities_sha:
+            criteria.insert(
+                0,
+                SuccessCriterion(
+                    name="task_completed",
+                    description=redacted_obj
+                    or "Task objective visible on final screen",
+                    verification="vlm_judge",
+                    required=True,
+                ),
             )
         return GoalContract(
             task_hash=compute_task_hash(text),
@@ -172,7 +223,9 @@ class ExternalGoalCompiler:
     def __init__(self, contract: GoalContract) -> None:
         self._contract = contract
 
-    def compile(self, *, task: str, hints: dict[str, Any] | None = None) -> GoalContract:
+    def compile(
+        self, *, task: str, hints: dict[str, Any] | None = None
+    ) -> GoalContract:
         from dataclasses import replace
 
         return replace(
@@ -197,7 +250,7 @@ GOAL_COMPILER_SYSTEM_PROMPT_CN = """你是一个任务目标编译器。你的�
   ],
   "constraints": ["约束1", "约束2"],
   "non_goals": ["非目标1"],
-  "target_app_hint": "bilibili|wechat|douyin|xiaohongshu|settings|null",
+  "target_app_hint": "canonical AppRegistry identity or null",
   "ordinal": null
 }
 
@@ -227,7 +280,7 @@ Output exactly one JSON object, no Markdown:
   ],
   "constraints": ["constraint1"],
   "non_goals": ["non_goal1"],
-  "target_app_hint": "bilibili|wechat|douyin|xiaohongshu|settings|null",
+  "target_app_hint": "canonical AppRegistry identity or null",
   "ordinal": null
 }
 
@@ -256,14 +309,21 @@ class LLMGoalCompiler:
         self._lang = lang
         self._retry_limit = max(0, retry_limit)
 
-    def compile(self, *, task: str, hints: dict[str, Any] | None = None) -> GoalContract:
+    def compile(
+        self, *, task: str, hints: dict[str, Any] | None = None
+    ) -> GoalContract:
         import json
 
         from phone_agent.model.client import MessageBuilder, ModelParseError
 
         text = str(task or "").strip()
         system_prompt = (
-            GOAL_COMPILER_SYSTEM_PROMPT_EN if self._lang == "en" else GOAL_COMPILER_SYSTEM_PROMPT_CN
+            GOAL_COMPILER_SYSTEM_PROMPT_EN
+            if self._lang == "en"
+            else GOAL_COMPILER_SYSTEM_PROMPT_CN
+        )
+        system_prompt = "\n\n".join(
+            [system_prompt, get_app_registry_summary(lang=self._lang)]
         )
         messages = [
             MessageBuilder.create_system_message(system_prompt),
@@ -271,7 +331,6 @@ class LLMGoalCompiler:
         ]
 
         attempts = 0
-        last_error = ""
         while attempts <= self._retry_limit:
             attempts += 1
             try:
@@ -283,11 +342,14 @@ class LLMGoalCompiler:
                 contract = self._parse_compiled_contract(data, task=text)
                 contract = _with_compile_meta(contract, source="llm", attempts=attempts)
                 return contract
-            except (json.JSONDecodeError, ValueError, ModelParseError, TypeError) as exc:
-                last_error = f"{type(exc).__name__}: {exc}"
+            except (
+                json.JSONDecodeError,
+                ValueError,
+                ModelParseError,
+                TypeError,
+            ):
                 continue
-            except Exception as exc:
-                last_error = f"{type(exc).__name__}: {exc}"
+            except Exception:
                 continue
 
         # Both attempts failed — return a failed sentinel; goal_node falls back.
@@ -302,7 +364,9 @@ class LLMGoalCompiler:
             compile_attempts=attempts,
         )
 
-    def _parse_compiled_contract(self, data: dict[str, Any], *, task: str) -> GoalContract:
+    def _parse_compiled_contract(
+        self, data: dict[str, Any], *, task: str
+    ) -> GoalContract:
         if not isinstance(data, dict):
             raise ValueError("compiler output is not a dict")
 
@@ -349,14 +413,34 @@ class LLMGoalCompiler:
         if not isinstance(ordinal, int) or isinstance(ordinal, bool):
             ordinal = None
 
+        target_app_hint = None
+        raw_app_hint = data.get("target_app_hint")
+        if isinstance(raw_app_hint, str) and raw_app_hint.strip():
+            app_resolution = DEFAULT_APP_REGISTRY.resolve_term(raw_app_hint)
+            if app_resolution.status != "resolved" or app_resolution.identity is None:
+                raise ValueError(
+                    f"unresolvable target_app_hint: {app_resolution.status}"
+                )
+            target_app_hint = app_resolution.identity.canonical_id
+
+        criteria = _attach_core_predicates(
+            criteria,
+            target_app_hint=target_app_hint,
+            ordinal=ordinal,
+        )
+
         return GoalContract(
             task_hash=compute_task_hash(task),
             redacted_objective=redact_objective(str(data.get("objective") or task)),
             objective_length=len(str(task)),
             success_criteria=criteria,
-            constraints=[str(c) for c in (data.get("constraints") or []) if isinstance(c, str)][:8],
-            non_goals=[str(ng) for ng in (data.get("non_goals") or []) if isinstance(ng, str)][:8],
-            target_app_hint=data.get("target_app_hint") if isinstance(data.get("target_app_hint"), str) else None,
+            constraints=[
+                str(c) for c in (data.get("constraints") or []) if isinstance(c, str)
+            ][:8],
+            non_goals=[
+                str(ng) for ng in (data.get("non_goals") or []) if isinstance(ng, str)
+            ][:8],
+            target_app_hint=target_app_hint,
             target_activity_hint=None,
             ordinal=ordinal,
             entities_sha=_extract_entities_sha(task),
@@ -368,10 +452,46 @@ class LLMGoalCompiler:
         )
 
 
-def _with_compile_meta(contract: GoalContract, *, source: str, attempts: int) -> GoalContract:
+def _with_compile_meta(
+    contract: GoalContract, *, source: str, attempts: int
+) -> GoalContract:
     from dataclasses import replace
 
     return replace(contract, compile_source=source, compile_attempts=attempts)
+
+
+def _attach_core_predicates(
+    criteria: list[SuccessCriterion],
+    *,
+    target_app_hint: str | None,
+    ordinal: int | None,
+) -> list[SuccessCriterion]:
+    """Explicitly migrate deterministic legacy compiler criteria to predicates."""
+
+    from dataclasses import replace
+
+    migrated: list[SuccessCriterion] = []
+    for criterion in criteria:
+        if criterion.predicate is not None:
+            migrated.append(criterion)
+            continue
+        predicate = None
+        if criterion.verification == "app_or_activity_match" and target_app_hint:
+            predicate = CORE_PREDICATE_CATALOG.create_spec(
+                "app.foreground_identity", target_app_hint
+            )
+        elif criterion.verification == "object_rank_match" and ordinal is not None:
+            predicate = CORE_PREDICATE_CATALOG.create_spec("ui.object_rank", ordinal)
+        elif criterion.verification == "focus_or_keyboard":
+            predicate = CORE_PREDICATE_CATALOG.create_spec("ui.focused", True)
+        elif criterion.verification == "accessibility_text_match":
+            match = re.search(r"sha256:([a-fA-F0-9]{8,64})", criterion.description)
+            if match:
+                predicate = CORE_PREDICATE_CATALOG.create_spec(
+                    "ui.text_hash_present", match.group(1).casefold()
+                )
+        migrated.append(replace(criterion, predicate=predicate))
+    return migrated
 
 
 # ----------------------------------------------------------------------
@@ -379,7 +499,9 @@ def _with_compile_meta(contract: GoalContract, *, source: str, attempts: int) ->
 # ----------------------------------------------------------------------
 
 
-def compile_goal_contract(state: dict[str, Any], config: dict[str, Any]) -> GoalContract:
+def compile_goal_contract(
+    state: dict[str, Any], config: dict[str, Any]
+) -> GoalContract:
     """Run the compilation chain: External > LLM > Heuristic.
 
     Returns a GoalContract with ``compile_status`` in {"compiled", "user_override"}.
@@ -392,14 +514,25 @@ def compile_goal_contract(state: dict[str, Any], config: dict[str, Any]) -> Goal
 
     # 1. External override (benchmark/eval)
     override = configurable.get("task_goal_contract_override")
+    requirement_override = configurable.get("task_requirement_set_override")
     if isinstance(override, GoalContract):
-        return ExternalGoalCompiler(override).compile(task=task)
+        contract = ExternalGoalCompiler(override).compile(task=task)
+        return _validate_external_override(
+            contract, task, requirement_override, configurable
+        )
     if isinstance(override, dict):
         try:
             contract = GoalContract.from_dict(override)
-            return ExternalGoalCompiler(contract).compile(task=task)
-        except Exception:
-            pass
+        except Exception as exc:
+            raise GoalCompilationError(
+                "external_goal_invalid", "external goal override is invalid"
+            ) from exc
+        return _validate_external_override(
+            ExternalGoalCompiler(contract).compile(task=task),
+            task,
+            requirement_override,
+            configurable,
+        )
 
     # 2. LLM compiler (if model_client available)
     model_client = configurable.get("model_client")
@@ -416,3 +549,35 @@ def compile_goal_contract(state: dict[str, Any], config: dict[str, Any]) -> Goal
 
     # 3. No model client — use heuristic directly (not a "fallback")
     return HeuristicGoalCompiler().compile(task=task)
+
+
+def _validate_external_override(
+    contract: GoalContract,
+    task: str,
+    requirement_override: Any,
+    configurable: dict[str, Any],
+) -> GoalContract:
+    if configurable.get("allow_legacy_goal_override_for_tests") is True:
+        return contract
+    if isinstance(requirement_override, TaskRequirementSet):
+        requirements = requirement_override
+    elif isinstance(requirement_override, dict):
+        requirements = TaskRequirementSet.from_safe_projection(requirement_override)
+    else:
+        raise GoalCompilationError(
+            "external_goal_requirements_missing",
+            "external goal override requires an independently supplied requirement set",
+        )
+    extracted = TaskRequirementExtractor().extract(task)
+    if requirements.task_hash != extracted.task_hash:
+        raise GoalCompilationError(
+            "external_requirement_binding_mismatch",
+            "external requirement set is not bound to the current raw task",
+        )
+    adequacy = ContractAdequacyValidator().validate(requirements, contract)
+    if adequacy.status != "adequate":
+        raise GoalCompilationError(
+            "external_goal_inadequate",
+            f"external goal does not cover task requirements: {','.join(adequacy.reason_codes)}",
+        )
+    return contract

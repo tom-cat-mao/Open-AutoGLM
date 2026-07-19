@@ -6,8 +6,9 @@ from dataclasses import asdict, dataclass, field
 import hashlib
 from typing import Any
 
+from phone_agent.config.policy import DEFAULT_SAFETY_POLICY
 from phone_agent.graph.context import sanitize_context_payload
-from phone_agent.graph.marks import Mark, MarkRegistry, build_mark_topology_digest
+from phone_agent.graph.marks import Mark, MarkRegistry
 from phone_agent.graph.marks import MARK_CONFIDENCE_THRESHOLD
 
 
@@ -28,7 +29,7 @@ MAX_OBJECT_EVIDENCE_CHARS = 120
 MAX_PROMPT_OBJECTS = 30
 MAX_PROMPT_LISTS = 5
 MAX_OBJECTS_BLOCK_CHARS = 4000
-SENSITIVITY_TAGS = {"payment", "privacy", "login", "password", "otp", "delete", "permission"}
+SENSITIVITY_TAGS = set(DEFAULT_SAFETY_POLICY.semantic_tags)
 VISUAL_OBJECT_TYPES = {"visual_target", "visual_text", "visual_control", "visual_group", "visual_card"}
 
 

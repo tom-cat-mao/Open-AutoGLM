@@ -9,6 +9,10 @@ def test_execute_uses_config_device_factory_for_dispatch(
     )
 
     assert result["action_result"]["success"] is True
+    assert result["action_receipt"]["dispatch_status"] == "accepted"
+    assert "action_succeeded" not in result
+    assert result["action_ledger"][-1]["record_type"] == "action_receipt"
+    assert "reflection_verdict" not in result["action_ledger"][-1]
     assert fake_device.calls[-1] == ("tap", (500, 1000, "device-1"), {})
     assert result["messages"][-1]["role"] == "assistant"
     assert result["action_outcome_summary"]["action"] == "Tap"
@@ -133,7 +137,7 @@ def test_execute_preserves_plan_parse_failure_without_dispatch(base_state, fake_
     assert fake_device.calls == []
 
 
-def test_execute_wait_clears_stale_reflection_wait_advice(base_state, fake_device) -> None:
+def test_execute_wait_emits_receipt_without_claiming_transition(base_state, fake_device) -> None:
     base_state["action_parsed"] = {
         "_metadata": "do",
         "action": "Wait",
@@ -149,14 +153,67 @@ def test_execute_wait_clears_stale_reflection_wait_advice(base_state, fake_devic
     )
 
     assert result["action_result"]["success"] is True
-    assert result["reflection"] is None
-    assert result["reflection_verdict"] is None
-    assert result["failure_cause"] is None
-    assert result["suggested_strategy"] is None
-    assert result["action_succeeded"] is True
-    assert result["action_outcome_summary"]["reflection_verdict"] is None
-    assert result["action_outcome_summary"]["failure_cause"] is None
-    assert result["action_outcome_summary"]["suggested_strategy"] is None
+    assert result["action_receipt"]["dispatch_status"] == "accepted"
+    assert "action_succeeded" not in result
+    assert "reflection" not in result
+    assert result["action_outcome_summary"]["dispatch_status"] == "accepted"
+
+
+def test_execute_unavailable_capability_fails_closed_after_safety(
+    base_state, monkeypatch
+) -> None:
+    import phone_agent.graph.nodes.execute as execute_module
+
+    calls: list[str] = []
+    real_safety = execute_module.decide_safety
+    real_capability = execute_module.get_tool_capability
+
+    def tracked_safety(action):
+        calls.append("safety")
+        return real_safety(action)
+
+    def tracked_capability(action_name):
+        calls.append("capability")
+        return real_capability(action_name)
+
+    monkeypatch.setattr(execute_module, "decide_safety", tracked_safety)
+    monkeypatch.setattr(execute_module, "get_tool_capability", tracked_capability)
+    base_state["action_parsed"] = {
+        "_metadata": "do",
+        "action": "Call_API",
+        "message": "external request",
+    }
+
+    result = execute_module.execute_node(
+        base_state, {"configurable": {"verbose": False}}
+    )
+
+    assert calls.index("safety") < calls.index("capability")
+    assert result["finished"] is True
+    assert result["failure_cause"] == "capability_unavailable"
+    assert result["action_result"]["success"] is False
+    assert result["action_receipt"]["dispatch_status"] == "rejected"
+    assert "action_succeeded" not in result
+    assert result["action_ledger"][-1]["receipt"]["dispatch_status"] == "rejected"
+    assert "goal_progress" not in result["action_ledger"][-1]
+
+
+def test_execute_delegated_interact_routes_to_takeover(base_state) -> None:
+    base_state["action_parsed"] = {
+        "_metadata": "do",
+        "action": "Interact",
+        "message": "Complete the manual step",
+    }
+
+    result = execute_node(base_state, {"configurable": {"verbose": False}})
+
+    assert result["pending_interrupt"] == "takeover"
+    assert result["action_result"]["success"] is False
+    assert result["action_receipt"]["dispatch_status"] == "accepted"
+    assert result["action_receipt"]["side_effect_receipt"] == {
+        "delegation_status": "awaiting_acknowledgement"
+    }
+    assert "action_succeeded" not in result
 
 
 def test_execute_adapter_swipe_dispatches_with_existing_tool_signature(

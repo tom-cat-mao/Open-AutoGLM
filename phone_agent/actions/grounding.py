@@ -9,6 +9,7 @@ from phone_agent.actions.adapter import ActionAdapterError, _canonical_action_na
 from phone_agent.actions.ir import is_intent_dict
 from phone_agent.actions.selectors import validate_object_filter
 from phone_agent.actions.validator import ActionValidationError, validate_action
+from phone_agent.config.policy import DEFAULT_SAFETY_POLICY
 from phone_agent.graph.marks import (
     MARK_CONFIDENCE_THRESHOLD,
     PERCEPTUAL_HASH_THRESHOLD,
@@ -49,41 +50,6 @@ INTENT_ALLOWED_FIELDS = {
     "duration",
 }
 
-CONFIRM_TERMS = {
-    "pay",
-    "payment",
-    "purchase",
-    "buy",
-    "order",
-    "confirm",
-    "delete",
-    "remove",
-    "permission",
-    "privacy",
-    "支付",
-    "付款",
-    "购买",
-    "下单",
-    "确认",
-    "删除",
-    "移除",
-    "权限",
-    "隐私",
-}
-
-TAKEOVER_TERMS = {
-    "login",
-    "password",
-    "captcha",
-    "otp",
-    "code",
-    "account",
-    "登录",
-    "密码",
-    "验证码",
-    "账户",
-    "账号",
-}
 SAFE_OBJECT_ID_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,64}$")
 
 
@@ -540,11 +506,9 @@ def _ground_non_target_intent(intent: dict[str, Any], action_name: str) -> dict[
 def _mark_sensitivity(intent: dict[str, Any], mark: Any) -> str | None:
     tags = intent.get("_selected_object_sensitivity_tags")
     if isinstance(tags, list):
-        normalized = {str(tag or "").casefold() for tag in tags}
-        if normalized & {"login", "password", "otp"}:
-            return "takeover"
-        if normalized & {"payment", "privacy", "delete", "permission"}:
-            return "confirm"
+        semantic_tags = tuple(str(tag or "") for tag in tags)
+    else:
+        semantic_tags = ()
     haystack = " ".join(
         str(value or "")
         for value in (
@@ -555,12 +519,10 @@ def _mark_sensitivity(intent: dict[str, Any], mark: Any) -> str | None:
             getattr(mark, "role", None),
             getattr(mark, "text_summary", None),
         )
-    ).lower()
-    if any(term.lower() in haystack for term in TAKEOVER_TERMS):
-        return "takeover"
-    if any(term.lower() in haystack for term in CONFIRM_TERMS):
-        return "confirm"
-    return None
+    )
+    return DEFAULT_SAFETY_POLICY.classify(
+        text=haystack, semantic_tags=semantic_tags
+    ).route
 
 
 def _validate_mark_semantics(intent: dict[str, Any], mark: Any) -> None:

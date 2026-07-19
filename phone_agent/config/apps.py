@@ -1,5 +1,11 @@
 """App name to package name mapping for supported applications."""
 
+from phone_agent.config.app_registry import (
+    AppRegistry,
+    LaunchPolicy,
+    LaunchTargetResolver,
+)
+
 APP_PACKAGES: dict[str, str] = {
     # Social & Messaging
     "微信": "com.tencent.mm",
@@ -200,7 +206,8 @@ def get_package_name(app_name: str) -> str | None:
     Returns:
         The Android package name, or None if not found.
     """
-    return APP_PACKAGES.get(app_name)
+    resolution = DEFAULT_LAUNCH_TARGET_RESOLVER.resolve(app_name)
+    return resolution.package_name if resolution.status == "resolved" else None
 
 
 def get_app_name(package_name: str) -> str | None:
@@ -213,10 +220,10 @@ def get_app_name(package_name: str) -> str | None:
     Returns:
         The display name of the app, or None if not found.
     """
-    for name, package in APP_PACKAGES.items():
-        if package == package_name:
-            return name
-    return None
+    resolution = DEFAULT_APP_REGISTRY.resolve_package(package_name)
+    if resolution.status != "resolved" or resolution.identity is None:
+        return None
+    return _legacy_launch_name(resolution.identity.canonical_id)
 
 
 def list_supported_apps() -> list[str]:
@@ -244,6 +251,11 @@ APP_ALIASES: dict[str, str] = {
     "wechat": "WeChat",
     "微信": "WeChat",
     "WeChat(微信)": "WeChat",
+    "b站": "bilibili",
+    "哔哩": "bilibili",
+    "douyin": "抖音",
+    "xiaohongshu": "小红书",
+    "rednote": "小红书",
     "Whatsapp": "WhatsApp",
     "twitter": "Twitter",
     "X": "Twitter",
@@ -320,24 +332,25 @@ CANONICAL_APP_DISPLAY: dict[str, str] = {
 
 
 def normalize_app_name(name: str) -> str | None:
-    """Normalize app name to canonical key in APP_PACKAGES.
+    """Normalize an app term to the legacy launch name compatibility key."""
 
-    Tries alias lookup first, then exact match, then case-insensitive match
-    preferring CANONICAL_APP_DISPLAY keys over lowercase variants.
-    Returns canonical name or None if no match found.
-    """
-    stripped = name.strip()
-    if stripped in APP_ALIASES:
-        return APP_ALIASES[stripped]
-    if stripped in APP_PACKAGES:
-        return stripped
-    lowered = stripped.lower()
-    for key in CANONICAL_APP_DISPLAY:
-        if key.lower() == lowered and key in APP_PACKAGES:
-            return key
-    for key in APP_PACKAGES:
-        if key.lower() == lowered:
-            return key
+    resolution = DEFAULT_APP_REGISTRY.resolve_term(name)
+    if resolution.status != "resolved" or resolution.identity is None:
+        return None
+    return _legacy_launch_name(resolution.identity.canonical_id)
+
+
+def _legacy_launch_name(canonical_id: str) -> str | None:
+    resolution = DEFAULT_APP_REGISTRY.resolve_term(canonical_id)
+    if resolution.status != "resolved" or resolution.identity is None:
+        return None
+    packages = resolution.identity.packages
+    for name in CANONICAL_APP_DISPLAY:
+        if APP_PACKAGES.get(name) in packages:
+            return name
+    for name, package in APP_PACKAGES.items():
+        if package in packages:
+            return name
     return None
 
 
@@ -347,7 +360,11 @@ def get_app_registry_summary(lang: str = "cn", max_chars: int = 2400) -> str:
     Returns a section that can be appended to the system prompt to tell
     the model which app names are valid for the Launch action.
     """
-    app_list = ", ".join(APP_PACKAGES)
+    app_list = ", ".join(
+        identity.display_name
+        for identity in DEFAULT_APP_REGISTRY.identities
+        if DEFAULT_LAUNCH_POLICY.is_allowed(identity)
+    )
 
     if lang == "en":
         header = "# Available Apps (Launch action must use one of these names)"
@@ -363,3 +380,17 @@ def get_app_registry_summary(lang: str = "cn", max_chars: int = 2400) -> str:
         result = f"{header}\n{truncated}, ..."
 
     return result
+
+
+# APP_PACKAGES remains the legacy launch-name compatibility source. Typed
+# consumers use these separate identity, inventory, and policy boundaries.
+DEFAULT_APP_REGISTRY = AppRegistry.from_legacy_maps(
+    APP_PACKAGES,
+    APP_ALIASES,
+    CANONICAL_APP_DISPLAY,
+)
+DEFAULT_LAUNCH_POLICY = LaunchPolicy(frozenset(APP_PACKAGES.values()))
+DEFAULT_LAUNCH_TARGET_RESOLVER = LaunchTargetResolver(
+    DEFAULT_APP_REGISTRY,
+    DEFAULT_LAUNCH_POLICY,
+)

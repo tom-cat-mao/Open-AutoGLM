@@ -15,10 +15,10 @@ START → goal → plan → execute → [confirm|takeover|reflect|replan|end]
                                └─ end → END
 ```
 
-- **goal** — 任务开始时一次性编译声明式 `GoalContract`（External > LLM > Heuristic 兜底）；已编译且未请求重编译时为 no-op，可选 `require_goal_approval` interrupt
+- **goal** — 从 raw task 独立提取 `TaskRequirementSet`，编译 typed `GoalContract` 并通过 `ContractAdequacyValidator`；已编译且未请求重编译时为 no-op，可选 `require_goal_approval` interrupt
 - **plan** — 截图 + 模型推理 + 解析 action
-- **execute** — `dispatch_tool()` 路由到 `@tool` 函数执行动作
-- **reflect** — 再截图 + 模型判断动作是否生效；并对 `pending_finish` 调用 `GoalEvaluator` 验证 finish claim
+- **execute** — Safety Gate 后校验 `ToolCapability`，再 dispatch，并只产生 dispatch 语义的 `ActionReceipt`
+- **reflect** — 再截图 + 模型判断动作是否生效；独占写入 privacy-safe Goal evidence ledger，并对 `pending_finish` 调用 pure `GoalEvaluator` 验证 criterion IDs 与 current screen/epoch binding
 - **confirm / takeover** — LangGraph `interrupt()` 实现 Human-in-the-Loop；当前保证 interrupt 路由语义，持久 resume 将在后续 checkpoint/resume 阶段完善
 
 ### 项目结构
@@ -31,11 +31,18 @@ phone_agent/
 │   └── client.py                # ModelClient (OpenAI 兼容；text/json/tool_calls 输出适配)
 ├── actions/
 │   ├── result.py                # ActionResult
+│   ├── receipt.py               # ActionReceipt（dispatch，不代表 transition/Goal 成功）
+│   ├── capability.py            # 每个 canonical action 的不可变能力元数据
 │   └── adapter.py               # JSON/tool_calls → canonical action 适配与校验
 ├── grounding/                   # MarkProvider、LocateAnything MLX、fake provider、bbox parser
 ├── adb/                         # Android 设备控制
+├── checkpoint/
+│   ├── serde.py                 # checkpoint egress redaction / metadata projection
+│   └── goal_resume.py           # HMAC-bound trusted trajectory rehydration contract
 ├── config/
-│   ├── apps.py                  # 应用包名映射
+│   ├── apps.py                  # legacy Launch 名称兼容数据
+│   ├── app_registry.py          # AppIdentity / inventory / LaunchPolicy 边界
+│   ├── policy.py                # versioned SafetyPolicyRegistry / VerificationPolicy
 │   ├── prompts_zh.py / prompts_en.py  # structured prompt contract
 │   └── timing.py
 └── graph/                       # LangGraph 核心
@@ -45,6 +52,9 @@ phone_agent/
     ├── marks.py / objects.py    # screen-bound marks、ScreenStructure、ObjectRegistry sidecars
     ├── trace.py                 # 本地 JSONL trace 与脱敏
     ├── context.py               # context selector、request compaction、预算裁剪与脱敏
+    ├── fact_providers.py        # node-local neutral facts、authority resolution、optional adapters
+    ├── runtime_goal.py          # per-run private Goal values; never serialized
+    ├── compatibility_adapters.py # legacy page-signal shadow telemetry only
     ├── nodes/
     │   ├── plan.py
     │   ├── execute.py
@@ -337,7 +347,7 @@ python scripts/check_deployment_cn.py --base-url http://localhost:8000/v1 --mode
 | `Wait` | 等待加载 |
 | `Take_over` | 人工接管（interrupt） |
 
-运行 `python main.py --list-apps` 查看支持的应用列表。
+运行 `python main.py --list-apps` 查看支持的启动名称。运行时使用统一 AppRegistry 解析别名；前台 package/activity observation、设备安装状态和启动授权是三个独立事实，未知前台 package 不会被猜测成系统桌面。
 
 ## 远程调试
 

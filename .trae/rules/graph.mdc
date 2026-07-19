@@ -38,6 +38,47 @@ notes: "Declarative GoalContract compiled once by goal_node; finish requires mat
   - `GoalEvaluator` (`goal_evaluator.py`) 按 verification 分发：`accessibility_text_match`（sha256 stub+`_match_expected_text`）、`object_hash_match`/`object_rank_match`（读 `verifier_evidence.selected_object_signals`）、`app_or_activity_match`（复用 `_package_for_app_name`）、`focus_or_keyboard`（复用 `_focus_signals`）、`vlm_judge`（三段校验：finish 点名 + reflect JSON `named_evidence` 含 grounded `screen_reference` + 程序化反证优先）、`external_probe`（benchmark 注入 callable）。
   - status：所有 required matched 且无 required missing → success；任一 required 显式 missing → failure；无显式 missing 但未全覆盖 → unknown（**不自动升级 success**）。tentative `task_goal_contract.goal_type=="generic_task"` 的 `unknown→success` 后门已删除。
   - Reflect 增加 context 窗口管理：`select_reflect_context` + `build_reflect_context_block`（与 plan 同源更窄，注入最近 K=3 action_outcome 摘要作为 trajectory 记忆）；`goal_contract_block` 提到独立 message 块（不嵌入 dynamic user），利 prompt prefix cache。
+- PhoneAgent generalization Phase 1 已完成：
+  - `AppRegistry` 将 legacy launch names 聚合为 package-unique identities；alias 冲突显式 ambiguous，unknown package 不再映射为 `System Home`。
+  - observation identity、installed inventory、LaunchPolicy/LaunchTargetResolver 已分离；legacy `APP_PACKAGES` 仅保留为兼容数据源。
+  - `DeviceFactory.capture_observation()` 使用 foreground-before → screenshot → foreground-after 复合采样，成功后分配单调 epoch；竞态耗尽返回 `observation_unstable` 并 fail-closed。
+  - Plan/Reflect 的 ScreenSnapshot/MarkRegistry 已绑定稳定 epoch 与 foreground package/activity；GoalCompiler 删除五 App `APP_HINTS` 与固定 prompt enum，统一消费 AppRegistry。
+- PhoneAgent generalization Phase 2 已完成：
+  - 每个 canonical action 都有不可变 `ToolCapability` 声明；Validator 检查声明存在，Executor 在 Safety Gate 后、dispatch 前执行 implementation availability 门禁。
+  - Execute 产生 dispatch-only `ActionReceipt`；`accepted` 不代表 transition 或 Goal 成功，`action_succeeded` 只由 Reflect 写入。
+  - `Note`/`Call_API` unavailable fail-closed，`Interact` delegated 走 takeover；所有 UI/external action 与 `Wait` 强制 Reflect reobserve，旧 action-name skip list 已删除。
+- PhoneAgent generalization Phase 3 已完成：
+  - `PredicateCatalog` 为 core predicate 声明 value schema、allowed sources、Matcher 与强制 privacy/state/trace/checkpoint projection；未知 predicate、任意 matcher token 和未授权 whole-screen source fail-closed。
+  - `ExpectedTransition`、neutral `ObservedFact`、evidence binding、`Matcher` 与 `EvidenceAuthorityPolicy` 已建立；同层冲突为 unknown，低置信度或 stale/cross-contract fact 不参与 resolution。
+  - `RuntimeObservationContext` 只在当前 node 持有 screenshot，绑定 screen/epoch、可失效且禁止序列化；Plan/Reflect 不再把 screenshot base64 写回 AgentState/message history，当前截图只进入当次 VLM request。
+  - legacy `ExpectedOutcome` 保留 verifier 兼容行为，同时产生不含 runtime expected value 的 typed shadow；toggle/form/collection/dialog/navigation/content-change generic semantics 已有离线契约测试。
+- PhoneAgent generalization Phase 4 已完成：
+  - `TaskRequirementSet` 从 raw task 独立提取并绑定 source-span 摘要；`ContractAdequacyValidator` 在 schema validation 后核对 task/app/ordinal/entity/typed semantic coverage，模糊或不支持语义 fail-closed。
+  - `CriterionSpec` 以 `PredicateSpec` 为 typed truth contract；legacy deterministic app/rank/focus/text-hash criterion 通过显式 migration 进入 typed 路径，production external override 必须同时提供独立且 task-bound 的 requirement set。
+  - Reflect 独占写入 bounded、privacy-safe `goal_evidence_ledger`；`PureGoalEvaluator` 只折叠 contract + ledger + current screen/epoch binding + finish criterion IDs，不调用 model/device/provider。
+  - unknown claim ID、遗漏 criterion、stale/cross-contract evidence、semantic contradiction 均阻止 finish；Goal objective/criterion/constraint/non-goal 文本在 prompt/state 边界统一 regex-redact。
+- PhoneAgent generalization Phase 5 已完成：
+  - `FactCollector` 从 device/accessibility/object/mark core providers 及受控 visual-region/whole-screen/external-probe providers 收集中性 facts，统一执行 schema、provider version、contract/screen/epoch binding 与 bounded collection 门禁。
+  - Reflect 每轮 reobserve 收集 typed facts 并写入 privacy-safe Goal ledger；pending finish 只折叠已绑定 ledger，provider/extractor 失败或缺失为 unknown。
+  - `OptionalAdapterRegistry` 只能追加 neutral fact providers，不能修改 catalog/matcher/authority/safety/edges/success；高权威 programmatic contradiction 优先，同层冲突仍为 unknown。
+  - feed/player 词表已移至 optional legacy page-signal compatibility adapter；adapters disabled 的 Silverstone/Singapore 离线 replay 仍经 collector → Matcher → authority → Goal fold 正确拒绝错内容。
+- PhoneAgent generalization Phase 6 已完成：
+  - versioned `SafetyPolicyRegistry` 集中拥有中英安全词、semantic tags 与固定 precedence；NFKC/token-aware 匹配覆盖 adversarial 变体，credential/captcha takeover 高于 payment/privacy confirm。
+  - immutable named `VerificationPolicy` 集中 mark confidence、perceptual hash distance、fact confidence、deterministic reflection 与 takeover retry thresholds；每项含 owner/unit/rationale/calibration dataset+version/fail-closed boundary。
+  - offline calibration 只报告 false accept/reject，不运行时调参；ordinary unknown page 不自动 HITL，可能敏感副作用的 classification uncertainty 才 fail-closed confirm。
+- PhoneAgent generalization Phase 7 已完成：
+  - `TrustedGoalResumeBinder` 用 HMAC-SHA256 绑定 canonical runtime TaskRequirementSet + GoalContract（含 typed expected values）+ schema/normalizer versions；token 不替代事实且 secret 不进入 state/checkpoint。
+  - 只允许 `scope=trajectory` 且 predicate persistence=`checkpoint_safe` 的 bounded progress 投影；terminal visual 与 runtime-only semantic evidence resume 后一律 stale/丢弃。
+  - missing projection、wrong key、version/contract/value mismatch 均返回 `goal_contract_invalid`、空 ledger 并要求 reobserve；普通 serializer 删除 unbound Goal progress 与低熵 task/entity hashes。
+  - runtime checkpointer 尚未接入 PhoneAgent/builder/CLI，activation 保持显式 gated deliverable。
+- PhoneAgent generalization Phase 8 已完成离线范围：
+  - `RuntimeGoalContext` 作为每次 run 显式依赖持有完整 contract/requirements；AgentState 只保留随机 opaque reference 和类型/计数元数据，绑定缺失或错配 fail-closed。
+  - task binding 统一使用 NFKC + casefold + whitespace canonicalization；CJK 紧邻 Latin app alias 可解析且仍阻止 Latin 子串误匹配。
+  - optional fact provider 由 core-owned registration 固定 provider ID/version、allowed sources 与 authority ceiling；adapter 冒充 accessibility/device fact 会被拒绝。
+  - legacy feed/player classifier 默认关闭且只写 shadow telemetry；它不能改变 `VerifierResult`、`action_succeeded`、Goal evidence 或 routing。
+  - Graph 的 UIAutomator dump 只经 `DeviceFactory.dump_uiautomator_xml()`；Plan/Reflect 不访问 device module。
+  - state/trace/checkpoint 的 Goal/requirement/private-text 投影只保留类型、计数、长度、状态和 opaque runtime reference；禁止低熵普通 SHA。trusted resume HMAC 是唯一持久语义绑定。
+  - cross-domain、negative、metamorphic、privacy、performance、rollout/rollback 与全量 P0 离线回归已覆盖；Phase 9 真机 gate 明确延期，不从离线结果推断。
 - 仍需保留既有 hardening 未闭环项：hint-mismatched provider marks 不得进入 executable `marks`、diagnostic code 字段需 strict sanitizer、hybrid child `parse_summary` 汇总、accessibility failure taxonomy 同步。
 
 ## 约束 Checklist
@@ -49,6 +90,6 @@ notes: "Declarative GoalContract compiled once by goal_node; finish requires mat
 - [x] `target_text_hint` 只能作为 provider hint。
 - [x] Grounding failure fail-closed；多候选、无候选、越界、格式错不回退主 VLM 坐标。
 - [x] Tree-first: Accessibility Tree 为 hybrid 第一层；解析失败、hint 不匹配、provider 缺失不能回退到主 VLM raw coordinate。
-- [x] trace/checkpoint 不含 raw screenshot、raw hint、API key、raw response；metadata 只允许 code/count/bool/hash/length/latency/model 字段。
+- [x] trace/checkpoint 不含 raw screenshot、raw hint、API key、raw response 或低熵语义摘要；metadata 只允许 code/count/bool/length/latency/model、屏幕绑定摘要和 opaque runtime reference，持久语义绑定只允许 keyed HMAC。
 - [x] `finish` 不是执行成功；必须经过 GoalContract `SuccessCriterion` evidence gate（`finish.matched_terminal_evidence` 点名 + `GoalEvaluator` 核验），未知或缺证据 fail-closed/replan；unknown 不自动升级 success。
 - [x] `bench_output/`、API key、runtime traces、真实截图数据默认不提交。

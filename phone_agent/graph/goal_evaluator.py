@@ -21,12 +21,16 @@ vlm_judge self-attestation.
 
 from __future__ import annotations
 
-import hashlib
 from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol
 
 from phone_agent.graph.goal import GoalContract, SuccessCriterion
-
+from phone_agent.graph.predicates import (
+    CORE_PREDICATE_CATALOG,
+    EvidenceReference,
+    Matcher,
+    ObservedFact,
+)
 
 # ----------------------------------------------------------------------
 # Result
@@ -66,10 +70,104 @@ class GoalEvaluator(Protocol):
         after_observation: dict[str, Any] | None,
         device_signals: dict[str, Any] | None,
         finish_claim_matched: list[str],
-        reflect_named_evidence: list[dict[str, str]] | None,
+        reflect_named_evidence: list[dict[str, Any]] | None,
         trajectory_summary: str | None = None,
         goal_probes: dict[str, Any] | None = None,
     ) -> GoalEvaluation: ...
+
+
+class PureGoalEvaluator:
+    """Pure typed-criterion fold over a bounded, already-matched evidence ledger."""
+
+    _BLOCKING = {"invalid", "contradicted", "stale", "missing"}
+
+    def evaluate(
+        self,
+        *,
+        contract: GoalContract,
+        contract_id: str,
+        evidence_ledger: list[dict[str, Any]],
+        finish_claim_matched: list[str],
+        screen_id: str,
+        observation_epoch: int,
+    ) -> GoalEvaluation:
+        claim_ids = set(finish_claim_matched)
+        criterion_ids = {criterion.name for criterion in contract.success_criteria}
+        unknown_claim_ids = sorted(claim_ids - criterion_ids)
+        latest: dict[str, dict[str, Any]] = {}
+        for entry in evidence_ledger:
+            if not isinstance(entry, dict):
+                continue
+            if entry.get("contract_id") != contract_id:
+                continue
+            criterion_id = str(entry.get("criterion_id") or "")
+            if criterion_id:
+                latest[criterion_id] = entry
+
+        matched: list[str] = []
+        missing: list[str] = []
+        unknown: list[str] = []
+        results: dict[str, dict[str, Any]] = {}
+        for criterion in contract.success_criteria:
+            if criterion.name not in claim_ids:
+                status = "missing"
+                reason = "not_named_in_finish_claim"
+            elif criterion.predicate is None:
+                status = "invalid"
+                reason = "typed_predicate_missing"
+            else:
+                entry = latest.get(criterion.name)
+                if entry is None:
+                    status = "unobserved"
+                    reason = "criterion_unobserved"
+                elif criterion.freshness == "current_observation" and (
+                    entry.get("screen_id") != screen_id
+                    or entry.get("observation_epoch") != observation_epoch
+                ):
+                    status = "stale"
+                    reason = "evidence_binding_stale"
+                else:
+                    status = str(entry.get("status") or "unknown")
+                    reason = str(entry.get("reason_code") or "unspecified")
+            results[criterion.name] = {
+                "status": status,
+                "reason": reason,
+                "predicate_id": (
+                    criterion.predicate.predicate_id
+                    if criterion.predicate is not None
+                    else None
+                ),
+            }
+            if status == "matched":
+                matched.append(criterion.name)
+            elif status in self._BLOCKING:
+                missing.append(criterion.name)
+            else:
+                unknown.append(criterion.name)
+
+        required = {item.name for item in contract.success_criteria if item.required}
+        if unknown_claim_ids:
+            overall = "failure"
+        elif required.intersection(missing):
+            overall: Literal["success", "failure", "unknown"] = "failure"
+        elif required and required.issubset(matched):
+            overall = "success"
+        else:
+            overall = "unknown"
+        return GoalEvaluation(
+            status=overall,
+            matched=matched,
+            missing=missing,
+            soft_matched=unknown,
+            evidence={
+                "per_criterion": results,
+                "goal_type": "typed_contract",
+                "finish_claim_matched": sorted(claim_ids),
+                "unknown_finish_claim_ids": unknown_claim_ids,
+                "screen_id": screen_id,
+                "observation_epoch": observation_epoch,
+            },
+        )
 
 
 # ----------------------------------------------------------------------
@@ -89,7 +187,7 @@ class AggregatingGoalEvaluator:
         after_observation: dict[str, Any] | None = None,
         device_signals: dict[str, Any] | None = None,
         finish_claim_matched: list[str] | None = None,
-        reflect_named_evidence: list[dict[str, str]] | None = None,
+        reflect_named_evidence: list[dict[str, Any]] | None = None,
         trajectory_summary: str | None = None,
         goal_probes: dict[str, Any] | None = None,
     ) -> GoalEvaluation:
@@ -130,6 +228,10 @@ class AggregatingGoalEvaluator:
                 missing.append(crit.name)
                 if crit.verification != "vlm_judge" and crit.required:
                     programmatic_missing.add(crit.name)
+            elif status in {"contradicted", "invalid", "stale"}:
+                missing.append(crit.name)
+                if crit.required:
+                    programmatic_missing.add(crit.name)
             elif status == "unknown":
                 soft_matched.append(crit.name)
             elif status == "soft_matched":
@@ -146,12 +248,22 @@ class AggregatingGoalEvaluator:
                 if crit.name not in final_missing:
                     final_missing.append(crit.name)
                 per_criterion[crit.name]["status"] = "missing"
-                per_criterion[crit.name]["override_reason"] = "programmatic_contradiction"
+                per_criterion[crit.name][
+                    "override_reason"
+                ] = "programmatic_contradiction"
 
         # Determine status
         required_names = {c.name for c in contract.success_criteria if c.required}
-        required_matched = {c.name for c in contract.success_criteria if c.required and c.name in matched}
-        required_missing = {c.name for c in contract.success_criteria if c.required and c.name in final_missing}
+        required_matched = {
+            c.name
+            for c in contract.success_criteria
+            if c.required and c.name in matched
+        }
+        required_missing = {
+            c.name
+            for c in contract.success_criteria
+            if c.required and c.name in final_missing
+        }
 
         if required_missing:
             status: Literal["success", "failure", "unknown"] = "failure"
@@ -172,7 +284,6 @@ class AggregatingGoalEvaluator:
                 "per_criterion": per_criterion,
                 "goal_type": "declarative_contract",
                 "ordinal": contract.ordinal,
-                "task_hash": contract.task_hash,
                 "verification_strategy": contract.verification_strategy,
                 "finish_claim_matched": sorted(finish_matched_set),
             },
@@ -192,10 +303,18 @@ class AggregatingGoalEvaluator:
         after_observation: dict[str, Any] | None,
         device_signals: dict[str, Any] | None,
         finish_matched_set: set[str],
-        named_evidence_map: dict[str, dict[str, str]],
+        named_evidence_map: dict[str, dict[str, Any]],
         vlm_not_run: bool,
         goal_probes: dict[str, Any] | None,
     ) -> dict[str, Any]:
+        if crit.predicate is not None:
+            return self._check_typed_predicate(
+                crit,
+                contract=contract,
+                finish_matched_set=finish_matched_set,
+                named_evidence_map=named_evidence_map,
+                vlm_not_run=vlm_not_run,
+            )
         if crit.verification == "accessibility_text_match":
             return self._check_accessibility_text(crit, after_observation)
         if crit.verification == "object_hash_match":
@@ -203,20 +322,101 @@ class AggregatingGoalEvaluator:
         if crit.verification == "object_rank_match":
             return self._check_object_rank(crit, contract, verifier_evidence)
         if crit.verification == "app_or_activity_match":
-            return self._check_app_or_activity(crit, contract, after_observation, device_signals)
+            return self._check_app_or_activity(
+                crit, contract, after_observation, device_signals
+            )
         if crit.verification == "focus_or_keyboard":
-            return self._check_focus_or_keyboard(crit, after_observation, device_signals)
+            return self._check_focus_or_keyboard(
+                crit, after_observation, device_signals
+            )
         if crit.verification == "external_probe":
             return self._check_external_probe(crit, goal_probes)
         if crit.verification == "vlm_judge":
-            return self._check_vlm_judge(crit, finish_matched_set, named_evidence_map, vlm_not_run)
+            return self._check_vlm_judge(
+                crit, finish_matched_set, named_evidence_map, vlm_not_run
+            )
         return {"status": "missing", "reason": "unknown_verification"}
+
+    def _check_typed_predicate(
+        self,
+        crit: SuccessCriterion,
+        *,
+        contract: GoalContract,
+        finish_matched_set: set[str],
+        named_evidence_map: dict[str, dict[str, Any]],
+        vlm_not_run: bool,
+    ) -> dict[str, Any]:
+        """Match a typed expected predicate against current grounded evidence."""
+
+        if crit.name not in finish_matched_set:
+            return {"status": "missing", "reason": "not_named_in_finish_claim"}
+        if vlm_not_run:
+            return {"status": "unknown", "reason": "typed_fact_not_yet_collected"}
+        evidence = named_evidence_map.get(crit.name)
+        if not isinstance(evidence, dict):
+            return {"status": "missing", "reason": "typed_fact_missing"}
+        screen_reference = str(evidence.get("screen_reference") or "").strip()
+        if not screen_reference:
+            return {"status": "missing", "reason": "no_screen_reference"}
+        observed_value = evidence.get("observed_value")
+        source = str(evidence.get("source") or "visual_region")
+        if source not in {
+            "accessibility",
+            "screen_object",
+            "mark",
+            "visual_region",
+            "whole_screen",
+            "external_probe",
+            "device",
+        }:
+            return {"status": "invalid", "reason": "fact_source_invalid"}
+        screen_id = str(evidence.get("screen_id") or "current_screen")
+        epoch_value = evidence.get("observation_epoch", 0)
+        epoch = epoch_value if isinstance(epoch_value, int) else 0
+        try:
+            reference = EvidenceReference(
+                source_kind=source,  # type: ignore[arg-type]
+                reference_id=screen_reference,
+                screen_id=screen_id,
+                observation_epoch=epoch,
+            )
+            fact = ObservedFact(
+                predicate_id=crit.predicate.predicate_id,
+                observed_value=observed_value,
+                confidence=float(evidence.get("confidence", 1.0)),
+                source=source,  # type: ignore[arg-type]
+                evidence_reference=reference,
+                contract_id=contract.task_hash,
+                screen_id=screen_id,
+                observation_epoch=epoch,
+                provider_version=str(evidence.get("provider_version") or "reflect_v1"),
+            )
+            CORE_PREDICATE_CATALOG.validate_fact(fact)
+        except (TypeError, ValueError):
+            return {"status": "invalid", "reason": "typed_fact_invalid"}
+        result = Matcher.match(crit.predicate, fact)
+        return {
+            "status": result.status,
+            "reason": (
+                "target_mismatch"
+                if result.status == "contradicted"
+                else result.reason_code
+            ),
+            "source": source,
+            "confidence_bucket": (
+                "high"
+                if fact.confidence >= 0.9
+                else "medium" if fact.confidence >= 0.6 else "low"
+            ),
+        }
 
     # ------------------------------------------------------------------
     # Programmatic checks (reuse verifier.py primitives)
     # ------------------------------------------------------------------
 
-    def _check_accessibility_text(self, crit: SuccessCriterion, after_observation: dict[str, Any] | None) -> dict[str, Any]:
+    def _check_accessibility_text(
+        self, crit: SuccessCriterion, after_observation: dict[str, Any] | None
+    ) -> dict[str, Any]:
         from phone_agent.graph.verifier import _match_expected_text, _observation_text
 
         # Extract sha256 stubs from description (format: "sha256:xxxxxxxxxxxx")
@@ -232,15 +432,24 @@ class AggregatingGoalEvaluator:
             return {"status": "missing", "reason": "text_not_found", "missing": missing}
         return {"status": "matched", "reason": "text_matched", "matched": matched}
 
-    def _check_object_hash(self, crit: SuccessCriterion, verifier_evidence: dict[str, Any] | None) -> dict[str, Any]:
+    def _check_object_hash(
+        self, crit: SuccessCriterion, verifier_evidence: dict[str, Any] | None
+    ) -> dict[str, Any]:
         signals = (verifier_evidence or {}).get("selected_object_signals") or {}
         if signals.get("selected_object_match"):
             return {"status": "matched", "reason": "object_hash_match"}
-        if signals.get("wrong_detail_opened") or signals.get("same_surface_still_visible"):
+        if signals.get("wrong_detail_opened") or signals.get(
+            "same_surface_still_visible"
+        ):
             return {"status": "missing", "reason": "wrong_object_or_surface"}
         return {"status": "missing", "reason": "no_object_hash_signal"}
 
-    def _check_object_rank(self, crit: SuccessCriterion, contract: GoalContract, verifier_evidence: dict[str, Any] | None) -> dict[str, Any]:
+    def _check_object_rank(
+        self,
+        crit: SuccessCriterion,
+        contract: GoalContract,
+        verifier_evidence: dict[str, Any] | None,
+    ) -> dict[str, Any]:
         if contract.ordinal is None:
             return {"status": "missing", "reason": "no_ordinal_in_contract"}
         signals = (verifier_evidence or {}).get("selected_object_signals") or {}
@@ -261,8 +470,16 @@ class AggregatingGoalEvaluator:
             and not signals.get("wrong_detail_opened")
             and not signals.get("same_surface_still_visible")
         ):
-            return {"status": "matched", "reason": f"rank_{contract.ordinal}_detail_only_soft_match"}
-        return {"status": "missing", "reason": f"rank_{contract.ordinal}_not_matched", "expected_rank": contract.ordinal, "actual_rank": expected_rank}
+            return {
+                "status": "matched",
+                "reason": f"rank_{contract.ordinal}_detail_only_soft_match",
+            }
+        return {
+            "status": "missing",
+            "reason": f"rank_{contract.ordinal}_not_matched",
+            "expected_rank": contract.ordinal,
+            "actual_rank": expected_rank,
+        }
 
     def _check_app_or_activity(
         self,
@@ -285,7 +502,11 @@ class AggregatingGoalEvaluator:
             return {"status": "matched", "reason": "package_match"}
         if app_hint in current_app or app_hint in top_activity:
             return {"status": "matched", "reason": "app_hint_match"}
-        return {"status": "missing", "reason": "app_not_in_foreground", "current_app": current_app}
+        return {
+            "status": "missing",
+            "reason": "app_not_in_foreground",
+            "current_app": current_app,
+        }
 
     def _check_focus_or_keyboard(
         self,
@@ -301,7 +522,9 @@ class AggregatingGoalEvaluator:
             return {"status": "matched", "reason": "focus_or_keyboard_visible"}
         return {"status": "missing", "reason": "no_focus_or_keyboard"}
 
-    def _check_external_probe(self, crit: SuccessCriterion, goal_probes: dict[str, Any] | None) -> dict[str, Any]:
+    def _check_external_probe(
+        self, crit: SuccessCriterion, goal_probes: dict[str, Any] | None
+    ) -> dict[str, Any]:
         probe_id = crit.probe_id or crit.name
         probes = goal_probes or {}
         probe = probes.get(probe_id)
@@ -323,7 +546,7 @@ class AggregatingGoalEvaluator:
         self,
         crit: SuccessCriterion,
         finish_matched_set: set[str],
-        named_evidence_map: dict[str, dict[str, str]],
+        named_evidence_map: dict[str, dict[str, Any]],
         vlm_not_run: bool,
     ) -> dict[str, Any]:
         # Part 1: criterion must be named in finish.matched_terminal_evidence
@@ -344,7 +567,11 @@ class AggregatingGoalEvaluator:
             return {"status": "missing", "reason": "no_screen_reference"}
 
         # Part 3: programmatic contradiction is handled in the second pass
-        return {"status": "matched", "reason": "vlm_judge_with_grounded_evidence", "screen_reference": screen_ref}
+        return {
+            "status": "matched",
+            "reason": "vlm_judge_with_grounded_evidence",
+            "screen_reference": screen_ref,
+        }
 
     # ------------------------------------------------------------------
     # Helpers
@@ -370,6 +597,7 @@ class AggregatingGoalEvaluator:
 
 # Module-level singleton for convenience
 default_goal_evaluator = AggregatingGoalEvaluator()
+pure_goal_evaluator = PureGoalEvaluator()
 
 
 def evaluate_finish_claim(
@@ -380,7 +608,7 @@ def evaluate_finish_claim(
     after_observation: dict[str, Any] | None = None,
     device_signals: dict[str, Any] | None = None,
     finish_claim_matched: list[str] | None = None,
-    reflect_named_evidence: list[dict[str, str]] | None = None,
+    reflect_named_evidence: list[dict[str, Any]] | None = None,
     goal_probes: dict[str, Any] | None = None,
 ) -> GoalEvaluation:
     """Convenience entry point — drop-in replacement for old validate_finish_claim."""

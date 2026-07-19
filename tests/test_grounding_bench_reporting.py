@@ -5,7 +5,11 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from bench.grounding.reporting import build_summary, enrich_prediction, percentile
+from bench.grounding.reporting import (  # noqa: E402
+    build_summary,
+    enrich_prediction,
+    percentile,
+)
 
 
 def test_enrich_prediction_adds_iou_center_and_score() -> None:
@@ -16,7 +20,13 @@ def test_enrich_prediction_adds_iou_center_and_score() -> None:
         "elements": [{"id": "target", "bbox": [100, 100, 300, 300], "required": True}],
         "metadata": {"target_type": "android.widget.TextView", "area_bucket": "medium"},
     }
-    prediction = {"case_id": "case_1", "bbox": [110, 110, 290, 290], "success": True, "parsed": True, "latency_ms": 123}
+    prediction = {
+        "case_id": "case_1",
+        "bbox": [110, 110, 290, 290],
+        "success": True,
+        "parsed": True,
+        "latency_ms": 123,
+    }
 
     enriched = enrich_prediction(prediction, case)
 

@@ -4,7 +4,6 @@ import subprocess
 import time
 from dataclasses import dataclass
 from enum import Enum
-from typing import Optional
 
 from phone_agent.config.timing import TIMING_CONFIG
 

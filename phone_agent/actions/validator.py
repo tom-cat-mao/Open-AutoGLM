@@ -10,6 +10,7 @@ import re
 from typing import Any
 
 from phone_agent.actions.constants import BASE_DANGEROUS_FIELDS
+from phone_agent.actions.capability import get_tool_capability
 from phone_agent.actions.ir import ActionIR, to_action_dict
 
 
@@ -66,6 +67,10 @@ def validate_action(action: dict[str, Any] | ActionIR) -> dict[str, Any]:
         raise ActionValidationError("missing_field", "do.action must be a string")
     if action_name not in CANONICAL_ACTIONS:
         raise ActionValidationError("unknown_action", f"unknown action: {action_name}")
+    if get_tool_capability(action_name) is None:
+        raise ActionValidationError(
+            "capability_missing", f"no capability declaration for action: {action_name}"
+        )
 
     allowed = ALLOWED_FIELDS_BY_ACTION[action_name]
     extras = set(action_dict) - allowed

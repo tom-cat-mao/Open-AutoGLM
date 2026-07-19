@@ -9,7 +9,12 @@ from phone_agent.graph.nodes.execute import execute_node
 from phone_agent.graph.nodes.reflect import reflect_node
 from phone_agent.graph.nodes.confirm import confirm_node
 from phone_agent.graph.nodes.takeover import takeover_node
-from phone_agent.graph.edges import should_continue, after_execute, after_interrupt
+from phone_agent.graph.edges import (
+    after_execute,
+    after_goal,
+    after_interrupt,
+    should_continue,
+)
 
 
 def create_agent_graph():
@@ -22,7 +27,7 @@ def create_agent_graph():
                                    ├─ confirm → after_interrupt → [execute|reflect|end]
                                    ├─ takeover → after_interrupt → [reflect|end]
                                    ├─ reflect → should_continue → [takeover|replan→goal|end]
-                                   ├─ replan → goal → plan (skip reflect for Wait/Note/Call_API/Interact)
+                                   ├─ replan → goal → plan (only internal no-observation capabilities)
                                    └─ end → END
     ```
     """
@@ -36,7 +41,11 @@ def create_agent_graph():
     graph.add_node("takeover", takeover_node)
 
     graph.add_edge(START, "goal")
-    graph.add_edge("goal", "plan")
+    graph.add_conditional_edges(
+        "goal",
+        after_goal,
+        {"plan": "plan", "end": END},
+    )
     graph.add_edge("plan", "execute")
     graph.add_conditional_edges(
         "execute",

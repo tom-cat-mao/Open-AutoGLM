@@ -1,4 +1,4 @@
-"""Misc tools: note, call_api, interact — stub actions with no device side-effect."""
+"""Unavailable/delegated tool shims that fail closed if called directly."""
 
 from langchain_core.tools import tool
 
@@ -15,7 +15,9 @@ def note(message: str = "") -> dict:
     Returns:
         ActionResult serialized as dict.
     """
-    return ActionResult(success=True, should_finish=False).__dict__
+    return ActionResult(
+        success=False, should_finish=False, message="Capability unavailable: Note"
+    ).__dict__
 
 
 @tool
@@ -28,7 +30,9 @@ def call_api(message: str = "") -> dict:
     Returns:
         ActionResult serialized as dict.
     """
-    return ActionResult(success=True, should_finish=False).__dict__
+    return ActionResult(
+        success=False, should_finish=False, message="Capability unavailable: Call_API"
+    ).__dict__
 
 
 @tool
@@ -42,5 +46,5 @@ def interact(message: str = "") -> dict:
         ActionResult serialized as dict.
     """
     return ActionResult(
-        success=True, should_finish=False, message="User interaction required"
+        success=False, should_finish=False, message="User takeover required"
     ).__dict__

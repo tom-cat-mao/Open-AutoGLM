@@ -1,6 +1,8 @@
 import json
+import hashlib
 
 from phone_agent.graph.nodes.execute import execute_node
+from phone_agent.graph.expected_outcome import EXPECTED_OBJECT_FIELDS
 from phone_agent.graph.trace import JsonlTraceWriter, sanitize_for_trace
 
 
@@ -34,6 +36,50 @@ def test_sanitize_preserves_non_sensitive_shape() -> None:
         "result": {"success": True},
         "items": [[1, 2]],
     }
+
+
+def test_trace_omits_low_entropy_semantic_digests() -> None:
+    secret = "OTP 123456"
+    digest = hashlib.sha256(secret.encode("utf-8")).hexdigest()[:12]
+
+    sanitized = sanitize_for_trace(
+        {
+            "message": secret,
+            "task_hash": digest,
+            "criterion": {"description_sha256": digest},
+            "expected": f"sha256:{digest}",
+        }
+    )
+    serialized = json.dumps(sanitized, ensure_ascii=False)
+
+    assert secret not in serialized
+    assert digest not in serialized
+    assert "sha256:" not in serialized
+
+
+def test_trace_writer_redacts_every_expected_object_digest_field(tmp_path) -> None:
+    digest = "0123456789ab"
+    object_fields = {
+        key: (
+            2
+            if key == "expected_rank"
+            else (
+                "video"
+                if key in {"object_type", "expected_page_type"}
+                else f"len:12 sha256:{digest}" if key == "title_stub" else digest
+            )
+        )
+        for key in EXPECTED_OBJECT_FIELDS
+    }
+    writer = JsonlTraceWriter(trace_id="expected-object-privacy", trace_dir=tmp_path)
+
+    writer.emit("plan", "plan_result", 1, {"expected_outcome": object_fields})
+    record = json.loads(writer.path.read_text(encoding="utf-8").splitlines()[0])
+    serialized = json.dumps(record["payload"], ensure_ascii=False)
+
+    assert digest not in serialized
+    assert "sha256:" not in serialized
+    assert record["payload"]["expected_outcome"]["object_type"] == "video"
 
 
 def test_sanitize_redacts_identifiable_visible_text() -> None:
@@ -119,7 +165,10 @@ def test_sanitize_redacts_grounding_target_hint_but_keeps_hashes() -> None:
     assert "13800138000" not in raw
     assert sanitized["grounding_observation"]["raw_screenshot_hash"] == "hash-1"
     assert sanitized["grounding_observation"]["provider_input_hash"] == "hash-2"
-    assert sanitized["grounding_observation"]["target"]["target_text_hint"]["redacted"] is True
+    assert (
+        sanitized["grounding_observation"]["target"]["target_text_hint"]["redacted"]
+        is True
+    )
 
 
 def test_execute_trace_records_confirm_interrupt(base_state, tmp_path) -> None:
@@ -137,17 +186,22 @@ def test_execute_trace_records_confirm_interrupt(base_state, tmp_path) -> None:
     )
 
     records = [
-        json.loads(line) for line in writer.path.read_text(encoding="utf-8").splitlines()
+        json.loads(line)
+        for line in writer.path.read_text(encoding="utf-8").splitlines()
     ]
     assert result["pending_interrupt"] == "confirmation"
     assert any(item["event"] == "safety_decision" for item in records)
     assert any(item["event"] == "confirm_interrupt" for item in records)
-    confirm_record = next(item for item in records if item["event"] == "confirm_interrupt")
+    confirm_record = next(
+        item for item in records if item["event"] == "confirm_interrupt"
+    )
     payload = confirm_record["payload"]
     assert payload["interrupt_message"]["redacted"] is True
 
 
-def test_unredacted_prompt_debug_still_strips_image_payload(base_state, fake_device, tmp_path) -> None:
+def test_unredacted_prompt_debug_still_strips_image_payload(
+    base_state, fake_device, tmp_path
+) -> None:
     from phone_agent.graph.nodes.plan import plan_node
     from phone_agent.graph.trace import JsonlTraceWriter
 
@@ -169,7 +223,11 @@ def test_unredacted_prompt_debug_still_strips_image_payload(base_state, fake_dev
         trace_dir=tmp_path,
         allow_raw_request_debug=True,
     )
-    model = FakeModelClient(FakeModelResponse("think", '{"type":"do","action":"Wait","duration":"1 seconds"}'))
+    model = FakeModelClient(
+        FakeModelResponse(
+            "think", '{"type":"do","action":"Wait","duration":"1 seconds"}'
+        )
+    )
 
     plan_node(
         base_state,
@@ -184,6 +242,11 @@ def test_unredacted_prompt_debug_still_strips_image_payload(base_state, fake_dev
         },
     )
 
-    records = [json.loads(line) for line in writer.path.read_text(encoding="utf-8").splitlines()]
-    payload = next(item["payload"] for item in records if item["event"] == "plan_prompt_debug")
+    records = [
+        json.loads(line)
+        for line in writer.path.read_text(encoding="utf-8").splitlines()
+    ]
+    payload = next(
+        item["payload"] for item in records if item["event"] == "plan_prompt_debug"
+    )
     assert "image_url" not in json.dumps(payload["request_messages"])

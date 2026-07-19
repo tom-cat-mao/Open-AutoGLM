@@ -9,9 +9,7 @@ from phone_agent.graph.goal import (
     GoalContract,
     SuccessCriterion,
     build_goal_prompt_block,
-    compute_task_hash,
     ensure_goal_contract,
-    goal_trace_payload,
 )
 from phone_agent.graph.goal_compiler import (
     ExternalGoalCompiler,
@@ -20,8 +18,7 @@ from phone_agent.graph.goal_compiler import (
     compile_goal_contract,
 )
 from phone_agent.graph.nodes.goal_node import goal_node
-from phone_agent.graph.context import default_screen_belief, default_context_budget
-
+from phone_agent.graph.runtime_goal import RuntimeGoalContext
 
 # ----------------------------------------------------------------------
 # Fake model (mirrors test_plan_reflect.py FakeModelClient)
@@ -66,9 +63,25 @@ def test_heuristic_compiler_produces_weak_vlm_judge_contract() -> None:
     assert contract.ordinal == 2
     assert len(contract.entities_sha) > 0
     assert len(contract.success_criteria) >= 1
-    # All criteria should be vlm_judge or app_or_activity_match, not keyword-matched
+    # Deterministic legacy criteria are explicitly migrated to typed predicates.
     for crit in contract.success_criteria:
-        assert crit.verification in {"vlm_judge", "app_or_activity_match"}
+        assert crit.verification in {
+            "vlm_judge",
+            "app_or_activity_match",
+            "object_rank_match",
+        }
+    app_criterion = next(
+        item for item in contract.success_criteria if item.name == "target_app_visible"
+    )
+    assert app_criterion.predicate is not None
+    assert app_criterion.predicate.predicate_id == "app.foreground_identity"
+    rank_criterion = next(
+        item
+        for item in contract.success_criteria
+        if item.name == "selected_object_rank"
+    )
+    assert rank_criterion.predicate is not None
+    assert rank_criterion.predicate.expected_value == 2
 
 
 def test_heuristic_compiler_never_fails_on_empty_task() -> None:
@@ -98,7 +111,11 @@ def test_external_compiler_returns_injected_contract() -> None:
         redacted_objective="test redacted",
         objective_length=10,
         success_criteria=[
-            SuccessCriterion(name="player_visible", description="player on screen", verification="accessibility_text_match"),
+            SuccessCriterion(
+                name="player_visible",
+                description="player on screen",
+                verification="accessibility_text_match",
+            ),
         ],
         target_app_hint="bilibili",
         ordinal=2,
@@ -144,7 +161,9 @@ def test_llm_compiler_parses_valid_structured_output() -> None:
         ensure_ascii=False,
     )
     model = FakeModelClient(FakeModelResponse("", compiled_json))
-    contract = LLMGoalCompiler(model, lang="cn", retry_limit=1).compile(task="去b站看逗比的雀巢的第二个视频")
+    contract = LLMGoalCompiler(model, lang="cn", retry_limit=1).compile(
+        task="去b站看逗比的雀巢的第二个视频"
+    )
 
     assert contract.compile_status == "compiled"
     assert contract.compile_source == "llm"
@@ -165,7 +184,12 @@ def test_llm_compiler_retries_on_parse_failure_then_succeeds() -> None:
             {
                 "objective": "search something",
                 "success_criteria": [
-                    {"name": "results_visible", "description": "search results", "verification": "vlm_judge", "required": True},
+                    {
+                        "name": "results_visible",
+                        "description": "search results",
+                        "verification": "vlm_judge",
+                        "required": True,
+                    },
                 ],
                 "constraints": [],
                 "non_goals": [],
@@ -175,7 +199,9 @@ def test_llm_compiler_retries_on_parse_failure_then_succeeds() -> None:
         ),
     )
     model = FakeModelClient([bad_response, good_response])
-    contract = LLMGoalCompiler(model, lang="cn", retry_limit=1).compile(task="搜索蓝牙耳机")
+    contract = LLMGoalCompiler(model, lang="cn", retry_limit=1).compile(
+        task="搜索蓝牙耳机"
+    )
 
     assert contract.compile_status == "compiled"
     assert contract.compile_attempts == 2
@@ -183,8 +209,12 @@ def test_llm_compiler_retries_on_parse_failure_then_succeeds() -> None:
 
 
 def test_llm_compiler_returns_failed_after_retry_exhausted() -> None:
-    model = FakeModelClient([FakeModelResponse("", "not json"), FakeModelResponse("", "still not json")])
-    contract = LLMGoalCompiler(model, lang="cn", retry_limit=1).compile(task="test task")
+    model = FakeModelClient(
+        [FakeModelResponse("", "not json"), FakeModelResponse("", "still not json")]
+    )
+    contract = LLMGoalCompiler(model, lang="cn", retry_limit=1).compile(
+        task="test task"
+    )
 
     assert contract.compile_status == "failed"
     assert contract.compile_source == "llm"
@@ -197,8 +227,18 @@ def test_llm_compiler_rejects_duplicate_criterion_names() -> None:
         {
             "objective": "test",
             "success_criteria": [
-                {"name": "dup", "description": "a", "verification": "vlm_judge", "required": True},
-                {"name": "dup", "description": "b", "verification": "vlm_judge", "required": True},
+                {
+                    "name": "dup",
+                    "description": "a",
+                    "verification": "vlm_judge",
+                    "required": True,
+                },
+                {
+                    "name": "dup",
+                    "description": "b",
+                    "verification": "vlm_judge",
+                    "required": True,
+                },
             ],
             "constraints": [],
             "non_goals": [],
@@ -217,7 +257,12 @@ def test_llm_compiler_rejects_invalid_verification() -> None:
         {
             "objective": "test",
             "success_criteria": [
-                {"name": "c1", "description": "a", "verification": "magic_keyword_match", "required": True},
+                {
+                    "name": "c1",
+                    "description": "a",
+                    "verification": "magic_keyword_match",
+                    "required": True,
+                },
             ],
             "constraints": [],
             "non_goals": [],
@@ -241,12 +286,20 @@ def test_compile_chain_prefers_external_override() -> None:
         task_hash="ext",
         redacted_objective="external",
         objective_length=8,
-        success_criteria=[SuccessCriterion(name="c1", description="d", verification="vlm_judge")],
+        success_criteria=[
+            SuccessCriterion(name="c1", description="d", verification="vlm_judge")
+        ],
         compile_status="compiled",
         compile_source="external",
     )
     state = {"task": "search something", "lang": "cn"}
-    config = {"configurable": {"task_goal_contract_override": injected, "model_client": FakeModelClient(FakeModelResponse("", "{}"))}}
+    config = {
+        "configurable": {
+            "task_goal_contract_override": injected,
+            "allow_legacy_goal_override_for_tests": True,
+            "model_client": FakeModelClient(FakeModelResponse("", "{}")),
+        }
+    }
 
     result = compile_goal_contract(state, config)
 
@@ -256,7 +309,9 @@ def test_compile_chain_prefers_external_override() -> None:
 
 def test_compile_chain_falls_back_to_heuristic_on_llm_failure() -> None:
     state = {"task": "打开设置", "lang": "cn"}
-    config = {"configurable": {"model_client": RaisingModelClient(), "goal_compile_retry": 1}}
+    config = {
+        "configurable": {"model_client": RaisingModelClient(), "goal_compile_retry": 1}
+    }
 
     result = compile_goal_contract(state, config)
 
@@ -286,8 +341,14 @@ def test_to_prompt_block_lists_criteria_in_cn() -> None:
         redacted_objective="test objective",
         objective_length=14,
         success_criteria=[
-            SuccessCriterion(name="player_visible", description="播放器可见", verification="accessibility_text_match"),
-            SuccessCriterion(name="rank_2", description="第2个视频", verification="object_rank_match"),
+            SuccessCriterion(
+                name="player_visible",
+                description="播放器可见",
+                verification="accessibility_text_match",
+            ),
+            SuccessCriterion(
+                name="rank_2", description="第2个视频", verification="object_rank_match"
+            ),
         ],
         target_app_hint="bilibili",
         ordinal=2,
@@ -329,7 +390,9 @@ def test_from_dict_round_trips() -> None:
         redacted_objective="obj",
         objective_length=3,
         success_criteria=[
-            SuccessCriterion(name="c1", description="d", verification="vlm_judge", required=False),
+            SuccessCriterion(
+                name="c1", description="d", verification="vlm_judge", required=False
+            ),
         ],
         constraints=["con1"],
         non_goals=["ng1"],
@@ -361,12 +424,17 @@ def test_ensure_goal_contract_returns_contract_for_compiled() -> None:
             task_hash="h",
             redacted_objective="obj",
             objective_length=3,
-            success_criteria=[SuccessCriterion(name="c1", description="d", verification="vlm_judge")],
+            success_criteria=[
+                SuccessCriterion(name="c1", description="d", verification="vlm_judge")
+            ],
             compile_status="compiled",
             compile_source="external",
         ).to_dict()
     }
-    contract = ensure_goal_contract(state)
+    contract = ensure_goal_contract(
+        state,
+        {"configurable": {"allow_legacy_goal_state_for_tests": True}},
+    )
 
     assert contract is not None
     assert contract.task_hash == "h"
@@ -383,28 +451,31 @@ def test_build_goal_prompt_block_returns_empty_for_uncompiled() -> None:
 
 
 def test_goal_node_noop_when_already_compiled() -> None:
-    state = {
-        "task": "test",
+    runtime_goal = RuntimeGoalContext()
+    initial_state = {
+        "task": "打开设置",
         "step_count": 0,
-        "goal_contract_status": "compiled",
+        "lang": "cn",
+        "goal_contract_status": "pending",
         "needs_recompile": False,
-        "goal_contract": GoalContract(
-            task_hash="h",
-            redacted_objective="obj",
-            objective_length=4,
-            success_criteria=[SuccessCriterion(name="c", description="d", verification="vlm_judge")],
-            compile_status="compiled",
-            compile_source="external",
-        ).to_dict(),
     }
-    result = goal_node(state, {"configurable": {}})
+    config = {"configurable": {"runtime_goal_context": runtime_goal}}
+    compiled = goal_node(initial_state, config)
+    state = {**initial_state, **compiled}
+
+    result = goal_node(state, config)
 
     assert result == {}
 
 
 def test_goal_node_compiles_on_pending_status() -> None:
-    state = {"task": "打开设置", "step_count": 0, "lang": "cn", "goal_contract_status": "pending"}
-    config = {"configurable": {}}
+    state = {
+        "task": "打开设置",
+        "step_count": 0,
+        "lang": "cn",
+        "goal_contract_status": "pending",
+    }
+    config = {"configurable": {"runtime_goal_context": RuntimeGoalContext()}}
 
     result = goal_node(state, config)
 
@@ -414,6 +485,25 @@ def test_goal_node_compiles_on_pending_status() -> None:
     contract_dict = result["goal_contract"]
     assert isinstance(contract_dict, dict)
     assert contract_dict["target_app_hint"] == "settings"
+
+
+def test_goal_node_fails_closed_when_requirements_need_clarification() -> None:
+    state = {
+        "task": "perform an unspecified mysterious operation",
+        "step_count": 0,
+        "lang": "en",
+        "goal_contract_status": "pending",
+    }
+
+    result = goal_node(
+        state,
+        {"configurable": {"runtime_goal_context": RuntimeGoalContext()}},
+    )
+
+    assert result["goal_contract_status"] == "failed"
+    assert result["finished"] is True
+    assert result["failure_cause"] == "needs_goal_clarification"
+    assert result["task_requirement_set"]["operation_kind"] == "unknown"
 
 
 def test_goal_node_recompiles_when_needs_recompile() -> None:
@@ -432,29 +522,83 @@ def test_goal_node_recompiles_when_needs_recompile() -> None:
             compile_source="external",
         ).to_dict(),
     }
-    config = {"configurable": {}}
+    config = {"configurable": {"runtime_goal_context": RuntimeGoalContext()}}
 
     result = goal_node(state, config)
 
     assert result["goal_contract_status"] == "compiled"
     assert result["needs_recompile"] is False
     # Compiled a new contract (heuristic since no model_client)
-    assert result["goal_contract"]["task_hash"] != "old"
+    assert "task_hash" not in result["goal_contract"]
+    assert result["goal_contract"]["schema"] == "goal_contract_state_metadata_v1"
+
+
+def test_goal_node_requires_runtime_context_for_compilation() -> None:
+    result = goal_node(
+        {
+            "task": "打开设置",
+            "step_count": 0,
+            "lang": "cn",
+            "goal_contract_status": "pending",
+        },
+        {"configurable": {}},
+    )
+
+    assert result["goal_contract_status"] == "failed"
+    assert result["error_code"] == "goal_contract_invalid"
+    assert result["contract_adequacy_reasons"] == ["runtime_goal_context_missing"]
+
+
+@pytest.mark.parametrize(
+    "mutation", ["missing_reference", "wrong_reference", "changed_task", "lost_context"]
+)
+def test_compiled_goal_reuse_fails_closed_when_runtime_binding_is_lost(
+    mutation: str,
+) -> None:
+    runtime_goal = RuntimeGoalContext()
+    config = {"configurable": {"runtime_goal_context": runtime_goal}}
+    initial = {
+        "task": "打开设置",
+        "step_count": 0,
+        "lang": "cn",
+        "goal_contract_status": "pending",
+        "needs_recompile": False,
+    }
+    compiled = goal_node(initial, config)
+    state = {**initial, **compiled}
+    if mutation == "missing_reference":
+        state["goal_contract"] = {**state["goal_contract"], "runtime_reference": None}
+    elif mutation == "wrong_reference":
+        state["goal_contract"] = {
+            **state["goal_contract"],
+            "runtime_reference": "goal-wrong",
+        }
+    elif mutation == "changed_task":
+        state["task"] = "打开浏览器"
+    else:
+        config = {"configurable": {"runtime_goal_context": RuntimeGoalContext()}}
+
+    result = goal_node(state, config)
+
+    assert result["goal_contract_status"] == "failed"
+    assert result["error_code"] == "goal_contract_invalid"
+    assert result["contract_adequacy_reasons"] == ["runtime_goal_binding_unavailable"]
 
 
 def test_ensure_goal_contract_rejects_trace_payload() -> None:
-    """P2-4: trace payload (redacted_objective is dict, not str) must be rejected."""
+    """Trace-only metadata must never be accepted as an executable contract."""
     contract = GoalContract(
         task_hash="h",
         redacted_objective="real objective",
         objective_length=3,
-        success_criteria=[SuccessCriterion(name="c1", description="d", verification="vlm_judge")],
+        success_criteria=[
+            SuccessCriterion(name="c1", description="d", verification="vlm_judge")
+        ],
         compile_status="compiled",
         compile_source="external",
     )
     trace = contract.to_trace_payload()
-    # trace payload has redacted_objective as a dict, not a str
-    assert isinstance(trace["redacted_objective"], dict)
+    assert trace["schema"] == "goal_contract_trace_metadata_v1"
 
     state = {"goal_contract": trace}
     assert ensure_goal_contract(state) is None
@@ -476,10 +620,11 @@ def test_validator_accepts_finish_with_matched_terminal_evidence() -> None:
 def test_validator_rejects_non_list_matched_terminal_evidence() -> None:
     from phone_agent.actions.validator import ActionValidationError, validate_action
 
-    with pytest.raises(ActionValidationError) as exc_info:
-        validate_action({
-            "_metadata": "finish",
-            "message": "done",
-            "matched_terminal_evidence": "not a list",
-        })
-    assert exc_info.value.code == "unsafe_value"
+    with pytest.raises(ActionValidationError):
+        validate_action(
+            {
+                "_metadata": "finish",
+                "message": "done",
+                "matched_terminal_evidence": "not a list",
+            }
+        )

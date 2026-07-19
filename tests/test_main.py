@@ -1,8 +1,6 @@
 import importlib.util
 from pathlib import Path
 
-import pytest
-
 
 def _load_main_module():
     module_path = Path(__file__).resolve().parents[1] / "main.py"

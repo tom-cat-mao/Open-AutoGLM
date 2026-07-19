@@ -82,7 +82,21 @@ def get_tool_map() -> dict[str, Any]:
     }
 ```
 
-`dispatch_tool()` handles `_metadata="do"` and `_metadata="finish"`, filters kwargs by tool function signature, injects `screen_width` / `screen_height` / `device_id` when supported, and converts tool dict results back to `ActionResult`.
+`dispatch_tool()` is the low-level compatibility dispatcher. The graph path first validates a capability declaration, runs Safety Gate, enforces implementation availability immediately before dispatch, and records an `ActionReceipt`. The legacy `ActionResult` is a dispatch projection only; it is not transition verification or Goal progress.
+
+## Capability Gate
+
+- `phone_agent/actions/capability.py` owns immutable metadata for every canonical action: implementation status, side-effect kind, observation effect, required postconditions, retry safety, and HITL policy.
+- The P0 order is `Adapter -> Validator -> Repair -> Validator -> Safety Gate -> capability availability -> dispatch`. Validator checks declaration presence; availability never bypasses Safety/HITL classification.
+- Execute writes `action_receipt` (`accepted | rejected | unknown`) and never writes positive `action_succeeded`. Reflect is the only owner of transition success.
+- UI/external actions and `Wait` always reobserve through Reflect. Reflect may be skipped only for an implemented internal capability with `observation_effect=none` that cannot advance Goal.
+
+## Safety Policy Registry
+
+- `phone_agent/config/policy.py` owns the versioned multilingual safety vocabulary, semantic tags, and deterministic precedence.
+- Credential/login/captcha/OTP classifications route to takeover and outrank payment/privacy/delete/permission confirmation.
+- NFKC and token-aware matching prevent simple Unicode and substring evasions. Ordinary unknown pages are not sensitive by default; uncertainty fails closed only when a potentially sensitive side effect is declared.
+- Model output and optional adapters cannot mutate policy. The Safety Gate remains after final validation and before availability/dispatch.
 
 ## Action Details
 
@@ -107,25 +121,28 @@ def get_tool_map() -> dict[str, Any]:
 - Text is auto-cleared before typing (no separate clear step needed)
 
 ### Launch
-- Looks up app name in `APP_PACKAGES` (Android)
-- Returns `ActionResult(False, False, "App not found")` if name not in mapping
+- Resolves app aliases through `AppRegistry`, then applies the separate `LaunchPolicy` before Android dispatch
+- Registry recognition, device installation, and launch authorization are independent facts
+- Returns `ActionResult(False, False, "App not found")` for unknown, ambiguous, or denied targets
 
-### Stub Actions (Note, Call_API, Interact)
-- `Note`: Returns `ActionResult(True, False)` - no actual implementation
-- `Call_API`: Returns `ActionResult(True, False)` - no actual implementation
-- `Interact`: Returns `ActionResult(True, False, message="User interaction required")`
+### Unavailable / Delegated Actions
+- `Note`: unavailable; fails closed with `capability_unavailable`.
+- `Call_API`: unavailable external capability; fails closed with `capability_unavailable`.
+- `Interact`: delegated capability; dispatches a takeover request with acknowledgement pending and does not report transition success.
+- Direct calls to the compatibility tool shims also return `success=False`.
 
 ## Adding a New Action: Checklist
 
 1. [ ] Add or update a `@tool` function under `phone_agent/graph/tools/`
 2. [ ] Register the action name in `get_tool_map()` in `phone_agent/graph/tools/__init__.py`
-3. [ ] Return `ActionResult.__dict__` from the tool function
-4. [ ] Update system prompt sections in `prompts_zh.py` and `prompts_en.py` if the model needs to emit the new action
-5. [ ] Update `phone_agent/actions/adapter.py` whitelists, aliases, field validation, and canonical mapping if JSON/tool_calls should support it
-6. [ ] If action uses coordinates, call `convert_relative_to_absolute()` from `phone_agent/graph/tools/coords.py`
-7. [ ] If action is sensitive, route through `execute_node` to `confirm_node` / `takeover_node` using `interrupt()`, not callbacks
-8. [ ] If action needs new device-level commands, add them to `adb/` module
-9. [ ] Add tests for parser/adapter, tool function, and `dispatch_tool()` routing
+3. [ ] Declare immutable metadata in `phone_agent/actions/capability.py`
+4. [ ] Return `ActionResult.__dict__` from the low-level tool function
+5. [ ] Update system prompt sections in `prompts_zh.py` and `prompts_en.py` if the model needs to emit the new action
+6. [ ] Update `phone_agent/actions/adapter.py` whitelists, aliases, field validation, and canonical mapping if JSON/tool_calls should support it
+7. [ ] If action uses coordinates, call `convert_relative_to_absolute()` from `phone_agent/graph/tools/coords.py`
+8. [ ] If action is sensitive, route through `execute_node` to `confirm_node` / `takeover_node` using `interrupt()`, not callbacks
+9. [ ] If action needs new device-level commands, add them to `adb/` module
+10. [ ] Add tests for capability completeness, parser/adapter, Safety-before-availability order, receipt semantics, and tool routing
 
 ## Action Details by Platform
 

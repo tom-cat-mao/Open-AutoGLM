@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from phone_agent.config.app_registry import ForegroundAppObservation
+from phone_agent.config.policy import DEFAULT_SAFETY_POLICY
 from phone_agent.graph.marks import (
     MarkRegistry,
     build_mark_topology_digest,
@@ -20,13 +22,21 @@ from phone_agent.graph.objects import (
     StructureNode,
     build_composite_structure_digest,
     build_object_registry,
+    build_structure_topology_digest,
     summarize_structures,
 )
-from phone_agent.grounding.provider import MarkProvider, MarkProviderHint, MarkProviderResult, ScreenBinding
+from phone_agent.grounding.provider import (
+    MarkProvider,
+    MarkProviderHint,
+    MarkProviderResult,
+    ScreenBinding,
+)
 
 
 def _safe_metadata(value: Any, *, default: str = "") -> str:
-    safe = str(sanitize_context_payload(str(value or ""), "message", consumer="inject")).strip()
+    safe = str(
+        sanitize_context_payload(str(value or ""), "message", consumer="inject")
+    ).strip()
     return safe[:64] or default
 
 
@@ -72,6 +82,10 @@ class ScreenSnapshot:
     screen_id: str
     screen_hash: str
     current_app: str
+    foreground_package: str | None
+    foreground_activity: str | None
+    foreground_canonical_id: str | None
+    foreground_known: bool
     width: int
     height: int
     semantic_screen_id: str
@@ -85,6 +99,10 @@ class ScreenSnapshot:
             "screen_id": self.screen_id,
             "screen_hash": self.screen_hash,
             "current_app": self.current_app,
+            "foreground_package": self.foreground_package,
+            "foreground_activity": self.foreground_activity,
+            "foreground_canonical_id": self.foreground_canonical_id,
+            "foreground_known": self.foreground_known,
             "width": self.width,
             "height": self.height,
             "semantic_screen_id": self.semantic_screen_id,
@@ -109,14 +127,21 @@ class Observation:
             "snapshot": self.snapshot.to_dict(),
             "mark_registry": self.mark_registry.to_dict(),
             "mark_provider_observation": self.mark_provider_observation,
-            "screen_structure": self.screen_structure.trace_summary() if self.screen_structure else None,
-            "screen_structures": [structure.trace_summary() for structure in self.screen_structures],
-            "object_registry": self.object_registry.trace_summary() if self.object_registry else None,
+            "screen_structure": (
+                self.screen_structure.trace_summary() if self.screen_structure else None
+            ),
+            "screen_structures": [
+                structure.trace_summary() for structure in self.screen_structures
+            ],
+            "object_registry": (
+                self.object_registry.trace_summary() if self.object_registry else None
+            ),
         }
 
 
 def build_mark_provider_hints(
-    *, task: str | None = None,
+    *,
+    task: str | None = None,
     reflection: str | None = None,
     provider_hints: list[str | dict[str, Any] | MarkProviderHint] | None = None,
     max_hints: int = 3,
@@ -132,7 +157,9 @@ def build_mark_provider_hints(
         return text[:240]
 
     def _safe_text(value: Any) -> str:
-        safe = str(sanitize_context_payload(str(value or ""), "message", consumer="inject")).strip()
+        safe = str(
+            sanitize_context_payload(str(value or ""), "message", consumer="inject")
+        ).strip()
         return safe[:240]
 
     for item in provider_hints or []:
@@ -182,15 +209,27 @@ def _provider_accepts_raw_hints(provider: MarkProvider) -> bool:
 def _redact_provider_hints(hints: list[MarkProviderHint]) -> list[MarkProviderHint]:
     redacted: list[MarkProviderHint] = []
     for hint in hints:
-        text = str(sanitize_context_payload(hint.text, "message", consumer="inject")).strip()
+        text = str(
+            sanitize_context_payload(hint.text, "message", consumer="inject")
+        ).strip()
         if not text:
             continue
         redacted.append(
             MarkProviderHint(
                 text=text[:240],
                 source=_safe_metadata(hint.source, default="hint"),
-                role=str(sanitize_context_payload(hint.role or "", "message", consumer="inject")).strip()[:240] or None,
-                intent=str(sanitize_context_payload(hint.intent or "", "message", consumer="inject")).strip()[:240] or None,
+                role=str(
+                    sanitize_context_payload(
+                        hint.role or "", "message", consumer="inject"
+                    )
+                ).strip()[:240]
+                or None,
+                intent=str(
+                    sanitize_context_payload(
+                        hint.intent or "", "message", consumer="inject"
+                    )
+                ).strip()[:240]
+                or None,
                 action=_safe_metadata(hint.action),
             )
         )
@@ -207,9 +246,13 @@ def _provider_result_to_marks(result: MarkProviderResult) -> list[dict[str, Any]
         bbox = mark.get("bbox") if isinstance(mark, dict) else mark.bbox
         center = mark.get("center") if isinstance(mark, dict) else mark.center
         source = mark.get("source") if isinstance(mark, dict) else mark.source
-        confidence = mark.get("confidence") if isinstance(mark, dict) else mark.confidence
+        confidence = (
+            mark.get("confidence") if isinstance(mark, dict) else mark.confidence
+        )
         role = mark.get("role") if isinstance(mark, dict) else mark.role
-        text_summary = mark.get("text_summary") if isinstance(mark, dict) else mark.text_summary
+        text_summary = (
+            mark.get("text_summary") if isinstance(mark, dict) else mark.text_summary
+        )
         marks.append(
             {
                 "mark_id": mark_id or f"{result.provider}_{index}",
@@ -218,7 +261,9 @@ def _provider_result_to_marks(result: MarkProviderResult) -> list[dict[str, Any]
                 "source": source or result.provider,
                 "confidence": 1.0 if confidence is None else confidence,
                 "role": role,
-                "text_summary": sanitize_context_payload(text_summary or "", "message", consumer="inject"),
+                "text_summary": sanitize_context_payload(
+                    text_summary or "", "message", consumer="inject"
+                ),
             }
         )
     return marks
@@ -242,22 +287,56 @@ def _summarize_provider_result(result: MarkProviderResult) -> dict[str, Any]:
             {
                 key: _safe_metadata(value)
                 for key, value in dict(hint).items()
-                if key in {"source", "has_text", "text_length", "has_role", "role_length", "has_intent", "intent_length", "action"}
+                if key
+                in {
+                    "source",
+                    "has_text",
+                    "text_length",
+                    "has_role",
+                    "role_length",
+                    "has_intent",
+                    "intent_length",
+                    "action",
+                }
             }
             for hint in list(result.hints or [])[:5]
             if isinstance(hint, dict)
         ],
         "marks": [
             {
-                "mark_id": _safe_metadata(mark.get("mark_id") if isinstance(mark, dict) else mark.mark_id),
-                "bbox": _safe_coordinate_list(mark.get("bbox") if isinstance(mark, dict) else mark.bbox, expected_len=4),
-                "center": _safe_coordinate_list(mark.get("center") if isinstance(mark, dict) else mark.center, expected_len=2),
-                "confidence": _safe_float(mark.get("confidence") if isinstance(mark, dict) else mark.confidence),
-                "source": _safe_metadata(mark.get("source") if isinstance(mark, dict) else mark.source),
-                "valid": _safe_bool(mark.get("valid") if isinstance(mark, dict) else mark.valid),
-                "reason": _safe_metadata(mark.get("reason") if isinstance(mark, dict) else mark.reason),
-                "role_length": _safe_length(mark.get("role") if isinstance(mark, dict) else mark.role),
-                "text_summary_length": _safe_length(mark.get("text_summary") if isinstance(mark, dict) else mark.text_summary),
+                "mark_id": _safe_metadata(
+                    mark.get("mark_id") if isinstance(mark, dict) else mark.mark_id
+                ),
+                "bbox": _safe_coordinate_list(
+                    mark.get("bbox") if isinstance(mark, dict) else mark.bbox,
+                    expected_len=4,
+                ),
+                "center": _safe_coordinate_list(
+                    mark.get("center") if isinstance(mark, dict) else mark.center,
+                    expected_len=2,
+                ),
+                "confidence": _safe_float(
+                    mark.get("confidence")
+                    if isinstance(mark, dict)
+                    else mark.confidence
+                ),
+                "source": _safe_metadata(
+                    mark.get("source") if isinstance(mark, dict) else mark.source
+                ),
+                "valid": _safe_bool(
+                    mark.get("valid") if isinstance(mark, dict) else mark.valid
+                ),
+                "reason": _safe_metadata(
+                    mark.get("reason") if isinstance(mark, dict) else mark.reason
+                ),
+                "role_length": _safe_length(
+                    mark.get("role") if isinstance(mark, dict) else mark.role
+                ),
+                "text_summary_length": _safe_length(
+                    mark.get("text_summary")
+                    if isinstance(mark, dict)
+                    else mark.text_summary
+                ),
             }
             for mark in list(result.marks or [])[:20]
         ],
@@ -309,7 +388,11 @@ def _result_structure_dicts(result: MarkProviderResult) -> list[dict[str, Any]]:
 def _safe_screen_structures_summary(values: list[dict[str, Any]]) -> dict[str, Any]:
     if not values:
         return {}
-    summaries = [_safe_screen_structure_summary(value) for value in values if isinstance(value, dict)]
+    summaries = [
+        _safe_screen_structure_summary(value)
+        for value in values
+        if isinstance(value, dict)
+    ]
     summaries = [summary for summary in summaries if summary]
     if not summaries:
         return {}
@@ -330,10 +413,14 @@ def _safe_screen_structure_summary(value: Any) -> dict[str, Any]:
         return {}
     return {
         "status": _safe_metadata(value.get("status"), default="ok"),
-        "structure_kind": _safe_metadata(value.get("structure_kind"), default="accessibility"),
+        "structure_kind": _safe_metadata(
+            value.get("structure_kind"), default="accessibility"
+        ),
         "source_provider": _safe_metadata(value.get("source_provider")),
         "confidence_tier": _safe_metadata(value.get("confidence_tier")),
-        "structure_digest": _safe_metadata(value.get("structure_digest") or value.get("topology_digest")),
+        "structure_digest": _safe_metadata(
+            value.get("structure_digest") or value.get("topology_digest")
+        ),
         "node_count": _safe_int(value.get("node_count")),
         "topology_digest": _safe_metadata(value.get("topology_digest")),
         "root_node_id": _safe_metadata(value.get("root_node_id")),
@@ -359,7 +446,10 @@ def _safe_fallback_chain(value: Any) -> list[dict[str, Any]]:
                 "usable": bool(item.get("usable")),
                 "skip_reason": _safe_enum(
                     item.get("skip_reason"),
-                    {"accessibility_dump_callback_missing", "skip_accessibility_provider"},
+                    {
+                        "accessibility_dump_callback_missing",
+                        "skip_accessibility_provider",
+                    },
                 ),
             }
         )
@@ -376,7 +466,9 @@ def _safe_parse_summary(value: Any) -> dict[str, Any]:
         "structure_node_count": _safe_int(value.get("structure_node_count")),
         "bounds_parse_fail_count": _safe_int(value.get("bounds_parse_fail_count")),
         "filtered_zero_area_count": _safe_int(value.get("filtered_zero_area_count")),
-        "interactive_candidate_count": _safe_int(value.get("interactive_candidate_count")),
+        "interactive_candidate_count": _safe_int(
+            value.get("interactive_candidate_count")
+        ),
     }
 
 
@@ -393,7 +485,9 @@ def _safe_hybrid_factory(value: Any) -> dict[str, Any]:
             value.get("accessibility_child_skip_reason"),
             {"accessibility_dump_callback_missing", "skip_accessibility_provider"},
         ),
-        "provider_order": [_safe_metadata(item, default="unknown") for item in provider_order[:8]],
+        "provider_order": [
+            _safe_metadata(item, default="unknown") for item in provider_order[:8]
+        ],
     }
 
 
@@ -402,7 +496,9 @@ def _safe_enum(value: Any, allowed: set[str]) -> str | None:
     return item if item in allowed else None
 
 
-def _validate_provider_result(result: MarkProviderResult, binding: ScreenBinding) -> str | None:
+def _validate_provider_result(
+    result: MarkProviderResult, binding: ScreenBinding
+) -> str | None:
     if not result.success or result.failure_code:
         return result.failure_code or "provider_failure"
     if not result.marks:
@@ -417,10 +513,15 @@ def _validate_provider_result(result: MarkProviderResult, binding: ScreenBinding
 
 
 def build_observation(
-    *, screenshot: Any, current_app: str, marks: list[dict[str, Any]] | None = None,
+    *,
+    screenshot: Any,
+    current_app: str,
+    marks: list[dict[str, Any]] | None = None,
     mark_providers: list[MarkProvider] | None = None,
     provider_hints: list[MarkProviderHint] | None = None,
     provider_timeout: float | None = None,
+    foreground: ForegroundAppObservation | None = None,
+    observation_epoch: int = 0,
 ) -> Observation:
     """Build a screen observation with optional mock/provider marks.
 
@@ -432,7 +533,9 @@ def build_observation(
     height = int(getattr(screenshot, "height", 0) or 0)
     screenshot_b64 = getattr(screenshot, "base64_data", None)
     base_marks = list(marks or [])
-    semantic_screen_id = build_semantic_screen_id(current_app=current_app, width=width, height=height)
+    semantic_screen_id = build_semantic_screen_id(
+        current_app=current_app, width=width, height=height
+    )
     mark_topology_digest = build_mark_topology_digest(base_marks)
     perceptual_hash = compute_perceptual_hash(
         screenshot_b64,
@@ -454,7 +557,7 @@ def build_observation(
         height=height,
         current_app=current_app,
         semantic_screen_id=semantic_screen_id,
-        observation_epoch=0,
+        observation_epoch=observation_epoch,
         mark_set_version=mark_topology_digest,
         perceptual_hash=perceptual_hash,
     )
@@ -477,7 +580,10 @@ def build_observation(
         except Exception as exc:
             provider_summaries.append(
                 {
-                    "provider": _safe_metadata(getattr(provider, "name", type(provider).__name__), default="unknown"),
+                    "provider": _safe_metadata(
+                        getattr(provider, "name", type(provider).__name__),
+                        default="unknown",
+                    ),
                     "success": False,
                     "failure_code": "provider_error",
                     "message": _safe_metadata(type(exc).__name__),
@@ -487,7 +593,9 @@ def build_observation(
         binding_error = _validate_provider_result(result, binding)
         if binding_error:
             summary = _summarize_provider_result(result)
-            summary.update({"success": False, "failure_code": binding_error, "marks": []})
+            summary.update(
+                {"success": False, "failure_code": binding_error, "marks": []}
+            )
             provider_summaries.append(summary)
             continue
         provider_summaries.append(_summarize_provider_result(result))
@@ -505,14 +613,16 @@ def build_observation(
         height=height,
         marks=all_marks,
     )
-    all_marks = [{**mark, "screen_id": mark.get("screen_id") or screen_id} for mark in all_marks]
+    all_marks = [
+        {**mark, "screen_id": mark.get("screen_id") or screen_id} for mark in all_marks
+    ]
     mark_topology_digest = build_mark_topology_digest(all_marks)
     registry = MarkRegistry.from_marks(screen_id, all_marks)
     registry = MarkRegistry(
         screen_id=registry.screen_id,
         marks=registry.marks,
         semantic_screen_id=semantic_screen_id,
-        observation_epoch=0,
+        observation_epoch=observation_epoch,
         mark_set_version=registry.mark_set_version or mark_topology_digest,
         perceptual_hash=perceptual_hash,
         raw_screenshot_hash=raw_screenshot_hash,
@@ -521,17 +631,28 @@ def build_observation(
         screen_id=screen_id,
         screen_hash=raw_screenshot_hash,
         current_app=current_app,
+        foreground_package=foreground.package_name if foreground else None,
+        foreground_activity=foreground.activity_name if foreground else None,
+        foreground_canonical_id=foreground.canonical_id if foreground else None,
+        foreground_known=foreground.known if foreground else False,
         width=width,
         height=height,
         semantic_screen_id=semantic_screen_id,
-        observation_epoch=0,
+        observation_epoch=observation_epoch,
         mark_set_version=registry.mark_set_version,
         perceptual_hash=perceptual_hash,
         raw_screenshot_hash=raw_screenshot_hash,
     )
     bound_structures: list[ScreenStructure] = []
     seen_structure_keys: set[tuple[str, str, str]] = set()
-    for structure in sorted(provider_structures, key=lambda item: (1 if item.structure_kind == "visual" else 0, item.source_provider or "", item.structure_digest or item.topology_digest or "")):
+    for structure in sorted(
+        provider_structures,
+        key=lambda item: (
+            1 if item.structure_kind == "visual" else 0,
+            item.source_provider or "",
+            item.structure_digest or item.topology_digest or "",
+        ),
+    ):
         bound = structure.with_binding(
             screen_id=screen_id,
             semantic_screen_id=semantic_screen_id,
@@ -561,7 +682,7 @@ def build_observation(
             height=height,
             current_app=current_app,
             semantic_screen_id=semantic_screen_id,
-            observation_epoch=0,
+            observation_epoch=observation_epoch,
             mark_set_version=registry.mark_set_version,
             perceptual_hash=perceptual_hash,
             structure_topology_digest=composite_structure_digest,
@@ -588,24 +709,47 @@ def _screen_structure_from_dict(value: dict[str, Any]) -> ScreenStructure | None
     raw_nodes = value.get("nodes")
     if not isinstance(raw_nodes, dict):
         return None
-    structure_kind = _safe_metadata(value.get("structure_kind"), default="accessibility")
+    structure_kind = _safe_metadata(
+        value.get("structure_kind"), default="accessibility"
+    )
     if structure_kind not in {"accessibility", "visual"}:
         structure_kind = "accessibility"
-    source_provider = _safe_metadata(value.get("source_provider") or value.get("provider")) or None
-    confidence_tier = _safe_metadata(value.get("confidence_tier")) or ("weak" if structure_kind == "visual" else "strong")
+    source_provider = (
+        _safe_metadata(value.get("source_provider") or value.get("provider")) or None
+    )
+    confidence_tier = _safe_metadata(value.get("confidence_tier")) or (
+        "weak" if structure_kind == "visual" else "strong"
+    )
     nodes: dict[str, StructureNode] = {}
     for node_id, item in raw_nodes.items():
         if not isinstance(item, dict):
             continue
         bounds_value = item.get("bounds")
         bounds = None
-        if isinstance(bounds_value, list) and len(bounds_value) == 4 and all(isinstance(v, int) for v in bounds_value):
-            bounds = (bounds_value[0], bounds_value[1], bounds_value[2], bounds_value[3])
-        child_ids = [str(child) for child in item.get("child_ids") or [] if isinstance(child, str)]
+        if (
+            isinstance(bounds_value, list)
+            and len(bounds_value) == 4
+            and all(isinstance(v, int) for v in bounds_value)
+        ):
+            bounds = (
+                bounds_value[0],
+                bounds_value[1],
+                bounds_value[2],
+                bounds_value[3],
+            )
+        child_ids = [
+            str(child)
+            for child in item.get("child_ids") or []
+            if isinstance(child, str)
+        ]
         nodes[str(node_id)] = StructureNode(
             node_id=str(item.get("node_id") or node_id),
             path=str(item.get("path") or ""),
-            parent_id=item.get("parent_id") if isinstance(item.get("parent_id"), str) else None,
+            parent_id=(
+                item.get("parent_id")
+                if isinstance(item.get("parent_id"), str)
+                else None
+            ),
             child_ids=child_ids,
             depth=_safe_int(item.get("depth"), maximum=10_000),
             bounds=bounds,
@@ -613,7 +757,8 @@ def _screen_structure_from_dict(value: dict[str, Any]) -> ScreenStructure | None
             class_name=_safe_metadata(item.get("class_name")) or None,
             resource_id_hash=_safe_metadata(item.get("resource_id_hash")) or None,
             text_summary=_safe_metadata(item.get("text_summary")) or None,
-            content_desc_summary=_safe_metadata(item.get("content_desc_summary")) or None,
+            content_desc_summary=_safe_metadata(item.get("content_desc_summary"))
+            or None,
             clickable=bool(item.get("clickable")),
             focusable=bool(item.get("focusable")),
             focused=bool(item.get("focused")),
@@ -624,9 +769,14 @@ def _screen_structure_from_dict(value: dict[str, Any]) -> ScreenStructure | None
             visible=item.get("visible") is not False,
             structure_kind=structure_kind,
             source_provider=source_provider,
-            confidence_tier=_safe_metadata(item.get("confidence_tier")) or confidence_tier,
+            confidence_tier=_safe_metadata(item.get("confidence_tier"))
+            or confidence_tier,
             node_provenance=_safe_metadata(item.get("node_provenance")) or None,
-            visual_order=_safe_int(item.get("visual_order"), maximum=10_000) if item.get("visual_order") is not None else None,
+            visual_order=(
+                _safe_int(item.get("visual_order"), maximum=10_000)
+                if item.get("visual_order") is not None
+                else None
+            ),
             confidence=_safe_float(item.get("confidence")),
             sensitivity_tags=_safe_sensitivity_tags(item.get("sensitivity_tags")),
         )
@@ -636,7 +786,8 @@ def _screen_structure_from_dict(value: dict[str, Any]) -> ScreenStructure | None
         screen_id=_safe_metadata(value.get("screen_id")),
         semantic_screen_id=_safe_metadata(value.get("semantic_screen_id")) or None,
         mark_set_version=_safe_metadata(value.get("mark_set_version")) or None,
-        topology_digest=_safe_metadata(value.get("topology_digest")) or build_structure_topology_digest(nodes),
+        topology_digest=_safe_metadata(value.get("topology_digest"))
+        or build_structure_topology_digest(nodes),
         status=_safe_metadata(value.get("status"), default="ok"),
         nodes=nodes,
         root_node_id=_safe_metadata(value.get("root_node_id")) or None,
@@ -644,12 +795,15 @@ def _screen_structure_from_dict(value: dict[str, Any]) -> ScreenStructure | None
         source_provider=source_provider,
         confidence_tier=confidence_tier,
         structure_version=_safe_metadata(value.get("structure_version")) or None,
-        structure_digest=_safe_metadata(value.get("structure_digest") or value.get("topology_digest")) or build_structure_topology_digest(nodes),
+        structure_digest=_safe_metadata(
+            value.get("structure_digest") or value.get("topology_digest")
+        )
+        or build_structure_topology_digest(nodes),
     )
 
 
 def _safe_sensitivity_tags(value: Any) -> list[str]:
-    allowed = {"payment", "privacy", "login", "password", "otp", "delete", "permission"}
+    allowed = DEFAULT_SAFETY_POLICY.semantic_tags
     if not isinstance(value, list):
         return []
     tags: list[str] = []

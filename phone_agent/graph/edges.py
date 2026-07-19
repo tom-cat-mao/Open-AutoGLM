@@ -2,7 +2,18 @@
 
 from typing import Literal
 
+from phone_agent.actions.capability import get_tool_capability
 from phone_agent.graph.state import AgentState
+
+
+def after_goal(state: AgentState) -> Literal["plan", "end"]:
+    """Fail closed before Plan when requirement/contract validation failed."""
+
+    if state.get("finished") or state.get("error"):
+        return "end"
+    if state.get("goal_contract_status") == "failed":
+        return "end"
+    return "plan"
 
 
 def should_continue(state: AgentState) -> Literal["end", "replan", "takeover"]:
@@ -43,8 +54,9 @@ def after_execute(
     - "reflect" if action_confirmed (already dispatched on resume)
     - "takeover" if action is Take_over
     - "confirm" if action is Tap with message (sensitive operation)
-    - "replan" if action is a skip type (Wait, Note, Call_API, Interact)
-    - "reflect" otherwise
+    - "replan" only for an implemented internal capability that cannot affect
+      observations or Goal progress
+    - "reflect" for every UI/external action and Wait
     """
     # Terminal guard: finished/error always routes to "end".
     # Must come BEFORE the pending_interrupt check so that a stale
@@ -82,9 +94,10 @@ def after_execute(
     if action.get("action") == "Tap" and "message" in action:
         return "confirm"
 
-    # Skip reflect for these action types
-    skip_actions = {"Wait", "Note", "Call_API", "Interact"}
-    if action.get("action") in skip_actions:
+    capability = get_tool_capability(str(action.get("action")))
+    if capability is None:
+        return "end"
+    if not capability.requires_reobservation:
         return "replan"
 
     return "reflect"

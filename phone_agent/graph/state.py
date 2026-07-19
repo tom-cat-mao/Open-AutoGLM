@@ -41,11 +41,20 @@ class AgentState(TypedDict):
 
     # === 任务 ===
     task: str  # 用户原始任务
-    task_goal_contract: Optional[dict]  # legacy/deprecated: trace payload alias for goal_contract; new code should read goal_contract via ensure_goal_contract()
-    goal_contract: Optional[dict]  # declarative GoalContract dict (compiled by goal_node)
+    task_goal_contract: Optional[
+        dict
+    ]  # legacy/deprecated: trace payload alias for goal_contract; new code should read goal_contract via ensure_goal_contract()
+    goal_contract: Optional[
+        dict
+    ]  # declarative GoalContract dict (compiled by goal_node)
     goal_contract_status: Optional[str]  # pending / compiled / failed / user_override
-    goal_compile_source: Optional[str]  # llm / heuristic / heuristic_fallback / external
+    goal_compile_source: Optional[
+        str
+    ]  # llm / heuristic / heuristic_fallback / external
     goal_compile_attempts: int  # number of compile attempts
+    task_requirement_set: Optional[dict]  # privacy-safe independent raw-task requirements
+    contract_adequacy_status: Optional[str]  # adequate / inadequate / needs_clarification
+    contract_adequacy_reasons: list[str]  # stable reason codes only
     needs_recompile: bool  # reserved: reflect may request goal recompilation (no writer currently sets True; recompile only via task_goal_contract_override)
     step_count: int  # 当前步数
     max_steps: int  # 最大步数
@@ -54,7 +63,7 @@ class AgentState(TypedDict):
     # === 屏幕 ===
     screen_width: int  # 设备屏幕宽度（像素）
     screen_height: int  # 设备屏幕高度（像素）
-    screenshot_b64: Optional[str]  # 当前截图 base64
+    screenshot_b64: Optional[str]  # deprecated compatibility field; always None
     current_app: str  # 当前前台 app 名
     screen_id: Optional[str]  # 当前屏幕快照 ID
     screen_hash: Optional[str]  # 当前屏幕 hash 摘要
@@ -73,31 +82,50 @@ class AgentState(TypedDict):
     thinking: str  # 模型思考过程
     action_raw: str  # 模型原始 action 文本
     action_parsed: Optional[dict]  # validated canonical ActionIR
-    intent_raw: Optional[dict]  # grounding 前的 IntentIR，仅供 trace/debug，不能进入 executor
+    intent_raw: Optional[
+        dict
+    ]  # grounding 前的 IntentIR，仅供 trace/debug，不能进入 executor
     grounding_error: Optional[str]  # IntentIR grounding 失败原因
-    grounding_result: Optional[dict]  # provider/mark grounding result, trace-safe metadata only
+    grounding_result: Optional[
+        dict
+    ]  # provider/mark grounding result, trace-safe metadata only
     grounding_provider: Optional[str]  # grounding provider name
     grounding_latency_ms: Optional[int]  # grounding latency in milliseconds
     grounding_failure_code: Optional[str]  # structured grounding failure code
-    grounding_screen_hash: Optional[str]  # raw screenshot hash bound to grounding request/result
+    grounding_screen_hash: Optional[
+        str
+    ]  # raw screenshot hash bound to grounding request/result
     grounding_observation: Optional[dict]  # bounded grounding context section payload
     grounding_candidates: list[dict]  # trace-safe grounding candidate summaries
     grounding_candidate_count: int  # count of provider candidates
-    selected_grounding_candidate_id: Optional[int]  # selected candidate index when exactly one valid candidate succeeds
-    expected_outcome: Optional[dict]  # sibling postcondition contract for verifier, never executor payload
+    selected_grounding_candidate_id: Optional[
+        int
+    ]  # selected candidate index when exactly one valid candidate succeeds
+    expected_outcome: Optional[
+        dict
+    ]  # sibling postcondition contract for verifier, never executor payload
+    expected_transition: Optional[
+        dict
+    ]  # privacy-safe typed shadow; runtime values omitted
 
     # === Layered error taxonomy ===
-    error_layer: Optional[str]  # parse / adapter / validation / grounding / safety / execution / reflection / context
+    error_layer: Optional[
+        str
+    ]  # parse / adapter / validation / grounding / safety / execution / reflection / context
     error_code: Optional[str]  # stable machine-readable error code
     recoverable: Optional[bool]  # whether automatic recovery may continue
     retry_policy: Optional[str]  # none / parse_retry / reobserve / wait / takeover
 
     # === Execute 节点输出 ===
+    action_receipt: Optional[
+        dict
+    ]  # dispatch-only receipt; never transition/Goal success
     action_result: Optional[dict]  # ActionResult 序列化为 dict
     pending_finish: bool  # finish claim pending reflect validation
     finish_claim: Optional[dict]  # trace-safe finish claim summary
     finish_validation_status: Optional[str]  # pending / success / failure / unknown
     finish_validation_evidence: Optional[dict]  # trace-safe final goal evidence
+    goal_evidence_ledger: list[dict]  # bounded privacy-safe criterion evidence; Reflect-owned
 
     # === Reflect 节点输出 ===
     reflection: Optional[str]  # 反思结论
@@ -129,7 +157,9 @@ class AgentState(TypedDict):
     approx_tokens_after: int  # rough char/4 token estimate after compaction
     failure_memory_hit_count: int  # failure memory 命中次数
     repeated_failure_count: int  # 重复失败计数
-    gui_memory: dict  # GUI 短期记忆：visited_screens/tried_actions/scroll_memory/task_progress
+    gui_memory: (
+        dict  # GUI 短期记忆：visited_screens/tried_actions/scroll_memory/task_progress
+    )
 
     # === Deterministic verifier ===
     verifier_result: Optional[dict]

@@ -6,7 +6,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from bench.grounding.datasets import (
+from bench.grounding.datasets import (  # noqa: E402
     DatasetFilters,
     SamplingConfig,
     area_bucket,

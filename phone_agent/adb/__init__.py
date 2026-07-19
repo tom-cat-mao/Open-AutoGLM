@@ -12,6 +12,8 @@ from phone_agent.adb.device import (
     double_tap,
     dump_uiautomator_xml,
     get_current_app,
+    get_foreground_app,
+    get_installed_app_inventory,
     get_focused_window_or_app,
     get_screen_marks,
     get_top_activity,
@@ -40,6 +42,8 @@ __all__ = [
     "restore_keyboard",
     # Device control
     "get_current_app",
+    "get_foreground_app",
+    "get_installed_app_inventory",
     "get_focused_window_or_app",
     "get_top_activity",
     "is_keyboard_visible",

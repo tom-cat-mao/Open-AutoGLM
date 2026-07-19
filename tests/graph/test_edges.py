@@ -1,4 +1,9 @@
-from phone_agent.graph.edges import after_execute, after_interrupt, should_continue
+from phone_agent.graph.edges import (
+    after_execute,
+    after_goal,
+    after_interrupt,
+    should_continue,
+)
 
 
 def test_after_execute_routes_pending_interrupts_first(base_state) -> None:
@@ -64,11 +69,44 @@ def test_after_execute_routes_sensitive_tap_to_confirm(base_state) -> None:
     assert after_execute(base_state) == "confirm"
 
 
-def test_after_execute_routes_skip_actions_to_replan(base_state) -> None:
-    for action in ("Wait", "Note", "Call_API", "Interact"):
+def test_after_execute_routes_ui_external_and_wait_actions_to_reflect(
+    base_state,
+) -> None:
+    for action in (
+        "Tap",
+        "Type",
+        "Swipe",
+        "Back",
+        "Home",
+        "Launch",
+        "Wait",
+        "Call_API",
+        "Interact",
+    ):
         base_state["action_parsed"] = {"_metadata": "do", "action": action}
         base_state["action_confirmed"] = False
-        assert after_execute(base_state) == "replan"
+        assert after_execute(base_state) == "reflect"
+
+
+def test_after_execute_only_skips_internal_non_progress_capability(
+    base_state, monkeypatch
+) -> None:
+    from phone_agent.actions.capability import ToolCapability
+    import phone_agent.graph.edges as edges_module
+
+    capability = ToolCapability(
+        action_name="Internal",
+        implementation_status="implemented",
+        side_effect_kind="none",
+        observation_effect="none",
+        required_postconditions=(),
+        retry_safety="safe",
+        can_advance_goal=False,
+    )
+    monkeypatch.setattr(edges_module, "get_tool_capability", lambda _: capability)
+    base_state["action_parsed"] = {"_metadata": "do", "action": "Internal"}
+
+    assert after_execute(base_state) == "replan"
 
 
 def test_after_execute_routes_finish_claim_to_reflect(base_state) -> None:
@@ -132,3 +170,12 @@ def test_reflect_conditional_edges_include_takeover_route() -> None:
     graph = create_agent_graph()
     edges = graph.get_graph().edges
     assert any(edge.source == "reflect" and edge.target == "takeover" for edge in edges)
+
+
+def test_after_goal_fails_closed_before_plan(base_state) -> None:
+    assert after_goal(base_state) == "plan"
+    base_state["goal_contract_status"] = "failed"
+    assert after_goal(base_state) == "end"
+    base_state["goal_contract_status"] = "compiled"
+    base_state["error"] = "Goal contract rejected"
+    assert after_goal(base_state) == "end"

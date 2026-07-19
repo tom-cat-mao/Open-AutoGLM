@@ -1,6 +1,21 @@
 """Configuration module for Phone Agent."""
 
-from phone_agent.config.apps import APP_PACKAGES
+from phone_agent.config.app_registry import (
+    AppIdentity,
+    AppRegistry,
+    AppResolution,
+    ForegroundAppObservation,
+    InstalledAppInventory,
+    LaunchPolicy,
+    LaunchTargetResolution,
+    LaunchTargetResolver,
+)
+from phone_agent.config.apps import (
+    APP_PACKAGES,
+    DEFAULT_APP_REGISTRY,
+    DEFAULT_LAUNCH_POLICY,
+    DEFAULT_LAUNCH_TARGET_RESOLVER,
+)
 from phone_agent.config.i18n import get_message, get_messages
 from phone_agent.config.prompts_en import (
     AUTO_OUTPUT_CONTRACT as AUTO_OUTPUT_CONTRACT_EN,
@@ -33,9 +48,7 @@ VALID_OUTPUT_MODES = {"json_schema", "tool_calls", "auto"}
 def _output_contract(lang: str, output_mode: str) -> str:
     """Return the single output contract for the selected mode."""
     if output_mode not in VALID_OUTPUT_MODES:
-        raise ValueError(
-            "output_mode must be one of: json_schema, tool_calls, auto"
-        )
+        raise ValueError("output_mode must be one of: json_schema, tool_calls, auto")
     contracts = {
         "cn": {
             "json_schema": JSON_OUTPUT_CONTRACT_ZH,
@@ -75,7 +88,7 @@ def get_system_prompt(
     Returns:
         System prompt string.
     """
-    normalized_version = get_prompt_version(prompt_version)
+    get_prompt_version(prompt_version)
     base_prompt = BASE_SYSTEM_PROMPT_EN if lang == "en" else BASE_SYSTEM_PROMPT_ZH
     return "\n\n".join([base_prompt, _output_contract(lang, output_mode)])
 
@@ -86,6 +99,17 @@ SYSTEM_PROMPT = SYSTEM_PROMPT_ZH
 
 __all__ = [
     "APP_PACKAGES",
+    "AppIdentity",
+    "AppRegistry",
+    "AppResolution",
+    "ForegroundAppObservation",
+    "InstalledAppInventory",
+    "LaunchPolicy",
+    "LaunchTargetResolution",
+    "LaunchTargetResolver",
+    "DEFAULT_APP_REGISTRY",
+    "DEFAULT_LAUNCH_POLICY",
+    "DEFAULT_LAUNCH_TARGET_RESOLVER",
     "SYSTEM_PROMPT",
     "SYSTEM_PROMPT_ZH",
     "SYSTEM_PROMPT_EN",
