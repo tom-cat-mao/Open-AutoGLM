@@ -181,9 +181,12 @@ system (see P0 constraint #13a in `AGENTS.md`).
 | parse/adapter | `phone_agent/model/client.py`, `phone_agent/actions/adapter.py` |
 | validation | `phone_agent/actions/validator.py`, `phone_agent/actions/repair.py` |
 | grounding | `phone_agent/actions/grounding.py`, `phone_agent/grounding/`, `phone_agent/graph/observation.py`, `phone_agent/graph/marks.py` |
-| safety/HITL | `phone_agent/actions/safety.py`, `phone_agent/graph/edges.py`, `phone_agent/graph/nodes/confirm.py`, `phone_agent/graph/nodes/takeover.py` |
+| safety/HITL | `phone_agent/actions/safety.py`, `phone_agent/config/policy.py`, `phone_agent/graph/edges.py`, `phone_agent/graph/nodes/confirm.py`, `phone_agent/graph/nodes/takeover.py` |
+| capability | `phone_agent/actions/capability.py`, `phone_agent/actions/receipt.py`, `phone_agent/graph/nodes/execute.py` |
 | execution | `phone_agent/graph/nodes/execute.py`, `phone_agent/graph/tools/`, `phone_agent/adb/device.py`, `phone_agent/adb/input.py` |
-| reflection / finish gate | `phone_agent/graph/goal.py`, `phone_agent/graph/goal_compiler.py`, `phone_agent/graph/goal_evaluator.py`, `phone_agent/graph/nodes/goal_node.py`, `phone_agent/graph/nodes/reflect.py`, `phone_agent/graph/verifier.py` |
+| goal contract | `phone_agent/graph/nodes/goal_node.py`, `phone_agent/graph/goal_requirements.py`, `phone_agent/graph/goal_compiler.py`, `phone_agent/graph/goal.py`, `phone_agent/graph/goal_binding.py` |
+| reflection / finish gate | `phone_agent/graph/goal.py`, `phone_agent/graph/goal_evaluator.py`, `phone_agent/graph/nodes/reflect.py`, `phone_agent/graph/verifier.py`, `phone_agent/graph/fact_providers.py`, `phone_agent/graph/predicates.py`, `phone_agent/graph/goal_evidence.py`, `phone_agent/graph/compatibility_adapters.py` |
+| checkpoint / goal resume | `phone_agent/checkpoint/goal_resume.py`, `phone_agent/checkpoint/serde.py` |
 | context | `phone_agent/graph/context.py`, `phone_agent/graph/nodes/plan.py` |
 | eval/trace | `evals/run_eval.py`, `phone_agent/graph/trace.py`, `phone_agent/agent.py` |
 
@@ -195,9 +198,23 @@ Key reflection/finish-gate signals to surface in the report:
   (hard gate; never auto-upgrade to success).
 - `needs_recompile` — mid-task contract swap requested (has no writer today; only
   via `configurable["task_goal_contract_override"]`).
+- `soft_match_accepted` — finish relied on the detail-only soft match (evidence
+  relaxation without content-hash confirmation); verify the opened page manually.
+- `programmatic_contradiction_override` — programmatic signals overrode a
+  `vlm_judge` self-attestation; trust the programmatic side.
 - `verifier_status` / `verifier_evidence.matched_postconditions` /
   `verifier_evidence.missing_postconditions` / `weak_signals` /
   `dynamic_change_only` / `fallback_chain` when present.
+
+Signals from the 9-phase rebuild (commit `7dc6946`) to route to the new layers:
+
+- `capability_missing` / `capability_unavailable` — capability gate rejected
+  dispatch; check `actions/capability.py` registry coverage before anything else.
+- `unsupported_semantics` / `needs_goal_clarification` — goal contract adequacy
+  rejection; the usual root cause is a task verb missing from
+  `TaskRequirementExtractor._OPERATIONS` in `graph/goal_requirements.py`.
+- `goal_resume_*` — HMAC-bound goal resume failures; check
+  `checkpoint/goal_resume.py` key consistency and serde egress collapsing.
 
 ## Report Design
 
