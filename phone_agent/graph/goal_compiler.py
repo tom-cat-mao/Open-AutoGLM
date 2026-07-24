@@ -7,7 +7,6 @@ weak contract (vlm_judge_at_finish) rather than terminating the task.
 
 from __future__ import annotations
 
-import hashlib
 import re
 import unicodedata
 from typing import Any, Protocol
@@ -24,6 +23,8 @@ from phone_agent.graph.goal_requirements import (
     ContractAdequacyValidator,
     TaskRequirementExtractor,
     TaskRequirementSet,
+    extract_entity_spans,
+    _digest as _requirement_digest,
 )
 from phone_agent.graph.predicates import CORE_PREDICATE_CATALOG
 
@@ -79,46 +80,42 @@ def _detect_ordinal(text: str) -> int | None:
 
 
 def _extract_entities_sha(text: str) -> list[str]:
-    normalized = _remove_known_goal_terms(text)
-    candidates = []
-    for chunk in re.split(r"[\s,，。.!！?？/\\]+", normalized):
-        cleaned = chunk.strip("'\"“”‘’《》<>（）()[]【】")
-        if len(cleaned) < 2:
-            continue
-        if re.fullmatch(r"第?\d+个?", cleaned):
-            continue
-        candidates.append(cleaned)
+    """Entity hashes over the SAME spans the requirement extractor produces.
+
+    Replicates TaskRequirementExtractor's operation + app-alias resolution
+    inline (extractor does not expose them) and delegates span extraction to
+    extract_entity_spans, so requirement entity hashes and contract
+    entities_sha always intersect for the same task (divergent stripping
+    vocabularies previously caused target_entities_uncovered).
+    """
+    lowered = str(text or "").casefold()
+    operation = next(
+        (
+            kind
+            for kind, terms in TaskRequirementExtractor._OPERATIONS
+            if any(term.casefold() in lowered for term in terms)
+        ),
+        "unknown",
+    )
+    matched_alias = None
+    resolution = DEFAULT_APP_REGISTRY.resolve_text(text)
+    if resolution.identity is not None:
+        matched_alias = next(
+            (
+                alias
+                for alias in sorted(
+                    resolution.identity.aliases, key=len, reverse=True
+                )
+                if alias.casefold() in lowered
+            ),
+            None,
+        )
     return [
-        hashlib.sha256(item.encode("utf-8")).hexdigest()[:12]
-        for item in candidates[:MAX_ENTITY_COUNT]
+        _requirement_digest(item)
+        for item in extract_entity_spans(text, matched_alias, operation)[
+            :MAX_ENTITY_COUNT
+        ]
     ]
-
-
-def _remove_known_goal_terms(text: str) -> str:
-    cleaned = str(text or "")
-    resolution = DEFAULT_APP_REGISTRY.resolve_text(cleaned)
-    if resolution.status == "resolved" and resolution.identity is not None:
-        for term in sorted(resolution.identity.aliases, key=len, reverse=True):
-            cleaned = re.sub(re.escape(term), " ", cleaned, flags=re.IGNORECASE)
-    for pattern, _value in ORDINAL_PATTERNS:
-        cleaned = cleaned.replace(pattern, " ")
-    for term in (
-        "去",
-        "看",
-        "打开",
-        "搜索",
-        "查找",
-        "播放",
-        "进入",
-        "视频",
-        "watch",
-        "video",
-        "play",
-        "open",
-        "search",
-    ):
-        cleaned = re.sub(re.escape(term), " ", cleaned, flags=re.IGNORECASE)
-    return cleaned
 
 
 # ----------------------------------------------------------------------
@@ -191,6 +188,13 @@ class HeuristicGoalCompiler:
                     or "Task objective visible on final screen",
                     verification="vlm_judge",
                     required=True,
+                    predicate=(
+                        CORE_PREDICATE_CATALOG.create_spec(
+                            "semantic.entity_matches", entities_sha[0]
+                        )
+                        if entities_sha
+                        else None
+                    ),
                 ),
             )
         return GoalContract(
@@ -268,6 +272,8 @@ verification 枚举说明：
 - criterion name 必须唯一、是合法标识符（字母数字下划线）
 - 隐私信息（手机号、邮箱、密钥）不要写进 objective/description，用 <redacted> 替代
 - 如果任务涉及"第N个"结果，设 ordinal 并用 object_rank_match
+- 如果任务的完成条件需要语义判断（某个目标内容出现/生效，而非仅 app 前台或列表序号），
+  必须额外给出一条 required 的 vlm_judge criterion 描述该终态；不要只用 app_or_activity_match 代替
 """
 
 GOAL_COMPILER_SYSTEM_PROMPT_EN = """You are a task goal compiler. Convert the user's natural-language task into a declarative goal contract (JSON) with verifiable success criteria, constraints, and non-goals.
@@ -288,6 +294,9 @@ Rules:
 - At least 1 required criterion; criterion names must be unique identifiers
 - Replace private info (phone/email/keys) with <redacted>
 - Use object_rank_match with ordinal for "the Nth result" tasks
+- When completion requires semantic judgement (some target content present/effective,
+  not merely app foreground or a list rank), add a required vlm_judge criterion
+  describing that terminal state; do NOT substitute app_or_activity_match for it
 """
 
 
@@ -423,10 +432,30 @@ class LLMGoalCompiler:
                 )
             target_app_hint = app_resolution.identity.canonical_id
 
+        entities_sha = _extract_entities_sha(task)
+        if entities_sha and not any(
+            item.verification == "vlm_judge" and item.required for item in criteria
+        ):
+            # Entity-bearing tasks need a semantic terminal criterion; models
+            # frequently emit only app-foreground/rank criteria. Synthesize
+            # the vlm_judge fallback so adequacy does not reject an otherwise
+            # reasonable contract (mirrors HeuristicGoalCompiler).
+            from phone_agent.graph.goal import redact_objective as _redact
+
+            criteria.append(
+                SuccessCriterion(
+                    name="task_objective_achieved",
+                    description=_redact(task)[:300]
+                    or "Task objective visible on final screen",
+                    verification="vlm_judge",
+                    required=True,
+                )
+            )
         criteria = _attach_core_predicates(
             criteria,
             target_app_hint=target_app_hint,
             ordinal=ordinal,
+            entities_sha=entities_sha,
         )
 
         return GoalContract(
@@ -443,7 +472,7 @@ class LLMGoalCompiler:
             target_app_hint=target_app_hint,
             target_activity_hint=None,
             ordinal=ordinal,
-            entities_sha=_extract_entities_sha(task),
+            entities_sha=entities_sha,
             verification_strategy="hybrid",
             stop_conditions={},
             compile_status="compiled",
@@ -465,11 +494,13 @@ def _attach_core_predicates(
     *,
     target_app_hint: str | None,
     ordinal: int | None,
+    entities_sha: list[str] | None = None,
 ) -> list[SuccessCriterion]:
     """Explicitly migrate deterministic legacy compiler criteria to predicates."""
 
     from dataclasses import replace
 
+    entity_hash = entities_sha[0] if entities_sha else None
     migrated: list[SuccessCriterion] = []
     for criterion in criteria:
         if criterion.predicate is not None:
@@ -490,6 +521,15 @@ def _attach_core_predicates(
                 predicate = CORE_PREDICATE_CATALOG.create_spec(
                     "ui.text_hash_present", match.group(1).casefold()
                 )
+        elif criterion.verification == "vlm_judge" and entity_hash:
+            # Semantic coverage for entity-bearing tasks: the criterion's
+            # terminal state involves the task entity, so bind it to the
+            # primary entity hash (privacy-safe, no raw text). This is what
+            # lets compiled contracts satisfy semantic_criterion_missing on
+            # the production path instead of only in injected test contracts.
+            predicate = CORE_PREDICATE_CATALOG.create_spec(
+                "semantic.entity_matches", entity_hash
+            )
         migrated.append(replace(criterion, predicate=predicate))
     return migrated
 

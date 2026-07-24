@@ -47,6 +47,33 @@ def test_adequacy_validator_rejects_candidate_contract_self_attestation() -> Non
 
 
 def test_adequacy_validator_rejects_untyped_semantic_self_attestation() -> None:
+    """Entity-bearing tasks still need semantic coverage with no vlm_judge.
+
+    After the adequacy relaxation, a required vlm_judge criterion counts as
+    semantic fallback coverage; a contract with NO vlm_judge and NO typed
+    semantic predicate must still be rejected.
+    """
+    requirements = TaskRequirementExtractor().extract("在设置里搜索 Silverstone")
+    candidate = GoalContract(
+        task_hash=requirements.task_hash,
+        redacted_objective="search target",
+        objective_length=18,
+        success_criteria=[
+            SuccessCriterion("done", "app foreground", "app_or_activity_match")
+        ],
+        target_app_hint="settings",
+        entities_sha=list(requirements.target_entity_hashes),
+        compile_status="compiled",
+    )
+
+    result = ContractAdequacyValidator().validate(requirements, candidate)
+
+    assert result.status == "inadequate"
+    assert "semantic_criterion_missing" in result.reason_codes
+
+
+def test_adequacy_validator_accepts_vlm_judge_semantic_fallback() -> None:
+    """A required vlm_judge criterion satisfies semantic coverage (fallback)."""
     requirements = TaskRequirementExtractor().extract("在设置里搜索 Silverstone")
     candidate = GoalContract(
         task_hash=requirements.task_hash,
@@ -60,8 +87,7 @@ def test_adequacy_validator_rejects_untyped_semantic_self_attestation() -> None:
 
     result = ContractAdequacyValidator().validate(requirements, candidate)
 
-    assert result.status == "inadequate"
-    assert "semantic_criterion_missing" in result.reason_codes
+    assert result.status == "adequate"
 
 
 def test_adequacy_validator_accepts_typed_semantic_criterion() -> None:

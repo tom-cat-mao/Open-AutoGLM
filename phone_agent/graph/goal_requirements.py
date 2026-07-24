@@ -121,13 +121,14 @@ class TaskRequirementExtractor:
                 ),
                 None,
             )
-        spans = _semantic_spans(text, matched_alias, operation)
+        spans = extract_entity_spans(text, matched_alias, operation)
         constraints = _constraint_spans(text)
         ambiguity = []
-        if operation == "unknown":
-            ambiguity.append("operation_unknown")
         if app_resolution.status == "ambiguous":
             ambiguity.append("app_ambiguous")
+        # operation_unknown is NOT an ambiguity: an unrecognized verb should
+        # fall through to the LLM compiler + vlm_judge fallback rather than
+        # terminating the task at the adequacy gate. It only lowers confidence.
         confidence = 0.95 if operation != "unknown" and not ambiguity else 0.45
         return TaskRequirementSet(
             task_hash=compute_task_binding(text),
@@ -175,10 +176,13 @@ class ContractAdequacyValidator:
             requirements.target_entity_hashes
         ).intersection(contract.entities_sha):
             reasons.append("target_entities_uncovered")
-        if requirements.target_entity_hashes and not any(
-            item.predicate is not None
-            and item.predicate.predicate_id == "semantic.entity_matches"
-            for item in required
+        if requirements.target_entity_hashes and not (
+            any(
+                item.predicate is not None
+                and item.predicate.predicate_id == "semantic.entity_matches"
+                for item in required
+            )
+            or any(item.verification == "vlm_judge" for item in required)
         ):
             reasons.append("semantic_criterion_missing")
         predicate_ids = {
@@ -186,8 +190,9 @@ class ContractAdequacyValidator:
             for item in required
             if item.predicate is not None
         }
+        has_vlm_judge = any(item.verification == "vlm_judge" for item in required)
         if not _terminal_state_is_covered(
-            requirements.required_terminal_state, predicate_ids
+            requirements.required_terminal_state, predicate_ids, has_vlm_judge
         ):
             reasons.append("terminal_state_uncovered")
         if requirements.constraint_hashes:
@@ -208,18 +213,31 @@ class ContractAdequacyValidator:
         return AdequacyResult("adequate")
 
 
-def _semantic_spans(
+def extract_entity_spans(
     text: str, app_alias: str | None, operation: OperationKind
 ) -> list[str]:
+    """Single source of truth for entity extraction from a raw task string.
+
+    Used by BOTH TaskRequirementExtractor (requirements side) and the goal
+    compilers (contract side) so that requirement entity hashes and contract
+    entities_sha are computed over the same spans — divergent extraction was
+    the root cause of spurious `target_entities_uncovered` rejections.
+    """
     cleaned = text
     for constraint in _constraint_spans(text):
         cleaned = cleaned.replace(constraint, " ")
     if app_alias:
         cleaned = re.sub(re.escape(app_alias), " ", cleaned, flags=re.IGNORECASE)
-    for kind, terms in TaskRequirementExtractor._OPERATIONS:
-        if kind == operation:
-            for term in terms:
-                cleaned = re.sub(re.escape(term), " ", cleaned, flags=re.IGNORECASE)
+    # Strip ALL operation vocabularies, not just the detected operation's.
+    # Compound tasks ("搜索…并播放…") contain verbs from multiple operation
+    # kinds; stripping only the primary kind leaves foreign verbs glued to
+    # entity spans and breaks requirement/contract hash agreement.
+    for _kind, terms in TaskRequirementExtractor._OPERATIONS:
+        for term in terms:
+            cleaned = re.sub(re.escape(term), " ", cleaned, flags=re.IGNORECASE)
+    # Word ordinals (第一个/第二…) — numeric form is handled below.
+    for word in ("第一", "第二", "第三", "第四", "第五"):
+        cleaned = re.sub(word + r"(?:个|条|项|部|集)?", " ", cleaned)
     cleaned = re.sub(r"第\s*[1-9]\d*\s*(?:个|条|项|部|集)?", " ", cleaned)
     return [
         item.strip("'\"“”‘’《》<>（）()[]【】")
@@ -240,7 +258,9 @@ def _terminal_state(operation: OperationKind) -> str:
     }[operation]
 
 
-def _terminal_state_is_covered(terminal_state: str, predicate_ids: set[str]) -> bool:
+def _terminal_state_is_covered(
+    terminal_state: str, predicate_ids: set[str], has_vlm_judge: bool = False
+) -> bool:
     accepted = {
         "target_app_foreground": {
             "app.foreground_package",
@@ -267,6 +287,16 @@ def _terminal_state_is_covered(terminal_state: str, predicate_ids: set[str]) -> 
         "external_effect_confirmed": {"external.effect_confirmed"},
         "task_state_observed": set(),
     }
+    # vlm_judge is the sanctioned fallback for semantic terminal states that
+    # no programmatic predicate can cover (AGENTS.md P0-13a). It never
+    # satisfies toggle/external states, which require programmatic signals.
+    vlm_judge_coverable = {
+        "search_results_visible",
+        "selected_target_visible",
+        "input_value_visible",
+    }
+    if terminal_state in vlm_judge_coverable and has_vlm_judge:
+        return True
     required = accepted.get(terminal_state, set())
     return terminal_state == "task_state_observed" or bool(
         required.intersection(predicate_ids)

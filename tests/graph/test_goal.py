@@ -168,12 +168,14 @@ def test_llm_compiler_parses_valid_structured_output() -> None:
     assert contract.compile_status == "compiled"
     assert contract.compile_source == "llm"
     assert contract.compile_attempts == 1
-    assert len(contract.success_criteria) == 2
     assert contract.success_criteria[0].name == "player_visible"
     assert contract.success_criteria[0].verification == "accessibility_text_match"
     assert contract.success_criteria[1].verification == "object_rank_match"
     assert contract.ordinal == 2
     assert contract.verification_strategy == "hybrid"
+    # Entity-bearing tasks get a synthesized vlm_judge semantic criterion
+    names = [item.name for item in contract.success_criteria]
+    assert "task_objective_achieved" in names
 
 
 def test_llm_compiler_retries_on_parse_failure_then_succeeds() -> None:
@@ -488,22 +490,51 @@ def test_goal_node_compiles_on_pending_status() -> None:
 
 
 def test_goal_node_fails_closed_when_requirements_need_clarification() -> None:
+    """needs_clarification now only fires on genuinely ambiguous requirements.
+
+    operation_unknown no longer blocks compilation (it falls through to the
+    LLM/vlm_judge path), so this test injects an ambiguous requirement set
+    directly to exercise the fail-closed gate.
+    """
+    from phone_agent.graph.goal_requirements import (
+        TaskRequirementExtractor,
+        TaskRequirementSet,
+    )
+
+    ambiguous_requirements = TaskRequirementSet(
+        task_hash="",
+        operation_kind="launch",
+        target_entity_hashes=(),
+        target_app_identity=None,
+        ordinal=None,
+        required_terminal_state="target_app_foreground",
+        ambiguities=("app_ambiguous",),
+    )
     state = {
-        "task": "perform an unspecified mysterious operation",
+        "task": "打开 iTunes 或 微信 处理一下",
         "step_count": 0,
-        "lang": "en",
+        "lang": "cn",
         "goal_contract_status": "pending",
     }
 
-    result = goal_node(
-        state,
-        {"configurable": {"runtime_goal_context": RuntimeGoalContext()}},
-    )
+    from unittest.mock import patch
+
+    extractor = TaskRequirementExtractor()
+    with patch(
+        "phone_agent.graph.nodes.goal_node.TaskRequirementExtractor",
+        return_value=extractor,
+    ), patch.object(
+        extractor, "extract", return_value=ambiguous_requirements
+    ):
+        result = goal_node(
+            state,
+            {"configurable": {"runtime_goal_context": RuntimeGoalContext()}},
+        )
 
     assert result["goal_contract_status"] == "failed"
     assert result["finished"] is True
     assert result["failure_cause"] == "needs_goal_clarification"
-    assert result["task_requirement_set"]["operation_kind"] == "unknown"
+    assert "app_ambiguous" in result["task_requirement_set"]["ambiguities"]
 
 
 def test_goal_node_recompiles_when_needs_recompile() -> None:

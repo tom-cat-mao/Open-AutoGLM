@@ -32,6 +32,37 @@ from phone_agent.graph.predicates import (
     ObservedFact,
 )
 
+_PLACEHOLDER_SCREEN_REFERENCES = frozenset(
+    {
+        "screen",
+        "current_screen",
+        "unknown",
+        "none",
+        "n/a",
+        "null",
+        "屏幕",
+        "当前屏幕",
+        "全屏",
+    }
+)
+
+
+def _is_placeholder_screen_reference(value: str) -> bool:
+    """Reject vlm_judge screen references with no discriminating information.
+
+    A grounded reference must identify a concrete UI element or region
+    (mark id, text snippet, object id...). Bare placeholders like
+    "region-1" or "screen" carry no verifiable content.
+    """
+    import re as _re
+
+    normalized = value.strip().casefold()
+    if normalized in _PLACEHOLDER_SCREEN_REFERENCES:
+        return True
+    if _re.fullmatch(r"(region|area|zone|box|区域|地区)[-_ ]?\d*", normalized):
+        return True
+    return False
+
 # ----------------------------------------------------------------------
 # Result
 # ----------------------------------------------------------------------
@@ -565,6 +596,8 @@ class AggregatingGoalEvaluator:
         screen_ref = str(evidence.get("screen_reference") or "").strip()
         if not screen_ref:
             return {"status": "missing", "reason": "no_screen_reference"}
+        if _is_placeholder_screen_reference(screen_ref):
+            return {"status": "missing", "reason": "placeholder_screen_reference"}
 
         # Part 3: programmatic contradiction is handled in the second pass
         return {

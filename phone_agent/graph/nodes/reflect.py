@@ -1218,7 +1218,7 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
             criterion.predicate is not None
             for criterion in goal_contract.success_criteria
         ):
-            finish_validation = pure_goal_evaluator.evaluate(
+            pure_evaluation = pure_goal_evaluator.evaluate(
                 contract=goal_contract,
                 contract_id=runtime_contract_id,
                 evidence_ledger=goal_evidence_ledger,
@@ -1226,6 +1226,31 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
                 screen_id=after_observation.snapshot.screen_id,
                 observation_epoch=after_observation.snapshot.observation_epoch,
             )
+            # Missing evidence must not overturn existing evidence: when the
+            # pure fold could not even observe some criteria (fact providers
+            # produced nothing — e.g. accessibility dump unavailable), keep
+            # the aggregating evaluation instead of overwriting it with a
+            # failure built on absence. Contradicted/stale/missing evidence
+            # DOES override, as before.
+            per_criterion = (pure_evaluation.evidence or {}).get("per_criterion") or {}
+            has_unobserved = any(
+                isinstance(value, dict) and value.get("reason") == "criterion_unobserved"
+                for value in per_criterion.values()
+            )
+            if not has_unobserved:
+                finish_validation = pure_evaluation
+            else:
+                emit_trace(
+                    config,
+                    state,
+                    "reflect",
+                    "pure_evaluation_degraded",
+                    {
+                        "reason": "criterion_unobserved",
+                        "kept_status": finish_validation.status,
+                        "pure_status": pure_evaluation.status,
+                    },
+                )
     # GoalEvaluator fail-closed: unknown and failure both block finish
     if (
         pending_finish
