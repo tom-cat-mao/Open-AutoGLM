@@ -108,7 +108,7 @@ class TaskRequirementExtractor:
             else None
         )
         ordinal_match = re.search(r"第\s*([1-9]\d*)", text)
-        ordinal = int(ordinal_match.group(1)) if ordinal_match else _word_ordinal(text)
+        ordinal = int(ordinal_match.group(1)) if ordinal_match else parse_chinese_ordinal(text)
         matched_alias = None
         if app_resolution.identity is not None:
             matched_alias = next(
@@ -322,10 +322,23 @@ def _constraint_spans(text: str) -> list[str]:
     return spans
 
 
-def _word_ordinal(text: str) -> int | None:
-    for word, value in (("一", 1), ("二", 2), ("三", 3), ("四", 4), ("五", 5)):
-        if f"第{word}" in text:
-            return value
+def parse_chinese_ordinal(text: str) -> int | None:
+    """Parse 第N个/第N ordinals including compound numerals (十二/二十/二十一).
+
+    Substring matching ("第{word}" in text) misreads 第二十个 as 2; this
+    parses the full numeral span first, then falls back to single words.
+    """
+    compound = re.search(r"第\s*([一二三四五六七八九]?)十([一二三四五六七八九]?)", text)
+    if compound:
+        digits = {"一": 1, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9}
+        tens = digits.get(compound.group(1), 1) * 10
+        ones = digits.get(compound.group(2), 0)
+        return tens + ones
+    simple = re.search(r"第\s*([一二三四五六七八九])(?:\s*(?:个|条|项|部|集))?", text)
+    if simple:
+        return {"一": 1, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9}[
+            simple.group(1)
+        ]
     return None
 
 

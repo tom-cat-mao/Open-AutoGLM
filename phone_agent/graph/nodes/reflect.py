@@ -2,7 +2,7 @@
 
 import json
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from langchain_core.runnables import RunnableConfig
 
@@ -1230,14 +1230,36 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
             # pure fold could not even observe some criteria (fact providers
             # produced nothing — e.g. accessibility dump unavailable), keep
             # the aggregating evaluation instead of overwriting it with a
-            # failure built on absence. Contradicted/stale/missing evidence
-            # DOES override, as before.
+            # failure built on absence. The same applies to contradictions
+            # against hash-bound expectations (entity hashes): providers can
+            # only produce raw screen text, which can never equal a hash, so
+            # such a "contradiction" is a domain mismatch rather than real
+            # counter-evidence. Genuine contradictions against reportable
+            # values (raw text/ordinal/app id) DO override, as before.
+            from phone_agent.graph.goal_evaluator import _is_hash_bound_expectation
+
             per_criterion = (pure_evaluation.evidence or {}).get("per_criterion") or {}
-            has_unobserved = any(
-                isinstance(value, dict) and value.get("reason") == "criterion_unobserved"
-                for value in per_criterion.values()
+            predicate_by_criterion = {
+                criterion.name: criterion.predicate
+                for criterion in goal_contract.success_criteria
+            }
+
+            def _domain_mismatch(criterion_name: str, value: dict[str, Any]) -> bool:
+                if not isinstance(value, dict):
+                    return False
+                if value.get("reason") == "criterion_unobserved":
+                    return True
+                if value.get("status") == "contradicted":
+                    predicate = predicate_by_criterion.get(criterion_name)
+                    expected = predicate.expected_value if predicate else None
+                    return _is_hash_bound_expectation(expected)
+                return False
+
+            has_domain_mismatch = any(
+                _domain_mismatch(name, value)
+                for name, value in per_criterion.items()
             )
-            if not has_unobserved:
+            if not has_domain_mismatch:
                 finish_validation = pure_evaluation
             else:
                 emit_trace(
@@ -1246,7 +1268,7 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
                     "reflect",
                     "pure_evaluation_degraded",
                     {
-                        "reason": "criterion_unobserved",
+                        "reason": "unobserved_or_hash_domain_mismatch",
                         "kept_status": finish_validation.status,
                         "pure_status": pure_evaluation.status,
                     },

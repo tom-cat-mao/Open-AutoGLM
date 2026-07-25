@@ -44,7 +44,7 @@ def create_agent_graph():
     graph.add_conditional_edges(
         "goal",
         after_goal,
-        {"plan": "plan", "end": END},
+        {"plan": "plan", "takeover": "takeover", "end": END},
     )
     graph.add_edge("plan", "execute")
     graph.add_conditional_edges(

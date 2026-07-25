@@ -24,6 +24,7 @@ from phone_agent.graph.goal_requirements import (
     TaskRequirementExtractor,
     TaskRequirementSet,
     extract_entity_spans,
+    parse_chinese_ordinal,
     _digest as _requirement_digest,
 )
 from phone_agent.graph.predicates import CORE_PREDICATE_CATALOG
@@ -41,24 +42,6 @@ class GoalCompilationError(ValueError):
 # Heuristic extraction (ported from old task_goal.py — app/ordinal/entity only)
 # ----------------------------------------------------------------------
 
-ORDINAL_PATTERNS: tuple[tuple[str, int], ...] = (
-    ("第一个", 1),
-    ("第1个", 1),
-    ("第一", 1),
-    ("第二个", 2),
-    ("第2个", 2),
-    ("第二", 2),
-    ("第三个", 3),
-    ("第3个", 3),
-    ("第三", 3),
-    ("第四个", 4),
-    ("第4个", 4),
-    ("第四", 4),
-    ("第五个", 5),
-    ("第5个", 5),
-    ("第五", 5),
-)
-
 MAX_ENTITY_COUNT = 4
 
 
@@ -70,13 +53,10 @@ def _detect_app_hint(text: str) -> str | None:
 
 
 def _detect_ordinal(text: str) -> int | None:
-    for pattern, value in ORDINAL_PATTERNS:
-        if pattern in text:
-            return value
     match = re.search(r"第\s*([1-9]\d*)\s*(?:个|条|项|部|集)?", text)
     if match:
         return int(match.group(1))
-    return None
+    return parse_chinese_ordinal(text)
 
 
 def _extract_entities_sha(text: str) -> list[str]:

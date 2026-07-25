@@ -63,6 +63,20 @@ def _is_placeholder_screen_reference(value: str) -> bool:
         return True
     return False
 
+
+def _is_hash_bound_expectation(expected_value: Any) -> bool:
+    """Whether an expected predicate value is a hash the reporter cannot echo.
+
+    Hash-bound expectations (entity hashes like ``3b8467b4dc8e``) are never
+    producible by a VLM or an accessibility text node, so a contradiction
+    against one is a domain mismatch, not genuine counter-evidence.
+    """
+    import re as _re
+
+    return isinstance(expected_value, str) and bool(
+        _re.fullmatch(r"[0-9a-f]{8,64}", expected_value.casefold())
+    )
+
 # ----------------------------------------------------------------------
 # Result
 # ----------------------------------------------------------------------
@@ -339,12 +353,32 @@ class AggregatingGoalEvaluator:
         goal_probes: dict[str, Any] | None,
     ) -> dict[str, Any]:
         if crit.predicate is not None:
-            return self._check_typed_predicate(
+            typed = self._check_typed_predicate(
                 crit,
                 contract=contract,
                 finish_matched_set=finish_matched_set,
                 named_evidence_map=named_evidence_map,
                 vlm_not_run=vlm_not_run,
+            )
+            if crit.verification != "vlm_judge":
+                return typed
+            # vlm_judge criterion with an attached predicate: the typed check
+            # is corroborating evidence. A typed match upgrades to matched
+            # directly. A typed contradiction vetoes ONLY when the expected
+            # value is meaningful to the reporter (raw text/value the model
+            # can actually echo). Hash-bound expectations (entity hashes) are
+            # not reportable, so a "contradiction" there is a domain mismatch,
+            # not real counter-evidence — fall back to vlm_judge instead.
+            if typed.get("status") == "matched":
+                return typed
+            if typed.get("status") == "contradicted" and not _is_hash_bound_expectation(
+                crit.predicate.expected_value
+            ):
+                return {"status": "missing", "reason": "typed_contradiction", **{
+                    k: v for k, v in typed.items() if k not in {"status", "reason"}
+                }}
+            return self._check_vlm_judge(
+                crit, finish_matched_set, named_evidence_map, vlm_not_run
             )
         if crit.verification == "accessibility_text_match":
             return self._check_accessibility_text(crit, after_observation)

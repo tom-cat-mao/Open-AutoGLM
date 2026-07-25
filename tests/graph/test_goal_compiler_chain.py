@@ -140,3 +140,165 @@ def test_vlm_judge_rejects_placeholder_screen_reference() -> None:
         vlm_not_run=False,
     )
     assert result["status"] == "matched"
+
+
+# ----------------------------------------------------------------------
+# Finish-gate regression: compiled entity contracts must be finishable
+# ----------------------------------------------------------------------
+
+
+def _simulate_finish(task: str, named_evidence: dict[str, dict]):
+    """Run AggregatingGoalEvaluator over a heuristic contract as reflect does."""
+    from phone_agent.graph.goal_evaluator import AggregatingGoalEvaluator
+
+    contract = HeuristicGoalCompiler().compile(task=task)
+    finish_claim = [c.name for c in contract.success_criteria]
+    evidence_list = [
+        {"criterion": key, **value} for key, value in named_evidence.items()
+    ]
+    return AggregatingGoalEvaluator().evaluate(
+        contract=contract,
+        verifier_status="success",
+        verifier_evidence={
+            "selected_object_signals": {
+                "selected_object_match": True,
+                "selected_object_expected_rank": contract.ordinal,
+            }
+        },
+        after_observation={"current_app": contract.target_app_hint or "", "top_activity": ""},
+        device_signals={"current_app": contract.target_app_hint or ""},
+        finish_claim_matched=finish_claim,
+        reflect_named_evidence=evidence_list,
+        goal_probes=None,
+    )
+
+
+def test_entity_contract_finish_gate_not_blocked_by_typed_predicate() -> None:
+    """The P0 regression: typed semantic predicate (entity hash vs screen
+    text, casefold_exact) must not veto a vlm_judge criterion. Finish with a
+    grounded screen_reference succeeds via the vlm_judge fallback."""
+    result = _simulate_finish(
+        "在哔哩哔哩搜索猫咪视频并播放第一个视频",
+        {
+            "task_completed": {
+                "screen_reference": "mark_id=video_title",
+                "observed_value": "猫咪视频合集",
+                "source": "accessibility",
+                "screen_id": "s1",
+                "observation_epoch": 1,
+            },
+            "target_app_visible": {
+                "screen_reference": "foreground",
+                "observed_value": "bilibili",
+                "source": "device",
+                "screen_id": "s1",
+                "observation_epoch": 1,
+            },
+            "selected_object_rank": {
+                "screen_reference": "item1",
+                "observed_value": 1,
+                "source": "screen_object",
+                "screen_id": "s1",
+                "observation_epoch": 1,
+            },
+        },
+    )
+    assert result.status == "success", result.evidence.get("per_criterion")
+
+
+def test_typed_match_still_upgrades_vlm_judge_criterion() -> None:
+    """When the typed predicate does match, it wins without vlm_judge."""
+    from phone_agent.graph.goal_evaluator import AggregatingGoalEvaluator
+
+    contract = HeuristicGoalCompiler().compile(task="打开微信给张三发消息说你好")
+    crit = next(c for c in contract.success_criteria if c.name == "task_completed")
+    assert crit.predicate is not None
+    result = AggregatingGoalEvaluator()._check_criterion(
+        crit,
+        contract=contract,
+        verifier_status=None,
+        verifier_evidence=None,
+        after_observation=None,
+        device_signals=None,
+        finish_matched_set={"task_completed"},
+        named_evidence_map={
+            "task_completed": {
+                "screen_reference": "title",
+                "observed_value": crit.predicate.expected_value,
+                "source": "accessibility",
+                "screen_id": "s1",
+                "observation_epoch": 1,
+            }
+        },
+        vlm_not_run=False,
+        goal_probes=None,
+    )
+    assert result["status"] == "matched"
+
+
+def test_finish_placeholder_reference_still_rejected_with_predicate_attached() -> None:
+    result = _simulate_finish(
+        "在哔哩哔哩搜索猫咪视频并播放第一个视频",
+        {
+            "task_completed": {
+                "screen_reference": "region-1",
+                "observed_value": "猫咪视频合集",
+                "source": "visual_region",
+                "screen_id": "s1",
+                "observation_epoch": 1,
+            },
+        },
+    )
+    assert result.status != "success"
+    assert result.evidence["per_criterion"]["task_completed"]["status"] == "missing"
+
+
+def test_reference_id_with_equals_sign_accepted() -> None:
+    from phone_agent.graph.predicates import EvidenceReference
+
+    ref = EvidenceReference(
+        source_kind="mark",
+        reference_id="mark_id=video_title",
+        screen_id="s1",
+        observation_epoch=1,
+    )
+    assert ref.reference_id == "mark_id=video_title"
+
+
+def test_chinese_compound_ordinals() -> None:
+    from phone_agent.graph.goal_requirements import parse_chinese_ordinal
+
+    assert parse_chinese_ordinal("播放第二十个视频") == 20
+    assert parse_chinese_ordinal("播放第十二个视频") == 12
+    assert parse_chinese_ordinal("播放第二十一个视频") == 21
+    assert parse_chinese_ordinal("播放第三个视频") == 3
+    assert parse_chinese_ordinal("播放视频") is None
+
+
+def test_compound_ordinal_flows_into_requirements_and_contract() -> None:
+    requirements = TaskRequirementExtractor().extract("在哔哩哔哩播放第二十个视频")
+    assert requirements.ordinal == 20
+    contract = HeuristicGoalCompiler().compile(task="在哔哩哔哩播放第二十个视频")
+    assert contract.ordinal == 20
+
+
+def test_after_goal_routes_takeover_when_retry_policy_requests_it() -> None:
+    from phone_agent.graph.edges import after_goal
+
+    state = {
+        "finished": False,
+        "error": None,
+        "goal_contract_status": "failed",
+        "retry_policy": "takeover",
+    }
+    assert after_goal(state) == "takeover"
+    state["retry_policy"] = "none"
+    assert after_goal(state) == "end"
+
+
+def test_agent_config_exposes_fact_extractors() -> None:
+    from phone_agent.agent import AgentConfig
+
+    config = AgentConfig()
+    assert config.visual_fact_extractor is None
+    assert config.whole_screen_fact_extractor is None

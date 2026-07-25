@@ -55,6 +55,11 @@ class AgentConfig:
     locateanything_max_visual_candidates: int = 30
     locateanything_visual_category_budget: int = 5
     locateanything_max_structure_calls: int = 5
+    # Optional fact extractors for typed-predicate evidence collection.
+    # Both default to None; reflect only wires ExtractorFactProvider when a
+    # callable is present (fact_providers.ExtractorFactProvider).
+    visual_fact_extractor: Any | None = None
+    whole_screen_fact_extractor: Any | None = None
 
     def __post_init__(self):
         self.context_mode = normalize_context_mode(self.context_mode)
@@ -368,6 +373,8 @@ class PhoneAgent:
                 "locateanything_max_visual_candidates": self.agent_config.locateanything_max_visual_candidates,
                 "locateanything_visual_category_budget": self.agent_config.locateanything_visual_category_budget,
                 "locateanything_max_structure_calls": self.agent_config.locateanything_max_structure_calls,
+                "visual_fact_extractor": self.agent_config.visual_fact_extractor,
+                "whole_screen_fact_extractor": self.agent_config.whole_screen_fact_extractor,
                 "runtime_goal_context": RuntimeGoalContext(),
             }
         }

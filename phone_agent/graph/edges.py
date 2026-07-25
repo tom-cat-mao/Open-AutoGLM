@@ -6,12 +6,14 @@ from phone_agent.actions.capability import get_tool_capability
 from phone_agent.graph.state import AgentState
 
 
-def after_goal(state: AgentState) -> Literal["plan", "end"]:
+def after_goal(state: AgentState) -> Literal["plan", "end", "takeover"]:
     """Fail closed before Plan when requirement/contract validation failed."""
 
     if state.get("finished") or state.get("error"):
         return "end"
     if state.get("goal_contract_status") == "failed":
+        if state.get("retry_policy") == "takeover":
+            return "takeover"
         return "end"
     return "plan"
 

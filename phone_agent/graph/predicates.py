@@ -115,7 +115,7 @@ class EvidenceReference:
     bbox: tuple[int, int, int, int] | None = None
 
     def __post_init__(self) -> None:
-        if not re.fullmatch(r"[A-Za-z0-9_.:-]{1,128}", self.reference_id):
+        if not re.fullmatch(r"[A-Za-z0-9_.:=-]{1,128}", self.reference_id):
             raise ValueError("evidence reference_id must be a trace-safe identifier")
         if self.screen_id is not None and not re.fullmatch(
             r"[A-Za-z0-9_.:-]{1,128}", self.screen_id
