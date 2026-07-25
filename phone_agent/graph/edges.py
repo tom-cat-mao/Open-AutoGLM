@@ -42,7 +42,7 @@ def should_continue(state: AgentState) -> Literal["end", "replan", "takeover"]:
 
 def after_execute(
     state: AgentState,
-) -> Literal["reflect", "replan", "confirm", "takeover", "end"]:
+) -> Literal["reflect", "acceptance", "replan", "confirm", "takeover", "end"]:
     """
     Decide the route after execute node.
 
@@ -51,7 +51,7 @@ def after_execute(
     - "confirm" / "takeover" if a pending HITL interrupt is waiting to be
       dispatched (resume path only — terminal guard above prevents this
       from firing when the run is already done)
-    - "reflect" if a finish claim is pending validation
+    - "acceptance" if a finish claim is pending validation
     - "end" if action is missing
     - "reflect" if action_confirmed (already dispatched on resume)
     - "takeover" if action is Take_over
@@ -79,8 +79,10 @@ def after_execute(
     action = state.get("action_parsed")
     if not action:
         return "end"
+    # A finish claim asks whether the whole task is done, not whether one
+    # action worked, so it goes to acceptance rather than action reflection.
     if state.get("pending_finish"):
-        return "reflect"
+        return "acceptance"
     if action.get("_metadata") == "finish":
         return "end"
 
@@ -103,6 +105,24 @@ def after_execute(
         return "replan"
 
     return "reflect"
+
+
+def after_acceptance(state: AgentState) -> Literal["replan", "takeover", "end"]:
+    """
+    Decide the route after the acceptance node.
+
+    Routes:
+    - "end" if the goal was satisfied (or the run errored out)
+    - "takeover" if acceptance escalated to a human
+    - "replan" otherwise — the claim was rejected, so keep working
+    """
+    if state.get("finished") or state.get("error"):
+        return "end"
+    if state.get("pending_interrupt") == "takeover":
+        return "takeover"
+    if state["step_count"] >= state["max_steps"]:
+        return "end"
+    return "replan"
 
 
 def after_interrupt(state: AgentState) -> Literal["reflect", "execute", "end"]:

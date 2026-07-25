@@ -7,9 +7,11 @@ from phone_agent.graph.nodes.goal_node import goal_node
 from phone_agent.graph.nodes.plan import plan_node
 from phone_agent.graph.nodes.execute import execute_node
 from phone_agent.graph.nodes.reflect import reflect_node
+from phone_agent.graph.nodes.acceptance import acceptance_node
 from phone_agent.graph.nodes.confirm import confirm_node
 from phone_agent.graph.nodes.takeover import takeover_node
 from phone_agent.graph.edges import (
+    after_acceptance,
     after_execute,
     after_goal,
     after_interrupt,
@@ -23,13 +25,17 @@ def create_agent_graph():
 
     Graph topology:
     ```
-    START → goal → plan → execute → [confirm|takeover|reflect|replan|end]
+    START → goal → plan → execute → [confirm|takeover|acceptance|reflect|replan|end]
                                    ├─ confirm → after_interrupt → [execute|reflect|end]
                                    ├─ takeover → after_interrupt → [reflect|end]
+                                   ├─ acceptance → after_acceptance → [takeover|replan→goal|end]
                                    ├─ reflect → should_continue → [takeover|replan→goal|end]
                                    ├─ replan → goal → plan (only internal no-observation capabilities)
                                    └─ end → END
     ```
+
+    `reflect` answers "did this action work?" on every step; `acceptance`
+    answers "is the task complete?" and runs only on a finish claim.
     """
     graph = StateGraph(AgentState)
 
@@ -37,6 +43,7 @@ def create_agent_graph():
     graph.add_node("plan", plan_node)
     graph.add_node("execute", execute_node)
     graph.add_node("reflect", reflect_node)
+    graph.add_node("acceptance", acceptance_node)
     graph.add_node("confirm", confirm_node)
     graph.add_node("takeover", takeover_node)
 
@@ -52,6 +59,7 @@ def create_agent_graph():
         after_execute,
         {
             "reflect": "reflect",
+            "acceptance": "acceptance",
             "replan": "plan",
             "confirm": "confirm",
             "takeover": "takeover",
@@ -61,6 +69,11 @@ def create_agent_graph():
     graph.add_conditional_edges(
         "reflect",
         should_continue,
+        {"replan": "goal", "takeover": "takeover", "end": END},
+    )
+    graph.add_conditional_edges(
+        "acceptance",
+        after_acceptance,
         {"replan": "goal", "takeover": "takeover", "end": END},
     )
     graph.add_conditional_edges(

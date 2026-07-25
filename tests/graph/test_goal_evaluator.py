@@ -297,3 +297,107 @@ def test_unknown_never_upgrades_to_success() -> None:
         reflect_named_evidence=None,
     )
     assert result.status == "unknown"
+
+
+# ----------------------------------------------------------------------
+# Self-observable criteria are settled from device truth, not testimony
+# ----------------------------------------------------------------------
+
+
+def _foreground_contract():
+    from phone_agent.graph.predicates import CORE_PREDICATE_CATALOG
+
+    return _contract(
+        [
+            SuccessCriterion(
+                name="app_open",
+                description="target app",
+                verification="app_or_activity_match",
+                predicate=CORE_PREDICATE_CATALOG.create_spec(
+                    "app.foreground_identity", "bilibili"
+                ),
+            )
+        ],
+        app_hint="bilibili",
+    )
+
+
+def test_self_observable_criterion_ignores_human_worded_report() -> None:
+    """The model naming the app in human words used to fail the whole task:
+    the gate string-compared its answer against a canonical id it never saw."""
+    result = evaluate_finish_claim(
+        contract=_foreground_contract(),
+        after_observation={"snapshot": {"current_app": "tv.danmaku.bili"}},
+        device_signals={"top_activity": "tv.danmaku.bili/.MainActivity"},
+        finish_claim_matched=["app_open"],
+        reflect_named_evidence=[
+            {
+                "criterion": "app_open",
+                "screen_reference": "fg",
+                "observed_value": "哔哩哔哩",
+            }
+        ],
+    )
+    assert result.status == "success"
+
+
+def test_self_observable_criterion_does_not_need_to_be_reported() -> None:
+    """Absent model evidence is not counter-evidence when the system can read
+    the fact itself."""
+    result = evaluate_finish_claim(
+        contract=_foreground_contract(),
+        after_observation={"snapshot": {"current_app": "tv.danmaku.bili"}},
+        device_signals={"top_activity": "tv.danmaku.bili/.MainActivity"},
+        finish_claim_matched=[],
+        reflect_named_evidence=[],
+    )
+    assert result.status == "success"
+
+
+def test_self_observable_criterion_still_fails_on_device_truth() -> None:
+    """Reading truth directly must not weaken the gate: a wrong foreground app
+    fails even when the model insists the right one is showing."""
+    result = evaluate_finish_claim(
+        contract=_foreground_contract(),
+        after_observation={"snapshot": {"current_app": "com.tencent.mm"}},
+        device_signals={"top_activity": "com.tencent.mm/.Main"},
+        finish_claim_matched=["app_open"],
+        reflect_named_evidence=[
+            {
+                "criterion": "app_open",
+                "screen_reference": "fg",
+                "observed_value": "bilibili",
+            }
+        ],
+    )
+    assert result.status == "failure"
+
+
+def test_only_raw_text_criteria_need_model_judgement() -> None:
+    """Raw-text criteria remain the model's call; structural facts do not."""
+    from phone_agent.graph.goal_evaluator import _is_self_observable
+    from phone_agent.graph.predicates import CORE_PREDICATE_CATALOG
+
+    semantic = SuccessCriterion(
+        name="topic",
+        description="target content visible",
+        verification="vlm_judge",
+        predicate=CORE_PREDICATE_CATALOG.create_spec(
+            "semantic.entity_matches", "周杰伦"
+        ),
+    )
+    assert not _is_self_observable(semantic)
+
+    for verification, predicate_id, value in (
+        ("app_or_activity_match", "app.foreground_identity", "bilibili"),
+        ("object_rank_match", "ui.object_rank", 3),
+        ("toggle_state_match", "ui.toggle_state", False),
+        ("focus_or_keyboard", "ui.focused", True),
+    ):
+        criterion = SuccessCriterion(
+            name=verification,
+            description="",
+            verification=verification,
+            predicate=CORE_PREDICATE_CATALOG.create_spec(predicate_id, value),
+        )
+        assert _is_self_observable(criterion), verification

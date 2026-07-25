@@ -23,8 +23,10 @@ from phone_agent.graph.goal_requirements import (
     ContractAdequacyValidator,
     TaskRequirementExtractor,
     TaskRequirementSet,
+    constraint_spans,
     extract_entity_spans,
     parse_chinese_ordinal,
+    parse_toggle_intent,
     _digest as _requirement_digest,
 )
 from phone_agent.graph.predicates import CORE_PREDICATE_CATALOG
@@ -59,8 +61,8 @@ def _detect_ordinal(text: str) -> int | None:
     return parse_chinese_ordinal(text)
 
 
-def _extract_entities_sha(text: str) -> list[str]:
-    """Entity hashes over the SAME spans the requirement extractor produces.
+def _extract_entity_spans(text: str) -> list[str]:
+    """Raw entity spans over the SAME spans the requirement extractor produces.
 
     Replicates TaskRequirementExtractor's operation + app-alias resolution
     inline (extractor does not expose them) and delegates span extraction to
@@ -90,12 +92,31 @@ def _extract_entities_sha(text: str) -> list[str]:
             ),
             None,
         )
-    return [
-        _requirement_digest(item)
-        for item in extract_entity_spans(text, matched_alias, operation)[
-            :MAX_ENTITY_COUNT
-        ]
-    ]
+    return extract_entity_spans(text, matched_alias, operation)[:MAX_ENTITY_COUNT]
+
+
+def _extract_entities_sha(text: str) -> list[str]:
+    """Digests of the entity spans, used for adequacy intersection only.
+
+    These hashes are a *binding* device (requirement side vs contract side),
+    never a match target: no fact provider emits hashes for
+    ``semantic.entity_matches``, so a predicate must bind the raw span
+    instead — see ``_primary_entity_span``.
+    """
+    return [_requirement_digest(item) for item in _extract_entity_spans(text)]
+
+
+def _primary_entity_span(text: str) -> str | None:
+    """Raw primary entity span used as a ``semantic.entity_matches`` expectation.
+
+    Fact providers emit raw on-screen text for this predicate
+    (``AccessibilityFactProvider`` yields ``node.text_summary``), so the
+    expectation must live in the same value domain. The raw value is
+    privacy-protected by the predicate's PRIVATE_RUNTIME projection, which
+    keeps it out of state, trace, and checkpoints.
+    """
+    spans = _extract_entity_spans(text)
+    return spans[0] if spans else None
 
 
 # ----------------------------------------------------------------------
@@ -132,6 +153,8 @@ class HeuristicGoalCompiler:
         app_hint = _detect_app_hint(text)
         ordinal = _detect_ordinal(text)
         entities_sha = _extract_entities_sha(text)
+        entity_span = _primary_entity_span(text)
+        toggle_state = parse_toggle_intent(text)
         redacted_obj = redact_objective(text)
 
         criteria: list[SuccessCriterion] = []
@@ -159,6 +182,20 @@ class HeuristicGoalCompiler:
                     ),
                 )
             )
+        if toggle_state is not None:
+            criteria.append(
+                SuccessCriterion(
+                    name="toggle_state_reached",
+                    description=(
+                        f"Target toggle is {'on' if toggle_state else 'off'}"
+                    ),
+                    verification="toggle_state_match",
+                    required=True,
+                    predicate=CORE_PREDICATE_CATALOG.create_spec(
+                        "ui.toggle_state", toggle_state
+                    ),
+                )
+            )
         if not criteria or entities_sha:
             criteria.insert(
                 0,
@@ -170,9 +207,9 @@ class HeuristicGoalCompiler:
                     required=True,
                     predicate=(
                         CORE_PREDICATE_CATALOG.create_spec(
-                            "semantic.entity_matches", entities_sha[0]
+                            "semantic.entity_matches", entity_span
                         )
-                        if entities_sha
+                        if entity_span
                         else None
                     ),
                 ),
@@ -182,7 +219,11 @@ class HeuristicGoalCompiler:
             redacted_objective=redacted_obj,
             objective_length=len(text),
             success_criteria=criteria,
-            constraints=[],
+            # Carry the constraint clauses the requirement extractor found, via
+            # the same function it uses, so the two sides agree by construction.
+            # Leaving this empty made every task containing 不要/只能/only
+            # permanently inadequate.
+            constraints=constraint_spans(text),
             non_goals=[],
             target_app_hint=app_hint,
             target_activity_hint=None,
@@ -230,7 +271,7 @@ GOAL_COMPILER_SYSTEM_PROMPT_CN = """你是一个任务目标编译器。你的�
 {
   "objective": "用户目标的脱敏重述（去除手机号/邮箱等隐私）",
   "success_criteria": [
-    {"name": "criterion_id", "description": "可观察的终态条件描述", "verification": "accessibility_text_match|object_hash_match|object_rank_match|app_or_activity_match|focus_or_keyboard|vlm_judge|external_probe", "required": true}
+    {"name": "criterion_id", "description": "可观察的终态条件描述", "verification": "accessibility_text_match|object_hash_match|object_rank_match|app_or_activity_match|focus_or_keyboard|toggle_state_match|vlm_judge|external_probe", "required": true}
   ],
   "constraints": ["约束1", "约束2"],
   "non_goals": ["非目标1"],
@@ -244,6 +285,7 @@ verification 枚举说明：
 - object_rank_match: 选中第 ordinal 个列表项
 - app_or_activity_match: 目标 app 或 activity 在前台
 - focus_or_keyboard: 输入框聚焦或键盘可见
+- toggle_state_match: 目标开关处于指定状态（开启/关闭）
 - vlm_judge: 需要视觉判断（必须在 finish 时点名该 criterion 并引用屏幕证据）
 - external_probe: 外部程序化探针
 
@@ -252,6 +294,7 @@ verification 枚举说明：
 - criterion name 必须唯一、是合法标识符（字母数字下划线）
 - 隐私信息（手机号、邮箱、密钥）不要写进 objective/description，用 <redacted> 替代
 - 如果任务涉及"第N个"结果，设 ordinal 并用 object_rank_match
+- 如果任务是把某个开关打开或关闭，用 toggle_state_match 描述目标开关状态
 - 如果任务的完成条件需要语义判断（某个目标内容出现/生效，而非仅 app 前台或列表序号），
   必须额外给出一条 required 的 vlm_judge criterion 描述该终态；不要只用 app_or_activity_match 代替
 """
@@ -262,7 +305,7 @@ Output exactly one JSON object, no Markdown:
 {
   "objective": "privacy-redacted restatement of the user goal",
   "success_criteria": [
-    {"name": "criterion_id", "description": "observable terminal condition", "verification": "accessibility_text_match|object_hash_match|object_rank_match|app_or_activity_match|focus_or_keyboard|vlm_judge|external_probe", "required": true}
+    {"name": "criterion_id", "description": "observable terminal condition", "verification": "accessibility_text_match|object_hash_match|object_rank_match|app_or_activity_match|focus_or_keyboard|toggle_state_match|vlm_judge|external_probe", "required": true}
   ],
   "constraints": ["constraint1"],
   "non_goals": ["non_goal1"],
@@ -274,6 +317,7 @@ Rules:
 - At least 1 required criterion; criterion names must be unique identifiers
 - Replace private info (phone/email/keys) with <redacted>
 - Use object_rank_match with ordinal for "the Nth result" tasks
+- Use toggle_state_match when the task turns a switch on or off
 - When completion requires semantic judgement (some target content present/effective,
   not merely app foreground or a list rank), add a required vlm_judge criterion
   describing that terminal state; do NOT substitute app_or_activity_match for it
@@ -413,6 +457,24 @@ class LLMGoalCompiler:
             target_app_hint = app_resolution.identity.canonical_id
 
         entities_sha = _extract_entities_sha(task)
+        entity_span = _primary_entity_span(task)
+        toggle_state = parse_toggle_intent(task)
+        if toggle_state is not None and not any(
+            item.verification == "toggle_state_match" for item in criteria
+        ):
+            # Toggle tasks need a programmatic state criterion; models routinely
+            # emit only app-foreground criteria, which would let "设置页在前台"
+            # stand in for "开关已关闭".
+            criteria.append(
+                SuccessCriterion(
+                    name="toggle_state_reached",
+                    description=(
+                        f"Target toggle is {'on' if toggle_state else 'off'}"
+                    ),
+                    verification="toggle_state_match",
+                    required=True,
+                )
+            )
         if entities_sha and not any(
             item.verification == "vlm_judge" and item.required for item in criteria
         ):
@@ -435,7 +497,8 @@ class LLMGoalCompiler:
             criteria,
             target_app_hint=target_app_hint,
             ordinal=ordinal,
-            entities_sha=entities_sha,
+            entity_span=entity_span,
+            toggle_state=toggle_state,
         )
 
         return GoalContract(
@@ -474,13 +537,13 @@ def _attach_core_predicates(
     *,
     target_app_hint: str | None,
     ordinal: int | None,
-    entities_sha: list[str] | None = None,
+    entity_span: str | None = None,
+    toggle_state: bool | None = None,
 ) -> list[SuccessCriterion]:
     """Explicitly migrate deterministic legacy compiler criteria to predicates."""
 
     from dataclasses import replace
 
-    entity_hash = entities_sha[0] if entities_sha else None
     migrated: list[SuccessCriterion] = []
     for criterion in criteria:
         if criterion.predicate is not None:
@@ -495,20 +558,23 @@ def _attach_core_predicates(
             predicate = CORE_PREDICATE_CATALOG.create_spec("ui.object_rank", ordinal)
         elif criterion.verification == "focus_or_keyboard":
             predicate = CORE_PREDICATE_CATALOG.create_spec("ui.focused", True)
+        elif criterion.verification == "toggle_state_match" and toggle_state is not None:
+            predicate = CORE_PREDICATE_CATALOG.create_spec(
+                "ui.toggle_state", toggle_state
+            )
         elif criterion.verification == "accessibility_text_match":
             match = re.search(r"sha256:([a-fA-F0-9]{8,64})", criterion.description)
             if match:
                 predicate = CORE_PREDICATE_CATALOG.create_spec(
                     "ui.text_hash_present", match.group(1).casefold()
                 )
-        elif criterion.verification == "vlm_judge" and entity_hash:
-            # Semantic coverage for entity-bearing tasks: the criterion's
-            # terminal state involves the task entity, so bind it to the
-            # primary entity hash (privacy-safe, no raw text). This is what
-            # lets compiled contracts satisfy semantic_criterion_missing on
-            # the production path instead of only in injected test contracts.
+        elif criterion.verification == "vlm_judge" and entity_span:
+            # Semantic coverage for entity-bearing tasks: bind the raw primary
+            # entity span, which is the domain fact providers actually emit for
+            # this predicate. Binding a hash here made the expectation
+            # unsatisfiable (casefold_exact(hash, screen_text) never matches).
             predicate = CORE_PREDICATE_CATALOG.create_spec(
-                "semantic.entity_matches", entity_hash
+                "semantic.entity_matches", entity_span
             )
         migrated.append(replace(criterion, predicate=predicate))
     return migrated

@@ -17,6 +17,7 @@ from phone_agent.graph.goal_compiler import (
     LLMGoalCompiler,
     compile_goal_contract,
 )
+from phone_agent.graph.edges import after_goal
 from phone_agent.graph.nodes.goal_node import goal_node
 from phone_agent.graph.runtime_goal import RuntimeGoalContext
 
@@ -532,9 +533,12 @@ def test_goal_node_fails_closed_when_requirements_need_clarification() -> None:
         )
 
     assert result["goal_contract_status"] == "failed"
-    assert result["finished"] is True
     assert result["failure_cause"] == "needs_goal_clarification"
     assert "app_ambiguous" in result["task_requirement_set"]["ambiguities"]
+    # Fail closed without silently ending: an ambiguous task is something a
+    # human can resolve, so it routes to takeover instead of terminating.
+    assert not result.get("finished")
+    assert after_goal(result) == "takeover"
 
 
 def test_goal_node_recompiles_when_needs_recompile() -> None:

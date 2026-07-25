@@ -16,6 +16,45 @@ OperationKind = Literal[
     "launch", "search", "select", "input", "toggle", "external", "unknown"
 ]
 
+# Single source of truth for Chinese ordinal numerals. Both the parser
+# (parse_chinese_ordinal) and the entity-span stripper (extract_entity_spans)
+# read these, so the two can never support different numeral ranges — a
+# divergence previously turned 第二十个视频 into the entity span 十个视频.
+# Toggle vocabulary, partitioned by the state the task asks for. The
+# operation-detection tuple below is derived from these three groups so the
+# classifier and parse_toggle_intent can never recognise different terms.
+# "切换/toggle" names a flip rather than a target state, so it stays neutral.
+_TOGGLE_ON_TERMS: tuple[str, ...] = ("开启", "enable")
+_TOGGLE_OFF_TERMS: tuple[str, ...] = ("关闭", "disable")
+_TOGGLE_NEUTRAL_TERMS: tuple[str, ...] = ("切换", "toggle")
+_TOGGLE_TERMS: tuple[str, ...] = (
+    _TOGGLE_ON_TERMS + _TOGGLE_OFF_TERMS + _TOGGLE_NEUTRAL_TERMS
+)
+
+_CJK_DIGITS: dict[str, int] = {
+    "一": 1,
+    "二": 2,
+    "三": 3,
+    "四": 4,
+    "五": 5,
+    "六": 6,
+    "七": 7,
+    "八": 8,
+    "九": 9,
+}
+_CJK_DIGIT_CLASS = "".join(_CJK_DIGITS)
+_ORDINAL_COUNTER = r"(?:\s*(?:个|条|项|部|集))?"
+_ORDINAL_COMPOUND_PATTERN = re.compile(
+    rf"第\s*([{_CJK_DIGIT_CLASS}]?)十([{_CJK_DIGIT_CLASS}]?)"
+)
+_ORDINAL_SIMPLE_PATTERN = re.compile(rf"第\s*([{_CJK_DIGIT_CLASS}]){_ORDINAL_COUNTER}")
+# Matches any ordinal span for removal: compound (第二十个), simple (第六个),
+# and numeric (第20个) forms.
+_ORDINAL_SPAN_PATTERN = re.compile(
+    rf"第\s*(?:[{_CJK_DIGIT_CLASS}]?十[{_CJK_DIGIT_CLASS}]?"
+    rf"|[{_CJK_DIGIT_CLASS}]|[1-9]\d*){_ORDINAL_COUNTER}"
+)
+
 
 @dataclass(frozen=True)
 class TaskRequirementSet:
@@ -85,7 +124,7 @@ class TaskRequirementExtractor:
     _OPERATIONS: tuple[tuple[OperationKind, tuple[str, ...]], ...] = (
         ("search", ("搜索", "查找", "search", "find")),
         ("input", ("输入", "填写", "type", "enter")),
-        ("toggle", ("开启", "关闭", "切换", "enable", "disable", "toggle")),
+        ("toggle", _TOGGLE_TERMS),
         ("select", ("打开第", "选择", "播放", "看", "select", "play", "open the")),
         ("launch", ("打开", "启动", "open", "launch")),
     )
@@ -122,7 +161,7 @@ class TaskRequirementExtractor:
                 None,
             )
         spans = extract_entity_spans(text, matched_alias, operation)
-        constraints = _constraint_spans(text)
+        constraints = constraint_spans(text)
         ambiguity = []
         if app_resolution.status == "ambiguous":
             ambiguity.append("app_ambiguous")
@@ -146,12 +185,37 @@ class TaskRequirementExtractor:
 
 @dataclass(frozen=True)
 class AdequacyResult:
-    status: Literal["adequate", "inadequate", "needs_clarification"]
+    status: Literal["adequate", "degraded", "inadequate", "needs_clarification"]
     reason_codes: tuple[str, ...] = field(default_factory=tuple)
 
 
+# Defects that make a contract structurally unusable: no amount of runtime
+# evidence can satisfy it, so proceeding would guarantee a false verdict.
+STRUCTURAL_REASON_CODES: frozenset[str] = frozenset(
+    {
+        "task_binding_mismatch",
+        "required_criteria_missing",
+        "predicate_unobservable",
+        "predicate_domain_mismatch",
+    }
+)
+
+
 class ContractAdequacyValidator:
-    """Compare independently extracted requirements with a candidate contract."""
+    """Compare independently extracted requirements with a candidate contract.
+
+    Two severities, because the two failure modes are not comparable:
+
+    * **structural** — the contract cannot be satisfied by any observation
+      (unbound task, no required criterion, a predicate no provider emits, or
+      an expectation in a different value domain than the provider output).
+      These are defects in the contract itself and block compilation.
+    * **semantic** — a keyword-derived requirement looks uncovered. The
+      requirement extractor is a vocabulary heuristic, so this is a *suspicion*,
+      not a fact; it degrades the contract (recorded, weaker verification)
+      rather than terminating the task. Terminal judgement happens at the
+      finish gate, where the screen and device truth are actually available.
+    """
 
     def validate(
         self, requirements: TaskRequirementSet, contract: GoalContract
@@ -162,6 +226,7 @@ class ContractAdequacyValidator:
         required = [item for item in contract.success_criteria if item.required]
         if not required:
             reasons.append("required_criteria_missing")
+        reasons.extend(_predicate_structural_defects(contract))
         if (
             requirements.target_app_identity
             and requirements.target_app_identity != contract.target_app_hint
@@ -203,14 +268,67 @@ class ContractAdequacyValidator:
                 contract_constraint_hashes
             ):
                 reasons.append("constraints_uncovered")
+
+        codes = tuple(sorted(set(reasons)))
+        # Ambiguity is a property of the task itself, so it outranks defects in
+        # the derived contract: when the input is ambiguous everything compiled
+        # from it is unreliable, and clarifying the task is the actionable fix.
         if requirements.ambiguities:
             return AdequacyResult(
                 "needs_clarification",
-                tuple(sorted(set(requirements.ambiguities + tuple(reasons)))),
+                tuple(sorted(set(requirements.ambiguities + codes))),
             )
-        if reasons:
-            return AdequacyResult("inadequate", tuple(sorted(set(reasons))))
+        if any(code in STRUCTURAL_REASON_CODES for code in codes):
+            return AdequacyResult("inadequate", codes)
+        if codes:
+            return AdequacyResult("degraded", codes)
         return AdequacyResult("adequate")
+
+
+def _predicate_structural_defects(contract: GoalContract) -> list[str]:
+    """Reject predicates that no provider can observe or compare.
+
+    Catches the two impossibilities that previously surfaced only as a finish
+    gate that never opened: a predicate with no producer, and an expectation
+    whose value domain differs from the provider's output domain (a digest
+    expectation can never equal raw screen text).
+    """
+    from phone_agent.graph.fact_providers import predicate_is_observable
+    from phone_agent.graph.predicates import CORE_PREDICATE_CATALOG
+
+    defects: list[str] = []
+    for criterion in contract.success_criteria:
+        predicate = criterion.predicate
+        if predicate is None or predicate.expected_value is None:
+            continue
+        if not predicate_is_observable(predicate.predicate_id):
+            defects.append("predicate_unobservable")
+            continue
+        definition = CORE_PREDICATE_CATALOG.get(predicate.predicate_id)
+        if not _expected_value_in_domain(
+            definition.value_domain, predicate.expected_value
+        ):
+            defects.append("predicate_domain_mismatch")
+    return defects
+
+
+def _expected_value_in_domain(domain: str, value: Any) -> bool:
+    """Whether an expected value plausibly belongs to the declared domain."""
+
+    if domain == "digest":
+        return isinstance(value, str) and bool(
+            re.fullmatch(r"[0-9a-f]{8,64}", value.casefold())
+        )
+    if domain == "raw_text":
+        # Raw screen text is never a bare digest: that combination is exactly
+        # the semantic.entity_matches regression this check exists to catch.
+        values = value if isinstance(value, (list, tuple)) else [value]
+        return not any(
+            isinstance(item, str)
+            and re.fullmatch(r"[0-9a-f]{12,64}", item.casefold())
+            for item in values
+        )
+    return True
 
 
 def extract_entity_spans(
@@ -224,7 +342,7 @@ def extract_entity_spans(
     the root cause of spurious `target_entities_uncovered` rejections.
     """
     cleaned = text
-    for constraint in _constraint_spans(text):
+    for constraint in constraint_spans(text):
         cleaned = cleaned.replace(constraint, " ")
     if app_alias:
         cleaned = re.sub(re.escape(app_alias), " ", cleaned, flags=re.IGNORECASE)
@@ -235,15 +353,39 @@ def extract_entity_spans(
     for _kind, terms in TaskRequirementExtractor._OPERATIONS:
         for term in terms:
             cleaned = re.sub(re.escape(term), " ", cleaned, flags=re.IGNORECASE)
-    # Word ordinals (第一个/第二…) — numeric form is handled below.
-    for word in ("第一", "第二", "第三", "第四", "第五"):
-        cleaned = re.sub(word + r"(?:个|条|项|部|集)?", " ", cleaned)
-    cleaned = re.sub(r"第\s*[1-9]\d*\s*(?:个|条|项|部|集)?", " ", cleaned)
-    return [
-        item.strip("'\"“”‘’《》<>（）()[]【】")
-        for item in re.split(r"[\s,，。.!！?？/\\]+", cleaned)
-        if len(item.strip("'\"“”‘’《》<>（）()[]【】")) >= 2
-    ]
+    # Ordinal spans (第一个 / 第二十个 / 第20个) — one pattern shared with
+    # parse_chinese_ordinal so numeral vocabularies cannot drift apart.
+    cleaned = _ORDINAL_SPAN_PATTERN.sub(" ", cleaned)
+    spans = []
+    for item in re.split(r"[\s,，。.!！?？/\\]+", cleaned):
+        span = _trim_span(item)
+        if len(span) >= 2:
+            spans.append(span)
+    return spans
+
+
+# Conjunctions/particles that survive verb stripping and stay glued to an
+# entity span ("搜索猫咪视频并播放" -> "猫咪视频并"). They are only ever
+# trailing/leading residue, so they are trimmed at the edges rather than
+# split on: 和/并 occur INSIDE real app names (和平精英, 并读新闻), so
+# splitting would corrupt legitimate entities.
+_SPAN_EDGE_PARTICLES = ("并且", "并", "然后", "接着", "以及", "和", "还有", "再", "的")
+_SPAN_EDGE_PUNCTUATION = "'\"“”‘’《》<>（）()[]【】、:：;；-—_"
+
+
+def _trim_span(value: str) -> str:
+    """Strip surrounding punctuation and trailing conjunction residue."""
+
+    span = value.strip(_SPAN_EDGE_PUNCTUATION).strip()
+    changed = True
+    while changed and span:
+        changed = False
+        for particle in _SPAN_EDGE_PARTICLES:
+            # Only trim when a real entity remains — 和平精英 must survive.
+            if span.endswith(particle) and len(span) > len(particle) + 1:
+                span = span[: -len(particle)].strip(_SPAN_EDGE_PUNCTUATION).strip()
+                changed = True
+    return span
 
 
 def _terminal_state(operation: OperationKind) -> str:
@@ -303,7 +445,13 @@ def _terminal_state_is_covered(
     )
 
 
-def _constraint_spans(text: str) -> list[str]:
+def constraint_spans(text: str) -> list[str]:
+    """Constraint clauses in a raw task ("不要加糖", "only use wifi").
+
+    Shared by TaskRequirementExtractor and the goal compilers so requirement
+    constraint hashes and contract constraints are computed over identical
+    spans — divergence made every constrained task permanently inadequate.
+    """
     markers = (
         "不要",
         "不得",
@@ -322,23 +470,37 @@ def _constraint_spans(text: str) -> list[str]:
     return spans
 
 
+def parse_toggle_intent(text: str) -> bool | None:
+    """Return the desired toggle state for a toggle task, or None if unclear.
+
+    "切换/toggle" states a flip, not a target, so it yields None and the
+    contract falls through to semantic judgement instead of asserting a
+    state the task never specified.
+    """
+    lowered = unicodedata.normalize("NFKC", str(text or "")).casefold()
+    for term in _TOGGLE_ON_TERMS:
+        if term.casefold() in lowered:
+            return True
+    for term in _TOGGLE_OFF_TERMS:
+        if term.casefold() in lowered:
+            return False
+    return None
+
+
 def parse_chinese_ordinal(text: str) -> int | None:
     """Parse 第N个/第N ordinals including compound numerals (十二/二十/二十一).
 
     Substring matching ("第{word}" in text) misreads 第二十个 as 2; this
     parses the full numeral span first, then falls back to single words.
     """
-    compound = re.search(r"第\s*([一二三四五六七八九]?)十([一二三四五六七八九]?)", text)
+    compound = _ORDINAL_COMPOUND_PATTERN.search(text)
     if compound:
-        digits = {"一": 1, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9}
-        tens = digits.get(compound.group(1), 1) * 10
-        ones = digits.get(compound.group(2), 0)
+        tens = _CJK_DIGITS.get(compound.group(1), 1) * 10
+        ones = _CJK_DIGITS.get(compound.group(2), 0)
         return tens + ones
-    simple = re.search(r"第\s*([一二三四五六七八九])(?:\s*(?:个|条|项|部|集))?", text)
+    simple = _ORDINAL_SIMPLE_PATTERN.search(text)
     if simple:
-        return {"一": 1, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9}[
-            simple.group(1)
-        ]
+        return _CJK_DIGITS[simple.group(1)]
     return None
 
 

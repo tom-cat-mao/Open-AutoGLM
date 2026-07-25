@@ -47,6 +47,49 @@ _PLACEHOLDER_SCREEN_REFERENCES = frozenset(
 )
 
 
+# Only raw on-screen text needs a judgement call: whether a label *means* the
+# goal was reached is a semantic question. Identifiers, digests, and scalars
+# (foreground app, rank, toggle state, focus) are structural facts the system
+# reads exactly, so asking the model to echo them adds a guess and no
+# information. The axis is the value domain, not the evidence source: an
+# accessibility node yields both raw text and booleans.
+_JUDGEMENT_VALUE_DOMAINS: frozenset[str] = frozenset({"raw_text"})
+
+
+def _is_self_observable(criterion: SuccessCriterion) -> bool:
+    """Whether the system can settle this criterion without model testimony."""
+
+    if criterion.verification == "vlm_judge":
+        return False
+    predicate = criterion.predicate
+    if predicate is None:
+        # No typed predicate: the verification kind alone decides, and every
+        # non-vlm_judge kind has a programmatic check.
+        return True
+    definition = CORE_PREDICATE_CATALOG.get(predicate.predicate_id)
+    return definition.value_domain not in _JUDGEMENT_VALUE_DOMAINS
+
+
+def _checkable_states(observation: Any) -> set[bool]:
+    """Collect checked states of visible checkable nodes in an observation payload."""
+
+    if not isinstance(observation, dict):
+        return set()
+    states: set[bool] = set()
+    structures = observation.get("screen_structures")
+    for structure in structures if isinstance(structures, list) else []:
+        if not isinstance(structure, dict):
+            continue
+        nodes = structure.get("nodes")
+        for node in (nodes.values() if isinstance(nodes, dict) else []):
+            if not isinstance(node, dict) or not node.get("checkable"):
+                continue
+            if node.get("visible") is False:
+                continue
+            states.add(bool(node.get("checked")))
+    return states
+
+
 def _is_placeholder_screen_reference(value: str) -> bool:
     """Reject vlm_judge screen references with no discriminating information.
 
@@ -63,19 +106,6 @@ def _is_placeholder_screen_reference(value: str) -> bool:
         return True
     return False
 
-
-def _is_hash_bound_expectation(expected_value: Any) -> bool:
-    """Whether an expected predicate value is a hash the reporter cannot echo.
-
-    Hash-bound expectations (entity hashes like ``3b8467b4dc8e``) are never
-    producible by a VLM or an accessibility text node, so a contradiction
-    against one is a domain mismatch, not genuine counter-evidence.
-    """
-    import re as _re
-
-    return isinstance(expected_value, str) and bool(
-        _re.fullmatch(r"[0-9a-f]{8,64}", expected_value.casefold())
-    )
 
 # ----------------------------------------------------------------------
 # Result
@@ -352,6 +382,26 @@ class AggregatingGoalEvaluator:
         vlm_not_run: bool,
         goal_probes: dict[str, Any] | None,
     ) -> dict[str, Any]:
+        # Facts the system can read for itself are never delegated to the
+        # model. Asking it to echo a canonical app id or a rank made finishing
+        # depend on guessing a value it was never shown, while the ground truth
+        # sat unread in the snapshot / object registry / verifier signals.
+        if _is_self_observable(crit):
+            programmatic = self._check_programmatic(
+                crit,
+                contract=contract,
+                verifier_evidence=verifier_evidence,
+                after_observation=after_observation,
+                device_signals=device_signals,
+                goal_probes=goal_probes,
+            )
+            if programmatic is not None:
+                # Deliberately not gated on finish_matched_set: naming exists to
+                # stop the model claiming criteria it cannot see. Where the
+                # system reads ground truth, the model's endorsement is
+                # irrelevant and requiring it would recreate the dependency this
+                # dispatch removes.
+                return programmatic
         if crit.predicate is not None:
             typed = self._check_typed_predicate(
                 crit,
@@ -363,23 +413,54 @@ class AggregatingGoalEvaluator:
             if crit.verification != "vlm_judge":
                 return typed
             # vlm_judge criterion with an attached predicate: the typed check
-            # is corroborating evidence. A typed match upgrades to matched
-            # directly. A typed contradiction vetoes ONLY when the expected
-            # value is meaningful to the reporter (raw text/value the model
-            # can actually echo). Hash-bound expectations (entity hashes) are
-            # not reportable, so a "contradiction" there is a domain mismatch,
-            # not real counter-evidence — fall back to vlm_judge instead.
+            # is corroborating evidence in the same value domain as the
+            # provider output. A match upgrades directly; a contradiction is
+            # genuine counter-evidence and vetoes. Only an unobservable typed
+            # fact falls back to the vlm_judge self-attestation path.
             if typed.get("status") == "matched":
                 return typed
-            if typed.get("status") == "contradicted" and not _is_hash_bound_expectation(
-                crit.predicate.expected_value
-            ):
-                return {"status": "missing", "reason": "typed_contradiction", **{
-                    k: v for k, v in typed.items() if k not in {"status", "reason"}
-                }}
+            if typed.get("status") == "contradicted":
+                return {
+                    "status": "missing",
+                    "reason": "typed_contradiction",
+                    **{
+                        key: value
+                        for key, value in typed.items()
+                        if key not in {"status", "reason"}
+                    },
+                }
             return self._check_vlm_judge(
                 crit, finish_matched_set, named_evidence_map, vlm_not_run
             )
+        programmatic = self._check_programmatic(
+            crit,
+            contract=contract,
+            verifier_evidence=verifier_evidence,
+            after_observation=after_observation,
+            device_signals=device_signals,
+            goal_probes=goal_probes,
+        )
+        if programmatic is not None:
+            return programmatic
+        if crit.verification == "vlm_judge":
+            return self._check_vlm_judge(
+                crit, finish_matched_set, named_evidence_map, vlm_not_run
+            )
+        return {"status": "missing", "reason": "unknown_verification"}
+
+    def _check_programmatic(
+        self,
+        crit: SuccessCriterion,
+        *,
+        contract: GoalContract,
+        verifier_evidence: dict[str, Any] | None,
+        after_observation: dict[str, Any] | None,
+        device_signals: dict[str, Any] | None,
+        goal_probes: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        """Evaluate a criterion from device/observation truth, or None if it has
+        no programmatic check."""
+
         if crit.verification == "accessibility_text_match":
             return self._check_accessibility_text(crit, after_observation)
         if crit.verification == "object_hash_match":
@@ -394,13 +475,11 @@ class AggregatingGoalEvaluator:
             return self._check_focus_or_keyboard(
                 crit, after_observation, device_signals
             )
+        if crit.verification == "toggle_state_match":
+            return self._check_toggle_state(crit, after_observation)
         if crit.verification == "external_probe":
             return self._check_external_probe(crit, goal_probes)
-        if crit.verification == "vlm_judge":
-            return self._check_vlm_judge(
-                crit, finish_matched_set, named_evidence_map, vlm_not_run
-            )
-        return {"status": "missing", "reason": "unknown_verification"}
+        return None
 
     def _check_typed_predicate(
         self,
@@ -423,6 +502,11 @@ class AggregatingGoalEvaluator:
         screen_reference = str(evidence.get("screen_reference") or "").strip()
         if not screen_reference:
             return {"status": "missing", "reason": "no_screen_reference"}
+        # An ungrounded reference cannot be audited back to a concrete element,
+        # so the reported value carries no verifiable provenance — reject it
+        # even when the value itself would match.
+        if _is_placeholder_screen_reference(screen_reference):
+            return {"status": "missing", "reason": "placeholder_screen_reference"}
         observed_value = evidence.get("observed_value")
         source = str(evidence.get("source") or "visual_region")
         if source not in {
@@ -521,14 +605,13 @@ class AggregatingGoalEvaluator:
         expected_rank = signals.get("selected_object_expected_rank")
         if signals.get("selected_object_match") and expected_rank == contract.ordinal:
             return {"status": "matched", "reason": f"rank_{contract.ordinal}_match"}
-        # Soft fallback: when the verifier could not positively identify the
-        # selected object's content hash (selected_object_match is None because
-        # expected_outcome was not pre-declared), but the after-observation shows
-        # a detail/player surface (selected_object_detail_signal=True) and no
-        # negative signal (wrong_detail_opened / same_surface_still_visible),
-        # accept the ordinal match as `unknown` so a finish claim can proceed
-        # without forcing the model to compute content hashes (which it cannot).
-        # Programmatic contradiction signals above still override this.
+        # Weakest admissible evidence, kept only because the verifier cannot
+        # always identify the selected object's content hash (selected_object_match
+        # is None when expected_outcome was not pre-declared). The strong signal is
+        # ui.object_rank from ObjectFactProvider, which PureGoalEvaluator folds in
+        # and which overrides this; `soft` marks the distinction in the trace so a
+        # run resting on this alone is visible rather than indistinguishable from
+        # a positive rank confirmation.
         if (
             expected_rank is None
             and signals.get("selected_object_detail_signal")
@@ -538,6 +621,7 @@ class AggregatingGoalEvaluator:
             return {
                 "status": "matched",
                 "reason": f"rank_{contract.ordinal}_detail_only_soft_match",
+                "soft": True,
             }
         return {
             "status": "missing",
@@ -586,6 +670,29 @@ class AggregatingGoalEvaluator:
         if focus.get("focused_editable") or focus.get("keyboard_visible") or keyboard:
             return {"status": "matched", "reason": "focus_or_keyboard_visible"}
         return {"status": "missing", "reason": "no_focus_or_keyboard"}
+
+    def _check_toggle_state(
+        self,
+        crit: SuccessCriterion,
+        after_observation: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        """Match a toggle criterion against checkable accessibility nodes.
+
+        The authoritative signal is ``ui.toggle_state`` collected by
+        ``AccessibilityFactProvider`` through the typed-predicate path. This
+        text-payload check only covers contracts whose criterion carries no
+        predicate, and reports ``unknown`` (never a false negative) when the
+        observation payload has no checkable node to read.
+        """
+        expected = crit.predicate.expected_value if crit.predicate else None
+        states = _checkable_states(after_observation)
+        if not states:
+            return {"status": "unknown", "reason": "no_toggle_signal"}
+        if expected is None:
+            return {"status": "unknown", "reason": "no_expected_toggle_state"}
+        if expected in states:
+            return {"status": "matched", "reason": "toggle_state_match"}
+        return {"status": "contradicted", "reason": "toggle_state_mismatch"}
 
     def _check_external_probe(
         self, crit: SuccessCriterion, goal_probes: dict[str, Any] | None

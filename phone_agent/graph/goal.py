@@ -9,7 +9,7 @@ and reused across plan/reflect nodes.
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
-from typing import Any, Literal
+from typing import Any, Literal, get_args
 
 from phone_agent.graph.context import redact_context_text
 from phone_agent.graph.goal_binding import compute_task_binding
@@ -24,21 +24,14 @@ VerificationKind = Literal[
     "object_rank_match",
     "app_or_activity_match",
     "focus_or_keyboard",
+    "toggle_state_match",
     "vlm_judge",
     "external_probe",
 ]
 
-VALID_VERIFICATIONS: frozenset[str] = frozenset(
-    {
-        "accessibility_text_match",
-        "object_hash_match",
-        "object_rank_match",
-        "app_or_activity_match",
-        "focus_or_keyboard",
-        "vlm_judge",
-        "external_probe",
-    }
-)
+# Derived from the Literal so the runtime allowlist and the type can never
+# list different verification kinds.
+VALID_VERIFICATIONS: frozenset[str] = frozenset(get_args(VerificationKind))
 
 CompileStatus = Literal["pending", "compiled", "failed", "user_override"]
 VerificationStrategy = Literal[
@@ -239,16 +232,29 @@ class GoalContract:
     def to_prompt_block(self, *, lang: str = "cn") -> str:
         """Render a compact prompt block for plan/reflect injection.
 
-        Lists criterion names + descriptions + verification kinds so the model
-        knows exactly which evidence to cite in ``matched_terminal_evidence``.
+        Every criterion is listed, because all of them describe the goal and
+        are useful for planning. Each is tagged with who settles it: criteria
+        the system verifies from device/registry truth are marked ``auto`` so
+        the model neither has to cite them nor guess an internal value, and
+        only ``judge`` criteria need to appear in ``matched_terminal_evidence``.
         """
+        from phone_agent.graph.goal_evaluator import _is_self_observable
+
         criteria_lines = []
+        judge_names: list[str] = []
         for crit in self.success_criteria:
             tag = "required" if crit.required else "optional"
+            if _is_self_observable(crit):
+                arbiter = "auto"
+            else:
+                arbiter = "judge"
+                judge_names.append(crit.name)
             criteria_lines.append(
-                f"  - {crit.name} [{crit.verification}] ({tag}): {crit.description}"
+                f"  - {crit.name} [{crit.verification}] ({tag}, {arbiter}):"
+                f" {crit.description}"
             )
         criteria_block = "\n".join(criteria_lines) if criteria_lines else "  (none)"
+        judge_block = ", ".join(judge_names) if judge_names else "none"
         constraints_block = (
             "\n".join(f"  - {c}" for c in self.constraints)
             if self.constraints
@@ -272,7 +278,12 @@ class GoalContract:
                     constraints_block,
                     "non_goals:",
                     non_goals_block,
-                    "Finish is only valid when you name matched criteria in matched_terminal_evidence; otherwise continue/replan.",
+                    "[auto] criteria are verified from device state — do not cite them.",
+                    (
+                        "Finish is only valid when you name the [judge] criteria you can "
+                        f"see satisfied in matched_terminal_evidence ({judge_block}); "
+                        "otherwise continue/replan."
+                    ),
                 ]
             )
         return "\n".join(
@@ -287,7 +298,11 @@ class GoalContract:
                 constraints_block,
                 "非目标:",
                 non_goals_block,
-                "只有在 matched_terminal_evidence 中点名满足的成功标准时才允许 finish；否则必须继续或重新规划。",
+                "[auto] 标准由系统读取设备状态自行核验，不需要你点名或回报。",
+                (
+                    "只有在 matched_terminal_evidence 中点名你确实看到已满足的 [judge] "
+                    f"标准时才允许 finish（{judge_block}）；否则必须继续或重新规划。"
+                ),
             ]
         )
 

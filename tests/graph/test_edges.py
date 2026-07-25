@@ -109,11 +109,13 @@ def test_after_execute_only_skips_internal_non_progress_capability(
     assert after_execute(base_state) == "replan"
 
 
-def test_after_execute_routes_finish_claim_to_reflect(base_state) -> None:
+def test_after_execute_routes_finish_claim_to_acceptance(base_state) -> None:
+    """A finish claim is a question about the whole task, so it goes to the
+    acceptance node rather than per-action reflection."""
     base_state["action_parsed"] = {"_metadata": "finish", "message": "done"}
     base_state["pending_finish"] = True
 
-    assert after_execute(base_state) == "reflect"
+    assert after_execute(base_state) == "acceptance"
 
 
 def test_after_execute_stale_finish_without_pending_finish_ends(base_state) -> None:

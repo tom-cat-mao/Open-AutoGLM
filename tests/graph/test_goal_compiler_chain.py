@@ -58,7 +58,9 @@ def test_entity_extraction_agrees_between_extractor_and_compiler() -> None:
         ), f"entity hash mismatch for {task!r}"
 
 
-def test_attach_core_predicates_binds_semantic_entity_for_vlm_judge() -> None:
+def test_attach_core_predicates_binds_raw_entity_span_for_vlm_judge() -> None:
+    """The expectation must be the raw span, not a hash: fact providers emit
+    on-screen text, so a hash expectation is unsatisfiable by construction."""
     criteria = [
         SuccessCriterion("task_completed", "objective visible", "vlm_judge"),
     ]
@@ -66,10 +68,11 @@ def test_attach_core_predicates_binds_semantic_entity_for_vlm_judge() -> None:
         criteria,
         target_app_hint=None,
         ordinal=None,
-        entities_sha=["abc123"],
+        entity_span="猫咪视频",
     )
     assert migrated[0].predicate is not None
     assert migrated[0].predicate.predicate_id == "semantic.entity_matches"
+    assert migrated[0].predicate.expected_value == "猫咪视频"
 
 
 def test_attach_core_predicates_leaves_vlm_judge_untyped_without_entities() -> None:
@@ -80,7 +83,7 @@ def test_attach_core_predicates_leaves_vlm_judge_untyped_without_entities() -> N
         criteria,
         target_app_hint=None,
         ordinal=None,
-        entities_sha=[],
+        entity_span=None,
     )
     assert migrated[0].predicate is None
 
@@ -104,17 +107,37 @@ def test_operation_unknown_does_not_block_adequacy() -> None:
     assert result.status == "adequate"
 
 
-def test_pure_third_pass_unobserved_does_not_override_aggregating_result() -> None:
-    """reflect.py: a PureGoalEvaluator pass that could not observe criteria
-    (fact providers produced nothing) must not overwrite the aggregating
-    evaluation — missing evidence is not contradicting evidence."""
-    import inspect
+def test_pure_fold_unobserved_does_not_override_aggregating_result() -> None:
+    """A PureGoalEvaluator fold that could not observe a criterion (fact
+    providers produced nothing) must not overwrite an evaluation built on real
+    evidence: missing evidence is not contradicting evidence.
 
-    from phone_agent.graph.nodes import reflect as reflect_module
+    Asserted on the fold itself rather than by grepping node source, so the
+    guarantee holds wherever the fold is called from.
+    """
+    from phone_agent.graph.goal_evaluator import pure_goal_evaluator
 
-    source = inspect.getsource(reflect_module)
-    assert "pure_evaluation_degraded" in source
-    assert "criterion_unobserved" in source
+    contract = HeuristicGoalCompiler().compile(task="在哔哩哔哩搜索周杰伦")
+    names = [item.name for item in contract.success_criteria]
+
+    # Empty ledger: nothing was observed at all.
+    evaluation = pure_goal_evaluator.evaluate(
+        contract=contract,
+        contract_id="cid",
+        evidence_ledger=[],
+        finish_claim_matched=names,
+        screen_id="s1",
+        observation_epoch=1,
+    )
+
+    per_criterion = evaluation.evidence["per_criterion"]
+    assert all(
+        item["reason"] == "criterion_unobserved" for item in per_criterion.values()
+    )
+    # Unobserved is distinct from contradicted, so callers can tell "no
+    # evidence" apart from "counter-evidence" and keep the richer verdict.
+    assert evaluation.status != "success"
+    assert not any(item["status"] == "contradicted" for item in per_criterion.values())
 
 
 def test_vlm_judge_rejects_placeholder_screen_reference() -> None:
@@ -173,10 +196,10 @@ def _simulate_finish(task: str, named_evidence: dict[str, dict]):
     )
 
 
-def test_entity_contract_finish_gate_not_blocked_by_typed_predicate() -> None:
-    """The P0 regression: typed semantic predicate (entity hash vs screen
-    text, casefold_exact) must not veto a vlm_judge criterion. Finish with a
-    grounded screen_reference succeeds via the vlm_judge fallback."""
+def test_entity_contract_finish_gate_accepts_matching_screen_text() -> None:
+    """The semantic predicate lives in the provider's value domain (raw screen
+    text), so a screen label containing the task entity satisfies it directly
+    rather than needing a self-attestation fallback."""
     result = _simulate_finish(
         "在哔哩哔哩搜索猫咪视频并播放第一个视频",
         {
@@ -204,6 +227,130 @@ def test_entity_contract_finish_gate_not_blocked_by_typed_predicate() -> None:
         },
     )
     assert result.status == "success", result.evidence.get("per_criterion")
+
+
+def test_entity_contract_finish_gate_rejects_wrong_entity_on_screen() -> None:
+    """Counterpart to the test above: a different entity must contradict.
+
+    While the expectation was hash-bound this case passed via the vlm_judge
+    fallback, so the gate accepted finishing on the wrong content.
+    """
+    result = _simulate_finish(
+        "在哔哩哔哩搜索猫咪视频并播放第一个视频",
+        {
+            "task_completed": {
+                "screen_reference": "mark_id=video_title",
+                "observed_value": "狗狗视频合集",
+                "source": "accessibility",
+                "screen_id": "s1",
+                "observation_epoch": 1,
+            },
+            "target_app_visible": {
+                "screen_reference": "foreground",
+                "observed_value": "bilibili",
+                "source": "device",
+                "screen_id": "s1",
+                "observation_epoch": 1,
+            },
+            "selected_object_rank": {
+                "screen_reference": "item1",
+                "observed_value": 1,
+                "source": "screen_object",
+                "screen_id": "s1",
+                "observation_epoch": 1,
+            },
+        },
+    )
+    assert result.status == "failure"
+    assert result.evidence["per_criterion"]["task_completed"]["reason"] == (
+        "typed_contradiction"
+    )
+
+
+def test_entity_span_strips_conjunction_but_keeps_real_app_names() -> None:
+    """Conjunctions are trimmed at span edges, never split on: 和/并 occur
+    inside real app names (和平精英, 并读新闻)."""
+    from phone_agent.graph.goal_compiler import _primary_entity_span
+
+    assert _primary_entity_span("在哔哩哔哩搜索猫咪视频并播放第一个视频") == "猫咪视频"
+    assert _primary_entity_span("打开和平精英") == "和平精英"
+    assert _primary_entity_span("打开并读新闻") == "并读新闻"
+
+
+def test_toggle_task_compiles_programmatic_toggle_criterion() -> None:
+    """Toggle tasks used to die at the adequacy gate: ui.toggle_state was
+    reachable by providers but no verification kind could ever attach it."""
+    for task, expected in (("关闭蓝牙", False), ("开启wifi", True)):
+        requirements = TaskRequirementExtractor().extract(task)
+        contract = HeuristicGoalCompiler().compile(task=task)
+        toggle = next(
+            item
+            for item in contract.success_criteria
+            if item.verification == "toggle_state_match"
+        )
+        assert toggle.predicate is not None
+        assert toggle.predicate.predicate_id == "ui.toggle_state"
+        assert toggle.predicate.expected_value is expected
+        adequacy = ContractAdequacyValidator().validate(requirements, contract)
+        assert adequacy.status == "adequate", adequacy.reason_codes
+
+
+def test_neutral_toggle_verb_asserts_no_target_state() -> None:
+    """"切换" names a flip, not a target state, so no state is asserted."""
+    from phone_agent.graph.goal_requirements import parse_toggle_intent
+
+    assert parse_toggle_intent("切换飞行模式") is None
+    contract = HeuristicGoalCompiler().compile(task="切换飞行模式")
+    assert not any(
+        item.verification == "toggle_state_match"
+        for item in contract.success_criteria
+    )
+
+
+def test_toggle_state_evaluation_reads_checkable_nodes() -> None:
+    from phone_agent.graph.goal_evaluator import AggregatingGoalEvaluator
+
+    contract = HeuristicGoalCompiler().compile(task="关闭蓝牙")
+    criterion = next(
+        item
+        for item in contract.success_criteria
+        if item.verification == "toggle_state_match"
+    )
+    evaluator = AggregatingGoalEvaluator()
+
+    def observation(checked: bool) -> dict:
+        return {
+            "screen_structures": [
+                {
+                    "nodes": {
+                        "n1": {
+                            "checkable": True,
+                            "checked": checked,
+                            "visible": True,
+                        }
+                    }
+                }
+            ]
+        }
+
+    assert evaluator._check_toggle_state(criterion, observation(False))["status"] == (
+        "matched"
+    )
+    assert evaluator._check_toggle_state(criterion, observation(True))["status"] == (
+        "contradicted"
+    )
+    # Absence of a checkable node is not counter-evidence.
+    assert evaluator._check_toggle_state(criterion, {})["status"] == "unknown"
+
+
+def test_valid_verifications_derives_from_verification_kind() -> None:
+    """The runtime allowlist and the Literal cannot list different kinds."""
+    from typing import get_args
+
+    from phone_agent.graph.goal import VALID_VERIFICATIONS, VerificationKind
+
+    assert VALID_VERIFICATIONS == frozenset(get_args(VerificationKind))
+    assert "toggle_state_match" in VALID_VERIFICATIONS
 
 
 def test_typed_match_still_upgrades_vlm_judge_criterion() -> None:

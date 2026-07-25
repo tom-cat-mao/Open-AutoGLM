@@ -5,6 +5,7 @@ import pytest
 
 from phone_agent.graph.nodes.plan import plan_node
 from phone_agent.graph.nodes.goal_node import goal_node
+from phone_agent.graph.nodes.acceptance import acceptance_node
 from phone_agent.graph.nodes.reflect import parse_reflection_action, reflect_node
 from phone_agent.grounding.fake import FakeGroundingProvider
 from phone_agent.model.client import ModelParseError
@@ -1500,9 +1501,12 @@ def test_reflect_node_cn_and_en_task_finished_detection(
         )
 
         assert result["action_succeeded"] is True
-        # P0-3: non-pending_finish model self-attestation must not finish
+        # Suggesting "finish" is allowed — it asks Plan to emit a finish action,
+        # which Execute turns into a claim that the acceptance node must then
+        # validate. What reflect cannot do is complete the task itself, so the
+        # goal gate is unbypassable regardless of what the model suggests.
+        assert result["suggested_strategy"] == "finish"
         assert result["finished"] is False
-        assert result["failure_cause"] == "goal_not_satisfied"
 
 
 def test_parse_reflection_action_structured_json_only() -> None:
@@ -3358,7 +3362,7 @@ def test_plan_node_injects_task_goal_after_message_compaction(
     assert base_state["goal_contract"].ordinal == 2
 
 
-def test_reflect_node_rejects_pending_finish_without_final_goal_evidence(
+def test_acceptance_node_rejects_pending_finish_without_final_goal_evidence(
     base_state, fake_device
 ) -> None:
     base_state["task"] = "去b站看逗比的雀巢的第二个视频"
@@ -3376,7 +3380,7 @@ def test_reflect_node_rejects_pending_finish_without_final_goal_evidence(
         )
     )
 
-    result = reflect_node(
+    result = acceptance_node(
         base_state,
         {
             "configurable": {
@@ -3409,7 +3413,7 @@ def test_reflect_node_rejects_pending_finish_without_final_goal_evidence(
     assert result["suggested_strategy"] == "continue"
 
 
-def test_reflect_node_accepts_pending_finish_with_final_goal_evidence(
+def test_acceptance_node_accepts_pending_finish_with_final_goal_evidence(
     base_state, fake_device
 ) -> None:
     from phone_agent.graph.goal import GoalContract, SuccessCriterion
@@ -3472,7 +3476,7 @@ def test_reflect_node_accepts_pending_finish_with_final_goal_evidence(
         )
     )
 
-    result = reflect_node(
+    result = acceptance_node(
         base_state,
         {
             "configurable": {
@@ -3551,7 +3555,7 @@ def test_expected_outcome_selected_video_object_defaults_to_page_opened(
     assert result["expected_outcome"]["expected_page_type"] == "detail_or_player"
 
 
-def test_reflect_node_generic_pending_finish_can_use_model_evidence(
+def test_acceptance_node_generic_pending_finish_can_use_model_evidence(
     base_state, fake_device
 ) -> None:
     from phone_agent.graph.goal import GoalContract, SuccessCriterion
@@ -3594,7 +3598,7 @@ def test_reflect_node_generic_pending_finish_can_use_model_evidence(
         )
     )
 
-    result = reflect_node(
+    result = acceptance_node(
         base_state,
         {
             "configurable": {
@@ -3623,7 +3627,7 @@ def test_reflect_node_generic_pending_finish_can_use_model_evidence(
     assert "完成标识可见" not in str(result["goal_evidence_ledger"])
 
 
-def test_reflect_node_rejects_ranked_finish_without_expected_rank_match(
+def test_acceptance_node_rejects_ranked_finish_without_expected_rank_match(
     base_state, fake_device
 ) -> None:
     from phone_agent.graph.goal import GoalContract, SuccessCriterion
@@ -3688,7 +3692,7 @@ def test_reflect_node_rejects_ranked_finish_without_expected_rank_match(
         )
     )
 
-    result = reflect_node(
+    result = acceptance_node(
         base_state,
         {
             "configurable": {
@@ -3808,7 +3812,7 @@ def test_private_goal_value_survives_runtime_context_and_folds_semantics(
             '"source":"visual_region"}]}',
         )
     )
-    result = reflect_node(
+    result = acceptance_node(
         base_state,
         {
             "configurable": {

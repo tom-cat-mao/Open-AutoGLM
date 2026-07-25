@@ -10,6 +10,7 @@ from phone_agent.graph.goal_compiler import (
     HeuristicGoalCompiler,
     compile_goal_contract,
 )
+from phone_agent.graph.edges import after_goal
 from phone_agent.graph.nodes.goal_node import goal_node
 from phone_agent.graph.predicates import CORE_PREDICATE_CATALOG
 from phone_agent.graph.runtime_goal import RuntimeGoalContext
@@ -42,7 +43,7 @@ def test_adequacy_validator_rejects_candidate_contract_self_attestation() -> Non
 
     result = ContractAdequacyValidator().validate(requirements, candidate)
 
-    assert result.status == "inadequate"
+    assert result.status == "degraded"
     assert "target_app_uncovered" in result.reason_codes
 
 
@@ -68,7 +69,9 @@ def test_adequacy_validator_rejects_untyped_semantic_self_attestation() -> None:
 
     result = ContractAdequacyValidator().validate(requirements, candidate)
 
-    assert result.status == "inadequate"
+    # Semantic gaps are keyword-derived suspicions: still reported, but they
+    # degrade the contract rather than terminating the task at step 0.
+    assert result.status == "degraded"
     assert "semantic_criterion_missing" in result.reason_codes
 
 
@@ -131,7 +134,7 @@ def test_adequacy_validator_requires_ordinal_coverage() -> None:
 
     result = ContractAdequacyValidator().validate(requirements, candidate)
 
-    assert result.status == "inadequate"
+    assert result.status == "degraded"
     assert "ordinal_uncovered" in result.reason_codes
 
 
@@ -192,7 +195,7 @@ def test_terminal_state_requires_operation_appropriate_typed_predicate() -> None
 
     result = ContractAdequacyValidator().validate(requirements, candidate)
 
-    assert result.status == "inadequate"
+    assert result.status == "degraded"
     assert "terminal_state_uncovered" in result.reason_codes
 
 
@@ -248,7 +251,10 @@ def test_goal_node_projects_external_override_error_fail_closed() -> None:
 
     assert result["goal_contract_status"] == "failed"
     assert result["error_code"] == "external_goal_requirements_missing"
-    assert result["finished"] is True
+    # Fail closed: never reaches plan. It routes to human takeover rather than
+    # silently ending — previously `finished: True` made that branch dead code.
+    assert not result.get("finished")
+    assert after_goal(result) == "takeover"
 
 
 def test_external_override_with_bound_requirements_is_validated() -> None:
@@ -297,3 +303,123 @@ def test_task_binding_normalization_is_shared_with_compiler(task: str) -> None:
         ContractAdequacyValidator().validate(requirements, contract).status
         == "adequate"
     )
+
+
+# ----------------------------------------------------------------------
+# Adequacy severity: structural defects block, semantic gaps degrade
+# ----------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "task",
+    [
+        "关闭蓝牙",
+        "开启wifi",
+        "切换飞行模式",
+        "在美团点一杯咖啡不要加糖",
+        "only use wifi to download",
+        "打开和平精英",
+        "把闹钟设成明天早上七点",
+    ],
+)
+def test_real_tasks_never_die_at_the_adequacy_gate(task: str) -> None:
+    """These task families used to be rejected 100% of the time at step 0.
+
+    Toggle tasks demanded ui.toggle_state that no verification could attach,
+    and any task containing 不要/only could never match the empty
+    contract.constraints. Compilation must now proceed (adequate or degraded).
+    """
+    requirements = TaskRequirementExtractor().extract(task)
+    contract = HeuristicGoalCompiler().compile(task=task)
+    result = ContractAdequacyValidator().validate(requirements, contract)
+
+    assert result.status in {"adequate", "degraded"}, result.reason_codes
+
+
+def test_constraint_clauses_are_covered_by_the_compiler() -> None:
+    """Requirement and contract constraints come from one function, so the
+    constrained-task deadlock cannot reappear."""
+    task = "在美团点一杯咖啡不要加糖"
+    requirements = TaskRequirementExtractor().extract(task)
+    contract = HeuristicGoalCompiler().compile(task=task)
+
+    assert requirements.constraint_hashes
+    assert contract.constraints
+    result = ContractAdequacyValidator().validate(requirements, contract)
+    assert "constraints_uncovered" not in result.reason_codes
+
+
+def test_unobservable_predicate_is_a_structural_defect() -> None:
+    """A predicate no provider emits can never be satisfied, so it blocks."""
+    requirements = TaskRequirementExtractor().extract("在设置里搜索 Silverstone")
+    candidate = GoalContract(
+        task_hash=requirements.task_hash,
+        redacted_objective="search target",
+        objective_length=18,
+        success_criteria=[
+            SuccessCriterion(
+                "value",
+                "value visible",
+                "vlm_judge",
+                predicate=CORE_PREDICATE_CATALOG.create_spec(
+                    "ui.value_equals", "Silverstone"
+                ),
+            )
+        ],
+        target_app_hint="settings",
+        entities_sha=list(requirements.target_entity_hashes),
+        compile_status="compiled",
+    )
+
+    result = ContractAdequacyValidator().validate(requirements, candidate)
+
+    assert result.status == "inadequate"
+    assert "predicate_unobservable" in result.reason_codes
+
+
+def test_domain_mismatched_expectation_is_a_structural_defect() -> None:
+    """The Phase 1 regression, now caught at compile time: a digest
+    expectation on a raw-text predicate can never equal provider output."""
+    requirements = TaskRequirementExtractor().extract("在设置里搜索 Silverstone")
+    candidate = GoalContract(
+        task_hash=requirements.task_hash,
+        redacted_objective="search target",
+        objective_length=18,
+        success_criteria=[
+            SuccessCriterion(
+                "topic",
+                "target visible",
+                "vlm_judge",
+                predicate=CORE_PREDICATE_CATALOG.create_spec(
+                    "semantic.entity_matches", "d1d51d7a7c5c"
+                ),
+            )
+        ],
+        target_app_hint="settings",
+        entities_sha=list(requirements.target_entity_hashes),
+        compile_status="compiled",
+    )
+
+    result = ContractAdequacyValidator().validate(requirements, candidate)
+
+    assert result.status == "inadequate"
+    assert "predicate_domain_mismatch" in result.reason_codes
+
+
+def test_degraded_contract_still_compiles_and_reaches_plan() -> None:
+    """A semantic gap records itself but must not terminate the task."""
+    state = {
+        "task": "切换飞行模式",
+        "step_count": 0,
+        "lang": "cn",
+        "goal_contract_status": "pending",
+    }
+
+    result = goal_node(
+        state, {"configurable": {"runtime_goal_context": RuntimeGoalContext()}}
+    )
+
+    assert result["goal_contract_status"] == "compiled"
+    assert result["contract_adequacy_status"] == "degraded"
+    assert result["contract_adequacy_reasons"]
+    assert after_goal(result) == "plan"

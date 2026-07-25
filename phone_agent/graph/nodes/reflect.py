@@ -2,7 +2,7 @@
 
 import json
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from langchain_core.runnables import RunnableConfig
 
@@ -25,39 +25,25 @@ from phone_agent.graph.context import (
 )
 from phone_agent.graph.compatibility_adapters import observe_legacy_page_signals
 from phone_agent.graph.expected_outcome import expected_outcome_prompt_block
-from phone_agent.graph.fact_providers import (
-    ExternalProbeFactProvider,
-    ExtractorFactProvider,
-    FactCollector,
-    FactRequest,
-    OptionalAdapterRegistry,
-    default_core_fact_providers,
-)
 from phone_agent.graph.device_observation import capture_device_observation
-from phone_agent.graph.observation import build_mark_provider_hints, build_observation
-from phone_agent.graph.screenshot_status import (
-    screenshot_failure_code,
-    screenshot_is_sensitive,
+from phone_agent.graph.nodes.observation_capture import (
+    build_after_observation,
+    collect_device_verifier_signals,
+    sanitize_verifier_observation_payload,
+    screenshot_failure_update,
+    state_before_observation_payload,
+    verifier_observation_payload,
 )
+from phone_agent.graph.screenshot_status import screenshot_failure_code
 from phone_agent.graph.goal import (
-    ensure_goal_contract as _ensure_goal_contract_compat,
     build_goal_prompt_block,
-    goal_runtime_reference,
     goal_trace_payload,
 )
-from phone_agent.graph.goal_evidence import append_evaluation_entries
-from phone_agent.graph.goal_evaluator import (
-    GoalEvaluation,
-    evaluate_finish_claim,
-    pure_goal_evaluator,
-)
-from phone_agent.graph.runtime_observation import RuntimeObservationContext
 from phone_agent.graph.trace import emit_trace
 from phone_agent.graph.verifier import (
     merge_verifier_with_reflection,
     verify_action_outcome,
 )
-from phone_agent.grounding.factory import build_mark_providers
 from phone_agent.model.client import MessageBuilder
 
 if TYPE_CHECKING:
@@ -67,7 +53,7 @@ if TYPE_CHECKING:
 REFLECT_SYSTEM_PROMPT_CN = """你是一个手机自动化任务的反思专家。你的职责是观察动作执行后的屏幕截图，判断动作是否生效，并给出下一步建议。
 
 你必须只输出一个 JSON 对象，不要 Markdown、XML、函数调用或多余文本：
-{"verdict":"succeeded|failed|partial","failure_cause":"none|element_not_found|wrong_page|app_not_responding|network_or_loading|permission_or_login_or_captcha|unsafe_or_sensitive|coordinate_or_tap_offset|context_lost|repeated_action|model_parse_failed|unknown","suggested_strategy":"continue|retry|retry_with_offset|go_back|swipe_to_find|wait|takeover|finish","message":"xxx","named_evidence":[{"criterion":"criterion_name","screen_reference":"safe evidence id","observed_value":"current visible value","source":"accessibility|screen_object|mark|visual_region|whole_screen|external_probe|device"}]}
+{"verdict":"succeeded|failed|partial","failure_cause":"none|element_not_found|wrong_page|app_not_responding|network_or_loading|permission_or_login_or_captcha|unsafe_or_sensitive|coordinate_or_tap_offset|context_lost|repeated_action|model_parse_failed|unknown","suggested_strategy":"continue|retry|retry_with_offset|go_back|swipe_to_find|wait|takeover|finish","message":"xxx","named_evidence":[{"criterion":"criterion_name","screen_reference":"mark_id 或屏幕上的具体元素","observed_value":"你在该处实际看到的文字"}]}
 
 判断标准：
 1. 动作生效：页面满足预期后置条件（如输入框聚焦、目标文本出现、目标页面打开、目标应用打开）
@@ -76,7 +62,8 @@ REFLECT_SYSTEM_PROMPT_CN = """你是一个手机自动化任务的反思专家�
 4. 任务完成：如果当前页面显示任务已经完成，输出 {"verdict":"succeeded","failure_cause":"none","suggested_strategy":"finish","message":"任务已完成","named_evidence":[{"criterion":"成功标准名","screen_reference":"屏幕证据引用"}]}
 
 重要约束：
-- named_evidence 仅在 suggested_strategy="finish" 时需要输出，列出 finish claim 对应的目标契约成功标准名与屏幕证据引用；typed criterion 还必须给出当前可见 observed_value 和 evidence source。observed_value 仅用于当前 node 匹配，不写入 state/trace。
+- named_evidence 仅在 suggested_strategy="finish" 时需要输出，且只列出契约中标记为 [judge] 的成功标准。标记为 [auto] 的标准由系统读取设备状态自行核验，你不需要点名或回报。
+- 每条证据给出：criterion（标准名）、screen_reference（mark_id 或屏幕上的具体元素，不要写"区域1"/"屏幕"这类占位）、observed_value（你在该处实际看到的原文）。照实回报你看到的文字即可，不要猜测系统内部使用的取值。observed_value 仅用于当前 node 匹配，不写入 state/trace。
 - 只有在截图明确显示加载中、空白页、网络错误、进度条/转圈、或执行结果表示应用无响应时，才使用 failure_cause="network_or_loading" 和 suggested_strategy="wait"。
 - 如果刚执行的是 Launch/启动应用，且当前屏幕信息或截图已显示目标应用/设置页/目标页面已打开，即使任务还没完成，也应判定为 succeeded + continue，而不是 partial + wait。
 - 不要因为页面内容很多、设置项列表尚需下一步操作，就误判为加载中；可继续操作的稳定页面应输出 continue。
@@ -86,7 +73,7 @@ REFLECT_SYSTEM_PROMPT_CN = """你是一个手机自动化任务的反思专家�
 REFLECT_SYSTEM_PROMPT_EN = """You are a mobile automation reflection expert. Your job is to observe the screenshot after an action and judge whether the action succeeded, then give next-step advice.
 
 You MUST output exactly one JSON object. Do not output Markdown, XML, function calls, or extra text:
-{"verdict":"succeeded|failed|partial","failure_cause":"none|element_not_found|wrong_page|app_not_responding|network_or_loading|permission_or_login_or_captcha|unsafe_or_sensitive|coordinate_or_tap_offset|context_lost|repeated_action|model_parse_failed|unknown","suggested_strategy":"continue|retry|retry_with_offset|go_back|swipe_to_find|wait|takeover|finish","message":"xxx","named_evidence":[{"criterion":"criterion_name","screen_reference":"safe evidence id","observed_value":"current visible value","source":"accessibility|screen_object|mark|visual_region|whole_screen|external_probe|device"}]}
+{"verdict":"succeeded|failed|partial","failure_cause":"none|element_not_found|wrong_page|app_not_responding|network_or_loading|permission_or_login_or_captcha|unsafe_or_sensitive|coordinate_or_tap_offset|context_lost|repeated_action|model_parse_failed|unknown","suggested_strategy":"continue|retry|retry_with_offset|go_back|swipe_to_find|wait|takeover|finish","message":"xxx","named_evidence":[{"criterion":"criterion_name","screen_reference":"mark_id or a concrete on-screen element","observed_value":"the text you actually see there"}]}
 
 Judgment criteria:
 1. Action succeeded: expected postconditions are satisfied (for example focused input, expected text, target page, or target app)
@@ -95,7 +82,8 @@ Judgment criteria:
 4. Task completed: if the current page shows the task is done, output {"verdict":"succeeded","failure_cause":"none","suggested_strategy":"finish","message":"Task completed","named_evidence":[{"criterion":"criterion_name","screen_reference":"screen evidence reference"}]}
 
 Important constraints:
-- named_evidence is only required when suggested_strategy="finish". For typed criteria include the current visible observed_value and evidence source; observed_value is node-local and must not enter state or trace.
+- named_evidence is only required when suggested_strategy="finish", and only for criteria marked [judge] in the contract. Criteria marked [auto] are verified by the system from device state — do not cite or report them.
+- For each evidence item give: criterion (its name), screen_reference (a mark_id or concrete on-screen element — never a placeholder like "region-1"/"screen"), and observed_value (the text you actually see there). Report what you see verbatim; do not guess values the system uses internally. observed_value is node-local and must not enter state or trace.
 - Use failure_cause="network_or_loading" and suggested_strategy="wait" only when the screenshot clearly shows loading, a blank page, a network error, a spinner/progress indicator, or the execution result indicates the app is not responding.
 - If the action just executed is Launch and the current screen info or screenshot already shows the target app/settings/target page is open, judge it as succeeded + continue even if the overall task still needs more steps; do not return partial + wait.
 - Do not treat a stable page with many settings/list items as loading. If the page is actionable, return continue.
@@ -262,316 +250,18 @@ def parse_reflection_action(raw_action: str) -> ReflectionResult:
     )
 
 
-def _screenshot_failure_update(
-    *,
-    state: "AgentState",
-    config: RunnableConfig,
-    screenshot: object,
-    current_app: str,
-    context_mode: str,
-) -> dict:
-    """Build a terminal reflect update when a screenshot is unavailable."""
-
-    code = screenshot_failure_code(screenshot) or "screenshot_unavailable"
-    sensitive = screenshot_is_sensitive(screenshot)
-    failure_cause = (
-        "unsafe_or_sensitive"
-        if sensitive or code == "secure_screenshot_blocked"
-        else "context_lost"
-    )
-    suggested_strategy = (
-        "takeover" if failure_cause == "unsafe_or_sensitive" else "retry"
-    )
-    error_fields = {
-        "error_layer": "grounding",
-        "error_code": code,
-        "recoverable": True,
-        "retry_policy": (
-            "takeover" if failure_cause == "unsafe_or_sensitive" else "reobserve"
-        ),
-    }
-    error_message = f"Screenshot unavailable: {code}"
-    result_dict = {"success": False, "should_finish": True, "message": error_message}
-    emit_trace(
-        config,
-        state,
-        "reflect",
-        "reflect_error",
-        {
-            "message": error_message,
-            "failure_cause": failure_cause,
-            "grounding_error_code": code,
-            **error_fields,
-        },
-    )
-    return {
-        "screenshot_b64": None,
-        "current_app": current_app,
-        "action_result": result_dict,
-        "reflection": error_message,
-        "action_succeeded": False,
-        "reflection_verdict": "failed",
-        "failure_cause": failure_cause,
-        "suggested_strategy": suggested_strategy,
-        "grounding_error": code,
-        "grounding_failure_code": code,
-        "grounding_provider": "screenshot",
-        "retry_count": int(state.get("retry_count") or 0) + 1,
-        "finished": True,
-        "error": error_message,
-        "context_mode": context_mode,
-        **error_fields,
-    }
 
 
-def _build_after_observation(
-    *,
-    state: "AgentState",
-    config: RunnableConfig,
-    screenshot: object,
-    current_app: str,
-    foreground: object | None,
-    observation_epoch: int,
-    device_factory: object,
-    device_id: str | None,
-) -> object:
-    """Build a fresh after-action observation for postcondition verification."""
-
-    configurable = config.get("configurable", {})
-    screen_marks = configurable.get("after_screen_marks")
-    if screen_marks is None:
-        screen_marks = configurable.get("screen_marks_after")
-    accessibility_enabled = configurable.get("accessibility_marks")
-    if accessibility_enabled is None:
-        import os
-
-        accessibility_enabled = os.getenv(
-            "PHONE_AGENT_ACCESSIBILITY_MARKS", ""
-        ).lower() in {"1", "true", "yes", "on"}
-    provider_name = str(configurable.get("grounding_provider_name") or "").lower()
-    hybrid_provider_enabled = provider_name in {
-        "hybrid",
-        "accessibility_locateanything",
-        "uiautomator_locateanything",
-    }
-    if (
-        screen_marks is None
-        and accessibility_enabled
-        and not hybrid_provider_enabled
-        and hasattr(device_factory, "get_screen_marks")
-    ):
-        try:
-            screen_marks = device_factory.get_screen_marks(
-                device_id,
-                width=getattr(screenshot, "width", 0),
-                height=getattr(screenshot, "height", 0),
-                timeout=float(configurable.get("accessibility_timeout", 3.0) or 3.0),
-                max_marks=int(configurable.get("accessibility_max_marks", 80) or 80),
-            )
-        except Exception as exc:
-            screen_marks = None
-            emit_trace(
-                config,
-                state,
-                "reflect",
-                "after_accessibility_marks_error",
-                {
-                    "failure_code": type(exc).__name__,
-                    "message": "after accessibility marks unavailable",
-                },
-            )
-
-    provider_configurable = dict(configurable)
-    if not provider_configurable.get("reflect_enable_vlm_grounding"):
-        provider_configurable["grounding_provider_name"] = "accessibility"
-    if (
-        provider_configurable.get("accessibility_tree_dump") is None
-        and not provider_configurable.get("skip_accessibility_provider")
-        and hasattr(device_factory, "dump_uiautomator_xml")
-    ):
-        provider_configurable["accessibility_tree_dump"] = lambda timeout=None: (
-            device_factory.dump_uiautomator_xml(
-                device_id,
-                timeout=timeout,
-            )
-        )
-    provider_hints = build_mark_provider_hints(
-        task=state.get("task"),
-        reflection=state.get("reflection"),
-        provider_hints=configurable.get("mark_provider_hints")
-        or configurable.get("grounding_hints"),
-    )
-    return build_observation(
-        screenshot=screenshot,
-        current_app=current_app,
-        marks=screen_marks,
-        mark_providers=build_mark_providers(provider_configurable),
-        provider_hints=provider_hints,
-        provider_timeout=float(configurable.get("grounding_timeout", 10.0) or 10.0),
-        foreground=foreground,
-        observation_epoch=observation_epoch,
-    )
 
 
-def _bounded_observation_summary(
-    payload: dict | None, *, task_context: str | None = None
-) -> dict:
-    """Return prompt/trace-safe screen evidence without raw screenshots or trees."""
-
-    if not isinstance(payload, dict):
-        return {}
-    safe = sanitize_context_payload(
-        payload, consumer="reflect_prompt", task_context=task_context
-    )
-    if not isinstance(safe, dict):
-        return {}
-    marks = safe.get("marks")
-    if isinstance(marks, list):
-        safe["marks"] = marks[:20]
-    return safe
 
 
-def _state_before_observation_payload(
-    state: "AgentState", *, task_context: str | None = None
-) -> dict:
-    observation = state.get("observation")
-    if not isinstance(observation, dict):
-        return {}
-    snapshot = (
-        observation.get("snapshot")
-        if isinstance(observation.get("snapshot"), dict)
-        else {}
-    )
-    registry = (
-        observation.get("mark_registry")
-        if isinstance(observation.get("mark_registry"), dict)
-        else {}
-    )
-    marks_value = registry.get("marks") if isinstance(registry, dict) else []
-    if isinstance(marks_value, dict):
-        iterable_marks = marks_value.values()
-    elif isinstance(marks_value, list):
-        iterable_marks = marks_value
-    else:
-        iterable_marks = []
-    marks = []
-    for mark in iterable_marks:
-        if not isinstance(mark, dict):
-            continue
-        marks.append(
-            {
-                "mark_id": mark.get("mark_id"),
-                "role": mark.get("role"),
-                "text_summary": sanitize_context_payload(
-                    mark.get("text_summary") or "",
-                    consumer="trace_payload",
-                    task_context=task_context,
-                ),
-            }
-        )
-    payload = {
-        "snapshot": {
-            key: snapshot.get(key)
-            for key in (
-                "screen_id",
-                "screen_hash",
-                "current_app",
-                "foreground_package",
-                "foreground_activity",
-                "foreground_canonical_id",
-                "foreground_known",
-                "semantic_screen_id",
-                "observation_epoch",
-                "mark_set_version",
-            )
-            if snapshot.get(key) is not None
-        },
-        "marks": marks,
-        "mark_provider_observation": observation.get("mark_provider_observation"),
-    }
-    return _bounded_observation_summary(payload, task_context=task_context)
 
 
-def _collect_device_verifier_signals(
-    *,
-    device_factory: object,
-    device_id: str | None,
-    config: RunnableConfig,
-) -> dict:
-    """Collect optional read-only post-action signals for verifier use."""
-
-    configurable = config.get("configurable", {})
-    signals: dict[str, object] = {}
-
-    for config_key, output_key in (
-        ("focused_editable", "focused_editable"),
-        ("focused_window", "focused_window"),
-        ("top_activity", "top_activity"),
-        ("keyboard_visible", "keyboard_visible"),
-    ):
-        if config_key in configurable:
-            signals[output_key] = configurable[config_key]
-
-    module = getattr(device_factory, "module", None)
-    for owner in (device_factory, module):
-        if owner is None:
-            continue
-        if "focused_window" not in signals and hasattr(
-            owner, "get_focused_window_or_app"
-        ):
-            try:
-                signals["focused_window"] = owner.get_focused_window_or_app(device_id)
-            except Exception:
-                pass
-        if "top_activity" not in signals and hasattr(owner, "get_top_activity"):
-            try:
-                signals["top_activity"] = owner.get_top_activity(device_id)
-            except Exception:
-                pass
-        if "keyboard_visible" not in signals and hasattr(owner, "is_keyboard_visible"):
-            try:
-                signals["keyboard_visible"] = bool(owner.is_keyboard_visible(device_id))
-            except Exception:
-                pass
-    return signals
 
 
-def _verifier_observation_payload(
-    observation, *, task_context: str | None = None
-) -> dict:
-    """Build after-observation text for in-memory verifier matching only."""
-
-    marks = []
-    for mark in observation.mark_registry.marks.values():
-        row = {
-            "mark_id": mark.mark_id,
-            "role": mark.role,
-            "text_summary": mark.text_summary or "",
-        }
-        marks.append(row)
-    return {
-        "snapshot": observation.snapshot.to_dict(),
-        "marks": marks,
-        "mark_provider_observation": observation.mark_provider_observation,
-    }
 
 
-def _sanitize_verifier_observation_payload(
-    payload: dict, *, task_context: str | None = None
-) -> dict:
-    """Return prompt/trace-safe verifier observation without raw UI text."""
-
-    if not isinstance(payload, dict):
-        return {}
-    safe = sanitize_context_payload(
-        payload, consumer="checkpoint", task_context=task_context
-    )
-    if not isinstance(safe, dict):
-        return {}
-    marks = safe.get("marks")
-    if isinstance(marks, list):
-        safe["marks"] = marks[:20]
-    return safe
 
 
 SAFE_VERIFIER_EVIDENCE_STRINGS = {
@@ -743,20 +433,19 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
             "grounding_error": exc.code,
             "grounding_failure_code": exc.code,
             "retry_count": int(state.get("retry_count") or 0) + 1,
-            "pending_finish": False,
-            "finish_validation_status": "unknown",
+            "finished": False,
         }
     screenshot = device_capture.screenshot
     current_app = device_capture.current_app
     if screenshot_failure_code(screenshot):
-        return _screenshot_failure_update(
+        return screenshot_failure_update(
             state=state,
             config=config,
             screenshot=screenshot,
             current_app=current_app,
             context_mode=context_mode,
         )
-    after_observation = _build_after_observation(
+    after_observation = build_after_observation(
         state=state,
         config=config,
         screenshot=screenshot,
@@ -766,15 +455,15 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
         device_factory=device_factory,
         device_id=device_id,
     )
-    after_verifier_observation = _verifier_observation_payload(
+    after_verifier_observation = verifier_observation_payload(
         after_observation,
         task_context=task,
     )
-    before_verifier_observation = _state_before_observation_payload(
+    before_verifier_observation = state_before_observation_payload(
         state,
         task_context=task,
     )
-    device_verifier_signals = _collect_device_verifier_signals(
+    device_verifier_signals = collect_device_verifier_signals(
         device_factory=device_factory,
         device_id=device_id,
         config=config,
@@ -801,35 +490,6 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
             expected=state.get("expected_outcome"),
             observation=after_verifier_observation,
         )
-    pending_finish = bool(state.get("pending_finish")) or (
-        isinstance(action_parsed, dict) and action_parsed.get("_metadata") == "finish"
-    )
-    goal_contract = _ensure_goal_contract_compat(state, config)
-    finish_validation: GoalEvaluation | None = None
-    finish_claim_matched: list[str] = []
-    if pending_finish and goal_contract is not None:
-        if isinstance(action_parsed, dict):
-            raw_evidence = action_parsed.get("matched_terminal_evidence")
-            if isinstance(raw_evidence, list):
-                finish_claim_matched = [
-                    str(e) for e in raw_evidence if isinstance(e, str)
-                ]
-        finish_validation = evaluate_finish_claim(
-            contract=goal_contract,
-            verifier_status=verifier_result.status,
-            verifier_evidence=verifier_result.evidence,
-            after_observation=after_verifier_observation,
-            device_signals=device_verifier_signals,
-            finish_claim_matched=finish_claim_matched,
-        )
-    elif pending_finish:
-        # No contract compiled yet — fail-closed
-        finish_validation = GoalEvaluation(
-            status="failure",
-            matched=[],
-            missing=["goal_contract_unavailable"],
-            evidence={"reason": "goal_contract_not_compiled"},
-        )
     verifier_result_dict = _sanitize_verifier_result_dict(
         verifier_result,
         task_context=task,
@@ -838,11 +498,11 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
         verifier_result.evidence,
         task_context=task,
     )
-    safe_before_verifier_observation = _sanitize_verifier_observation_payload(
+    safe_before_verifier_observation = sanitize_verifier_observation_payload(
         before_verifier_observation,
         task_context=task,
     )
-    safe_after_verifier_observation = _sanitize_verifier_observation_payload(
+    safe_after_verifier_observation = sanitize_verifier_observation_payload(
         after_verifier_observation,
         task_context=task,
     )
@@ -864,34 +524,10 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
             ),
             "verifier_result": verifier_result_dict,
             "goal_contract": goal_trace_payload(state, config),
-            "finish_validation": (
-                finish_validation.to_dict() if finish_validation else None
-            ),
         },
     )
 
-    deterministic_reflection = None
-    if pending_finish and finish_validation is not None:
-        finish_status = finish_validation.status
-        if finish_status == "success":
-            deterministic_reflection = ReflectionResult(
-                "succeeded",
-                None,
-                "finish",
-                "finish claim validated by goal contract criteria",
-                True,
-            )
-        elif finish_status == "failure":
-            deterministic_reflection = ReflectionResult(
-                "failed",
-                "goal_not_satisfied",
-                "continue",
-                "finish claim rejected: goal evidence missing",
-                True,
-            )
-        # unknown → fall through to run VLM so named_evidence can be collected and re-evaluated
-    else:
-        deterministic_reflection = _reflection_from_verifier(verifier_result)
+    deterministic_reflection = _reflection_from_verifier(verifier_result)
 
     # 2. Build reflection prompt with language selection
     if lang == "en":
@@ -1056,32 +692,6 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
     # 4. Parse reflection
     reflection_state_value = _redacted_private_text(str(reflection or ""))
     action_succeeded = parsed_reflection.verdict == "succeeded"
-    task_finished = parsed_reflection.suggested_strategy == "finish"
-
-    # Re-evaluate finish claim with VLM named evidence when initial evaluation was unknown
-    if (
-        pending_finish
-        and goal_contract is not None
-        and finish_validation is not None
-        and finish_validation.status == "unknown"
-        and parsed_reflection.named_evidence is not None
-    ):
-        finish_claim_matched = []
-        if isinstance(action_parsed, dict):
-            raw_evidence = action_parsed.get("matched_terminal_evidence")
-            if isinstance(raw_evidence, list):
-                finish_claim_matched = [
-                    str(e) for e in raw_evidence if isinstance(e, str)
-                ]
-        finish_validation = evaluate_finish_claim(
-            contract=goal_contract,
-            verifier_status=verifier_result.status,
-            verifier_evidence=verifier_result.evidence,
-            after_observation=after_verifier_observation,
-            device_signals=device_verifier_signals,
-            finish_claim_matched=finish_claim_matched,
-            reflect_named_evidence=parsed_reflection.named_evidence,
-        )
 
     reflection_fields = merge_verifier_with_reflection(
         verifier_result,
@@ -1106,7 +716,6 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
     if (
         final_verdict in {"failed", "partial"}
         and retry_count >= _takeover_threshold(config)
-        and not task_finished
         and not has_positive_progress
     ):
         parsed_reflection.suggested_strategy = "takeover"
@@ -1115,173 +724,13 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
             "interrupt_message": "Repeated verification failures require human takeover",
             "hitl_count": int(state.get("hitl_count") or 0) + 1,
         }
-    if verifier_result.hard_failure or final_verdict != "succeeded":
-        task_finished = False
-    # Only pending_finish path can finish the task; model self-attestation
-    # ("suggested_strategy=finish" on a regular do action) must not bypass the goal gate
-    if task_finished and not pending_finish:
-        task_finished = False
-        final_verdict = "failed"
-        final_failure_cause = "goal_not_satisfied"
-        parsed_reflection.suggested_strategy = "continue"
-
-    state_contract = state.get("goal_contract")
-    has_runtime_goal_binding = isinstance(state_contract, dict) and isinstance(
-        state_contract.get("runtime_reference"), str
-    )
-    goal_evidence_ledger = (
-        list(state.get("goal_evidence_ledger") or [])
-        if has_runtime_goal_binding
-        else []
-    )
-    runtime_contract_id = (
-        goal_runtime_reference(state) if goal_contract is not None else None
-    )
-    if finish_validation is not None and goal_contract is not None:
-        goal_evidence_ledger = append_evaluation_entries(
-            goal_evidence_ledger,
-            evaluation=finish_validation.to_dict(),
-            contract_id=runtime_contract_id,
-            screen_id=after_observation.snapshot.screen_id,
-            observation_epoch=after_observation.snapshot.observation_epoch,
-            predicate_ids={
-                criterion.name: (
-                    criterion.predicate.predicate_id
-                    if criterion.predicate is not None
-                    else None
-                )
-                for criterion in goal_contract.success_criteria
-            },
-        )
-    if goal_contract is not None:
-        requests = tuple(
-            FactRequest(criterion.name, criterion.predicate)
-            for criterion in goal_contract.success_criteria
-            if criterion.predicate is not None
-            and criterion.predicate.expected_value is not None
-        )
-        if requests:
-            providers = list(default_core_fact_providers())
-            visual_extractor = configurable.get("visual_fact_extractor")
-            if callable(visual_extractor):
-                providers.append(
-                    ExtractorFactProvider(
-                        "visual_region",
-                        visual_extractor,
-                        provider_id="core.visual_region",
-                        provider_version="visual_region_v1",
-                    )
-                )
-            whole_screen_extractor = configurable.get("whole_screen_fact_extractor")
-            if callable(whole_screen_extractor):
-                providers.append(
-                    ExtractorFactProvider(
-                        "whole_screen",
-                        whole_screen_extractor,
-                        provider_id="core.whole_screen",
-                        provider_version="whole_screen_v1",
-                    )
-                )
-            goal_probes = configurable.get("goal_probes")
-            if isinstance(goal_probes, dict):
-                providers.append(ExternalProbeFactProvider(goal_probes))
-            adapter_registry = configurable.get("optional_fact_adapter_registry")
-            if isinstance(adapter_registry, OptionalAdapterRegistry):
-                providers.extend(adapter_registry.providers)
-            runtime_context = RuntimeObservationContext(
-                screenshot=screenshot,
-                observation=after_observation,
-                screen_id=after_observation.snapshot.screen_id,
-                observation_epoch=after_observation.snapshot.observation_epoch,
-            )
-            try:
-                collected_results = FactCollector(tuple(providers)).collect_and_resolve(
-                    runtime_context,
-                    requests,
-                    contract_id=runtime_contract_id,
-                )
-            finally:
-                runtime_context.invalidate()
-            goal_evidence_ledger = append_evaluation_entries(
-                goal_evidence_ledger,
-                evaluation={"evidence": {"per_criterion": collected_results}},
-                contract_id=runtime_contract_id,
-                screen_id=after_observation.snapshot.screen_id,
-                observation_epoch=after_observation.snapshot.observation_epoch,
-                predicate_ids={
-                    request.criterion_id: request.predicate.predicate_id
-                    for request in requests
-                },
-            )
-    if finish_validation is not None and goal_contract is not None:
-        if goal_contract.success_criteria and all(
-            criterion.predicate is not None
-            for criterion in goal_contract.success_criteria
-        ):
-            pure_evaluation = pure_goal_evaluator.evaluate(
-                contract=goal_contract,
-                contract_id=runtime_contract_id,
-                evidence_ledger=goal_evidence_ledger,
-                finish_claim_matched=finish_claim_matched,
-                screen_id=after_observation.snapshot.screen_id,
-                observation_epoch=after_observation.snapshot.observation_epoch,
-            )
-            # Missing evidence must not overturn existing evidence: when the
-            # pure fold could not even observe some criteria (fact providers
-            # produced nothing — e.g. accessibility dump unavailable), keep
-            # the aggregating evaluation instead of overwriting it with a
-            # failure built on absence. The same applies to contradictions
-            # against hash-bound expectations (entity hashes): providers can
-            # only produce raw screen text, which can never equal a hash, so
-            # such a "contradiction" is a domain mismatch rather than real
-            # counter-evidence. Genuine contradictions against reportable
-            # values (raw text/ordinal/app id) DO override, as before.
-            from phone_agent.graph.goal_evaluator import _is_hash_bound_expectation
-
-            per_criterion = (pure_evaluation.evidence or {}).get("per_criterion") or {}
-            predicate_by_criterion = {
-                criterion.name: criterion.predicate
-                for criterion in goal_contract.success_criteria
-            }
-
-            def _domain_mismatch(criterion_name: str, value: dict[str, Any]) -> bool:
-                if not isinstance(value, dict):
-                    return False
-                if value.get("reason") == "criterion_unobserved":
-                    return True
-                if value.get("status") == "contradicted":
-                    predicate = predicate_by_criterion.get(criterion_name)
-                    expected = predicate.expected_value if predicate else None
-                    return _is_hash_bound_expectation(expected)
-                return False
-
-            has_domain_mismatch = any(
-                _domain_mismatch(name, value)
-                for name, value in per_criterion.items()
-            )
-            if not has_domain_mismatch:
-                finish_validation = pure_evaluation
-            else:
-                emit_trace(
-                    config,
-                    state,
-                    "reflect",
-                    "pure_evaluation_degraded",
-                    {
-                        "reason": "unobserved_or_hash_domain_mismatch",
-                        "kept_status": finish_validation.status,
-                        "pure_status": pure_evaluation.status,
-                    },
-                )
-    # GoalEvaluator fail-closed: unknown and failure both block finish
-    if (
-        pending_finish
-        and finish_validation is not None
-        and finish_validation.status != "success"
+    # Reflect judges one action and can never finish the task: only a finish
+    # claim routed to the acceptance node can do that. A model that suggests
+    # "finish" here is asking to emit a finish action next, not declaring
+    # completion, so the suggestion is downgraded to keep planning.
+    if parsed_reflection.suggested_strategy == "finish" and (
+        verifier_result.hard_failure or final_verdict != "succeeded"
     ):
-        task_finished = False
-        final_verdict = "failed"
-        final_failure_cause = "goal_not_satisfied"
         parsed_reflection.suggested_strategy = "continue"
 
     context_updates = {"context_mode": context_mode}
@@ -1369,20 +818,11 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
             "failure_cause": final_failure_cause,
             "suggested_strategy": parsed_reflection.suggested_strategy,
             "action_succeeded": action_succeeded,
-            "finished": task_finished,
             "verifier_result": verifier_result_dict,
             "verifier_status": verifier_result.status,
             "verifier_failure_cause": verifier_result.failure_cause,
             "verifier_evidence": verifier_evidence,
             "goal_contract": goal_trace_payload(state, config),
-            "pending_finish": pending_finish,
-            "finish_validation_status": (
-                finish_validation.status if finish_validation else None
-            ),
-            "finish_validation_evidence": (
-                finish_validation.to_dict() if finish_validation else None
-            ),
-            "goal_evidence_ledger_count": len(goal_evidence_ledger),
             "context_mode": context_mode,
             "context_truncated": context_updates.get("context_truncated", False),
             "failure_memory_hit_count": context_updates.get(
@@ -1408,16 +848,10 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
         "verifier_status": verifier_result.status,
         "verifier_failure_cause": verifier_result.failure_cause,
         "verifier_evidence": verifier_evidence,
-        "pending_finish": False,
-        "finish_validation_status": (
-            finish_validation.status if finish_validation else None
-        ),
-        "finish_validation_evidence": (
-            finish_validation.to_dict() if finish_validation else None
-        ),
-        "goal_evidence_ledger": goal_evidence_ledger,
         "retry_count": retry_count,
-        "finished": task_finished,
+        # Reflect judges a single action and never completes the task; only the
+        # acceptance node can set this True, after the goal gate passes.
+        "finished": False,
         **takeover_update,
         **context_updates,
     }

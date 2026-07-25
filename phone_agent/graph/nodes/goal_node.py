@@ -85,12 +85,18 @@ def goal_node(state: "AgentState", config: RunnableConfig) -> dict:
             "error_code": exc.code,
             "recoverable": True,
             "retry_policy": "takeover",
-            "error": f"Goal contract rejected: {exc.code}",
-            "finished": True,
+            "pending_interrupt": "takeover",
+            "interrupt_message": (
+                f"Goal contract rejected ({exc.code}); human takeover required"
+            ),
             "needs_recompile": False,
         }
     adequacy = ContractAdequacyValidator().validate(requirements, contract)
-    if adequacy.status != "adequate":
+    if adequacy.status in {"inadequate", "needs_clarification"}:
+        # Structurally unsatisfiable contract (or an ambiguous task): no
+        # observation could ever settle it, so hand off to a human instead of
+        # burning steps. `finished` stays False so after_goal can route to
+        # takeover — setting it True made that branch unreachable.
         failure_cause = (
             "needs_goal_clarification"
             if adequacy.status == "needs_clarification"
@@ -123,10 +129,31 @@ def goal_node(state: "AgentState", config: RunnableConfig) -> dict:
             "error_code": failure_cause,
             "recoverable": True,
             "retry_policy": "takeover",
-            "error": f"Goal contract rejected: {failure_cause}",
-            "finished": True,
+            "pending_interrupt": "takeover",
+            "interrupt_message": (
+                f"Goal contract cannot be verified ({failure_cause}); "
+                "human takeover required"
+            ),
             "needs_recompile": False,
         }
+    if adequacy.status == "degraded":
+        # A keyword-derived requirement looks uncovered. The extractor is a
+        # vocabulary heuristic, so this is a suspicion rather than a fact:
+        # record it, weaken verification, and let the finish gate decide with
+        # real screen and device evidence.
+        emit_trace(
+            config,
+            state,
+            "goal",
+            "goal_contract_degraded",
+            {
+                "contract_adequacy": {
+                    "status": adequacy.status,
+                    "reason_codes": list(adequacy.reason_codes),
+                },
+                "requirement_set": requirements.safe_projection(),
+            },
+        )
 
     # If LLM failed and we fell back to heuristic, trace it explicitly.
     if contract.compile_source == "heuristic_fallback":
@@ -161,7 +188,7 @@ def goal_node(state: "AgentState", config: RunnableConfig) -> dict:
                 compile_source="heuristic_user_rejected",
             )
             adequacy = ContractAdequacyValidator().validate(requirements, contract)
-            if adequacy.status != "adequate":
+            if adequacy.status in {"inadequate", "needs_clarification"}:
                 return {
                     "goal_contract": None,
                     "goal_contract_status": "failed",
@@ -175,8 +202,11 @@ def goal_node(state: "AgentState", config: RunnableConfig) -> dict:
                     "error_code": "goal_approval_replacement_inadequate",
                     "recoverable": True,
                     "retry_policy": "takeover",
-                    "error": "Replacement goal contract is inadequate",
-                    "finished": True,
+                    "pending_interrupt": "takeover",
+                    "interrupt_message": (
+                        "Replacement goal contract cannot be verified; "
+                        "human takeover required"
+                    ),
                     "needs_recompile": False,
                 }
         emit_trace(

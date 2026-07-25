@@ -465,6 +465,42 @@ def default_core_fact_providers() -> tuple[FactProvider, ...]:
     )
 
 
+# Which predicates the core providers can actually emit facts for. A criterion
+# bound to a predicate absent from this map can never be observed, so the
+# contract asserting it is structurally unsatisfiable — the adequacy gate
+# rejects that instead of letting it fail silently at the finish gate.
+# `tests/graph/test_predicate_catalog_closure.py` drives every provider against
+# a synthetic observation to prove this map matches real behaviour, so it
+# cannot drift away from the implementations above.
+CORE_PROVIDER_PREDICATES: frozenset[str] = frozenset(
+    {
+        # DeviceFactProvider
+        "app.foreground_package",
+        "app.foreground_activity",
+        "app.foreground_identity",
+        # AccessibilityFactProvider
+        "ui.focused",
+        "ui.toggle_state",
+        "ui.text_equals",
+        "ui.text_hash_present",
+        "ui.dialog_open",
+        "ui.dialog_closed",
+        "semantic.entity_matches",
+        # ObjectFactProvider
+        "ui.object_present",
+        "ui.object_rank",
+        # ExternalProbeFactProvider (registered when goal_probes are supplied)
+        "external.effect_confirmed",
+    }
+)
+
+
+def predicate_is_observable(predicate_id: str) -> bool:
+    """Whether any core provider can emit facts for this predicate."""
+
+    return predicate_id in CORE_PROVIDER_PREDICATES
+
+
 def default_evidence_authority_policy(
     catalog: PredicateCatalog = CORE_PREDICATE_CATALOG,
 ) -> EvidenceAuthorityPolicy:

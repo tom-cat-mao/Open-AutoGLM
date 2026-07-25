@@ -8,6 +8,11 @@ from typing import Any, Literal, Mapping
 
 
 ValueKind = Literal["string", "boolean", "integer", "string_list", "mapping"]
+# The *domain* a value lives in, orthogonal to its Python type. Two string
+# predicates can be type-compatible yet never comparable: a digest expectation
+# can never equal the raw screen text a provider emits. Declaring the domain
+# makes that mismatch checkable instead of a latent runtime impossibility.
+ValueDomain = Literal["raw_text", "digest", "identifier", "scalar", "structured"]
 SourceKind = Literal[
     "accessibility",
     "screen_object",
@@ -54,6 +59,7 @@ class PredicateDefinition:
     matcher_id: str
     projection: PrivacyProjection
     whole_screen_allowed: bool = False
+    value_domain: ValueDomain = "scalar"
 
     def __post_init__(self) -> None:
         if not self.predicate_id or "." not in self.predicate_id:
@@ -402,6 +408,7 @@ def _definition(
     matcher_id: str = "exact",
     projection: PrivacyProjection = PUBLIC_CHECKPOINT,
     whole_screen_allowed: bool = False,
+    value_domain: ValueDomain = "scalar",
 ) -> PredicateDefinition:
     return PredicateDefinition(
         predicate_id=predicate_id,
@@ -410,19 +417,32 @@ def _definition(
         matcher_id=matcher_id,
         projection=projection,
         whole_screen_allowed=whole_screen_allowed,
+        value_domain=value_domain,
     )
 
 
 CORE_PREDICATE_CATALOG = PredicateCatalog(
     (
         _definition(
-            "app.foreground_package", "string", {"device"}, matcher_id="casefold_exact"
+            "app.foreground_package",
+            "string",
+            {"device"},
+            matcher_id="casefold_exact",
+            value_domain="identifier",
         ),
         _definition(
-            "app.foreground_activity", "string", {"device"}, matcher_id="casefold_exact"
+            "app.foreground_activity",
+            "string",
+            {"device"},
+            matcher_id="casefold_exact",
+            value_domain="identifier",
         ),
         _definition(
-            "app.foreground_identity", "string", {"device"}, matcher_id="casefold_exact"
+            "app.foreground_identity",
+            "string",
+            {"device"},
+            matcher_id="casefold_exact",
+            value_domain="identifier",
         ),
         _definition("ui.focused", "boolean", {"accessibility", "screen_object"}),
         _definition("ui.keyboard_visible", "boolean", {"accessibility", "device"}),
@@ -432,14 +452,37 @@ CORE_PREDICATE_CATALOG = PredicateCatalog(
             {"accessibility", "visual_region"},
             matcher_id="casefold_exact",
             projection=PRIVATE_RUNTIME,
+            value_domain="raw_text",
         ),
-        _definition("ui.text_hash_present", "string", {"accessibility"}),
+        _definition(
+            "ui.text_hash_present",
+            "string",
+            {"accessibility"},
+            # The provider digests node text before emitting, so the
+            # expectation must also be a digest.
+            value_domain="digest",
+        ),
         _definition(
             "ui.reference_text_changed", "boolean", {"accessibility", "visual_region"}
         ),
-        _definition("ui.object_present", "string", {"screen_object", "mark"}),
-        _definition("ui.object_absent", "string", {"screen_object", "mark"}),
-        _definition("ui.object_selected", "string", {"screen_object", "accessibility"}),
+        _definition(
+            "ui.object_present",
+            "string",
+            {"screen_object", "mark"},
+            value_domain="identifier",
+        ),
+        _definition(
+            "ui.object_absent",
+            "string",
+            {"screen_object", "mark"},
+            value_domain="identifier",
+        ),
+        _definition(
+            "ui.object_selected",
+            "string",
+            {"screen_object", "accessibility"},
+            value_domain="identifier",
+        ),
         _definition("ui.object_rank", "integer", {"screen_object", "accessibility"}),
         _definition(
             "ui.value_equals",
@@ -447,6 +490,7 @@ CORE_PREDICATE_CATALOG = PredicateCatalog(
             {"accessibility", "screen_object"},
             matcher_id="casefold_exact",
             projection=PRIVATE_RUNTIME,
+            value_domain="raw_text",
         ),
         _definition("ui.value_changed", "boolean", {"accessibility", "screen_object"}),
         _definition("ui.toggle_state", "boolean", {"accessibility", "screen_object"}),
@@ -456,6 +500,7 @@ CORE_PREDICATE_CATALOG = PredicateCatalog(
             {"accessibility", "screen_object"},
             matcher_id="collection_contains",
             projection=PRIVATE_RUNTIME,
+            value_domain="raw_text",
         ),
         _definition(
             "ui.collection_not_contains",
@@ -463,6 +508,7 @@ CORE_PREDICATE_CATALOG = PredicateCatalog(
             {"accessibility", "screen_object"},
             matcher_id="collection_not_contains",
             projection=PRIVATE_RUNTIME,
+            value_domain="raw_text",
         ),
         _definition(
             "ui.collection_count_changed", "boolean", {"accessibility", "screen_object"}
@@ -472,6 +518,7 @@ CORE_PREDICATE_CATALOG = PredicateCatalog(
             "string_list",
             {"accessibility", "screen_object"},
             projection=PRIVATE_RUNTIME,
+            value_domain="raw_text",
         ),
         _definition("ui.dialog_open", "boolean", {"accessibility", "screen_object"}),
         _definition("ui.dialog_closed", "boolean", {"accessibility", "screen_object"}),
@@ -483,20 +530,27 @@ CORE_PREDICATE_CATALOG = PredicateCatalog(
             "screen.loading_state",
             "string",
             {"accessibility", "screen_object", "visual_region"},
+            value_domain="identifier",
         ),
         _definition(
             "semantic.entity_matches",
             "string",
             {"accessibility", "visual_region", "whole_screen"},
-            matcher_id="casefold_exact",
+            # `contains`, not `casefold_exact`: providers emit whole on-screen
+            # labels ("猫咪视频合集") while the expectation is the task entity
+            # ("猫咪视频"). Requiring full equality would fail on every real
+            # screen. A different entity still contradicts.
+            matcher_id="contains",
             projection=PRIVATE_RUNTIME,
             whole_screen_allowed=True,
+            value_domain="raw_text",
         ),
         _definition(
             "external.effect_confirmed",
             "mapping",
             {"external_probe"},
             projection=PRIVATE_RUNTIME,
+            value_domain="structured",
         ),
     )
 )
