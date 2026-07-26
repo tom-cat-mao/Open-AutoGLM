@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from phone_agent.graph.context import (
     CONSUMER_POLICY,
     build_action_outcome_summary,
@@ -24,6 +26,11 @@ from phone_agent.graph.context import (
 def test_consumer_policy_covers_documented_consumers() -> None:
     for consumer in ("inject", "reflect_prompt", "trace_payload", "checkpoint", "default"):
         assert consumer in CONSUMER_POLICY
+
+
+def test_unregistered_consumer_is_rejected() -> None:
+    with pytest.raises(ValueError, match="unregistered context consumer: trace"):
+        sanitize_context_payload("value", consumer="trace")
 
 
 def test_sanitize_context_payload_inject_true_is_regex_only() -> None:

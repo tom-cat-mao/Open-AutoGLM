@@ -19,49 +19,7 @@ MAX_MARK_METADATA_CHARS = 32
 PERCEPTUAL_HASH_THRESHOLD = int(
     DEFAULT_VERIFICATION_POLICY.value("perceptual_hash_max_distance")
 )
-MARK_CONFIDENCE_THRESHOLD = DEFAULT_VERIFICATION_POLICY.value(
-    "mark_min_confidence"
-)
-PROMPT_SAFE_UI_TERMS = {
-    "搜索",
-    "搜一搜",
-    "首页",
-    "我的",
-    "推荐",
-    "热门",
-    "视频",
-    "直播",
-    "番剧",
-    "影视",
-    "关注",
-    "动态",
-    "消息",
-    "会员",
-    "频道",
-    "取消",
-    "返回",
-    "关闭",
-    "确定",
-    "完成",
-    "发布",
-    "打开",
-    "设置",
-    "刷新",
-    "历史",
-    "收藏",
-    "点赞",
-    "评论",
-    "分享",
-    "search",
-    "home",
-    "profile",
-    "me",
-    "cancel",
-    "back",
-    "close",
-    "ok",
-    "done",
-}
+MARK_CONFIDENCE_THRESHOLD = DEFAULT_VERIFICATION_POLICY.value("mark_min_confidence")
 
 
 @dataclass(frozen=True)
@@ -76,15 +34,29 @@ class Mark:
     confidence: float = 1.0
     role: str | None = None
     text_summary: str | None = None
+    password: bool = False
 
     def to_trace_dict(self) -> dict[str, Any]:
         data = asdict(self)
-        data["text_summary"] = sanitize_context_payload(self.text_summary or "", "message", consumer="checkpoint")
+        data["text_summary"] = (
+            None
+            if self.password
+            else sanitize_context_payload(
+                self.text_summary or "", "message", consumer="checkpoint"
+            )
+        )
         return data
+
+    def to_state_dict(self) -> dict[str, Any]:
+        return asdict(self)
 
     def to_prompt_dict(self) -> dict[str, Any]:
         data = asdict(self)
-        data["text_summary"] = _sanitize_mark_text_for_prompt(self.text_summary or "")
+        data["text_summary"] = (
+            None
+            if self.password
+            else _sanitize_mark_text_for_prompt(self.text_summary or "")
+        )
         return data
 
 
@@ -101,11 +73,17 @@ class MarkRegistry:
     raw_screenshot_hash: str | None = None
 
     @classmethod
-    def from_marks(cls, screen_id: str, marks: list[dict[str, Any] | Mark] | None) -> "MarkRegistry":
+    def from_marks(
+        cls, screen_id: str, marks: list[dict[str, Any] | Mark] | None
+    ) -> "MarkRegistry":
         parsed: dict[str, Mark] = {}
         for index, item in enumerate(marks or [], start=1):
             try:
-                mark = item if isinstance(item, Mark) else _coerce_mark(screen_id, item, index)
+                mark = (
+                    item
+                    if isinstance(item, Mark)
+                    else _coerce_mark(screen_id, item, index)
+                )
             except (TypeError, ValueError):
                 continue
             if mark.screen_id == screen_id:
@@ -114,7 +92,11 @@ class MarkRegistry:
         return cls(
             screen_id=screen_id,
             marks=parsed,
-            semantic_screen_id=str(marks[0].get("semantic_screen_id")) if marks and isinstance(marks[0], dict) and marks[0].get("semantic_screen_id") else None,
+            semantic_screen_id=str(marks[0].get("semantic_screen_id"))
+            if marks
+            and isinstance(marks[0], dict)
+            and marks[0].get("semantic_screen_id")
+            else None,
             mark_set_version=mark_set_version,
         )
 
@@ -131,7 +113,8 @@ class MarkRegistry:
         return cls(
             screen_id=registry.screen_id,
             marks=registry.marks,
-            semantic_screen_id=value.get("semantic_screen_id") or registry.semantic_screen_id,
+            semantic_screen_id=value.get("semantic_screen_id")
+            or registry.semantic_screen_id,
             observation_epoch=int(value.get("observation_epoch") or 0),
             mark_set_version=value.get("mark_set_version") or registry.mark_set_version,
             perceptual_hash=value.get("perceptual_hash"),
@@ -146,7 +129,7 @@ class MarkRegistry:
             "mark_set_version": self.mark_set_version,
             "perceptual_hash": self.perceptual_hash,
             "raw_screenshot_hash": self.raw_screenshot_hash,
-            "marks": {key: mark.to_trace_dict() for key, mark in self.marks.items()},
+            "marks": {key: mark.to_state_dict() for key, mark in self.marks.items()},
         }
 
     def get(self, mark_id: str) -> Mark | None:
@@ -183,26 +166,39 @@ class MarkRegistry:
 
 
 def build_screen_id(
-    *, current_app: str, screenshot_b64: str | None, width: int, height: int, marks: list[dict[str, Any] | Mark] | None = None
+    *,
+    current_app: str,
+    screenshot_b64: str | None,
+    width: int,
+    height: int,
+    marks: list[dict[str, Any] | Mark] | None = None,
 ) -> str:
-    semantic_id = build_semantic_screen_id(current_app=current_app, width=width, height=height)
+    semantic_id = build_semantic_screen_id(
+        current_app=current_app, width=width, height=height
+    )
     topology_digest = build_mark_topology_digest(marks)
     digest = hashlib.sha256(
         f"{semantic_id}|"
-        f"{compute_perceptual_hash(screenshot_b64, fallback_key=f'{semantic_id}|{topology_digest}')}|{topology_digest}".encode("utf-8")
+        f"{compute_perceptual_hash(screenshot_b64, fallback_key=f'{semantic_id}|{topology_digest}')}|{topology_digest}".encode(
+            "utf-8"
+        )
     ).hexdigest()
     return digest[:16]
 
 
 def build_semantic_screen_id(*, current_app: str, width: int, height: int) -> str:
-    return hashlib.sha256(f"{current_app}|{width}x{height}".encode("utf-8")).hexdigest()[:16]
+    return hashlib.sha256(
+        f"{current_app}|{width}x{height}".encode("utf-8")
+    ).hexdigest()[:16]
 
 
 def compute_raw_screenshot_hash(screenshot_b64: str | None) -> str:
     return hashlib.sha256((screenshot_b64 or "").encode("utf-8")).hexdigest()[:16]
 
 
-def compute_perceptual_hash(screenshot_b64: str | None, *, fallback_key: str | None = None) -> str:
+def compute_perceptual_hash(
+    screenshot_b64: str | None, *, fallback_key: str | None = None
+) -> str:
     if not screenshot_b64:
         return hashlib.sha256((fallback_key or "").encode("utf-8")).hexdigest()[:16]
     try:
@@ -212,27 +208,39 @@ def compute_perceptual_hash(screenshot_b64: str | None, *, fallback_key: str | N
         image = Image.open(BytesIO(raw)).convert("L").resize((8, 8))
         values = list(image.getdata())
         avg = sum(values) / len(values)
-        bits = ''.join('1' if value >= avg else '0' for value in values)
+        bits = "".join("1" if value >= avg else "0" for value in values)
         return f"{int(bits, 2):016x}"
     except Exception:
         # Raw screenshot hash is audit-only. If image decoding/Pillow is unavailable,
         # fall back to deterministic semantic/layout inputs supplied by the caller
         # instead of reintroducing pixel-sensitive raw screenshot binding.
-        return hashlib.sha256((fallback_key or "perceptual_hash_unavailable").encode("utf-8")).hexdigest()[:16]
+        return hashlib.sha256(
+            (fallback_key or "perceptual_hash_unavailable").encode("utf-8")
+        ).hexdigest()[:16]
 
 
-def build_mark_topology_digest(marks: list[dict[str, Any] | Mark] | dict[str, Any] | None) -> str:
+def build_mark_topology_digest(
+    marks: list[dict[str, Any] | Mark] | dict[str, Any] | None,
+) -> str:
     if isinstance(marks, dict):
-        iterable = list((marks.get("marks") or {}).values()) if "marks" in marks else list(marks.values())
+        iterable = (
+            list((marks.get("marks") or {}).values())
+            if "marks" in marks
+            else list(marks.values())
+        )
     else:
         iterable = list(marks or [])
     rows: list[str] = []
     for item in iterable:
         if isinstance(item, Mark):
-            rows.append(f"{item.mark_id}:{tuple(round(v, 1) for v in item.bbox)}:{item.role or ''}:{item.source}")
+            rows.append(
+                f"{item.mark_id}:{tuple(round(v, 1) for v in item.bbox)}:{item.role or ''}:{item.source}"
+            )
         elif isinstance(item, dict):
             bbox = item.get("bbox") or item.get("bounds") or item.get("rect") or []
-            rows.append(f"{item.get('mark_id') or item.get('id') or ''}:{bbox}:{item.get('role') or ''}:{item.get('source') or ''}")
+            rows.append(
+                f"{item.get('mark_id') or item.get('id') or ''}:{bbox}:{item.get('role') or ''}:{item.get('source') or ''}"
+            )
     return hashlib.sha256("|".join(sorted(rows)).encode("utf-8")).hexdigest()[:16]
 
 
@@ -254,7 +262,11 @@ def _coerce_mark(screen_id: str, item: dict[str, Any], index: int) -> Mark:
     bbox_value = item.get("bbox") or item.get("bounds") or item.get("rect")
     bbox = _coerce_bbox(bbox_value)
     center_value = item.get("center")
-    center = _coerce_point(center_value) if center_value is not None else ((bbox[0] + bbox[2]) / 2, (bbox[1] + bbox[3]) / 2)
+    center = (
+        _coerce_point(center_value)
+        if center_value is not None
+        else ((bbox[0] + bbox[2]) / 2, (bbox[1] + bbox[3]) / 2)
+    )
     confidence = item.get("confidence", 1.0)
     if not isinstance(confidence, (int, float)) or isinstance(confidence, bool):
         confidence = 0.0
@@ -266,7 +278,13 @@ def _coerce_mark(screen_id: str, item: dict[str, Any], index: int) -> Mark:
         source=_safe_mark_metadata(item.get("source") or "mock", default="unknown"),
         confidence=max(0.0, min(float(confidence), 1.0)),
         role=_safe_mark_metadata(item.get("role"), default="") or None,
-        text_summary=str(item.get("text_summary") or item.get("text") or item.get("label") or "") or None,
+        text_summary=None
+        if item.get("password") is True
+        else str(
+            item.get("text_summary") or item.get("text") or item.get("label") or ""
+        )
+        or None,
+        password=item.get("password") is True,
     )
 
 
@@ -291,38 +309,9 @@ def _mark_position_label(mark: Mark) -> str:
 
 
 def _sanitize_mark_text_for_prompt(value: str) -> str:
-    text = str(sanitize_context_payload(value or "", "text_summary", consumer="inject")).strip()
-    if not text:
-        return ""
-    if "<redacted>" in text:
-        return text
-    safe_text = _prompt_safe_ui_text(text)
-    if safe_text:
-        return safe_text
-    return "<private_or_content_text>"
-
-
-def _prompt_safe_ui_text(text: str) -> str:
-    normalized = " ".join(text.split()).casefold()
-    if not normalized:
-        return ""
-    if len(normalized) > 80:
-        return ""
-    matched = [term for term in PROMPT_SAFE_UI_TERMS if term.casefold() in normalized]
-    if not matched:
-        return ""
-    if _looks_like_resource_id(normalized):
-        return " ".join(sorted(matched, key=len, reverse=True)[:3])
-    ascii_words = re.findall(r"[a-zA-Z][a-zA-Z_-]{1,24}", normalized)
-    if ascii_words and all(word in PROMPT_SAFE_UI_TERMS for word in ascii_words):
-        return text
-    if normalized in {term.casefold() for term in PROMPT_SAFE_UI_TERMS}:
-        return text
-    return " ".join(sorted(matched, key=len, reverse=True)[:3])
-
-
-def _looks_like_resource_id(text: str) -> bool:
-    return ":id/" in text or "/" in text or "." in text
+    return str(
+        sanitize_context_payload(value or "", "text_summary", consumer="inject")
+    ).strip()
 
 
 def _safe_mark_id(value: Any) -> str:

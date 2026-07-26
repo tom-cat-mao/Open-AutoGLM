@@ -850,7 +850,8 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
         text_content = f"{task}\n\n{task_goal_block}\n\n{screen_info}"
         objects_block = (
             observation.object_registry.prompt_block(
-                mark_registry=mark_registry, lang=lang
+                mark_registry=mark_registry,
+                lang=lang,
             )
             if observation.object_registry
             else ""
@@ -878,7 +879,8 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
             text_content = f"{task_goal_block}\n\n** Screen Info **\n\n{screen_info}"
         objects_block = (
             observation.object_registry.prompt_block(
-                mark_registry=mark_registry, lang=lang
+                mark_registry=mark_registry,
+                lang=lang,
             )
             if observation.object_registry
             else ""

@@ -15,8 +15,17 @@ from phone_agent.grounding.fallback import FallbackMarkProvider
 from phone_agent.grounding.fake import FakeGroundingProvider
 from phone_agent.grounding.factory import build_mark_provider, build_mark_providers
 from phone_agent.grounding.locateanything import LocateAnythingMLXProvider
-from phone_agent.grounding.parser import GroundingParseError, calibrate_bbox_from_resized_input, parse_box_response
-from phone_agent.grounding.provider import MarkCandidate, MarkProviderHint, MarkProviderResult, ScreenBinding
+from phone_agent.grounding.parser import (
+    GroundingParseError,
+    calibrate_bbox_from_resized_input,
+    parse_box_response,
+)
+from phone_agent.grounding.provider import (
+    MarkCandidate,
+    MarkProviderHint,
+    MarkProviderResult,
+    ScreenBinding,
+)
 from phone_agent.graph.marks import MarkRegistry
 
 
@@ -27,7 +36,9 @@ class Screenshot:
 
 
 def binding() -> ScreenBinding:
-    return ScreenBinding(screen_id="screen-1", raw_screenshot_hash="hash-1", width=1000, height=2000)
+    return ScreenBinding(
+        screen_id="screen-1", raw_screenshot_hash="hash-1", width=1000, height=2000
+    )
 
 
 def test_parse_box_response_returns_deterministic_center() -> None:
@@ -63,9 +74,13 @@ def test_parse_box_response_normalizes_coordinate_order() -> None:
 
 
 def test_resize_calibration_keeps_normalized_bbox_and_rejects_bad_size() -> None:
-    assert calibrate_bbox_from_resized_input([1, 2, 3, 4], original_size=(100, 200), resized_size=(50, 100)) == [1, 2, 3, 4]
+    assert calibrate_bbox_from_resized_input(
+        [1, 2, 3, 4], original_size=(100, 200), resized_size=(50, 100)
+    ) == [1, 2, 3, 4]
     with pytest.raises(GroundingParseError) as exc_info:
-        calibrate_bbox_from_resized_input([1, 2, 3, 4], original_size=(0, 200), resized_size=(50, 100))
+        calibrate_bbox_from_resized_input(
+            [1, 2, 3, 4], original_size=(0, 200), resized_size=(50, 100)
+        )
     assert exc_info.value.code == "invalid_resize"
 
 
@@ -89,7 +104,9 @@ def test_mark_provider_factory_passes_locateanything_max_size_from_config() -> N
     assert provider.max_size == 720
 
 
-def test_mark_provider_factory_prefers_locateanything_specific_max_size(monkeypatch) -> None:
+def test_mark_provider_factory_prefers_locateanything_specific_max_size(
+    monkeypatch,
+) -> None:
     monkeypatch.setenv("PHONE_AGENT_LOCATEANYTHING_MAX_SIZE", "720")
     monkeypatch.setenv("PHONE_AGENT_GROUNDING_MAX_SIZE", "512")
 
@@ -105,7 +122,9 @@ def test_mark_provider_factory_prefers_locateanything_specific_max_size(monkeypa
     assert provider.max_size == 960
 
 
-def test_mark_provider_factory_passes_locateanything_max_size_from_env(monkeypatch) -> None:
+def test_mark_provider_factory_passes_locateanything_max_size_from_env(
+    monkeypatch,
+) -> None:
     monkeypatch.setenv("PHONE_AGENT_GROUNDING_PROVIDER", "locateanything")
     monkeypatch.setenv("PHONE_AGENT_LOCATEANYTHING_MAX_SIZE", "720")
 
@@ -115,7 +134,9 @@ def test_mark_provider_factory_passes_locateanything_max_size_from_env(monkeypat
     assert provider.max_size == 720
 
 
-def test_mark_provider_factory_invalid_max_size_falls_back_to_default(monkeypatch) -> None:
+def test_mark_provider_factory_invalid_max_size_falls_back_to_default(
+    monkeypatch,
+) -> None:
     monkeypatch.setenv("PHONE_AGENT_GROUNDING_PROVIDER", "locateanything")
     monkeypatch.setenv("PHONE_AGENT_LOCATEANYTHING_MAX_SIZE", "not-an-int")
 
@@ -136,7 +157,9 @@ def test_mark_providers_default_to_hybrid(monkeypatch) -> None:
 
     assert len(providers) == 1
     assert isinstance(providers[0], FallbackMarkProvider)
-    assert [provider.name for provider in providers[0].providers] == ["locateanything_mlx"]
+    assert [provider.name for provider in providers[0].providers] == [
+        "locateanything_mlx"
+    ]
 
 
 def test_mark_provider_factory_passes_locateanything_context_budget() -> None:
@@ -151,7 +174,9 @@ def test_mark_provider_factory_passes_locateanything_context_budget() -> None:
     assert provider.context_max_chars == 32
 
 
-def test_mark_provider_factory_locateanything_structure_mode_precedence(monkeypatch) -> None:
+def test_mark_provider_factory_locateanything_structure_mode_precedence(
+    monkeypatch,
+) -> None:
     monkeypatch.setenv("PHONE_AGENT_LOCATEANYTHING_STRUCTURE_MODE", "screen")
 
     provider = build_mark_provider(
@@ -181,7 +206,9 @@ def test_mark_provider_factory_invalid_explicit_structure_mode_raises() -> None:
         )
 
 
-def test_mark_provider_factory_invalid_env_structure_mode_falls_back_off(monkeypatch) -> None:
+def test_mark_provider_factory_invalid_env_structure_mode_falls_back_off(
+    monkeypatch,
+) -> None:
     monkeypatch.setenv("PHONE_AGENT_GROUNDING_PROVIDER", "locateanything")
     monkeypatch.setenv("PHONE_AGENT_LOCATEANYTHING_STRUCTURE_MODE", "bad")
 
@@ -242,9 +269,8 @@ def test_mark_prompt_preserves_non_sensitive_ui_text_and_geometry() -> None:
 
     prompt = registry.prompt_block()
 
-    assert "搜索" in prompt
-    assert "食贫道" not in prompt
     assert "我的" in prompt
+    assert "搜索 食贫道" in prompt
     assert "bbox=[174.0, 57.0, 745.0, 95.0]" in prompt
     assert "center=[459.5, 76.0]" in prompt
     assert "position=top-center-wide" in prompt
@@ -252,7 +278,7 @@ def test_mark_prompt_preserves_non_sensitive_ui_text_and_geometry() -> None:
     assert "sha256" not in prompt
 
 
-def test_mark_prompt_hides_private_content_text() -> None:
+def test_mark_prompt_keeps_non_regex_ui_text() -> None:
     registry = MarkRegistry.from_marks(
         "screen-1",
         [
@@ -268,8 +294,7 @@ def test_mark_prompt_hides_private_content_text() -> None:
 
     prompt = registry.prompt_block()
 
-    assert "张三" not in prompt
-    assert "<private_or_content_text>" in prompt
+    assert "张三" in prompt
 
 
 def test_mark_prompt_still_redacts_sensitive_ui_text() -> None:
@@ -289,7 +314,7 @@ def test_mark_prompt_still_redacts_sensitive_ui_text() -> None:
     prompt = registry.prompt_block()
 
     assert "13800138000" not in prompt
-    assert "<redacted>" in prompt
+    assert "text_summary=联系人 <redacted>" in prompt
 
 
 def test_mark_grounding_rejects_target_text_mismatch() -> None:
@@ -374,7 +399,9 @@ def test_fake_mark_provider_returns_mark_candidates() -> None:
 
 def test_fake_mark_provider_failure_is_not_executable_action() -> None:
     provider = FakeGroundingProvider(failure_code="provider_unavailable")
-    result = provider.provide_marks(Screenshot(), binding(), hints=[MarkProviderHint(text="Settings")])
+    result = provider.provide_marks(
+        Screenshot(), binding(), hints=[MarkProviderHint(text="Settings")]
+    )
 
     assert result.success is False
     assert result.failure_code == "provider_unavailable"
@@ -400,6 +427,29 @@ def test_parse_uiautomator_marks_normalizes_interactive_nodes() -> None:
     assert marks[0]["role"] == "TextView"
     assert "Wi-Fi" in marks[0]["text_summary"]
     assert marks[1]["role"] == "EditText"
+
+
+def test_parse_uiautomator_drops_password_text_and_resource_id_pollution() -> None:
+    xml = """<hierarchy>
+      <node text="secret-value" password="true" resource-id="com.example:id/password"
+            class="android.widget.EditText" focusable="true" bounds="[0,0][100,100]" />
+      <node text="" resource-id="com.example:id/nickNameTV"
+            class="android.widget.Button" clickable="true" bounds="[0,100][100,200]" />
+    </hierarchy>"""
+
+    marks = parse_uiautomator_marks(xml, screen_width=100, screen_height=200)
+    structure = parse_uiautomator_structure(xml, screen_width=100, screen_height=200)
+    registry = MarkRegistry.from_marks("screen-1", marks)
+
+    assert marks[0]["password"] is True
+    assert marks[0]["text_summary"] is None
+    assert marks[1]["text_summary"] == "Button"
+    assert structure is not None
+    assert structure.nodes["node_1"].password is True
+    assert structure.nodes["node_1"].text_summary is None
+    assert registry.marks["ax_1"].password is True
+    assert registry.marks["ax_1"].text_summary is None
+    assert registry.marks["ax_2"].text_summary == "Button"
 
 
 def test_parse_uiautomator_structure_preserves_topology_and_signed_bounds() -> None:
@@ -449,14 +499,23 @@ def test_parse_uiautomator_accepts_whitespace_and_clamps_out_of_range_bounds() -
     assert summary["interactive_candidate_count"] == 3
 
 
-def test_parse_uiautomator_summary_cleans_control_chars_but_fails_closed_on_bad_xml() -> None:
+def test_parse_uiautomator_summary_cleans_control_chars_but_fails_closed_on_bad_xml() -> (
+    None
+):
     control_char_xml = """<hierarchy>
       <node text="OK\x01" class="android.widget.Button" clickable="true" enabled="true" bounds="[0,0][100,100]" />
     </hierarchy>"""
     bad_xml = """<hierarchy><node text="A & B" class="android.widget.Button" bounds="[0,0][1,1]" /></hierarchy>"""
 
-    assert parse_uiautomator_summary(control_char_xml, screen_width=100, screen_height=100)["mark_count"] == 1
-    bad_summary = parse_uiautomator_summary(bad_xml, screen_width=100, screen_height=100)
+    assert (
+        parse_uiautomator_summary(
+            control_char_xml, screen_width=100, screen_height=100
+        )["mark_count"]
+        == 1
+    )
+    bad_summary = parse_uiautomator_summary(
+        bad_xml, screen_width=100, screen_height=100
+    )
     assert bad_summary["xml_status"] == "accessibility_xml_parse_error"
     assert bad_summary["raw_node_count"] == 0
 
@@ -467,7 +526,9 @@ def test_accessibility_tree_provider_returns_screen_bound_marks() -> None:
     </hierarchy>"""
     provider = AccessibilityTreeProvider(lambda timeout=None: xml)
 
-    result = provider.provide_marks(Screenshot(), binding(), hints=[MarkProviderHint(text="OK")])
+    result = provider.provide_marks(
+        Screenshot(), binding(), hints=[MarkProviderHint(text="OK")]
+    )
 
     assert result.success is True
     assert result.provider == "accessibility_tree"
@@ -492,13 +553,18 @@ def test_accessibility_tree_provider_no_marks_fails_closed() -> None:
 
 
 def test_accessibility_tree_provider_reports_parse_error_failure_code() -> None:
-    provider = AccessibilityTreeProvider(lambda timeout=None: '<hierarchy><node text="A & B" /></hierarchy>')
+    provider = AccessibilityTreeProvider(
+        lambda timeout=None: '<hierarchy><node text="A & B" /></hierarchy>'
+    )
 
     result = provider.provide_marks(Screenshot(), binding())
 
     assert result.success is False
     assert result.failure_code == "accessibility_xml_parse_error"
-    assert result.metadata["parse_summary"]["xml_status"] == "accessibility_xml_parse_error"
+    assert (
+        result.metadata["parse_summary"]["xml_status"]
+        == "accessibility_xml_parse_error"
+    )
 
 
 def test_adb_dump_uiautomator_xml_extracts_closed_hierarchy(monkeypatch) -> None:
@@ -514,7 +580,9 @@ def test_adb_dump_uiautomator_xml_extracts_closed_hierarchy(monkeypatch) -> None
 
     monkeypatch.setattr("phone_agent.adb.device.subprocess.run", fake_run)
 
-    assert dump_uiautomator_xml() == '<?xml version="1.0"?><hierarchy><node /></hierarchy>'
+    assert (
+        dump_uiautomator_xml() == '<?xml version="1.0"?><hierarchy><node /></hierarchy>'
+    )
 
 
 def test_adb_dump_uiautomator_xml_timeout_is_normalized(monkeypatch) -> None:
@@ -536,7 +604,7 @@ def test_visible_text_summary_extracts_bounded_unique_text() -> None:
       <node text="" content-desc="Bluetooth" resource-id="com.example:id/bluetooth" class="android.widget.TextView" bounds="[0,0][1,1]" />
     </hierarchy>"""
 
-    assert visible_text_summary(xml, max_chars=32) == "Wi-Fi, Bluetooth | com.example:i"
+    assert visible_text_summary(xml, max_chars=32) == "Wi-Fi, Bluetooth"
 
 
 def test_fallback_provider_stops_after_first_successful_marks() -> None:
@@ -550,7 +618,9 @@ def test_fallback_provider_stops_after_first_successful_marks() -> None:
 
         def provide_marks(self, screenshot, screen_binding, hints=None, timeout=None):
             self.calls += 1
-            mark = MarkCandidate(mark_id="first", bbox=[1, 2, 3, 4], center=[2, 3], source=self.name)
+            mark = MarkCandidate(
+                mark_id="first", bbox=[1, 2, 3, 4], center=[2, 3], source=self.name
+            )
             return MarkProviderResult(
                 success=True,
                 provider=self.name,
@@ -565,7 +635,9 @@ def test_fallback_provider_stops_after_first_successful_marks() -> None:
 
     first = CountingProvider()
     second = CountingProvider()
-    result = FallbackMarkProvider([first, second]).provide_marks(Screenshot(), binding(), hints=[])
+    result = FallbackMarkProvider([first, second]).provide_marks(
+        Screenshot(), binding(), hints=[]
+    )
 
     assert result.success is True
     assert result.provider == "counting"
@@ -585,7 +657,9 @@ def test_fallback_provider_redacts_hints_for_opt_out_child_provider() -> None:
 
         def provide_marks(self, screenshot, screen_binding, hints=None, timeout=None):
             self.seen = [hint.description() for hint in hints or []]
-            mark = MarkCandidate(mark_id="m1", bbox=[1, 2, 3, 4], center=[2, 3], source=self.name)
+            mark = MarkCandidate(
+                mark_id="m1", bbox=[1, 2, 3, 4], center=[2, 3], source=self.name
+            )
             return MarkProviderResult(
                 success=True,
                 provider=self.name,
@@ -711,8 +785,14 @@ def test_fallback_provider_preserves_accessibility_and_visual_structures() -> No
     ).provide_marks(Screenshot(), binding(), hints=[MarkProviderHint(text="Wi-Fi")])
 
     assert result.success is True
-    assert [item["structure_kind"] for item in result.screen_structures] == ["accessibility", "visual"]
-    assert [row["structure_count"] for row in result.metadata["fallback_chain"]] == [1, 1]
+    assert [item["structure_kind"] for item in result.screen_structures] == [
+        "accessibility",
+        "visual",
+    ]
+    assert [row["structure_count"] for row in result.metadata["fallback_chain"]] == [
+        1,
+        1,
+    ]
 
 
 def test_fallback_provider_preserves_successful_visual_sidecar_without_marks() -> None:
@@ -779,7 +859,9 @@ def test_fallback_provider_stops_when_tree_marks_match_hint() -> None:
 
         def provide_marks(self, screenshot, screen_binding, hints=None, timeout=None):
             self.calls += 1
-            mark = MarkCandidate(mark_id="ax_1", bbox=[1, 2, 3, 4], center=[2, 3], text_summary="Wi-Fi")
+            mark = MarkCandidate(
+                mark_id="ax_1", bbox=[1, 2, 3, 4], center=[2, 3], text_summary="Wi-Fi"
+            )
             return MarkProviderResult(
                 success=True,
                 provider=self.name,
@@ -809,14 +891,18 @@ def test_fallback_provider_stops_when_tree_marks_match_hint() -> None:
     assert result.metadata["fallback_chain"][0]["usable"] is True
 
 
-def test_fallback_provider_screen_mode_supplements_usable_tree_without_executable_marks() -> None:
+def test_fallback_provider_screen_mode_supplements_usable_tree_without_executable_marks() -> (
+    None
+):
     class TreeProvider:
         name = "accessibility_tree"
         version = "test"
         allow_raw_hints = False
 
         def provide_marks(self, screenshot, screen_binding, hints=None, timeout=None):
-            mark = MarkCandidate(mark_id="ax_1", bbox=[1, 2, 3, 4], center=[2, 3], text_summary="Wi-Fi")
+            mark = MarkCandidate(
+                mark_id="ax_1", bbox=[1, 2, 3, 4], center=[2, 3], text_summary="Wi-Fi"
+            )
             return MarkProviderResult(
                 success=True,
                 provider=self.name,
@@ -858,7 +944,13 @@ def test_fallback_provider_screen_mode_supplements_usable_tree_without_executabl
 
         def provide_marks(self, screenshot, screen_binding, hints=None, timeout=None):
             self.calls += 1
-            mark = MarkCandidate(mark_id="la_screen_1_1", bbox=[10, 20, 30, 40], center=[20, 30], source=self.name, role="button")
+            mark = MarkCandidate(
+                mark_id="la_screen_1_1",
+                bbox=[10, 20, 30, 40],
+                center=[20, 30],
+                source=self.name,
+                role="button",
+            )
             return MarkProviderResult(
                 success=True,
                 provider=self.name,
@@ -898,7 +990,10 @@ def test_fallback_provider_screen_mode_supplements_usable_tree_without_executabl
     assert screen_provider.calls == 1
     assert result.success is True
     assert [mark.mark_id for mark in result.marks] == ["ax_1"]
-    assert [item["structure_kind"] for item in result.screen_structures] == ["accessibility", "visual"]
+    assert [item["structure_kind"] for item in result.screen_structures] == [
+        "accessibility",
+        "visual",
+    ]
     assert len(result.metadata["fallback_chain"]) == 2
 
 
@@ -946,7 +1041,10 @@ def test_fallback_provider_fails_closed_when_all_marks_miss_hint() -> None:
     assert result.failure_code == "grounding_no_usable_candidate"
     assert result.marks == []
     assert [candidate.mark_id for candidate in result.candidates] == ["ax_1", "la_1_1"]
-    assert [row["usable"] for row in result.metadata["fallback_chain"]] == [False, False]
+    assert [row["usable"] for row in result.metadata["fallback_chain"]] == [
+        False,
+        False,
+    ]
 
 
 def test_hybrid_factory_builds_accessibility_then_locateanything_fallback() -> None:
@@ -960,7 +1058,10 @@ def test_hybrid_factory_builds_accessibility_then_locateanything_fallback() -> N
 
     assert len(providers) == 1
     assert isinstance(providers[0], FallbackMarkProvider)
-    assert [provider.name for provider in providers[0].providers] == ["accessibility_tree", "locateanything_mlx"]
+    assert [provider.name for provider in providers[0].providers] == [
+        "accessibility_tree",
+        "locateanything_mlx",
+    ]
     assert providers[0].composition_metadata["accessibility_child_enabled"] is True
 
 
@@ -968,25 +1069,39 @@ def test_hybrid_factory_can_skip_accessibility_child_when_base_marks_present() -
     providers = build_mark_providers(
         {
             "grounding_provider_name": "hybrid",
-            "accessibility_tree_dump": lambda timeout=None: pytest.fail("tree should be skipped"),
+            "accessibility_tree_dump": lambda timeout=None: pytest.fail(
+                "tree should be skipped"
+            ),
             "skip_accessibility_provider": True,
         }
     )
 
     assert len(providers) == 1
     assert isinstance(providers[0], FallbackMarkProvider)
-    assert [provider.name for provider in providers[0].providers] == ["locateanything_mlx"]
-    assert providers[0].composition_metadata["accessibility_child_skip_reason"] == "skip_accessibility_provider"
+    assert [provider.name for provider in providers[0].providers] == [
+        "locateanything_mlx"
+    ]
+    assert (
+        providers[0].composition_metadata["accessibility_child_skip_reason"]
+        == "skip_accessibility_provider"
+    )
 
 
-def test_hybrid_factory_missing_dump_callback_emits_synthetic_skip_row(monkeypatch) -> None:
+def test_hybrid_factory_missing_dump_callback_emits_synthetic_skip_row(
+    monkeypatch,
+) -> None:
     class StaticLocateProvider:
         name = "locateanything_mlx"
         version = "test"
         allow_raw_hints = True
 
         def provide_marks(self, screenshot, screen_binding, hints=None, timeout=None):
-            mark = MarkCandidate(mark_id="la_1", bbox=[100, 100, 200, 200], center=[150, 150], source=self.name)
+            mark = MarkCandidate(
+                mark_id="la_1",
+                bbox=[100, 100, 200, 200],
+                center=[150, 150],
+                source=self.name,
+            )
             return MarkProviderResult(
                 success=True,
                 provider=self.name,
@@ -998,7 +1113,10 @@ def test_hybrid_factory_missing_dump_callback_emits_synthetic_skip_row(monkeypat
                 candidate_count=1,
             )
 
-    monkeypatch.setattr("phone_agent.grounding.factory._build_locateanything_provider", lambda cfg: StaticLocateProvider())
+    monkeypatch.setattr(
+        "phone_agent.grounding.factory._build_locateanything_provider",
+        lambda cfg: StaticLocateProvider(),
+    )
 
     providers = build_mark_providers({"grounding_provider_name": "hybrid"})
     result = providers[0].provide_marks(Screenshot(), binding())
@@ -1006,20 +1124,36 @@ def test_hybrid_factory_missing_dump_callback_emits_synthetic_skip_row(monkeypat
     assert isinstance(providers[0], FallbackMarkProvider)
     assert result.success is True
     assert result.metadata["hybrid_factory"]["accessibility_child_enabled"] is False
-    assert result.metadata["hybrid_factory"]["accessibility_child_skip_reason"] == "accessibility_dump_callback_missing"
+    assert (
+        result.metadata["hybrid_factory"]["accessibility_child_skip_reason"]
+        == "accessibility_dump_callback_missing"
+    )
     assert result.metadata["fallback_chain"][0]["provider"] == "accessibility_tree"
-    assert result.metadata["fallback_chain"][0]["skip_reason"] == "accessibility_dump_callback_missing"
+    assert (
+        result.metadata["fallback_chain"][0]["skip_reason"]
+        == "accessibility_dump_callback_missing"
+    )
 
 
-def test_locateanything_provider_multiple_hints_create_multiple_marks(monkeypatch) -> None:
+def test_locateanything_provider_multiple_hints_create_multiple_marks(
+    monkeypatch,
+) -> None:
     outputs = iter(["<box>100 200 300 400</box>", "<box>500 600 700 800</box>"])
     provider = LocateAnythingMLXProvider(model_path="models/LocateAnything-3B-4bit")
 
-    monkeypatch.setattr("phone_agent.grounding.locateanything.platform.system", lambda: "Darwin")
-    monkeypatch.setattr("phone_agent.grounding.locateanything.platform.machine", lambda: "arm64")
+    monkeypatch.setattr(
+        "phone_agent.grounding.locateanything.platform.system", lambda: "Darwin"
+    )
+    monkeypatch.setattr(
+        "phone_agent.grounding.locateanything.platform.machine", lambda: "arm64"
+    )
     monkeypatch.setattr("pathlib.Path.exists", lambda self: True)
-    monkeypatch.setattr(provider, "_prepare_image", lambda screenshot: (object(), "input-hash"))
-    monkeypatch.setattr(provider, "_run_model", lambda image, description, timeout=None: next(outputs))
+    monkeypatch.setattr(
+        provider, "_prepare_image", lambda screenshot: (object(), "input-hash")
+    )
+    monkeypatch.setattr(
+        provider, "_run_model", lambda image, description, timeout=None: next(outputs)
+    )
 
     result = provider.provide_marks(
         Screenshot(),
@@ -1029,20 +1163,41 @@ def test_locateanything_provider_multiple_hints_create_multiple_marks(monkeypatc
 
     assert result.success is True
     assert [mark.mark_id for mark in result.marks] == ["la_1_1", "la_2_1"]
-    assert [mark.bbox for mark in result.marks] == [[100, 200, 300, 400], [500, 600, 700, 800]]
+    assert [mark.bbox for mark in result.marks] == [
+        [100, 200, 300, 400],
+        [500, 600, 700, 800],
+    ]
     assert result.provider_input_hash == "input-hash"
 
 
-def test_locateanything_target_structure_mode_returns_visual_sidecar(monkeypatch) -> None:
-    provider = LocateAnythingMLXProvider(model_path="models/LocateAnything-3B-4bit", structure_mode="target")
+def test_locateanything_target_structure_mode_returns_visual_sidecar(
+    monkeypatch,
+) -> None:
+    provider = LocateAnythingMLXProvider(
+        model_path="models/LocateAnything-3B-4bit", structure_mode="target"
+    )
 
-    monkeypatch.setattr("phone_agent.grounding.locateanything.platform.system", lambda: "Darwin")
-    monkeypatch.setattr("phone_agent.grounding.locateanything.platform.machine", lambda: "arm64")
+    monkeypatch.setattr(
+        "phone_agent.grounding.locateanything.platform.system", lambda: "Darwin"
+    )
+    monkeypatch.setattr(
+        "phone_agent.grounding.locateanything.platform.machine", lambda: "arm64"
+    )
     monkeypatch.setattr("pathlib.Path.exists", lambda self: True)
-    monkeypatch.setattr(provider, "_prepare_image", lambda screenshot: (object(), "input-hash"))
-    monkeypatch.setattr(provider, "_run_model", lambda image, description, timeout=None, context=None: "<box>100 200 300 400</box>")
+    monkeypatch.setattr(
+        provider, "_prepare_image", lambda screenshot: (object(), "input-hash")
+    )
+    monkeypatch.setattr(
+        provider,
+        "_run_model",
+        lambda image, description, timeout=None, context=None: (
+            "<box>100 200 300 400</box>"
+        ),
+    )
 
-    result = provider.provide_marks(Screenshot(), binding(), hints=[MarkProviderHint(text="搜索 13800138000")])
+    result = provider.provide_marks(
+        Screenshot(), binding(), hints=[MarkProviderHint(text="搜索 13800138000")]
+    )
 
     assert result.success is True
     assert len(result.marks) == 1
@@ -1052,20 +1207,34 @@ def test_locateanything_target_structure_mode_returns_visual_sidecar(monkeypatch
     assert "13800138000" not in str(result.to_dict())
 
 
-def test_locateanything_target_structure_mode_multi_box_is_not_immediately_executable(monkeypatch) -> None:
-    provider = LocateAnythingMLXProvider(model_path="models/LocateAnything-3B-4bit", structure_mode="target")
+def test_locateanything_target_structure_mode_multi_box_is_not_immediately_executable(
+    monkeypatch,
+) -> None:
+    provider = LocateAnythingMLXProvider(
+        model_path="models/LocateAnything-3B-4bit", structure_mode="target"
+    )
 
-    monkeypatch.setattr("phone_agent.grounding.locateanything.platform.system", lambda: "Darwin")
-    monkeypatch.setattr("phone_agent.grounding.locateanything.platform.machine", lambda: "arm64")
+    monkeypatch.setattr(
+        "phone_agent.grounding.locateanything.platform.system", lambda: "Darwin"
+    )
+    monkeypatch.setattr(
+        "phone_agent.grounding.locateanything.platform.machine", lambda: "arm64"
+    )
     monkeypatch.setattr("pathlib.Path.exists", lambda self: True)
-    monkeypatch.setattr(provider, "_prepare_image", lambda screenshot: (object(), "input-hash"))
+    monkeypatch.setattr(
+        provider, "_prepare_image", lambda screenshot: (object(), "input-hash")
+    )
     monkeypatch.setattr(
         provider,
         "_run_model",
-        lambda image, description, timeout=None, context=None: "<box>100 200 300 400</box><box>500 600 700 800</box>",
+        lambda image, description, timeout=None, context=None: (
+            "<box>100 200 300 400</box><box>500 600 700 800</box>"
+        ),
     )
 
-    result = provider.provide_marks(Screenshot(), binding(), hints=[MarkProviderHint(text="target")])
+    result = provider.provide_marks(
+        Screenshot(), binding(), hints=[MarkProviderHint(text="target")]
+    )
 
     assert result.success is True
     assert result.marks == []
@@ -1075,14 +1244,19 @@ def test_locateanything_target_structure_mode_multi_box_is_not_immediately_execu
 
 
 def test_mark_provider_result_to_dict_sanitizes_metadata_and_structure_text() -> None:
-    mark = MarkCandidate(mark_id="m1", bbox=[1, 2, 3, 4], center=[2, 3], text_summary="13800138000")
+    mark = MarkCandidate(
+        mark_id="m1", bbox=[1, 2, 3, 4], center=[2, 3], text_summary="13800138000"
+    )
     result = MarkProviderResult(
         success=True,
         provider="test",
         marks=[mark],
         candidates=[mark],
         candidate_count=1,
-        metadata={"raw_hint": "请点击 13800138000", "nested": {"ocr": "foo@example.com"}},
+        metadata={
+            "raw_hint": "请点击 13800138000",
+            "nested": {"ocr": "foo@example.com"},
+        },
         screen_structures=[
             {
                 "structure_kind": "visual",
@@ -1103,20 +1277,32 @@ def test_mark_provider_result_to_dict_sanitizes_metadata_and_structure_text() ->
     assert "foo@example.com" not in serialized
 
 
-def test_locateanything_provider_ambiguous_single_hint_fails_closed(monkeypatch) -> None:
+def test_locateanything_provider_ambiguous_single_hint_fails_closed(
+    monkeypatch,
+) -> None:
     provider = LocateAnythingMLXProvider(model_path="models/LocateAnything-3B-4bit")
 
-    monkeypatch.setattr("phone_agent.grounding.locateanything.platform.system", lambda: "Darwin")
-    monkeypatch.setattr("phone_agent.grounding.locateanything.platform.machine", lambda: "arm64")
+    monkeypatch.setattr(
+        "phone_agent.grounding.locateanything.platform.system", lambda: "Darwin"
+    )
+    monkeypatch.setattr(
+        "phone_agent.grounding.locateanything.platform.machine", lambda: "arm64"
+    )
     monkeypatch.setattr("pathlib.Path.exists", lambda self: True)
-    monkeypatch.setattr(provider, "_prepare_image", lambda screenshot: (object(), "input-hash"))
+    monkeypatch.setattr(
+        provider, "_prepare_image", lambda screenshot: (object(), "input-hash")
+    )
     monkeypatch.setattr(
         provider,
         "_run_model",
-        lambda image, description, timeout=None: "<box>100 200 300 400</box><box>500 600 700 800</box>",
+        lambda image, description, timeout=None: (
+            "<box>100 200 300 400</box><box>500 600 700 800</box>"
+        ),
     )
 
-    result = provider.provide_marks(Screenshot(), binding(), hints=[MarkProviderHint(text="target")])
+    result = provider.provide_marks(
+        Screenshot(), binding(), hints=[MarkProviderHint(text="target")]
+    )
 
     assert result.success is False
     assert result.failure_code == "grounding_ambiguous"
@@ -1124,7 +1310,9 @@ def test_locateanything_provider_ambiguous_single_hint_fails_closed(monkeypatch)
     assert result.candidate_count == 2
 
 
-def test_locateanything_mlx_run_model_uses_gui_prompt_and_fallback_generate(monkeypatch) -> None:
+def test_locateanything_mlx_run_model_uses_gui_prompt_and_fallback_generate(
+    monkeypatch,
+) -> None:
     captured: dict = {}
 
     def fake_load(model_path: str):
@@ -1160,8 +1348,14 @@ def test_locateanything_mlx_run_model_uses_gui_prompt_and_fallback_generate(monk
     assert captured["model_path"] == "models/LocateAnything-3B-4bit"
     assert captured["model"].config == {"model_type": "locateanything"}
     assert captured["processor"] == "processor"
-    assert captured["prompt"] == "<chat><image-1>Locate the region that matches the following description: WLAN setting.</chat>"
-    assert captured["template_prompt"] == "Locate the region that matches the following description: WLAN setting."
+    assert (
+        captured["prompt"]
+        == "<chat><image-1>Locate the region that matches the following description: WLAN setting.</chat>"
+    )
+    assert (
+        captured["template_prompt"]
+        == "Locate the region that matches the following description: WLAN setting."
+    )
     assert captured["template_kwargs"]["num_images"] == 1
     assert captured["image"] is not None
     assert captured["max_tokens"] == 2048
@@ -1169,7 +1363,9 @@ def test_locateanything_mlx_run_model_uses_gui_prompt_and_fallback_generate(monk
     assert captured["generation_mode"] == "hybrid"
 
 
-def test_locateanything_prompt_allows_bounded_context_without_changing_template(monkeypatch) -> None:
+def test_locateanything_prompt_allows_bounded_context_without_changing_template(
+    monkeypatch,
+) -> None:
     captured: dict = {}
 
     def fake_apply_chat_template(processor, config, prompt, **kwargs):
@@ -1186,7 +1382,9 @@ def test_locateanything_prompt_allows_bounded_context_without_changing_template(
     provider._model = SimpleNamespace(config={"model_type": "locateanything"})
     provider._processor = "processor"
 
-    prompt = provider._build_prompt("Wi-Fi row", context="Settings screen with many visible options")
+    prompt = provider._build_prompt(
+        "Wi-Fi row", context="Settings screen with many visible options"
+    )
 
     assert prompt.startswith("<chat><image-0>")
     assert captured["template_kwargs"]["num_images"] == 1
@@ -1196,7 +1394,9 @@ def test_locateanything_prompt_allows_bounded_context_without_changing_template(
     )
 
 
-def test_locateanything_mlx_run_model_prefers_parallel_box_decoding(monkeypatch) -> None:
+def test_locateanything_mlx_run_model_prefers_parallel_box_decoding(
+    monkeypatch,
+) -> None:
     captured: dict = {}
 
     class FakeModel:
@@ -1224,11 +1424,18 @@ def test_locateanything_mlx_run_model_prefers_parallel_box_decoding(monkeypatch)
     def fake_prepare_inputs(processor, **kwargs):
         captured["prepare_processor"] = processor
         captured["prepare_kwargs"] = kwargs
-        return {"input_ids": "ids", "attention_mask": "mask", "pixel_values": "pixels", "image_grid_hws": "grid"}
+        return {
+            "input_ids": "ids",
+            "attention_mask": "mask",
+            "pixel_values": "pixels",
+            "image_grid_hws": "grid",
+        }
 
     mlx_vlm_module = ModuleType("mlx_vlm")
     mlx_vlm_module.load = fake_load
-    mlx_vlm_module.generate = lambda *args, **kwargs: pytest.fail("fallback generate should not be called")
+    mlx_vlm_module.generate = lambda *args, **kwargs: pytest.fail(
+        "fallback generate should not be called"
+    )
     prompt_utils_module = ModuleType("mlx_vlm.prompt_utils")
     prompt_utils_module.apply_chat_template = fake_apply_chat_template
     utils_module = ModuleType("mlx_vlm.utils")
@@ -1242,9 +1449,18 @@ def test_locateanything_mlx_run_model_prefers_parallel_box_decoding(monkeypatch)
 
     assert output == "<ref>WLAN</ref><box><100><200><300><400></box>"
     assert captured["model_path"] == "models/LocateAnything-3B-4bit"
-    assert captured["template_prompt"] == "Locate the region that matches the following description: WLAN setting."
-    assert captured["prepare_kwargs"]["images"] == [object()] or len(captured["prepare_kwargs"]["images"]) == 1
-    assert captured["prepare_kwargs"]["prompts"] == "<chat><image-0>Locate the region that matches the following description: WLAN setting.</chat>"
+    assert (
+        captured["template_prompt"]
+        == "Locate the region that matches the following description: WLAN setting."
+    )
+    assert (
+        captured["prepare_kwargs"]["images"] == [object()]
+        or len(captured["prepare_kwargs"]["images"]) == 1
+    )
+    assert (
+        captured["prepare_kwargs"]["prompts"]
+        == "<chat><image-0>Locate the region that matches the following description: WLAN setting.</chat>"
+    )
     assert captured["pbd_input_ids"] == "ids"
     assert captured["pbd_kwargs"] == {
         "generation_mode": "hybrid",

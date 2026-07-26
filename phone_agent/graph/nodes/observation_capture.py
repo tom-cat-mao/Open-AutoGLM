@@ -191,6 +191,55 @@ def bounded_observation_summary(
     return safe
 
 
+def observation_shape_diff(before: dict, after: dict) -> dict:
+    """Return a bounded projected mark delta for reflection prompts."""
+
+    before_marks = _marks_by_id(before)
+    after_marks = _marks_by_id(after)
+    before_ids = set(before_marks)
+    after_ids = set(after_marks)
+    changed = []
+    for mark_id in sorted(before_ids & after_ids):
+        before_mark = before_marks[mark_id]
+        after_mark = after_marks[mark_id]
+        before_shape = {
+            "role": before_mark.get("role"),
+            "text_summary": before_mark.get("text_summary"),
+        }
+        after_shape = {
+            "role": after_mark.get("role"),
+            "text_summary": after_mark.get("text_summary"),
+        }
+        if before_shape != after_shape:
+            changed.append(
+                {"mark_id": mark_id, "before": before_shape, "after": after_shape}
+            )
+    return {
+        "before_mark_count": len(before_marks),
+        "after_mark_count": len(after_marks),
+        "added": [after_marks[key] for key in sorted(after_ids - before_ids)[:20]],
+        "removed": [before_marks[key] for key in sorted(before_ids - after_ids)[:20]],
+        "changed": changed[:20],
+        "unchanged_count": len(before_ids & after_ids) - len(changed),
+    }
+
+
+def _marks_by_id(payload: dict) -> dict[str, dict]:
+    marks = payload.get("marks") if isinstance(payload, dict) else None
+    iterable = marks.values() if isinstance(marks, dict) else marks or []
+    result = {}
+    for index, mark in enumerate(iterable):
+        if not isinstance(mark, dict):
+            continue
+        mark_id = str(mark.get("mark_id") or f"mark_{index}")
+        result[mark_id] = {
+            "mark_id": mark_id,
+            "role": mark.get("role"),
+            "text_summary": mark.get("text_summary"),
+        }
+    return result
+
+
 def state_before_observation_payload(
     state: "AgentState", *, task_context: str | None = None
 ) -> dict:
@@ -249,7 +298,7 @@ def state_before_observation_payload(
         "marks": marks,
         "mark_provider_observation": observation.get("mark_provider_observation"),
     }
-    return bounded_observation_summary(payload, task_context=task_context)
+    return payload
 
 
 def collect_device_verifier_signals(
@@ -324,7 +373,7 @@ def sanitize_verifier_observation_payload(
     if not isinstance(payload, dict):
         return {}
     safe = sanitize_context_payload(
-        payload, consumer="checkpoint", task_context=task_context
+        payload, consumer="reflect_prompt", task_context=task_context
     )
     if not isinstance(safe, dict):
         return {}

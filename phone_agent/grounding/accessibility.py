@@ -197,7 +197,8 @@ def _structure_from_root(
         raw_bounds = _parse_bounds(element.attrib.get("bounds") or "")
         bounds = _normalize_bounds(raw_bounds, width=screen_width, height=screen_height)
         role = _role_from_class(element.attrib.get("class") or "")
-        text = _safe_node_summary(element.attrib.get("text") or "")
+        password = element.attrib.get("password") == "true"
+        text = None if password else _safe_node_summary(element.attrib.get("text") or "")
         content_desc = _safe_node_summary(element.attrib.get("content-desc") or "")
         resource_id_hash = _hash_value(element.attrib.get("resource-id") or "")
         child_ids: list[str] = []
@@ -213,6 +214,7 @@ def _structure_from_root(
             resource_id_hash=resource_id_hash,
             text_summary=text,
             content_desc_summary=content_desc,
+            password=password,
             clickable=element.attrib.get("clickable") == "true",
             focusable=element.attrib.get("focusable") == "true",
             focused=element.attrib.get("focused") == "true",
@@ -431,6 +433,7 @@ def _node_to_mark_from_parts(
     ]
     center = [int(round((bbox[0] + bbox[2]) / 2)), int(round((bbox[1] + bbox[3]) / 2))]
     confidence = 1.0 if attrs.get("clickable") == "true" or attrs.get("focusable") == "true" else 0.8
+    password = attrs.get("password") == "true"
     return {
         "mark_id": f"ax_{index}",
         "bbox": bbox,
@@ -438,7 +441,8 @@ def _node_to_mark_from_parts(
         "source": source,
         "confidence": confidence,
         "role": role,
-        "text_summary": text[:MAX_TEXT_SUMMARY_CHARS] or role,
+        "text_summary": None if password else text[:MAX_TEXT_SUMMARY_CHARS] or role,
+        "password": password,
     }
 
 
@@ -475,10 +479,11 @@ def _to_relative(value: int, maximum: int) -> int:
 
 
 def _node_text(attrs: dict[str, str]) -> str:
+    if attrs.get("password") == "true":
+        return ""
     values = [
         attrs.get("text") or "",
         attrs.get("content-desc") or "",
-        attrs.get("resource-id") or "",
     ]
     parts: list[str] = []
     for value in values:

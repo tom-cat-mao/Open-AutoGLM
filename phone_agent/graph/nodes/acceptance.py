@@ -498,7 +498,7 @@ def acceptance_node(state: "AgentState", config: RunnableConfig) -> dict:
             "finish_claim_matched": sorted(finish_claim_matched),
             "finish_validation": evaluation.to_dict(),
             "device_signals": sanitize_context_payload(
-                device_signals, consumer="checkpoint", task_context=task
+                device_signals, consumer="reflect_prompt", task_context=task
             ),
         },
     )
@@ -593,7 +593,7 @@ def _run_semantic_judge(
     )
     task_for_prompt = str(
         sanitize_context_payload(
-            task, "task", consumer="checkpoint", task_context=task
+            task, "task", consumer="reflect_prompt", task_context=task
         )
     )
     goal_block = build_goal_prompt_block(state, lang=lang, config=config)

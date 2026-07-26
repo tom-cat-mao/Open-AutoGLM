@@ -281,7 +281,9 @@ def sanitize_context_payload(
     which is regex-only.
     """
     resolved = _resolve_consumer(consumer=consumer, inject=inject)
-    policy = CONSUMER_POLICY.get(resolved, CONSUMER_POLICY["default"])
+    if resolved not in CONSUMER_POLICY:
+        raise ValueError(f"unregistered context consumer: {resolved}")
+    policy = CONSUMER_POLICY[resolved]
     task_values = (
         _task_sensitive_values(task_context)
         if resolved in {"inject", "reflect_prompt"}

@@ -1,3 +1,4 @@
+import copy
 import json
 from dataclasses import dataclass
 
@@ -7,6 +8,7 @@ from phone_agent.graph.nodes.plan import plan_node
 from phone_agent.graph.nodes.goal_node import goal_node
 from phone_agent.graph.nodes.acceptance import acceptance_node
 from phone_agent.graph.nodes.reflect import parse_reflection_action, reflect_node
+from phone_agent.graph.goal_compiler import HeuristicGoalCompiler
 from phone_agent.grounding.fake import FakeGroundingProvider
 from phone_agent.model.client import ModelParseError
 
@@ -57,6 +59,128 @@ class InvalidScreenshotDevice:
 
     def get_current_app(self, device_id=None):
         return "SecureApp"
+
+
+def test_privacy_boundary_prompt_metrics(base_state, fake_device) -> None:
+    task = "在小红书搜索村长托马斯"
+    plan_state = copy.deepcopy(base_state)
+    plan_state.update(
+        {
+            "task": task,
+            "goal_contract": HeuristicGoalCompiler().compile(task=task),
+            "messages": [],
+            "step_count": 0,
+        }
+    )
+    plan_model = FakeModelClient(FakeModelResponse("", '{"type":"do","action":"back"}'))
+    plan_result = plan_node(
+        plan_state,
+        {
+            "configurable": {
+                "model_client": plan_model,
+                "device_factory": fake_device,
+                "screen_marks": [
+                    {
+                        "mark_id": "ax_1",
+                        "bbox": [0, 0, 100, 100],
+                        "role": "TextView",
+                        "text_summary": "村长托马斯",
+                    },
+                    {
+                        "mark_id": "ax_2",
+                        "bbox": [0, 100, 100, 200],
+                        "role": "Button",
+                        "text_summary": "搜索",
+                    },
+                    {
+                        "mark_id": "ax_3",
+                        "bbox": [0, 200, 100, 300],
+                        "role": "Button",
+                        "text_summary": "me",
+                    },
+                ],
+                "grounding_provider_name": "off",
+                "verbose": False,
+            }
+        },
+    )
+    plan_text = plan_model.messages[-1]["content"][-1]["text"]
+
+    reflect_state = copy.deepcopy(base_state)
+    reflect_state.update(
+        {
+            "task": task,
+            "goal_contract": HeuristicGoalCompiler().compile(task=task),
+            "observation": plan_result["observation"],
+            "action_parsed": {
+                "_metadata": "do",
+                "action": "Tap",
+                "element": [500, 500],
+            },
+            "expected_outcome": {
+                "kind": "target_appeared",
+                "must_observe": ["sha256:000000000000"],
+                "must_not_observe": [],
+                "target_mark_id": None,
+                "target_text_hint": "sha256:000000000000",
+                "timeout_hint": None,
+                "dynamic_regions": [],
+            },
+        }
+    )
+    reflect_model = FakeModelClient(
+        FakeModelResponse(
+            "ok",
+            '{"verdict":"failed","failure_cause":"unknown",'
+            '"suggested_strategy":"retry","message":"not sure"}',
+        )
+    )
+    reflect_node(
+        reflect_state,
+        {
+            "configurable": {
+                "model_client": reflect_model,
+                "device_factory": fake_device,
+                "after_screen_marks": [
+                    {
+                        "mark_id": "ax_1",
+                        "bbox": [0, 0, 100, 100],
+                        "role": "TextView",
+                        "text_summary": "村长托马斯",
+                    },
+                    {
+                        "mark_id": "ax_2",
+                        "bbox": [0, 100, 100, 200],
+                        "role": "Button",
+                        "text_summary": "搜索",
+                    },
+                    {
+                        "mark_id": "ax_3",
+                        "bbox": [0, 200, 100, 300],
+                        "role": "Button",
+                        "text_summary": "me",
+                    },
+                ],
+                "grounding_provider_name": "off",
+                "verbose": False,
+            }
+        },
+    )
+    reflect_text = reflect_model.messages[-1]["content"][-1]["text"]
+    metrics = {
+        "plan_text_summary_me_count": plan_text.count("text_summary=me"),
+        "plan_has_chinese_control": "text_summary=搜索" in plan_text,
+        "plan_has_task_entity": "text_summary=村长托马斯" in plan_text,
+        "reflect_chars": len(reflect_text),
+        "reflect_redacted_stub_count": reflect_text.count("{'redacted': True"),
+    }
+    print(json.dumps(metrics, ensure_ascii=False, sort_keys=True))
+
+    assert metrics["plan_text_summary_me_count"] >= 1
+    assert metrics["plan_has_chinese_control"] is True
+    assert metrics["plan_has_task_entity"] is True
+    assert metrics["reflect_chars"] < 26919
+    assert metrics["reflect_redacted_stub_count"] <= 2
 
 
 def test_plan_node_fails_closed_on_invalid_screenshot(base_state) -> None:
@@ -373,7 +497,7 @@ def test_plan_node_grounds_known_mark_intent_to_tap(base_state, fake_device) -> 
     assert result["grounding_error"] is None
     text = model.messages[-1]["content"][-1]["text"]
     assert "target_mark_id" in text
-    assert "张三" not in text
+    assert "text_summary=张三" in text
 
 
 def test_plan_node_rejects_unknown_mark_intent(base_state, fake_device) -> None:
@@ -1060,7 +1184,7 @@ def test_plan_node_includes_object_registry_sidecars_and_prompt(
     text = model.messages[-1]["content"][-1]["text"]
     assert "屏幕对象" in text
     assert "primary_mark_id=ax_2" in text
-    assert "视频标题一" not in text
+    assert "evidence=视频标题一" in text
     assert "title_hash=5d0fe1cbd1c0" in text
     assert result["action_parsed"] == {
         "_metadata": "do",
@@ -2849,7 +2973,7 @@ def test_reflect_prompt_sanitizes_action_and_result_text(
     assert "redacted" in text
 
 
-def test_reflect_prompt_stubs_non_regex_action_and_ui_text(
+def test_reflect_prompt_regex_cleans_action_and_keeps_ui_text(
     base_state, fake_device
 ) -> None:
     private_phrase = "张三家庭住址"
@@ -2896,8 +3020,8 @@ def test_reflect_prompt_stubs_non_regex_action_and_ui_text(
     )
 
     text = model.messages[-1]["content"][-1]["text"]
-    assert private_phrase not in text
-    assert "redacted" in text
+    assert private_phrase in text
+    assert f"text_summary': '{private_phrase}'" in text
 
 
 def test_reflect_prompt_includes_before_after_observation_summaries(
@@ -2950,12 +3074,13 @@ def test_reflect_prompt_includes_before_after_observation_summaries(
     )
 
     text = model.messages[-1]["content"][-1]["text"]
-    assert "动作前观测摘要" in text
+    assert "动作前后观测形状差异" in text
+    assert "before_mark_count" in text
     assert "before_search" in text
-    assert "动作后观测摘要" in text
+    assert "after_mark_count" in text
     assert "after_search" in text
-    assert "首页推荐" not in text
-    assert "搜索" not in text
+    assert "text_summary': '首页推荐'" in text
+    assert "text_summary': '搜索'" in text
     assert result["finished"] is False
     assert base_state["messages"][0]["content"][1]["type"] == "image_url"
 

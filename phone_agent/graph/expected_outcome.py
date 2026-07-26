@@ -108,13 +108,9 @@ class ExpectedOutcome:
         return asdict(self)
 
     def trace_summary(self, *, task_context: str | None = None) -> dict[str, Any]:
-        """Return a redacted bounded summary safe for trace and prompt use."""
+        """Return the typed outcome for in-memory verification."""
 
-        return sanitize_context_payload(
-            self.to_dict(),
-            consumer="trace",
-            task_context=task_context,
-        )
+        return self.to_dict()
 
     def to_expected_transition(self) -> ExpectedTransition:
         """Translate legacy page-kind fields into conservative typed predicates."""

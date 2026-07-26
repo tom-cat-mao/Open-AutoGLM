@@ -9,7 +9,6 @@ from typing import Any, Literal
 
 from phone_agent.config.apps import APP_PACKAGES, get_package_name, normalize_app_name
 from phone_agent.graph.compatibility_adapters import PageSignalAdapter
-from phone_agent.graph.context import sanitize_context_payload
 from phone_agent.graph.expected_outcome import normalize_expected_outcome
 from phone_agent.graph.marks import build_screen_id
 
@@ -383,9 +382,8 @@ def merge_verifier_with_reflection(
 def _observation_text(observation: dict[str, Any] | None) -> str:
     if not isinstance(observation, dict):
         return ""
-    safe_observation = sanitize_context_payload(observation, consumer="trace")
     chunks: list[str] = []
-    _collect_visible_text(safe_observation, chunks)
+    _collect_visible_text(observation, chunks)
     return "\n".join(chunks).lower()
 
 

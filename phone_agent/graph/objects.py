@@ -30,7 +30,13 @@ MAX_PROMPT_OBJECTS = 30
 MAX_PROMPT_LISTS = 5
 MAX_OBJECTS_BLOCK_CHARS = 4000
 SENSITIVITY_TAGS = set(DEFAULT_SAFETY_POLICY.semantic_tags)
-VISUAL_OBJECT_TYPES = {"visual_target", "visual_text", "visual_control", "visual_group", "visual_card"}
+VISUAL_OBJECT_TYPES = {
+    "visual_target",
+    "visual_text",
+    "visual_control",
+    "visual_group",
+    "visual_card",
+}
 
 
 @dataclass(frozen=True)
@@ -48,6 +54,7 @@ class StructureNode:
     resource_id_hash: str | None = None
     text_summary: str | None = None
     content_desc_summary: str | None = None
+    password: bool = False
     clickable: bool = False
     focusable: bool = False
     focused: bool = False
@@ -99,7 +106,8 @@ class ScreenStructure:
             screen_id=screen_id,
             semantic_screen_id=semantic_screen_id,
             mark_set_version=mark_set_version,
-            topology_digest=self.topology_digest or build_structure_topology_digest(self.nodes),
+            topology_digest=self.topology_digest
+            or build_structure_topology_digest(self.nodes),
             status=self.status,
             nodes=self.nodes,
             root_node_id=self.root_node_id,
@@ -115,13 +123,16 @@ class ScreenStructure:
             "screen_id": self.screen_id,
             "semantic_screen_id": self.semantic_screen_id,
             "mark_set_version": self.mark_set_version,
-            "topology_digest": self.topology_digest or build_structure_topology_digest(self.nodes),
+            "topology_digest": self.topology_digest
+            or build_structure_topology_digest(self.nodes),
             "status": self.status,
             "structure_kind": self.structure_kind,
             "source_provider": self.source_provider,
             "confidence_tier": self.confidence_tier,
             "structure_version": self.structure_version,
-            "structure_digest": self.structure_digest or self.topology_digest or build_structure_topology_digest(self.nodes),
+            "structure_digest": self.structure_digest
+            or self.topology_digest
+            or build_structure_topology_digest(self.nodes),
             "node_count": len(self.nodes),
             "root_node_id": self.root_node_id,
             "nodes": {node_id: node.to_dict() for node_id, node in self.nodes.items()},
@@ -132,12 +143,15 @@ class ScreenStructure:
             "screen_id": self.screen_id,
             "semantic_screen_id": self.semantic_screen_id,
             "mark_set_version": self.mark_set_version,
-            "topology_digest": self.topology_digest or build_structure_topology_digest(self.nodes),
+            "topology_digest": self.topology_digest
+            or build_structure_topology_digest(self.nodes),
             "status": self.status,
             "structure_kind": self.structure_kind,
             "source_provider": self.source_provider,
             "confidence_tier": self.confidence_tier,
-            "structure_digest": self.structure_digest or self.topology_digest or build_structure_topology_digest(self.nodes),
+            "structure_digest": self.structure_digest
+            or self.topology_digest
+            or build_structure_topology_digest(self.nodes),
             "node_count": len(self.nodes),
         }
 
@@ -177,12 +191,14 @@ class ScreenObject:
     def prompt_line(self) -> str:
         ordinal = "" if self.ordinal_index is None else f" ordinal={self.ordinal_index}"
         list_part = "" if not self.list_id else f" list={self.list_id}"
+        evidence = _safe_evidence(self.evidence_summary)
         return (
             f"- {self.object_id}: type={self.object_type} role={self.role or 'unknown'}"
             f"{list_part}{ordinal} primary_mark_id={self.primary_mark_id}"
             f" confidence={round(self.confidence, 3)}"
             f" source={self.source_kind} tier={self.confidence_tier}"
             f" eligible={str(self.executable_selector).lower()} selector_confidence={self.selector_confidence}"
+            f" evidence={evidence}"
             f" title_hash={self.title_hash} text_hash={self.text_hash}"
             f" lineage_hash={self.lineage_hash}"
         )
@@ -207,7 +223,9 @@ class ObjectRegistry:
             return None
         objects: dict[str, ScreenObject] = {}
         raw_objects = value.get("objects") or {}
-        iterable = raw_objects.values() if isinstance(raw_objects, dict) else raw_objects
+        iterable = (
+            raw_objects.values() if isinstance(raw_objects, dict) else raw_objects
+        )
         for item in iterable or []:
             if not isinstance(item, dict):
                 continue
@@ -218,7 +236,8 @@ class ObjectRegistry:
             screen_id=str(value["screen_id"]),
             objects=objects,
             semantic_screen_id=value.get("semantic_screen_id"),
-            object_set_version=value.get("object_set_version") or build_object_set_version(objects),
+            object_set_version=value.get("object_set_version")
+            or build_object_set_version(objects),
             structure_topology_digest=value.get("structure_topology_digest"),
             mark_set_version=value.get("mark_set_version"),
             status=str(value.get("status") or "ok"),
@@ -237,8 +256,10 @@ class ObjectRegistry:
             screen_id=screen_id,
             objects=self.objects,
             semantic_screen_id=semantic_screen_id,
-            object_set_version=self.object_set_version or build_object_set_version(self.objects),
-            structure_topology_digest=structure_topology_digest or self.structure_topology_digest,
+            object_set_version=self.object_set_version
+            or build_object_set_version(self.objects),
+            structure_topology_digest=structure_topology_digest
+            or self.structure_topology_digest,
             mark_set_version=mark_set_version,
             status=self.status,
             truncation_summary=self.truncation_summary,
@@ -248,13 +269,16 @@ class ObjectRegistry:
         return {
             "screen_id": self.screen_id,
             "semantic_screen_id": self.semantic_screen_id,
-            "object_set_version": self.object_set_version or build_object_set_version(self.objects),
+            "object_set_version": self.object_set_version
+            or build_object_set_version(self.objects),
             "structure_topology_digest": self.structure_topology_digest,
             "mark_set_version": self.mark_set_version,
             "status": self.status,
             "object_count": len(self.objects),
             "truncation_summary": self.truncation_summary,
-            "objects": {object_id: obj.to_dict() for object_id, obj in self.objects.items()},
+            "objects": {
+                object_id: obj.to_dict() for object_id, obj in self.objects.items()
+            },
         }
 
     def trace_summary(self) -> dict[str, Any]:
@@ -269,7 +293,8 @@ class ObjectRegistry:
         return {
             "screen_id": self.screen_id,
             "semantic_screen_id": self.semantic_screen_id,
-            "object_set_version": self.object_set_version or build_object_set_version(self.objects),
+            "object_set_version": self.object_set_version
+            or build_object_set_version(self.objects),
             "structure_topology_digest": self.structure_topology_digest,
             "mark_set_version": self.mark_set_version,
             "status": self.status,
@@ -283,7 +308,12 @@ class ObjectRegistry:
     def get(self, object_id: str) -> ScreenObject | None:
         return self.objects.get(str(object_id))
 
-    def prompt_block(self, *, mark_registry: MarkRegistry | None = None, lang: str = "cn") -> str:
+    def prompt_block(
+        self,
+        *,
+        mark_registry: MarkRegistry | None = None,
+        lang: str = "cn",
+    ) -> str:
         if not self.objects:
             return ""
         title = "** Screen Objects (observation-local; compile to target_mark_id before execution) **"
@@ -310,7 +340,11 @@ class ObjectRegistry:
                 "target_text_hint 只是 provider hint，不是可执行目标。"
             )
         list_ids = _top_list_ids(self.objects.values())
-        rows = [title, f"screen={self.screen_id} topology={self.structure_topology_digest}", limits]
+        rows = [
+            title,
+            f"screen={self.screen_id} topology={self.structure_topology_digest}",
+            limits,
+        ]
         if list_ids:
             rows.append("lists: " + ", ".join(list_ids[:MAX_PROMPT_LISTS]))
         selected = _prompt_objects(self.objects.values(), mark_registry=mark_registry)
@@ -370,10 +404,17 @@ def build_object_registry(
     for current_structure in sorted(structures, key=_structure_sort_key):
         before_count = len(objects)
         if current_structure.structure_kind == "visual":
-            conflict_count += _append_visual_objects(objects, current_structure, mark_registry)
+            conflict_count += _append_visual_objects(
+                objects, current_structure, mark_registry
+            )
         else:
-            list_count += _append_accessibility_objects(objects, current_structure, mark_registry, source=source)
-        if len(objects) == before_count and current_structure.structure_kind == "visual":
+            list_count += _append_accessibility_objects(
+                objects, current_structure, mark_registry, source=source
+            )
+        if (
+            len(objects) == before_count
+            and current_structure.structure_kind == "visual"
+        ):
             continue
     structure_digest = build_composite_structure_digest(structures)
     return ObjectRegistry(
@@ -381,7 +422,8 @@ def build_object_registry(
         objects=objects,
         semantic_screen_id=mark_registry.semantic_screen_id,
         object_set_version=build_object_set_version(objects),
-        structure_topology_digest=_strong_structure_digest(structures) or structure_digest,
+        structure_topology_digest=_strong_structure_digest(structures)
+        or structure_digest,
         mark_set_version=mark_registry.mark_set_version,
         truncation_summary={
             "object_count": len(objects),
@@ -396,7 +438,9 @@ def build_object_registry(
     )
 
 
-def _normalize_structures(structure: ScreenStructure | list[ScreenStructure] | None) -> list[ScreenStructure]:
+def _normalize_structures(
+    structure: ScreenStructure | list[ScreenStructure] | None,
+) -> list[ScreenStructure]:
     if structure is None:
         return []
     if isinstance(structure, ScreenStructure):
@@ -406,7 +450,11 @@ def _normalize_structures(structure: ScreenStructure | list[ScreenStructure] | N
 
 def _structure_sort_key(structure: ScreenStructure) -> tuple[int, str, str]:
     priority = 1 if structure.structure_kind == "visual" else 0
-    return (priority, structure.source_provider or "", structure.structure_digest or structure.topology_digest or "")
+    return (
+        priority,
+        structure.source_provider or "",
+        structure.structure_digest or structure.topology_digest or "",
+    )
 
 
 def build_composite_structure_digest(structures: list[ScreenStructure]) -> str | None:
@@ -423,7 +471,11 @@ def build_composite_structure_digest(structures: list[ScreenStructure]) -> str |
 def _strong_structure_digest(structures: list[ScreenStructure]) -> str | None:
     for structure in structures:
         if structure.structure_kind == "accessibility":
-            return structure.topology_digest or structure.structure_digest or build_structure_topology_digest(structure.nodes)
+            return (
+                structure.topology_digest
+                or structure.structure_digest
+                or build_structure_topology_digest(structure.nodes)
+            )
     return None
 
 
@@ -442,7 +494,8 @@ def summarize_structures(structures: list[ScreenStructure]) -> dict[str, Any]:
         "kind_counts": counts,
         "node_counts": node_counts,
         "node_count": total_nodes,
-        "topology_digest": _strong_structure_digest(structures) or (structures[0].topology_digest if structures else None),
+        "topology_digest": _strong_structure_digest(structures)
+        or (structures[0].topology_digest if structures else None),
         "merge_order": [structure.structure_kind for structure in structures],
         "composite_structure_digest": build_composite_structure_digest(structures),
         "strong_structure_digest": _strong_structure_digest(structures),
@@ -458,7 +511,9 @@ def _append_accessibility_objects(
     source: str,
 ) -> int:
     parent_to_marks = _map_marks_to_structure_nodes(structure, mark_registry)
-    scrollable_nodes = [node for node in structure.nodes.values() if node.scrollable and node.visible]
+    scrollable_nodes = [
+        node for node in structure.nodes.values() if node.scrollable and node.visible
+    ]
     scrollable_nodes.sort(key=lambda node: (node.bounds or (0, 0, 0, 0))[1])
     list_by_node = {
         node.node_id: f"list_{index}"
@@ -480,9 +535,25 @@ def _append_accessibility_objects(
             ordinal_index = ordinal_by_list[list_id]
         lineage_hash = _hash_text(f"{node.path}|{list_id or ''}|{object_type}") or None
         object_id = f"obj_{len(objects) + 1}"
-        evidence = _safe_evidence(mark.text_summary or node.text_summary or node.content_desc_summary or node.role or object_type)
-        tags = _normalize_sensitivity_tags(node.sensitivity_tags) or _infer_sensitivity_tags(
-            " ".join(text for text in [mark.text_summary, node.text_summary, node.content_desc_summary] if text)
+        evidence = _safe_evidence(
+            mark.text_summary
+            or node.text_summary
+            or node.content_desc_summary
+            or node.role
+            or object_type
+        )
+        tags = _normalize_sensitivity_tags(
+            node.sensitivity_tags
+        ) or _infer_sensitivity_tags(
+            " ".join(
+                text
+                for text in [
+                    mark.text_summary,
+                    node.text_summary,
+                    node.content_desc_summary,
+                ]
+                if text
+            )
         )
         objects[object_id] = ScreenObject(
             object_id=object_id,
@@ -503,7 +574,18 @@ def _append_accessibility_objects(
             selector_reasons=["accessibility_structure"],
             sensitivity_tags=tags,
             evidence_summary=evidence,
-            sensitivity_evidence_summary=_safe_evidence(" ".join(tags) or " ".join(text for text in [mark.text_summary, node.text_summary, node.content_desc_summary] if text)),
+            sensitivity_evidence_summary=_safe_evidence(
+                " ".join(tags)
+                or " ".join(
+                    text
+                    for text in [
+                        mark.text_summary,
+                        node.text_summary,
+                        node.content_desc_summary,
+                    ]
+                    if text
+                )
+            ),
             title_hash=_hash_text(mark.text_summary or node.text_summary),
             text_hash=_hash_text(node.text_summary or mark.text_summary),
             resource_id_hash=node.resource_id_hash,
@@ -519,7 +601,11 @@ def _append_visual_objects(
 ) -> int:
     conflict_count = 0
     visual_nodes = sorted(
-        [node for node in structure.nodes.values() if node.visible and node.bounds is not None],
+        [
+            node
+            for node in structure.nodes.values()
+            if node.visible and node.bounds is not None
+        ],
         key=lambda node: (
             node.visual_order if node.visual_order is not None else 10_000,
             (node.bounds or (0, 0, 0, 0))[1],
@@ -544,8 +630,16 @@ def _append_visual_objects(
         object_type = _visual_object_type_for(node, mark)
         row_bucket = _visual_row_bucket(node.bounds)
         ordinal_by_row[row_bucket] = ordinal_by_row.get(row_bucket, 0) + 1
-        ordinal_index = ordinal_by_row[row_bucket] if len(visual_nodes) <= MAX_PROMPT_OBJECTS else None
-        list_id = f"visual_row_{row_bucket}" if ordinal_index is not None and len(visual_nodes) > 1 else None
+        ordinal_index = (
+            ordinal_by_row[row_bucket]
+            if len(visual_nodes) <= MAX_PROMPT_OBJECTS
+            else None
+        )
+        list_id = (
+            f"visual_row_{row_bucket}"
+            if ordinal_index is not None and len(visual_nodes) > 1
+            else None
+        )
         selector_reasons = ["visual_structure", "single_primary_mark"]
         source_safe_bound = _visual_node_has_source_safe_binding(node, mark)
         executable_selector = (
@@ -561,8 +655,12 @@ def _append_visual_objects(
         if mark.confidence < MARK_CONFIDENCE_THRESHOLD:
             selector_reasons.append("low_mark_confidence")
         object_id = f"obj_{len(objects) + 1}"
-        evidence = _safe_evidence(node.text_summary or mark.text_summary or node.role or object_type)
-        tags = _normalize_sensitivity_tags(node.sensitivity_tags) or _infer_sensitivity_tags(node.text_summary or mark.text_summary)
+        evidence = _safe_evidence(
+            node.text_summary or mark.text_summary or node.role or object_type
+        )
+        tags = _normalize_sensitivity_tags(
+            node.sensitivity_tags
+        ) or _infer_sensitivity_tags(node.text_summary or mark.text_summary)
         objects[object_id] = ScreenObject(
             object_id=object_id,
             object_type=object_type,
@@ -571,7 +669,12 @@ def _append_visual_objects(
             container_node_id=node.node_id,
             list_id=list_id,
             ordinal_index=ordinal_index,
-            confidence=min(float(node.confidence if node.confidence is not None else mark.confidence), mark.confidence),
+            confidence=min(
+                float(
+                    node.confidence if node.confidence is not None else mark.confidence
+                ),
+                mark.confidence,
+            ),
             role=mark.role or node.role,
             source="visual",
             source_kind="visual",
@@ -585,12 +688,16 @@ def _append_visual_objects(
             sensitivity_evidence_summary=_safe_evidence(" ".join(tags)),
             title_hash=_hash_text(node.text_summary or mark.text_summary),
             text_hash=_hash_text(node.text_summary or mark.text_summary),
-            lineage_hash=_hash_text(f"{structure.structure_digest or structure.topology_digest}|{node.path}|{list_id or ''}|{object_type}"),
+            lineage_hash=_hash_text(
+                f"{structure.structure_digest or structure.topology_digest}|{node.path}|{list_id or ''}|{object_type}"
+            ),
         )
     return conflict_count
 
 
-def _best_mark_for_node(node: StructureNode, mark_registry: MarkRegistry) -> Mark | None:
+def _best_mark_for_node(
+    node: StructureNode, mark_registry: MarkRegistry
+) -> Mark | None:
     if node.bounds is None:
         return None
     best: tuple[float, str, Mark] | None = None
@@ -605,12 +712,20 @@ def _best_mark_for_node(node: StructureNode, mark_registry: MarkRegistry) -> Mar
 
 
 def _visual_object_type_for(node: StructureNode, mark: Mark) -> str:
-    haystack = " ".join(str(value or "").casefold() for value in (node.role, mark.role, node.text_summary, mark.text_summary))
+    haystack = " ".join(
+        str(value or "").casefold()
+        for value in (node.role, mark.role, node.text_summary, mark.text_summary)
+    )
     if "text" in haystack or "ocr" in haystack:
         return "visual_text"
     if "card" in haystack or "video" in haystack or "result" in haystack:
         return "visual_card"
-    if "button" in haystack or "control" in haystack or "search" in haystack or "搜索" in haystack:
+    if (
+        "button" in haystack
+        or "control" in haystack
+        or "search" in haystack
+        or "搜索" in haystack
+    ):
         return "visual_control"
     if "group" in haystack or "container" in haystack:
         return "visual_group"
@@ -618,8 +733,20 @@ def _visual_object_type_for(node: StructureNode, mark: Mark) -> str:
 
 
 def _visual_node_has_source_safe_binding(node: StructureNode, mark: Mark) -> bool:
-    haystack = " ".join(str(value or "").casefold() for value in (node.role, mark.role, node.text_summary, mark.text_summary))
-    safe_terms = {"button", "text", "input", "card", "image", "search", "搜索", "visual_target"}
+    haystack = " ".join(
+        str(value or "").casefold()
+        for value in (node.role, mark.role, node.text_summary, mark.text_summary)
+    )
+    safe_terms = {
+        "button",
+        "text",
+        "input",
+        "card",
+        "image",
+        "search",
+        "搜索",
+        "visual_target",
+    }
     if any(term in haystack for term in safe_terms):
         return True
     return bool(node.sensitivity_tags)
@@ -631,7 +758,9 @@ def _visual_row_bucket(bounds: tuple[int, int, int, int] | None) -> int:
     return int(round(bounds[1] / 80.0))
 
 
-def _bbox_iou(left: tuple[float, float, float, float], right: tuple[float, float, float, float]) -> float:
+def _bbox_iou(
+    left: tuple[float, float, float, float], right: tuple[float, float, float, float]
+) -> float:
     lx1, ly1, lx2, ly2 = [float(v) for v in left]
     rx1, ry1, rx2, ry2 = [float(v) for v in right]
     x1 = max(lx1, rx1)
@@ -641,7 +770,9 @@ def _bbox_iou(left: tuple[float, float, float, float], right: tuple[float, float
     if x2 <= x1 or y2 <= y1:
         return 0.0
     intersection = (x2 - x1) * (y2 - y1)
-    union = max(1.0, (lx2 - lx1) * (ly2 - ly1) + (rx2 - rx1) * (ry2 - ry1) - intersection)
+    union = max(
+        1.0, (lx2 - lx1) * (ly2 - ly1) + (rx2 - rx1) * (ry2 - ry1) - intersection
+    )
     return intersection / union
 
 
@@ -697,48 +828,88 @@ def _coerce_object(item: dict[str, Any]) -> ScreenObject | None:
     object_type = item.get("object_type")
     if not isinstance(object_id, str) or not isinstance(object_type, str):
         return None
-    atomic_mark_ids = [str(mark_id) for mark_id in item.get("atomic_mark_ids") or [] if isinstance(mark_id, str)]
+    atomic_mark_ids = [
+        str(mark_id)
+        for mark_id in item.get("atomic_mark_ids") or []
+        if isinstance(mark_id, str)
+    ]
     primary_mark_id = item.get("primary_mark_id")
     if primary_mark_id is not None and not isinstance(primary_mark_id, str):
         primary_mark_id = None
-    source_kind = item.get("source_kind") if isinstance(item.get("source_kind"), str) else "accessibility"
+    source_kind = (
+        item.get("source_kind")
+        if isinstance(item.get("source_kind"), str)
+        else "accessibility"
+    )
     has_explicit_eligibility = "executable_selector" in item
     has_explicit_selector_confidence = "selector_confidence" in item
-    executable_selector = bool(item.get("executable_selector")) if has_explicit_eligibility else source_kind != "visual"
+    executable_selector = (
+        bool(item.get("executable_selector"))
+        if has_explicit_eligibility
+        else source_kind != "visual"
+    )
     selector_confidence = (
         item.get("selector_confidence")
         if isinstance(item.get("selector_confidence"), str)
-        else ("none" if source_kind == "visual" and not has_explicit_selector_confidence else "strong")
+        else (
+            "none"
+            if source_kind == "visual" and not has_explicit_selector_confidence
+            else "strong"
+        )
     )
     return ScreenObject(
         object_id=object_id,
         object_type=object_type,
         atomic_mark_ids=atomic_mark_ids,
         primary_mark_id=primary_mark_id,
-        container_node_id=item.get("container_node_id") if isinstance(item.get("container_node_id"), str) else None,
-        parent_object_id=item.get("parent_object_id") if isinstance(item.get("parent_object_id"), str) else None,
+        container_node_id=item.get("container_node_id")
+        if isinstance(item.get("container_node_id"), str)
+        else None,
+        parent_object_id=item.get("parent_object_id")
+        if isinstance(item.get("parent_object_id"), str)
+        else None,
         list_id=item.get("list_id") if isinstance(item.get("list_id"), str) else None,
-        ordinal_index=item.get("ordinal_index") if isinstance(item.get("ordinal_index"), int) else None,
+        ordinal_index=item.get("ordinal_index")
+        if isinstance(item.get("ordinal_index"), int)
+        else None,
         confidence=float(item.get("confidence") or 0.0),
         role=item.get("role") if isinstance(item.get("role"), str) else None,
-        source=item.get("source") if isinstance(item.get("source"), str) else "accessibility",
+        source=item.get("source")
+        if isinstance(item.get("source"), str)
+        else "accessibility",
         source_kind=source_kind,
-        source_provider=item.get("source_provider") if isinstance(item.get("source_provider"), str) else None,
-        confidence_tier=item.get("confidence_tier") if isinstance(item.get("confidence_tier"), str) else "strong",
+        source_provider=item.get("source_provider")
+        if isinstance(item.get("source_provider"), str)
+        else None,
+        confidence_tier=item.get("confidence_tier")
+        if isinstance(item.get("confidence_tier"), str)
+        else "strong",
         executable_selector=executable_selector,
         selector_confidence=selector_confidence,
         selector_reasons=[
-            str(reason) for reason in item.get("selector_reasons") or [] if isinstance(reason, str)
+            str(reason)
+            for reason in item.get("selector_reasons") or []
+            if isinstance(reason, str)
         ],
         sensitivity_tags=_normalize_sensitivity_tags(item.get("sensitivity_tags")),
-        evidence_summary=item.get("evidence_summary") if isinstance(item.get("evidence_summary"), str) else None,
+        evidence_summary=item.get("evidence_summary")
+        if isinstance(item.get("evidence_summary"), str)
+        else None,
         sensitivity_evidence_summary=item.get("sensitivity_evidence_summary")
         if isinstance(item.get("sensitivity_evidence_summary"), str)
         else None,
-        title_hash=item.get("title_hash") if isinstance(item.get("title_hash"), str) else None,
-        text_hash=item.get("text_hash") if isinstance(item.get("text_hash"), str) else None,
-        resource_id_hash=item.get("resource_id_hash") if isinstance(item.get("resource_id_hash"), str) else None,
-        lineage_hash=item.get("lineage_hash") if isinstance(item.get("lineage_hash"), str) else None,
+        title_hash=item.get("title_hash")
+        if isinstance(item.get("title_hash"), str)
+        else None,
+        text_hash=item.get("text_hash")
+        if isinstance(item.get("text_hash"), str)
+        else None,
+        resource_id_hash=item.get("resource_id_hash")
+        if isinstance(item.get("resource_id_hash"), str)
+        else None,
+        lineage_hash=item.get("lineage_hash")
+        if isinstance(item.get("lineage_hash"), str)
+        else None,
     )
 
 
@@ -754,14 +925,18 @@ def _map_marks_to_structure_nodes(
     return mapping
 
 
-def _find_node_for_mark(mark: Mark, structure: ScreenStructure, parent_to_marks: dict[str, list[str]]) -> StructureNode | None:
+def _find_node_for_mark(
+    mark: Mark, structure: ScreenStructure, parent_to_marks: dict[str, list[str]]
+) -> StructureNode | None:
     for node_id, mark_ids in parent_to_marks.items():
         if mark.mark_id in mark_ids:
             return structure.nodes.get(node_id)
     return _best_node_for_bbox(mark.bbox, structure)
 
 
-def _best_node_for_bbox(bbox: tuple[float, float, float, float], structure: ScreenStructure) -> StructureNode | None:
+def _best_node_for_bbox(
+    bbox: tuple[float, float, float, float], structure: ScreenStructure
+) -> StructureNode | None:
     best: tuple[float, int, float, StructureNode] | None = None
     for node in structure.nodes.values():
         if node.bounds is None:
@@ -777,7 +952,9 @@ def _best_node_for_bbox(bbox: tuple[float, float, float, float], structure: Scre
     return best[3] if best else None
 
 
-def _bbox_overlap_ratio(left: tuple[float, float, float, float], right: tuple[int, int, int, int]) -> float:
+def _bbox_overlap_ratio(
+    left: tuple[float, float, float, float], right: tuple[int, int, int, int]
+) -> float:
     lx1, ly1, lx2, ly2 = [float(v) for v in left]
     rx1, ry1, rx2, ry2 = [float(v) for v in right]
     x1 = max(lx1, rx1)
@@ -809,7 +986,10 @@ def _nearest_scrollable_ancestor(
 
 
 def _object_type_for(node: StructureNode, mark: Mark) -> str:
-    haystack = " ".join(str(value or "").lower() for value in (node.role, mark.role, node.text_summary, mark.text_summary))
+    haystack = " ".join(
+        str(value or "").lower()
+        for value in (node.role, mark.role, node.text_summary, mark.text_summary)
+    )
     if "edittext" in haystack or "search" in haystack or "搜索" in haystack:
         return "input"
     if "video" in haystack or "播放" in haystack or "视频" in haystack:
@@ -821,10 +1001,14 @@ def _object_type_for(node: StructureNode, mark: Mark) -> str:
     return "control"
 
 
-def _prompt_objects(objects: Any, *, mark_registry: MarkRegistry | None) -> list[ScreenObject]:
+def _prompt_objects(
+    objects: Any, *, mark_registry: MarkRegistry | None
+) -> list[ScreenObject]:
     selected = []
     for obj in objects:
-        if obj.primary_mark_id and (mark_registry is None or mark_registry.get(obj.primary_mark_id)):
+        if obj.primary_mark_id and (
+            mark_registry is None or mark_registry.get(obj.primary_mark_id)
+        ):
             selected.append(obj)
     return sorted(
         selected,
@@ -846,12 +1030,14 @@ def _top_list_ids(objects: Any) -> list[str]:
 
 
 def _safe_evidence(value: Any) -> str:
-    text = str(sanitize_context_payload(str(value or ""), "message", consumer="inject")).strip()
+    text = str(
+        sanitize_context_payload(str(value or ""), "message", consumer="inject")
+    ).strip()
     return text[:MAX_OBJECT_EVIDENCE_CHARS]
 
 
 def _hash_text(value: Any) -> str | None:
-    text = str(value or "").strip()
+    text = str(value or "").strip()[:MAX_OBJECT_EVIDENCE_CHARS]
     if not text:
         return None
     return hashlib.sha256(text.encode("utf-8")).hexdigest()[:12]

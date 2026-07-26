@@ -32,6 +32,7 @@ from phone_agent.graph.nodes.observation_capture import (
     sanitize_verifier_observation_payload,
     screenshot_failure_update,
     state_before_observation_payload,
+    observation_shape_diff,
     verifier_observation_payload,
 )
 from phone_agent.graph.screenshot_status import screenshot_failure_code
@@ -316,7 +317,7 @@ def _sanitize_verifier_result_dict(
         )
     if isinstance(data.get("signals"), dict):
         data["signals"] = sanitize_context_payload(
-            data["signals"], consumer="checkpoint", task_context=task_context
+            data["signals"], consumer="reflect_prompt", task_context=task_context
         )
     return data
 
@@ -329,8 +330,7 @@ def _maybe_emit_reflect_prompt_debug(
     reflect_text: str,
     expected_outcome_text: str,
     verifier_signals: str,
-    before_summary: str,
-    after_summary: str,
+    observation_diff: str,
     screen_info: str,
 ) -> None:
     """Emit opt-in reflect request debug traces for local diagnosis."""
@@ -344,8 +344,7 @@ def _maybe_emit_reflect_prompt_debug(
             "reflect_text": len(reflect_text or ""),
             "expected_outcome_text": len(expected_outcome_text or ""),
             "verifier_signals": len(verifier_signals or ""),
-            "before_summary": len(before_summary or ""),
-            "after_summary": len(after_summary or ""),
+            "observation_diff": len(observation_diff or ""),
             "screen_info": len(screen_info or ""),
         },
     }
@@ -356,8 +355,7 @@ def _maybe_emit_reflect_prompt_debug(
             "reflect_text": reflect_text,
             "expected_outcome_text": expected_outcome_text,
             "verifier_signals": verifier_signals,
-            "before_summary": before_summary,
-            "after_summary": after_summary,
+            "observation_diff": observation_diff,
             "screen_info": screen_info,
         }
     if "request_messages" in payload or "prompt_blocks" in payload:
@@ -409,7 +407,7 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
     action_result = state.get("action_result")
     task = state["task"]
     task_for_prompt = str(
-        sanitize_context_payload(task, "task", consumer="checkpoint", task_context=task)
+        sanitize_context_payload(task, "task", consumer="reflect_prompt", task_context=task)
     )
     step_count = state["step_count"]
     max_steps = state["max_steps"]
@@ -519,7 +517,7 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
             "after_observation": after_observation.mark_provider_observation,
             "device_signals": sanitize_context_payload(
                 device_verifier_signals,
-                consumer="checkpoint",
+                consumer="reflect_prompt",
                 task_context=task,
             ),
             "verifier_result": verifier_result_dict,
@@ -538,7 +536,7 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
     action_str = (
         str(
             sanitize_context_payload(
-                action_parsed, consumer="checkpoint", task_context=task
+                action_parsed, consumer="reflect_prompt", task_context=task
             )
         )
         if action_parsed
@@ -547,7 +545,7 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
     result_str = (
         str(
             sanitize_context_payload(
-                action_result, consumer="checkpoint", task_context=task
+                action_result, consumer="reflect_prompt", task_context=task
             )
         )
         if action_result
@@ -570,8 +568,12 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
         verifier_signals = str(
             _sanitize_verifier_result_dict(verifier_result, task_context=task)
         )
-        before_summary = str(safe_before_verifier_observation)
-        after_summary = str(safe_after_verifier_observation)
+        observation_diff = str(
+            observation_shape_diff(
+                safe_before_verifier_observation,
+                safe_after_verifier_observation,
+            )
+        )
         screen_info = MessageBuilder.build_screen_info(current_app)
         # dynamic user prompt: includes task context, action, results, observations
         # goal_contract block is injected as a separate user message before this one
@@ -584,8 +586,7 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
                 f"Execution result: {result_str}\n"
                 f"{expected_outcome_text}\n"
                 f"Deterministic verifier signals: {verifier_signals}\n"
-                f"Before-observation summary: {before_summary}\n"
-                f"After-observation summary: {after_summary}\n"
+                f"Before/after observation shape diff: {observation_diff}\n"
                 f"Current screen info: {screen_info}\n\n"
             )
             if reflect_context_block:
@@ -603,8 +604,7 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
                 f"执行结果：{result_str}\n"
                 f"{expected_outcome_text}\n"
                 f"确定性验证信号：{verifier_signals}\n"
-                f"动作前观测摘要：{before_summary}\n"
-                f"动作后观测摘要：{after_summary}\n"
+                f"动作前后观测形状差异：{observation_diff}\n"
                 f"当前屏幕信息：{screen_info}\n\n"
             )
             if reflect_context_block:
@@ -637,8 +637,7 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
             reflect_text=reflect_text,
             expected_outcome_text=expected_outcome_text,
             verifier_signals=verifier_signals,
-            before_summary=before_summary,
-            after_summary=after_summary,
+            observation_diff=observation_diff,
             screen_info=screen_info,
         )
 

@@ -269,6 +269,21 @@ def _provider_result_to_marks(result: MarkProviderResult) -> list[dict[str, Any]
     return marks
 
 
+def _sanitize_mark_for_memory(mark: dict[str, Any]) -> dict[str, Any]:
+    sanitized = dict(mark)
+    if sanitized.get("password") is True:
+        sanitized["text_summary"] = None
+        return sanitized
+    text_summary = sanitized.get("text_summary")
+    if text_summary is None:
+        text_summary = sanitized.get("text") or sanitized.get("label") or ""
+    sanitized["text_summary"] = (
+        str(sanitize_context_payload(text_summary, "message", consumer="inject"))
+        or None
+    )
+    return sanitized
+
+
 def _summarize_provider_result(result: MarkProviderResult) -> dict[str, Any]:
     """Return trace-safe provider metadata without raw hint or mark text."""
 
@@ -605,7 +620,9 @@ def build_observation(
             if structure is not None:
                 provider_structures.append(structure)
 
-    all_marks = base_marks + provider_marks
+    all_marks = [
+        _sanitize_mark_for_memory(mark) for mark in base_marks + provider_marks
+    ]
     screen_id = build_screen_id(
         current_app=current_app,
         screenshot_b64=screenshot_b64,
