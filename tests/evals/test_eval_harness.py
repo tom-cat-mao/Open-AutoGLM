@@ -62,6 +62,8 @@ def test_dry_run_eval_outputs_stable_json_shape(monkeypatch, tmp_path) -> None:
     assert output["summary"]["success"] == 3
     assert output["summary"]["hitl_count"] == 1
     assert output["summary"]["retry_count"] == 1
+    assert output["summary"]["observation_retry_count"] == 0
+    assert output["summary"]["acceptance_round_count"] == 0
     assert output["summary"]["failure_cause_histogram"] == {"element_not_found": 1}
     assert output["summary"]["grounding_failure_histogram"] == {}
     assert output["summary"]["grounding_count"] == 0

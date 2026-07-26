@@ -201,30 +201,15 @@ DEFAULT_VERIFICATION_POLICY = VerificationPolicy(
             rationale="Exclude weak facts from Goal authority resolution.",
             boundary="below resolves as no evidence",
         ),
-        "verified_reflection_skip_confidence": _threshold(
-            "verified_reflection_skip_confidence",
-            0.9,
-            unit="probability",
-            rationale="Skip model reflection only for high-confidence deterministic verification.",
-            boundary="below requires reflection",
-        ),
-        "takeover_retry_count": _threshold(
-            "takeover_retry_count",
-            3,
-            unit="attempts",
-            rationale="Bound repeated failures before human takeover.",
-            boundary="at or above routes takeover",
-        ),
         "selected_object_text_match_confidence": _threshold(
             "selected_object_text_match_confidence",
             0.75,
             unit="probability",
             rationale=(
                 "Selected-object text appearing after a tap shows the action landed "
-                "somewhere plausible, not that the trajectory advanced. Held below "
-                "verified_reflection_skip_confidence so model reflection still runs."
+                "somewhere plausible, not that the trajectory advanced or Goal moved."
             ),
-            boundary="below verified_reflection_skip_confidence keeps reflection",
+            boundary="below is weak selected-object evidence",
         ),
         "repeated_action_threshold": _threshold(
             "repeated_action_threshold",
@@ -235,6 +220,41 @@ DEFAULT_VERIFICATION_POLICY = VerificationPolicy(
                 "even when every step verified as successful."
             ),
             boundary="at or above reports repeated_action",
+        ),
+        "screen_literal_max_chars": _threshold(
+            "screen_literal_max_chars",
+            40,
+            unit="characters",
+            rationale="Reject prose-shaped raw-text bindings that cannot be screen literals.",
+            boundary="above is structurally unobservable",
+        ),
+        "binding_attestation_observations": _threshold(
+            "binding_attestation_observations",
+            3,
+            unit="observations",
+            rationale="Surface raw-text bindings that never appear in observed node text.",
+            boundary="at or above degrades the contract without vetoing",
+        ),
+        "observation_retry_limit": _threshold(
+            "observation_retry_limit",
+            3,
+            unit="attempts",
+            rationale="Bound consecutive observation infrastructure failures.",
+            boundary="at or above requires human recovery",
+        ),
+        "acceptance_round_limit": _threshold(
+            "acceptance_round_limit",
+            3,
+            unit="rounds",
+            rationale="Report repeated rejected finish claims independently of liveness.",
+            boundary="at or above remains incomplete and replans",
+        ),
+        "novelty_exhaustion_steps": _threshold(
+            "novelty_exhaustion_steps",
+            4,
+            unit="steps",
+            rationale="Detect trajectories that neither advance criteria nor reach new states.",
+            boundary="at or above classifies the trajectory as stuck",
         ),
     },
     source_priority=(

@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 from langchain_core.runnables import RunnableConfig
 
 from phone_agent.device_factory import ObservationCaptureError
-from phone_agent.config.policy import DEFAULT_VERIFICATION_POLICY, VerificationPolicy
+from phone_agent.config.policy import DEFAULT_VERIFICATION_POLICY
 from phone_agent.graph.context import (
     FAILURE_TAXONOMY,
     build_action_outcome_summary,
@@ -19,6 +19,7 @@ from phone_agent.graph.context import (
     normalize_failure_cause,
     sanitize_context_payload,
     select_reflect_context,
+    trajectory_liveness,
     _redacted_private_text,
     update_gui_memory,
     update_failure_memory,
@@ -39,8 +40,12 @@ from phone_agent.graph.nodes.observation_capture import (
 from phone_agent.graph.screenshot_status import screenshot_failure_code
 from phone_agent.graph.goal import (
     build_goal_prompt_block,
+    ensure_goal_contract,
+    goal_runtime_reference,
     goal_trace_payload,
 )
+from phone_agent.graph import goal_evidence
+from phone_agent.graph.fact_providers import collect_goal_facts
 from phone_agent.graph.trace import emit_trace
 from phone_agent.graph.verifier import (
     merge_verifier_with_reflection,
@@ -104,12 +109,6 @@ VALID_STRATEGIES = {
     "takeover",
     "finish",
 }
-VERIFIED_REFLECTION_SKIP_CONFIDENCE = DEFAULT_VERIFICATION_POLICY.value(
-    "verified_reflection_skip_confidence"
-)
-DEFAULT_TAKEOVER_RETRY_THRESHOLD = int(
-    DEFAULT_VERIFICATION_POLICY.value("takeover_retry_count")
-)
 
 
 @dataclass
@@ -122,8 +121,10 @@ class ReflectionResult:
     named_evidence: list[dict[str, object]] | None = None
 
 
-def _reflection_from_verifier(verifier_result) -> ReflectionResult | None:
-    """Return a deterministic reflection when verifier is conclusive."""
+def _reflection_from_verifier(
+    verifier_result, *, action: dict | None, liveness: dict[str, object]
+) -> ReflectionResult | None:
+    """Skip model reflection only for self-evident action questions."""
 
     if verifier_result.hard_failure:
         return ReflectionResult(
@@ -133,23 +134,17 @@ def _reflection_from_verifier(verifier_result) -> ReflectionResult | None:
             "deterministic verifier hard failure",
             True,
         )
+    action_name = str((action or {}).get("action") or "")
     if (
         verifier_result.status == "success"
-        and verifier_result.confidence >= VERIFIED_REFLECTION_SKIP_CONFIDENCE
+        and action_name == "Launch"
+        and liveness.get("state") != "stuck"
     ):
         return ReflectionResult(
             "succeeded",
             None,
             "continue",
             "deterministic postconditions matched",
-            True,
-        )
-    if verifier_result.status == "failure" and verifier_result.confidence >= 0.7:
-        return ReflectionResult(
-            "failed",
-            verifier_result.failure_cause or "unknown",
-            "retry",
-            "deterministic postconditions missing",
             True,
         )
     return None
@@ -368,28 +363,6 @@ def _strip_images_for_reflect_prompt_debug(messages: list[dict]) -> list[dict]:
     ]
 
 
-def _takeover_threshold(config: RunnableConfig) -> int:
-    configurable = config.get("configurable", {})
-    policy = configurable.get("verification_policy")
-    if isinstance(policy, VerificationPolicy):
-        return max(1, int(policy.value("takeover_retry_count")))
-    try:
-        value = int(
-            configurable.get(
-                "verifier_takeover_threshold", DEFAULT_TAKEOVER_RETRY_THRESHOLD
-            )
-        )
-    except (TypeError, ValueError):
-        return DEFAULT_TAKEOVER_RETRY_THRESHOLD
-    return max(1, value)
-
-
-def _has_positive_verifier_progress(verifier_result) -> bool:
-    evidence = getattr(verifier_result, "evidence", None) or {}
-    progress = evidence.get("progress_signals") if isinstance(evidence, dict) else None
-    return bool(isinstance(progress, dict) and progress.get("strong_progress"))
-
-
 def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
     """
     Reflect node: capture screen again, ask model to judge if action succeeded.
@@ -430,7 +403,7 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
             "suggested_strategy": "wait",
             "grounding_error": exc.code,
             "grounding_failure_code": exc.code,
-            "retry_count": int(state.get("retry_count") or 0) + 1,
+            "observation_retry_count": int(state.get("observation_retry_count") or 0) + 1,
             "finished": False,
         }
     screenshot = device_capture.screenshot
@@ -483,6 +456,33 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
         after_observation=after_verifier_observation,
         page_signal_adapter=None,
     )
+    runtime_contract_id = goal_runtime_reference(state)
+    ledger = list(state.get("goal_evidence_ledger") or [])
+    goal_contract = ensure_goal_contract(state, config)
+    if goal_contract is not None:
+        facts = collect_goal_facts(
+            goal_contract=goal_contract,
+            configurable=configurable,
+            screenshot=screenshot,
+            after_observation=after_observation,
+            runtime_contract_id=runtime_contract_id,
+        )
+        if facts:
+            in_target_app = goal_evidence.target_app_entered(
+                goal_contract,
+                facts["collected"],
+                current_app=current_app,
+                foreground_activity=after_observation.snapshot.foreground_activity,
+            )
+            ledger = goal_evidence.append_evaluation_entries(
+                ledger,
+                evaluation={"evidence": {"per_criterion": facts["collected"]}},
+                contract_id=runtime_contract_id,
+                screen_id=after_observation.snapshot.screen_id,
+                observation_epoch=after_observation.snapshot.observation_epoch,
+                predicate_ids=facts["predicate_ids"],
+                target_app_entered=in_target_app,
+            )
     if configurable.get("enable_legacy_page_signal_adapter", False):
         observe_legacy_page_signals(
             expected=state.get("expected_outcome"),
@@ -525,7 +525,27 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
         },
     )
 
-    deterministic_reflection = _reflection_from_verifier(verifier_result)
+    preview_memory = update_gui_memory(
+        state,
+        current_app=current_app,
+        screen_id=after_observation.snapshot.screen_id,
+        reached_surface=after_observation.snapshot.foreground_activity,
+    )
+    current_liveness = trajectory_liveness(
+        tried_actions=list(preview_memory.get("tried_actions") or []),
+        visited_states=list(preview_memory.get("visited_screens") or []),
+        criterion_history=goal_evidence.criterion_history_from_ledger(
+            ledger, contract_id=runtime_contract_id
+        ),
+        budget={
+            "novelty_exhaustion_steps": int(
+                DEFAULT_VERIFICATION_POLICY.value("novelty_exhaustion_steps")
+            )
+        },
+    )
+    deterministic_reflection = _reflection_from_verifier(
+        verifier_result, action=action_parsed, liveness=current_liveness
+    )
 
     # 2. Build reflection prompt with language selection
     if lang == "en":
@@ -713,25 +733,6 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
     action_succeeded = bool(reflection_fields["action_succeeded"])
     final_verdict = reflection_fields["reflection_verdict"]
     final_failure_cause = reflection_fields.get("failure_cause")
-    retry_count = int(state.get("retry_count") or 0)
-    has_positive_progress = _has_positive_verifier_progress(verifier_result)
-    if final_verdict in {"failed", "partial"}:
-        if has_positive_progress:
-            retry_count = 0
-        else:
-            retry_count += 1
-    takeover_update = {}
-    if (
-        final_verdict in {"failed", "partial"}
-        and retry_count >= _takeover_threshold(config)
-        and not has_positive_progress
-    ):
-        parsed_reflection.suggested_strategy = "takeover"
-        takeover_update = {
-            "pending_interrupt": "takeover",
-            "interrupt_message": "Repeated verification failures require human takeover",
-            "hitl_count": int(state.get("hitl_count") or 0) + 1,
-        }
     # Reflect judges one action and can never finish the task: only a finish
     # claim routed to the acceptance node can do that. A model that suggests
     # "finish" here is asking to emit a finish action next, not declaring
@@ -811,8 +812,17 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
         context_updates["gui_memory"] = update_gui_memory(
             {**state, **context_updates, "action_result": action_result},
             current_app=current_app,
-            screen_id=state.get("screen_id"),
+            screen_id=after_observation.snapshot.screen_id,
+            reached_surface=after_observation.snapshot.foreground_activity,
         )
+        context_updates["gui_memory"]["task_progress"] = {
+            **dict(
+                context_updates["gui_memory"].get("task_progress") or {}
+            ),
+            "trajectory_liveness": current_liveness["state"],
+            "liveness_reasons": current_liveness["reasons"],
+            "novelty_streak": current_liveness["novelty_streak"],
+        }
         # Trajectory-level check, deliberately separate from `detect_repeated_failure`:
         # a loop where every step verifies as successful is invisible to failure memory,
         # so re-using one target on one surface is judged on its own terms here.
@@ -864,10 +874,10 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
         "verifier_status": verifier_result.status,
         "verifier_failure_cause": verifier_result.failure_cause,
         "verifier_evidence": verifier_evidence,
-        "retry_count": retry_count,
+        "goal_evidence_ledger": ledger,
+        "observation_retry_count": 0,
         # Reflect judges a single action and never completes the task; only the
         # acceptance node can set this True, after the goal gate passes.
         "finished": False,
-        **takeover_update,
         **context_updates,
     }

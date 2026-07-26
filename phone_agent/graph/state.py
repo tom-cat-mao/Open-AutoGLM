@@ -133,7 +133,8 @@ class AgentState(TypedDict):
     reflection_verdict: Optional[str]  # succeeded / failed / partial
     failure_cause: Optional[str]  # 结构化失败原因分类
     suggested_strategy: Optional[str]  # 建议恢复策略
-    retry_count: int  # 失败/部分成功反思累计次数
+    observation_retry_count: int  # consecutive observation infrastructure failures
+    acceptance_round_count: int  # rejected finish claims requiring replanning
 
     # === Context & Observability Harness (Phase 11) ===
     context_mode: str  # off / observe / inject

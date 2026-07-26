@@ -92,6 +92,8 @@ class RunResult:
     trace_path: str | None = None
     failure_cause: str | None = None
     retry_count: int = 0
+    observation_retry_count: int = 0
+    acceptance_round_count: int = 0
     context_mode: str = DEFAULT_CONTEXT_MODE
     context_strategy: str = "unknown"
     prompt_version: str = PROMPT_VERSION
@@ -289,7 +291,8 @@ class PhoneAgent:
             "reflection_verdict": None,
             "failure_cause": None,
             "suggested_strategy": None,
-            "retry_count": 0,
+            "observation_retry_count": 0,
+            "acceptance_round_count": 0,
             "context_mode": self.agent_config.context_mode,
             "context_strategy": context_strategy,
             "prompt_version": self.agent_config.prompt_version,
@@ -411,7 +414,12 @@ class PhoneAgent:
             trace_id=trace_id,
             trace_path=trace_path,
             failure_cause=state.get("failure_cause"),
-            retry_count=int(state.get("retry_count") or 0),
+            retry_count=(
+                int(state.get("observation_retry_count") or 0)
+                + int(state.get("acceptance_round_count") or 0)
+            ),
+            observation_retry_count=int(state.get("observation_retry_count") or 0),
+            acceptance_round_count=int(state.get("acceptance_round_count") or 0),
             verifier_status=state.get("verifier_status"),
             verifier_failure_cause=state.get("verifier_failure_cause"),
             verifier_evidence=state.get("verifier_evidence"),

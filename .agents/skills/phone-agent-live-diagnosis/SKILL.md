@@ -196,19 +196,28 @@ The HTML report is the primary deliverable. It must connect:
 The graph is `START → goal → plan → execute → [confirm|takeover|acceptance|reflect|replan|end]`,
 with `acceptance → after_acceptance → [takeover|replan→goal|end]`.
 
-Two questions are answered by two different nodes, at two different time scales:
+**Three** questions are answered by three different owners, at three time scales.
+Attributing a finding to the wrong one is the most common diagnosis error here:
 
-- `reflect` — "did this action work?" — runs every step.
+- `reflect` — "did this action work?" — runs every step. **Forbidden from judging
+  task progress or human takeover** (P0 #13).
 - `acceptance` — "is the whole task done?" — runs **only** on a finish claim, and
   is the sole finish gate. Authority is ordered: hard veto > hard confirm >
-  semantic judgement, fail-closed throughout.
+  semantic judgement, fail-closed throughout (P0 #13a).
+- `trajectory_liveness` — "is the trajectory advancing, exploring, or stuck?" —
+  a pure function over bounded history in `graph/context.py`, **not a node** and
+  not a counter (P0 #13b). It is the sole input to stuck-based routing and never
+  reads a single-step verdict.
 
 `nodes/observation_capture.py` is shared post-action observation capture, so
 reflect and acceptance cannot disagree about "the screen right now". When the two
 seem to contradict each other, look there first.
 
 Do not attribute finish-gate failures to `nodes/reflect.py` — that split landed in
-commit `46f5bd6`.
+commit `46f5bd6`. Likewise do not attribute a stuck/looping trajectory or an
+unexpected takeover to reflect: it no longer owns either. Reflect held a single
+`retry_count` accumulator that never reset on success, so a normally-progressing
+task could be handed to a human; that ownership moved out in this cycle.
 
 ## Source Mapping
 
@@ -228,6 +237,7 @@ system (see P0 constraint #13a in `AGENTS.md`).
 | goal contract | `phone_agent/graph/nodes/goal_node.py`, `phone_agent/graph/goal_requirements.py`, `phone_agent/graph/goal_compiler.py`, `phone_agent/graph/goal.py`, `phone_agent/graph/predicates.py`, `phone_agent/graph/fact_providers.py`, `phone_agent/graph/goal_binding.py` |
 | reflection (per-step) | `phone_agent/graph/nodes/reflect.py`, `phone_agent/graph/nodes/observation_capture.py`, `phone_agent/graph/verifier.py`, `phone_agent/graph/expected_outcome.py` |
 | acceptance / finish gate | `phone_agent/graph/nodes/acceptance.py`, `phone_agent/graph/goal_evaluator.py`, `phone_agent/graph/goal.py`, `phone_agent/graph/verifier.py`, `phone_agent/graph/fact_providers.py`, `phone_agent/graph/predicates.py`, `phone_agent/graph/goal_evidence.py`, `phone_agent/graph/nodes/observation_capture.py`, `phone_agent/graph/compatibility_adapters.py` |
+| trajectory liveness (P0 #13b) | `phone_agent/graph/context.py` (`trajectory_liveness`), `phone_agent/graph/edges.py`, `phone_agent/config/policy.py` |
 | checkpoint / goal resume | `phone_agent/checkpoint/goal_resume.py`, `phone_agent/checkpoint/serde.py` |
 | context | `phone_agent/graph/context.py`, `phone_agent/graph/nodes/plan.py` |
 | eval/trace | `evals/run_eval.py`, `phone_agent/graph/trace.py`, `phone_agent/agent.py` |
@@ -257,10 +267,66 @@ Acceptance / finish-gate signals to surface in the report (all from the
   `verifier_evidence.missing_postconditions` / `weak_signals` /
   `dynamic_change_only` / `fallback_chain` when present.
 
+Evidence-resolution signals (per criterion, from `EvidenceAuthorityPolicy`):
+
+- `existential_match` — one authoritative fact matched. For an existential
+  predicate (per-node accessibility facts) a single hit among many non-matching
+  nodes is a match; siblings that do not match contribute no evidence.
+- `not_observed_in_view` — every authoritative fact was searched and none
+  matched. **This is `unknown`, not a contradiction.** "Not found in the current
+  viewport, this instant, via the accessibility channel" also covers offscreen
+  content needing a scroll, text rendered inside an image, and truncated labels.
+  Report it as "not observed yet", never as failure.
+- `existential_inconclusive` — a fact had a type/value problem, so the search
+  itself was unreliable.
+- `same_tier_conflict` — retained for `screen_singular` / `element_scoped`
+  predicates only: same-tier facts disagree about one screen-wide or
+  element-scoped value.
+
+Only a **positive counter-observation** contradicts: a device/summary source that
+read the target and reported a different value (e.g. expected foreground app `A`,
+observed `B`; expected toggle ON, observed OFF). A failed substring search is not
+one, and before commit `3892614` it could hard-veto a genuinely completed task.
+
+Known limitation — `element_scoped` predicates (`ui.toggle_state`,
+`ui.object_rank`) resolve `unknown` on any multi-element screen because evidence
+is not yet scoped to a selected element. Fail-closed and harmless, but those
+criteria do not currently verify; do not report their `unknown` as a defect.
+
+Trajectory liveness signals (`graph/context.py::trajectory_liveness`, P0 #13b):
+
+- `advancing` — a goal criterion moved toward satisfaction.
+- `exploring` — no criterion movement, but a state not visited before was
+  reached. **Legitimate search lives here and must not be reported as failure.**
+- `stuck` — neither, for `novelty_exhaustion_steps` consecutive steps. Oscillation
+  (Back/forward loops) lands here correctly: the surface changes every step but no
+  new state is added.
+- `novelty_streak` / `reasons` — surface these; a rising streak with `exploring`
+  is normal, a rising streak toward `stuck` is the loop signal.
+
+Progress is **goal-relative**: only criterion movement and reaching a new state
+count. Surface change, screen-hash change, new marks and `typed_text_present` are
+NOT progress — they oscillate. Do not read them as advancement in the report.
+
+Split counters (one meaning each; they used to share `retry_count`):
+
+- `observation_retry_count` — consecutive screenshot/observation infrastructure
+  failures. At its limit this routes takeover, because it is unrecoverable.
+- `acceptance_round_count` — finish claims rejected by the gate, i.e. replan
+  rounds. Not an error count.
+- `max_steps` exhaustion is an **incomplete report, never a takeover**. Takeover
+  means only a human can do this (login / captcha / payment).
+
 Contract adequacy signals (compile-time, from the `goal_compile_result` trace
 event — **not** present in `result.json`):
 
-- `predicate_unobservable` — no fact provider can ever emit this predicate.
+- `predicate_unobservable` — no fact provider can ever emit this predicate; also
+  emitted when a `raw_text` expectation cannot be node text (prose, terminal
+  punctuation, screen meta-language, over-long bindings).
+- `binding_never_observed` — a `raw_text` expectation has not appeared in any
+  observation since the target app was entered, so it is probably a compiler
+  artefact. Severity is `degraded` and diagnostic only: it must never hard-veto,
+  because the literal may legitimately require scrolling.
 - `predicate_domain_mismatch` — the predicate's declared `value_domain`
   (`raw_text`/`digest`/`identifier`/`scalar`/`structured`) does not match what the
   provider actually produces. Historically the compiler emitted a sha256 digest
@@ -293,11 +359,17 @@ style:
 - Fira Code for IDs, paths, timestamps, and code symbols.
 - Tabs: Overview, Timeline, Source Analysis, Recommendations, Raw Evidence.
 - Filters for step, event, layer, severity, and source file.
-- Overview must carry two separate verification cards: per-step postcondition
-  verification (reflect) and the finish gate (acceptance), including
-  `per_criterion` status/reason per criterion and the contract adequacy
-  status/`reason_codes`. A finish-gate status string alone is not enough — the
-  reason is what points at the source file.
+- Overview must carry **three** separate verification cards, one per owner, so a
+  finding is never attributed to the wrong layer:
+  1. per-step postcondition verification (reflect),
+  2. the finish gate (acceptance), including `per_criterion` status/reason per
+     criterion and the contract adequacy status/`reason_codes`,
+  3. trajectory liveness — state (`advancing`/`exploring`/`stuck`), `reasons`,
+     `novelty_streak`, plus `observation_retry_count` and
+     `acceptance_round_count` shown as the distinct counters they now are.
+  A finish-gate status string alone is not enough — the reason is what points at
+  the source file. Render `unknown` neutrally (not red): it means "not observed",
+  and only a positive counter-observation is a contradiction.
 - Include `<base target="_blank">`.
 - Apply `word-break: break-all` and `overflow-wrap: break-word` to long paths/URLs.
 - Never include raw screenshot base64, API keys, verification codes, or unredacted
@@ -316,6 +388,15 @@ style:
 - Do not read a green offline suite as proof a criterion is satisfiable. A
   value-domain mismatch can make a criterion unsatisfiable at runtime while every
   test passes; the compile-time adequacy `reason_codes` are the check for that.
+- **Absence of evidence is not contradiction.** Never report `unknown` /
+  `not_observed_in_view` as failure. GUI observation is partially observable: the
+  target may be offscreen, inside an image, or truncated. Only a positive
+  counter-observation contradicts.
+- Do not report `exploring` as a problem. A search-and-browse task must try
+  candidates that do not pan out; that is the intended state, not a defect. Only
+  `stuck` (no new state and no criterion movement) is a loop.
+- Do not report `max_steps` exhaustion as a takeover, and do not report a takeover
+  as "the agent gave up". Takeover means only a human can proceed.
 - `--dry-run` never enters the graph (`by_node` is just `eval`), so it validates
   the report pipeline only — never finish-gate or grounding behavior.
 - Do not auto-edit business code from this skill unless the user separately asks

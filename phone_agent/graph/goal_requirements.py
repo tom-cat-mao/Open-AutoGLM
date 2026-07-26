@@ -9,6 +9,7 @@ import unicodedata
 from typing import Any, Literal
 
 from phone_agent.config.apps import DEFAULT_APP_REGISTRY
+from phone_agent.config.policy import DEFAULT_VERIFICATION_POLICY
 from phone_agent.graph.goal import GoalContract
 from phone_agent.graph.goal_binding import compute_task_binding, normalize_task_binding
 
@@ -305,11 +306,44 @@ def _predicate_structural_defects(contract: GoalContract) -> list[str]:
             defects.append("predicate_unobservable")
             continue
         definition = CORE_PREDICATE_CATALOG.get(predicate.predicate_id)
+        if definition.value_domain == "raw_text" and not raw_text_binding_is_observable(
+            predicate.expected_value
+        ):
+            defects.append("predicate_unobservable")
+            continue
         if not _expected_value_in_domain(
             definition.value_domain, predicate.expected_value
         ):
             defects.append("predicate_domain_mismatch")
     return defects
+
+
+def raw_text_binding_is_observable(value: Any) -> bool:
+    """Whether a raw-text expectation has the shape of node text."""
+
+    values = value if isinstance(value, (list, tuple)) else [value]
+    max_chars = int(DEFAULT_VERIFICATION_POLICY.value("screen_literal_max_chars"))
+    meta_terms = ("屏幕", "页面", "可观察到", "显示", "已进入", "screen", "visible")
+    quote_pairs = (("“", "”"), ('"', '"'), ("《", "》"), ("「", "」"))
+    for item in values:
+        if not isinstance(item, str) or not item.strip():
+            return False
+        normalized = item.strip()
+        lowered = normalized.casefold()
+        # This guards prose shape; it is not a semantic stopword filter.
+        if (
+            len(normalized) > max_chars
+            or normalized.endswith(("。", "！", "？", "."))
+            or any(term in lowered for term in meta_terms)
+            or any(
+                normalized.count(left) >= 2
+                if left == right
+                else left in normalized and right in normalized
+                for left, right in quote_pairs
+            )
+        ):
+            return False
+    return True
 
 
 def _expected_value_in_domain(domain: str, value: Any) -> bool:

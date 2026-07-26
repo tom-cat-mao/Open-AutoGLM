@@ -263,6 +263,8 @@ def run_eval(args: argparse.Namespace) -> dict[str, Any]:
     failure_cause_histogram: dict[str, int] = {}
     grounding_failure_histogram: dict[str, int] = {}
     total_retries = 0
+    total_observation_retries = 0
+    total_acceptance_rounds = 0
     total_grounding_latency_ms = 0
     grounding_count = 0
     intent_grounding_count = 0
@@ -279,6 +281,8 @@ def run_eval(args: argparse.Namespace) -> dict[str, Any]:
     selected_section_counts: dict[str, int] = {}
     for item in records:
         total_retries += int(item.get("retry_count") or 0)
+        total_observation_retries += int(item.get("observation_retry_count") or 0)
+        total_acceptance_rounds += int(item.get("acceptance_round_count") or 0)
         total_context_chars += int(item.get("context_block_chars") or 0)
         context_truncated_count += 1 if item.get("context_truncated") else 0
         total_messages_before += int(item.get("messages_before") or 0)
@@ -317,6 +321,8 @@ def run_eval(args: argparse.Namespace) -> dict[str, Any]:
             "avg_duration": total_duration / len(records) if records else 0.0,
             "hitl_count": total_hitl,
             "retry_count": total_retries,
+            "observation_retry_count": total_observation_retries,
+            "acceptance_round_count": total_acceptance_rounds,
             "failure_cause_histogram": failure_cause_histogram,
             "grounding_failure_histogram": grounding_failure_histogram,
             "provider_grounding_count": grounding_count,

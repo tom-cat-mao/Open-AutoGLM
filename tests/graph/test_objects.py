@@ -1,3 +1,5 @@
+import pytest
+
 from phone_agent.actions.grounding import GroundingError, ground_intent_to_action
 from phone_agent.actions.safety import decide_safety
 from phone_agent.graph.marks import MarkRegistry
@@ -27,6 +29,51 @@ def test_object_evidence_uses_bounded_raw_summary() -> None:
     assert selected["evidence_summary"] == evidence[:120]
     assert "object_evidence_hash" not in selected
     assert "title_stub" not in selected
+
+
+@pytest.mark.parametrize(
+    "role", ["RelativeLayout", "ImageView", "Button", "ActionBar$Tab"]
+)
+def test_textless_widget_role_never_becomes_evidence_summary(role: str) -> None:
+    structure = ScreenStructure(
+        screen_id="screen-textless",
+        semantic_screen_id="semantic-textless",
+        mark_set_version=None,
+        nodes={
+            "node": StructureNode(
+                node_id="node",
+                path="0",
+                parent_id=None,
+                bounds=(100, 100, 300, 300),
+                role=role,
+                clickable=True,
+            )
+        },
+    )
+    registry = MarkRegistry.from_marks(
+        "screen-textless",
+        [
+            {
+                "mark_id": "m1",
+                "screen_id": "screen-textless",
+                "bbox": [100, 100, 300, 300],
+                "center": [200, 200],
+                "role": role,
+                "text_summary": None,
+            }
+        ],
+    )
+
+    objects = build_object_registry(
+        screen_id="screen-textless", structure=structure, mark_registry=registry
+    )
+    selected_object = next(iter(objects.objects.values()))
+    selected_evidence = object_selected_evidence(selected_object)
+
+    assert selected_object.role == role.replace("$", "_")
+    assert selected_object.evidence_summary is None
+    assert selected_evidence is not None
+    assert selected_evidence["evidence_summary"] is None
 
 
 def _structure() -> ScreenStructure:

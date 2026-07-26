@@ -1704,7 +1704,7 @@ def test_reflect_node_returns_structured_failure(base_state, fake_device) -> Non
     assert result["reflection_verdict"] == "failed"
     assert result["failure_cause"] == "wrong_page"
     assert result["suggested_strategy"] == "go_back"
-    assert result["retry_count"] == 1
+    assert result["observation_retry_count"] == 0
 
 
 def test_reflect_node_does_not_finish_on_not_finished_task_progress(
@@ -1926,6 +1926,7 @@ def test_reflect_node_launch_matches_package_alias(base_state, fake_device) -> N
     assert result["verifier_status"] == "success"
     assert result["reflection_verdict"] == "succeeded"
     assert result["verifier_result"]["signals"]["launch_matched"] is True
+    assert model.calls == 0
 
 
 def test_sensitive_expected_text_round_trips_in_runtime_contract(
@@ -2116,9 +2117,7 @@ def test_reflect_node_selected_object_text_matches_detail_page(
         is True
     )
     # Text containment is admissible but weak evidence, so it no longer outranks a
-    # model reflection that read the screenshot and reported the wrong page. It also
-    # stays below `verified_reflection_skip_confidence`, so reflection actually runs
-    # instead of being short-circuited.
+    # model reflection that read the screenshot and reported the wrong page.
     assert result["verifier_evidence"]["selected_object_signals"][
         "selected_object_text_match"
     ] is True
@@ -2418,7 +2417,7 @@ def test_reflect_node_search_page_progress_prevents_takeover(
     )
 
     assert result["verifier_status"] == "unknown"
-    assert result["retry_count"] == 0
+    assert result.get("pending_interrupt") != "takeover"
     assert result["suggested_strategy"] == "continue"
     assert result.get("pending_interrupt") is None
     assert result["verifier_evidence"]["progress_signals"]["typed_text_present"] is True
@@ -2426,13 +2425,12 @@ def test_reflect_node_search_page_progress_prevents_takeover(
         result["verifier_evidence"]["progress_signals"]["search_button_present"] is True
     )
     assert result["verifier_evidence"]["progress_signals"]["search_activity"] is True
-    assert result["verifier_evidence"]["progress_signals"]["strong_progress"] is True
+    assert "strong_progress" not in result["verifier_evidence"]["progress_signals"]
 
 
-def test_reflect_node_search_chrome_without_typed_text_still_takeover(
+def test_reflect_node_search_chrome_without_typed_text_does_not_takeover(
     base_state, fake_device
 ) -> None:
-    base_state["retry_count"] = 2
     base_state["action_parsed"] = {
         "_metadata": "do",
         "action": "Type",
@@ -2483,19 +2481,16 @@ def test_reflect_node_search_chrome_without_typed_text_still_takeover(
     )
 
     assert result["verifier_status"] == "unknown"
-    assert result["retry_count"] == 3
-    assert result["suggested_strategy"] == "takeover"
-    assert result["pending_interrupt"] == "takeover"
+    assert result.get("pending_interrupt") != "takeover"
     assert (
         result["verifier_evidence"]["progress_signals"]["search_button_present"] is True
     )
     assert "strong_progress" not in result["verifier_evidence"]["progress_signals"]
 
 
-def test_reflect_node_keyboard_residue_does_not_suppress_page_takeover(
+def test_reflect_node_keyboard_residue_does_not_trigger_takeover(
     base_state, fake_device
 ) -> None:
-    base_state["retry_count"] = 2
     base_state["action_parsed"] = {
         "_metadata": "do",
         "action": "Tap",
@@ -2539,8 +2534,7 @@ def test_reflect_node_keyboard_residue_does_not_suppress_page_takeover(
         },
     )
 
-    assert result["retry_count"] == 3
-    assert result["pending_interrupt"] == "takeover"
+    assert result.get("pending_interrupt") != "takeover"
     assert "strong_progress" not in result["verifier_evidence"]["progress_signals"]
 
 
@@ -2644,6 +2638,7 @@ def test_reflect_node_input_focused_succeeds_with_keyboard_signal(
     assert result["verifier_status"] == "success"
     assert result["reflection_verdict"] == "succeeded"
     assert result["verifier_result"]["signals"]["keyboard_visible"] is True
+    assert model.calls == 1
 
 
 def test_reflect_node_input_focused_succeeds_with_focused_editable_signal(
@@ -2817,14 +2812,13 @@ def test_reflect_node_does_not_assume_success_when_verifier_unknown_and_model_fa
     assert result["reflection_verdict"] == "failed"
     assert result["failure_cause"] == "model_reflection_failed"
     assert result["finished"] is False
-    assert result["retry_count"] == 1
+    assert result["observation_retry_count"] == 0
     assert "secret" not in result["reflection"]
 
 
-def test_reflect_node_repeated_failure_routes_to_takeover_interrupt(
+def test_reflect_node_repeated_failure_does_not_route_takeover_interrupt(
     base_state, fake_device
 ) -> None:
-    base_state["retry_count"] = 1
     model = FakeModelClient(
         FakeModelResponse(
             "still wrong",
@@ -2844,10 +2838,8 @@ def test_reflect_node_repeated_failure_routes_to_takeover_interrupt(
         },
     )
 
-    assert result["retry_count"] == 2
-    assert result["suggested_strategy"] == "takeover"
-    assert result["pending_interrupt"] == "takeover"
-    assert result["hitl_count"] == 1
+    assert result["suggested_strategy"] == "retry"
+    assert result.get("pending_interrupt") != "takeover"
     assert result["finished"] is False
 
 
@@ -2879,7 +2871,7 @@ def test_reflect_node_hard_verifier_failure_blocks_finish_from_model(
 
     assert result["reflection_verdict"] == "failed"
     assert result["finished"] is False
-    assert result["retry_count"] == 1
+    assert result["observation_retry_count"] == 0
 
 
 def test_reflect_node_updates_gui_memory(base_state, fake_device) -> None:
@@ -2901,7 +2893,7 @@ def test_reflect_node_updates_gui_memory(base_state, fake_device) -> None:
         },
     )
 
-    assert result["gui_memory"]["visited_screens"][-1]["screen_id"] == "screen-1"
+    assert result["gui_memory"]["visited_screens"][-1]["screen_id"] == result["screen_id"]
     assert result["gui_memory"]["tried_actions"][-1]["action"] == "Tap"
 
 
@@ -3477,6 +3469,7 @@ def test_acceptance_node_rejects_pending_finish_without_final_goal_evidence(
         "message": "已搜索到UP主",
     }
     base_state["pending_finish"] = True
+    base_state["observation_retry_count"] = 2
     model = FakeModelClient(
         FakeModelResponse(
             "unused",
@@ -3515,6 +3508,7 @@ def test_acceptance_node_rejects_pending_finish_without_final_goal_evidence(
     assert result["finish_validation_status"] in {"failure", "unknown"}
     assert result["failure_cause"] == "goal_not_satisfied"
     assert result["suggested_strategy"] == "continue"
+    assert result["observation_retry_count"] == 0
 
 
 def test_acceptance_node_accepts_pending_finish_with_final_goal_evidence(

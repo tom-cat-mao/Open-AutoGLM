@@ -406,6 +406,42 @@ def test_domain_mismatched_expectation_is_a_structural_defect() -> None:
     assert "predicate_domain_mismatch" in result.reason_codes
 
 
+@pytest.mark.parametrize(
+    "prose_builder",
+    [
+        lambda: "The screen visibly shows " + "requested " * 5 + "result.",
+        lambda: "页面显示" + ("x" * 48),
+        lambda: 'Visible text is "' + "generated target" + '"',
+    ],
+)
+def test_prose_shaped_raw_text_binding_is_unobservable(prose_builder) -> None:
+    expected_value = prose_builder()
+    requirements = TaskRequirementExtractor().extract("在设置里搜索 generated target")
+    candidate = GoalContract(
+        task_hash=requirements.task_hash,
+        redacted_objective="search target",
+        objective_length=32,
+        success_criteria=[
+            SuccessCriterion(
+                "topic",
+                "target visible",
+                "vlm_judge",
+                predicate=CORE_PREDICATE_CATALOG.create_spec(
+                    "semantic.entity_matches", expected_value
+                ),
+            )
+        ],
+        target_app_hint="settings",
+        entities_sha=list(requirements.target_entity_hashes),
+        compile_status="compiled",
+    )
+
+    result = ContractAdequacyValidator().validate(requirements, candidate)
+
+    assert result.status == "inadequate"
+    assert "predicate_unobservable" in result.reason_codes
+
+
 def test_degraded_contract_still_compiles_and_reaches_plan() -> None:
     """A semantic gap records itself but must not terminate the task."""
     state = {

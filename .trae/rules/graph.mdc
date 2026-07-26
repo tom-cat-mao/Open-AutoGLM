@@ -77,8 +77,15 @@ notes: "Declarative GoalContract compiled once by goal_node; finish requires mat
   - optional fact provider 由 core-owned registration 固定 provider ID/version、allowed sources 与 authority ceiling；adapter 冒充 accessibility/device fact 会被拒绝。
   - legacy feed/player classifier 默认关闭且只写 shadow telemetry；它不能改变 `VerifierResult`、`action_succeeded`、Goal evidence 或 routing。
   - Graph 的 UIAutomator dump 只经 `DeviceFactory.dump_uiautomator_xml()`；Plan/Reflect 不访问 device module。
-  - state/trace/checkpoint 的 Goal/requirement/private-text 投影只保留类型、计数、长度、状态和 opaque runtime reference；禁止低熵普通 SHA。trusted resume HMAC 是唯一持久语义绑定。
+  - state/trace/checkpoint egress 的 Goal/requirement/private-text 投影只保留类型、计数、长度、状态和 opaque runtime reference；禁止低熵普通 SHA。trusted resume HMAC 是唯一持久语义绑定。
+  - prompt-side content projection 曾通过 `projection.py` 试行，后按 `.omx/plans/privacy-prompt-projection-rollback-20260726.md` 回滚：截图通道已携带完整内容，因此该机制既损害性能，也不符合威胁模型。Prompt 仅保留高风险 regex 脱敏与 password 字段源头抑制；持久化隐私边界仍在 state/trace/checkpoint egress。
   - cross-domain、negative、metamorphic、privacy、performance、rollout/rollback 与全量 P0 离线回归已覆盖；Phase 9 真机 gate 明确延期，不从离线结果推断。
+- Verification layer hardening 已完成：
+  - Predicate evidence scope 按 `(predicate, source)` 解析；accessibility existential 任一命中即 `matched`，当前视口未见为 `unknown/not_observed_in_view`，summary source 的正面反证仍可 `contradicted`。
+  - `element_scoped` 的 `ui.toggle_state` / `ui.object_rank` 在多元素屏幕保持 fail-closed `unknown`；在证据绑定 selected element 前不做 existential fold。
+  - compiler 只从引号 literal 或通过 shape guard 的 entity span 绑定 raw text；`vlm_judge` 不再绑定 compiler substring。连续未见 binding 只产生 `binding_never_observed` degraded 诊断，不 hard-veto。
+  - `observation_retry_count` 仅统计 observation infrastructure failure，`acceptance_round_count` 仅统计 finish rejection；旧 writable `retry_count` 已删除，RunResult 只保留二者之和的兼容派生值。
+  - `trajectory_liveness` 纯折叠 criterion movement 与新 `(surface, screen_id)` 状态，输出 `advancing|exploring|stuck`；surface/hash/marks/typed text 变化不算 Goal progress。stuck 先 replan，max_steps 只报告 incomplete，takeover 仅用于 human-required 或不可恢复 observation failure。
 - 仍需保留既有 hardening 未闭环项：hint-mismatched provider marks 不得进入 executable `marks`、diagnostic code 字段需 strict sanitizer、hybrid child `parse_summary` 汇总、accessibility failure taxonomy 同步。
 
 ## 约束 Checklist
@@ -92,4 +99,6 @@ notes: "Declarative GoalContract compiled once by goal_node; finish requires mat
 - [x] Tree-first: Accessibility Tree 为 hybrid 第一层；解析失败、hint 不匹配、provider 缺失不能回退到主 VLM raw coordinate。
 - [x] trace/checkpoint 不含 raw screenshot、raw hint、API key、raw response 或低熵语义摘要；metadata 只允许 code/count/bool/length/latency/model、屏幕绑定摘要和 opaque runtime reference，持久语义绑定只允许 keyed HMAC。
 - [x] `finish` 不是执行成功；必须经过 GoalContract `SuccessCriterion` evidence gate（`finish.matched_terminal_evidence` 点名 + `GoalEvaluator` 核验），未知或缺证据 fail-closed/replan；unknown 不自动升级 success。
+- [x] `evidence_scope` 决定 authority fold；existential absence 为 unknown，positive counter-observation 才能 contradicted。
+- [x] per-step verifier、finish acceptance、trajectory liveness 三问分属不同 owner；single-step verdict 不驱动 stuck/takeover。
 - [x] `bench_output/`、API key、runtime traces、真实截图数据默认不提交。

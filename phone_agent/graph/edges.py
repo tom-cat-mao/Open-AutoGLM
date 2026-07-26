@@ -3,9 +3,12 @@
 from typing import Literal
 
 from phone_agent.actions.capability import get_tool_capability
+from phone_agent.config.policy import DEFAULT_VERIFICATION_POLICY
 from phone_agent.graph.state import AgentState
 
-
+OBSERVATION_RETRY_LIMIT = int(
+    DEFAULT_VERIFICATION_POLICY.value("observation_retry_limit")
+)
 def after_goal(state: AgentState) -> Literal["plan", "end", "takeover"]:
     """Fail closed before Plan when requirement/contract validation failed."""
 
@@ -33,10 +36,12 @@ def should_continue(state: AgentState) -> Literal["end", "replan", "takeover"]:
         return "end"
     if state.get("error"):
         return "end"
-    if state.get("pending_interrupt") == "takeover":
-        return "takeover"
     if state["step_count"] >= state["max_steps"]:
         return "end"
+    if state.get("pending_interrupt") == "takeover":
+        return "takeover"
+    if int(state.get("observation_retry_count") or 0) >= OBSERVATION_RETRY_LIMIT:
+        return "takeover"
     return "replan"
 
 
@@ -118,10 +123,12 @@ def after_acceptance(state: AgentState) -> Literal["replan", "takeover", "end"]:
     """
     if state.get("finished") or state.get("error"):
         return "end"
-    if state.get("pending_interrupt") == "takeover":
-        return "takeover"
     if state["step_count"] >= state["max_steps"]:
         return "end"
+    if state.get("pending_interrupt") == "takeover":
+        return "takeover"
+    if int(state.get("observation_retry_count") or 0) >= OBSERVATION_RETRY_LIMIT:
+        return "takeover"
     return "replan"
 
 

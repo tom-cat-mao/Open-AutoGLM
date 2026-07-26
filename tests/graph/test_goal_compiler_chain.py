@@ -16,12 +16,15 @@ from phone_agent.graph.goal_compiler import (
     HeuristicGoalCompiler,
     _attach_core_predicates,
     _extract_entities_sha,
+    _extract_entity_spans,
+    _quoted_span,
 )
 from phone_agent.graph.goal import SuccessCriterion
 from phone_agent.graph.goal_requirements import (
     ContractAdequacyValidator,
     TaskRequirementExtractor,
 )
+from phone_agent.graph.predicates import CORE_PREDICATE_CATALOG
 
 # Tasks covering the real failure modes found on-device: entity-bearing
 # launch/search/select, ordinal selection, and out-of-vocabulary verbs.
@@ -58,9 +61,7 @@ def test_entity_extraction_agrees_between_extractor_and_compiler() -> None:
         ), f"entity hash mismatch for {task!r}"
 
 
-def test_attach_core_predicates_binds_raw_entity_span_for_vlm_judge() -> None:
-    """The expectation must be the raw span, not a hash: fact providers emit
-    on-screen text, so a hash expectation is unsatisfiable by construction."""
+def test_attach_core_predicates_leaves_vlm_judge_semantic() -> None:
     criteria = [
         SuccessCriterion("task_completed", "objective visible", "vlm_judge"),
     ]
@@ -70,12 +71,10 @@ def test_attach_core_predicates_binds_raw_entity_span_for_vlm_judge() -> None:
         ordinal=None,
         entity_span="猫咪视频",
     )
-    assert migrated[0].predicate is not None
-    assert migrated[0].predicate.predicate_id == "semantic.entity_matches"
-    assert migrated[0].predicate.expected_value == "猫咪视频"
+    assert migrated[0].predicate is None
 
 
-def test_attach_core_predicates_binds_raw_accessibility_text() -> None:
+def test_attach_core_predicates_does_not_bind_unquoted_description() -> None:
     criteria = [
         SuccessCriterion(
             "search_query_visible",
@@ -91,9 +90,41 @@ def test_attach_core_predicates_binds_raw_accessibility_text() -> None:
         entity_span=None,
     )
 
+    assert migrated[0].predicate is None
+
+
+@pytest.mark.parametrize(
+    ("description", "literal"),
+    [
+        ('The result shows "literal target".', "literal target"),
+        ("结果显示“目标文本”。", "目标文本"),
+        ("打开《目标条目》", "目标条目"),
+        ("选择「目标标签」", "目标标签"),
+        ("结果显示“打开「内层目标」”。", "内层目标"),
+    ],
+)
+def test_quoted_span_extracts_most_specific_literal(
+    description: str, literal: str
+) -> None:
+    assert _quoted_span(description) == literal
+
+
+def test_quoted_span_returns_none_without_quotes() -> None:
+    assert _quoted_span("plain criterion description") is None
+
+
+def test_accessibility_criterion_binds_quoted_literal_not_description() -> None:
+    criterion = SuccessCriterion(
+        "target_visible",
+        'The screen shows "literal target".',
+        "accessibility_text_match",
+    )
+    migrated = _attach_core_predicates(
+        [criterion], target_app_hint=None, ordinal=None, entity_span="fallback"
+    )
+
     assert migrated[0].predicate is not None
-    assert migrated[0].predicate.predicate_id == "semantic.entity_matches"
-    assert migrated[0].predicate.expected_value == "村长托马斯"
+    assert migrated[0].predicate.expected_value == "literal target"
 
 
 def test_attach_core_predicates_leaves_vlm_judge_untyped_without_entities() -> None:
@@ -109,13 +140,16 @@ def test_attach_core_predicates_leaves_vlm_judge_untyped_without_entities() -> N
     assert migrated[0].predicate is None
 
 
-def test_heuristic_task_completed_carries_semantic_predicate_with_entities() -> None:
+def test_heuristic_task_completed_uses_unbound_vlm_judge() -> None:
     contract = HeuristicGoalCompiler().compile(task="打开微信给张三发消息说你好")
     task_completed = next(
         item for item in contract.success_criteria if item.name == "task_completed"
     )
-    assert task_completed.predicate is not None
-    assert task_completed.predicate.predicate_id == "semantic.entity_matches"
+    assert task_completed.predicate is None
+    requirements = TaskRequirementExtractor().extract("打开微信给张三发消息说你好")
+    adequacy = ContractAdequacyValidator().validate(requirements, contract)
+    assert adequacy.status == "adequate"
+    assert "semantic_criterion_missing" not in adequacy.reason_codes
 
 
 def test_operation_unknown_does_not_block_adequacy() -> None:
@@ -139,6 +173,14 @@ def test_pure_fold_unobserved_does_not_override_aggregating_result() -> None:
     from phone_agent.graph.goal_evaluator import pure_goal_evaluator
 
     contract = HeuristicGoalCompiler().compile(task="在哔哩哔哩搜索周杰伦")
+    contract.success_criteria[0] = SuccessCriterion(
+        "task_completed",
+        "target visible",
+        "vlm_judge",
+        predicate=CORE_PREDICATE_CATALOG.create_spec(
+            "semantic.entity_matches", "周杰伦"
+        ),
+    )
     names = [item.name for item in contract.success_criteria]
 
     # Empty ledger: nothing was observed at all.
@@ -250,12 +292,7 @@ def test_entity_contract_finish_gate_accepts_matching_screen_text() -> None:
     assert result.status == "success", result.evidence.get("per_criterion")
 
 
-def test_entity_contract_finish_gate_rejects_wrong_entity_on_screen() -> None:
-    """Counterpart to the test above: a different entity must contradict.
-
-    While the expectation was hash-bound this case passed via the vlm_judge
-    fallback, so the gate accepted finishing on the wrong content.
-    """
+def test_semantic_finish_uses_grounded_vlm_evidence_without_compiler_substring() -> None:
     result = _simulate_finish(
         "在哔哩哔哩搜索猫咪视频并播放第一个视频",
         {
@@ -282,20 +319,15 @@ def test_entity_contract_finish_gate_rejects_wrong_entity_on_screen() -> None:
             },
         },
     )
-    assert result.status == "failure"
-    assert result.evidence["per_criterion"]["task_completed"]["reason"] == (
-        "typed_contradiction"
-    )
+    assert result.status == "success"
 
 
 def test_entity_span_strips_conjunction_but_keeps_real_app_names() -> None:
     """Conjunctions are trimmed at span edges, never split on: 和/并 occur
     inside real app names (和平精英, 并读新闻)."""
-    from phone_agent.graph.goal_compiler import _primary_entity_span
-
-    assert _primary_entity_span("在哔哩哔哩搜索猫咪视频并播放第一个视频") == "猫咪视频"
-    assert _primary_entity_span("打开和平精英") == "和平精英"
-    assert _primary_entity_span("打开并读新闻") == "并读新闻"
+    assert _extract_entity_spans("在哔哩哔哩搜索猫咪视频并播放第一个视频")[0] == "猫咪视频"
+    assert _extract_entity_spans("打开和平精英")[0] == "和平精英"
+    assert _extract_entity_spans("打开并读新闻")[0] == "并读新闻"
 
 
 def test_toggle_task_compiles_programmatic_toggle_criterion() -> None:
@@ -379,8 +411,14 @@ def test_typed_match_still_upgrades_vlm_judge_criterion() -> None:
     from phone_agent.graph.goal_evaluator import AggregatingGoalEvaluator
 
     contract = HeuristicGoalCompiler().compile(task="打开微信给张三发消息说你好")
-    crit = next(c for c in contract.success_criteria if c.name == "task_completed")
-    assert crit.predicate is not None
+    crit = SuccessCriterion(
+        "task_completed",
+        "target visible",
+        "vlm_judge",
+        predicate=CORE_PREDICATE_CATALOG.create_spec(
+            "semantic.entity_matches", "张三"
+        ),
+    )
     result = AggregatingGoalEvaluator()._check_criterion(
         crit,
         contract=contract,

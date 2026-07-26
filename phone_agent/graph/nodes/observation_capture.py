@@ -78,7 +78,7 @@ def screenshot_failure_update(
         "grounding_error": code,
         "grounding_failure_code": code,
         "grounding_provider": "screenshot",
-        "retry_count": int(state.get("retry_count") or 0) + 1,
+        "observation_retry_count": int(state.get("observation_retry_count") or 0) + 1,
         "finished": True,
         "error": error_message,
         "context_mode": context_mode,

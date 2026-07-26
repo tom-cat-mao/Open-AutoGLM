@@ -169,9 +169,7 @@ def verify_action_outcome(
         if selected_object_signals.get("selected_object_match"):
             evidence["matched_postconditions"] = ["selected_object_match"]
             # Content appearing on the new screen shows the action landed somewhere
-            # plausible, but not that the trajectory advanced. Staying below
-            # `verified_reflection_skip_confidence` keeps model reflection in the
-            # loop, which is what answers "is this progress?".
+            # plausible, but not that the trajectory advanced or the Goal moved.
             return VerifierResult(
                 status="success",
                 confidence=SELECTED_OBJECT_TEXT_MATCH_CONFIDENCE,
@@ -338,7 +336,7 @@ def verify_action_outcome(
 def merge_verifier_with_reflection(
     verifier: VerifierResult, reflection: dict[str, Any]
 ) -> dict[str, Any]:
-    """Apply precedence: hard failure > model reflection; unknown falls back."""
+    """Apply local postcondition precedence after reflection has run."""
 
     if verifier.hard_failure:
         return {
@@ -437,7 +435,6 @@ def _progress_signals(
     focus_signals: dict[str, Any],
 ) -> dict[str, Any]:
     signals: dict[str, Any] = {}
-    action_name = str(action.get("action") or "") if isinstance(action, dict) else ""
     if focus_signals.get("editable_present"):
         signals["editable_present"] = True
     if focus_signals.get("focused_editable"):
@@ -456,27 +453,6 @@ def _progress_signals(
             signals["typed_text_present"] = True
     if expected_kind == "input_focused" and "input" in text_blob:
         signals["input_hint_present"] = True
-    strong_reasons: list[str] = []
-    if expected_kind == "input_focused" and (
-        signals.get("focused_editable") or signals.get("keyboard_visible")
-    ):
-        strong_reasons.append("input_focus_signal")
-    if (
-        action_name in {"Type", "Type_Name"}
-        and expected_kind == "text_present"
-        and signals.get("typed_text_present")
-    ):
-        strong_reasons.append("typed_text_present")
-    if (
-        action_name in {"Type", "Type_Name"}
-        and expected_kind == "input_focused"
-        and signals.get("typed_text_present")
-    ):
-        strong_reasons.append("typed_text_present")
-    strong = bool(strong_reasons)
-    if strong:
-        signals["strong_progress"] = True
-        signals["strong_progress_reasons"] = strong_reasons
     return signals
 
 

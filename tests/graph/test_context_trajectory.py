@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import json
 
+import phone_agent.graph.context as context_module
+
 from phone_agent.graph.context import (
     build_plan_context_block,
     detect_repeated_action,
@@ -27,6 +29,81 @@ from phone_agent.graph.context import (
 
 FEED_SURFACE = "com.xingin.xhs/com.xingin.alioth.search.GlobalSearchActivity"
 NOTE_CARD_CENTER = [747.0, 418.0]
+
+
+def _trajectory_step(index: int, *, surface: str, screen_id: str) -> dict[str, object]:
+    return {
+        "step_count": index,
+        "surface": surface,
+        "screen_id": screen_id,
+        "reflection_verdict": "partial" if index % 2 else "succeeded",
+    }
+
+
+def test_long_novel_trajectory_remains_exploring() -> None:
+    steps = [
+        _trajectory_step(index, surface=f"surface-{index}", screen_id=f"screen-{index}")
+        for index in range(1, 17)
+    ]
+    criteria = [
+        {"observation_epoch": index, "per_criterion": {"target": "unknown"}}
+        for index in range(1, 17)
+    ]
+
+    for length in range(2, len(steps) + 1):
+        result = context_module.trajectory_liveness(
+            tried_actions=steps[:length],
+            visited_states=[],
+            criterion_history=criteria[:length],
+            budget={"novelty_exhaustion_steps": 4},
+        )
+        assert result["state"] == "exploring"
+
+
+def test_successful_two_state_oscillation_becomes_stuck() -> None:
+    steps = [
+        _trajectory_step(
+            index,
+            surface=f"surface-{index % 2}",
+            screen_id=f"screen-{index % 2}",
+        )
+        for index in range(1, 9)
+    ]
+    criteria = [
+        {"observation_epoch": index, "per_criterion": {"target": "unknown"}}
+        for index in range(1, 9)
+    ]
+
+    result = context_module.trajectory_liveness(
+        tried_actions=steps,
+        visited_states=[],
+        criterion_history=criteria,
+        budget={"novelty_exhaustion_steps": 4},
+    )
+
+    assert result["state"] == "stuck"
+    assert result["novelty_streak"] >= 4
+
+
+def test_criterion_movement_is_advancing_and_resets_novelty() -> None:
+    result = context_module.trajectory_liveness(
+        tried_actions=[
+            _trajectory_step(index, surface="same", screen_id=f"screen-{index % 2}")
+            for index in range(1, 9)
+        ],
+        visited_states=[],
+        criterion_history=[
+            {"per_criterion": {"target": "unknown"}},
+            {"per_criterion": {"target": "matched"}},
+        ],
+        budget={"novelty_exhaustion_steps": 4},
+    )
+
+    assert result == {
+        "state": "advancing",
+        "reasons": ["criterion_movement"],
+        "novelty_streak": 0,
+    }
 
 
 def _succeeded_tap(step: int, *, screen_id: str) -> dict[str, object]:
@@ -94,6 +171,28 @@ def test_gui_memory_records_target_geometry_for_dedup() -> None:
     latest = memory["tried_actions"][-1]
     assert latest["target_center"] == NOTE_CARD_CENTER
     assert latest["surface"] == FEED_SURFACE
+
+
+def test_gui_memory_aligns_visited_surface_with_reached_screen() -> None:
+    state = {
+        "step_count": 6,
+        "action_parsed": {
+            "_metadata": "do",
+            "action": "Tap",
+            "element": NOTE_CARD_CENTER,
+        },
+        "observation": {"snapshot": {"foreground_activity": FEED_SURFACE}},
+    }
+
+    memory = update_gui_memory(
+        state,
+        current_app="小红书",
+        screen_id="detail-screen",
+        reached_surface="NoteDetailActivity",
+    )
+
+    assert memory["visited_screens"][-1]["surface"] == "NoteDetailActivity"
+    assert memory["tried_actions"][-1]["surface"] == FEED_SURFACE
 
 
 def test_newest_tried_actions_survive_the_context_budget() -> None:

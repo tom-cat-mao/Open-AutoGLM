@@ -539,9 +539,7 @@ def _append_accessibility_objects(
             mark.text_summary
             or node.text_summary
             or node.content_desc_summary
-            or node.role
-            or object_type
-        )
+        ) or None
         tags = _normalize_sensitivity_tags(
             node.sensitivity_tags
         ) or _infer_sensitivity_tags(
@@ -655,9 +653,7 @@ def _append_visual_objects(
         if mark.confidence < MARK_CONFIDENCE_THRESHOLD:
             selector_reasons.append("low_mark_confidence")
         object_id = f"obj_{len(objects) + 1}"
-        evidence = _safe_evidence(
-            node.text_summary or mark.text_summary or node.role or object_type
-        )
+        evidence = _safe_evidence(node.text_summary or mark.text_summary) or None
         tags = _normalize_sensitivity_tags(
             node.sensitivity_tags
         ) or _infer_sensitivity_tags(node.text_summary or mark.text_summary)
@@ -812,7 +808,7 @@ def object_selected_evidence(obj: ScreenObject | None) -> dict[str, Any] | None:
         return None
     return {
         "object_type": obj.object_type,
-        "evidence_summary": _safe_evidence(obj.evidence_summary),
+        "evidence_summary": _safe_evidence(obj.evidence_summary) or None,
         "expected_page_type": _expected_page_type(obj.object_type),
         "expected_rank": obj.ordinal_index,
     }

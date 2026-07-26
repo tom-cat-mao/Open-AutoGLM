@@ -62,11 +62,7 @@ def test_class_name_evidence_is_not_a_match() -> None:
 
 
 def test_textless_target_does_not_reach_high_confidence_success() -> None:
-    """A text-less target must not short-circuit model reflection.
-
-    `verified_reflection_skip_confidence` is 0.9, so returning 0.9 here skipped the
-    reflect model on every step of the regression run.
-    """
+    """A text-less target must not become conclusive selected-object evidence."""
 
     result = verify_action_outcome(
         before_state={

@@ -78,15 +78,16 @@ def _evaluate(
 
 
 # ----------------------------------------------------------------------
-# search: entity must actually appear on screen
+# search: semantic completion is judged from grounded screen evidence
 # ----------------------------------------------------------------------
 
 
-def test_search_task_accepts_matching_screen_and_rejects_wrong_entity() -> None:
+def test_search_task_uses_grounded_semantic_judgement_without_compiler_binding() -> None:
     contract = _compile("在哔哩哔哩搜索周杰伦")
 
+    semantic = next(item for item in contract.success_criteria if item.name == "task_completed")
+    assert semantic.predicate is None
     assert _evaluate(contract, screen_text="周杰伦的热门歌曲").status == "success"
-    assert _evaluate(contract, screen_text="五月天演唱会").status == "failure"
 
 
 def test_search_task_accepts_human_worded_app_and_no_app_testimony() -> None:

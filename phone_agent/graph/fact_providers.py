@@ -495,6 +495,68 @@ CORE_PROVIDER_PREDICATES: frozenset[str] = frozenset(
 )
 
 
+def collect_goal_facts(
+    *,
+    goal_contract: Any,
+    configurable: dict[str, Any],
+    screenshot: Any,
+    after_observation: Any,
+    runtime_contract_id: str | None,
+) -> dict[str, dict] | None:
+    """Collect resolved neutral facts for every typed Goal criterion."""
+
+    requests = tuple(
+        FactRequest(criterion.name, criterion.predicate)
+        for criterion in goal_contract.success_criteria
+        if criterion.predicate is not None
+        and criterion.predicate.expected_value is not None
+    )
+    if not requests:
+        return None
+
+    providers = list(default_core_fact_providers())
+    for source, key in (
+        ("visual_region", "visual_fact_extractor"),
+        ("whole_screen", "whole_screen_fact_extractor"),
+    ):
+        extractor = configurable.get(key)
+        if callable(extractor):
+            providers.append(
+                ExtractorFactProvider(
+                    source,
+                    extractor,
+                    provider_id=f"core.{source}",
+                    provider_version=f"{source}_v1",
+                )
+            )
+    goal_probes = configurable.get("goal_probes")
+    if isinstance(goal_probes, dict):
+        providers.append(ExternalProbeFactProvider(goal_probes))
+    adapter_registry = configurable.get("optional_fact_adapter_registry")
+    if isinstance(adapter_registry, OptionalAdapterRegistry):
+        providers.extend(adapter_registry.providers)
+
+    runtime_context = RuntimeObservationContext(
+        screenshot=screenshot,
+        observation=after_observation,
+        screen_id=after_observation.snapshot.screen_id,
+        observation_epoch=after_observation.snapshot.observation_epoch,
+    )
+    try:
+        collected = FactCollector(tuple(providers)).collect_and_resolve(
+            runtime_context, requests, contract_id=runtime_contract_id
+        )
+    finally:
+        runtime_context.invalidate()
+    return {
+        "collected": collected,
+        "predicate_ids": {
+            request.criterion_id: request.predicate.predicate_id
+            for request in requests
+        },
+    }
+
+
 def predicate_is_observable(predicate_id: str) -> bool:
     """Whether any core provider can emit facts for this predicate."""
 

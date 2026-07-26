@@ -48,6 +48,8 @@ def test_run_result_defaults_and_serialization() -> None:
         "trace_path": None,
         "failure_cause": None,
         "retry_count": 0,
+        "observation_retry_count": 0,
+        "acceptance_round_count": 0,
         "context_mode": "inject",
         "context_strategy": "unknown",
         "prompt_version": "context_harness_v1",
@@ -97,7 +99,8 @@ def test_run_structured_returns_metrics_and_keeps_config(monkeypatch) -> None:
         "error": None,
         "hitl_count": 1,
         "failure_cause": "wrong_page",
-        "retry_count": 2,
+        "observation_retry_count": 1,
+        "acceptance_round_count": 1,
         "context_mode": "inject",
         "context_strategy": "inject_redacted_block",
         "prompt_version": "context_harness_v1",
@@ -132,6 +135,8 @@ def test_run_structured_returns_metrics_and_keeps_config(monkeypatch) -> None:
     assert result.trace_path
     assert result.failure_cause == "wrong_page"
     assert result.retry_count == 2
+    assert result.observation_retry_count == 1
+    assert result.acceptance_round_count == 1
     assert result.context_mode == "inject"
     assert result.context_strategy == "inject_redacted_block"
     assert result.prompt_version == "context_harness_v1"

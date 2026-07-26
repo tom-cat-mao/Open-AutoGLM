@@ -1,4 +1,8 @@
-from phone_agent.graph.goal_evidence import append_evaluation_entries
+from phone_agent.graph.goal_evidence import (
+    append_evaluation_entries,
+    target_app_entered,
+    unattested_raw_text_bindings,
+)
 from phone_agent.graph.goal import GoalContract, SuccessCriterion
 from phone_agent.graph.goal_evaluator import PureGoalEvaluator
 from phone_agent.graph.predicates import CORE_PREDICATE_CATALOG
@@ -45,6 +49,224 @@ def test_evidence_ledger_is_bounded_and_excludes_runtime_values() -> None:
     ]
     assert "Silverstone" not in str(ledger)
     assert "Singapore" not in str(ledger)
+
+
+def test_absent_raw_text_binding_degrades_without_becoming_a_veto() -> None:
+    contract = GoalContract(
+        task_hash="contract-1",
+        redacted_objective="locate target",
+        objective_length=13,
+        success_criteria=[
+            SuccessCriterion(
+                "topic",
+                "target visible",
+                "vlm_judge",
+                predicate=CORE_PREDICATE_CATALOG.create_spec(
+                    "semantic.entity_matches", "role-name"
+                ),
+            )
+        ],
+        compile_status="compiled",
+    )
+    ledger = []
+    for epoch in range(1, 4):
+        ledger = append_evaluation_entries(
+            ledger,
+            evaluation={
+                "evidence": {
+                    "per_criterion": {
+                        "topic": {
+                            "status": "unknown",
+                            "reason": "not_observed_in_view",
+                            "source": "accessibility",
+                        }
+                    }
+                }
+            },
+            contract_id="contract-1",
+            screen_id=f"screen-{epoch}",
+            observation_epoch=epoch,
+            predicate_ids={"topic": "semantic.entity_matches"},
+            target_app_entered=True,
+        )
+
+    assert unattested_raw_text_bindings(
+        ledger,
+        contract,
+        contract_id="contract-1",
+    ) == ["topic"]
+    evaluation = PureGoalEvaluator().evaluate(
+        contract=contract,
+        contract_id="contract-1",
+        evidence_ledger=ledger,
+        finish_claim_matched=["topic"],
+        screen_id="screen-3",
+        observation_epoch=3,
+    )
+    assert evaluation.status == "unknown"
+    assert not evaluation.missing
+
+
+def test_observed_raw_text_binding_never_later_degrades() -> None:
+    contract = GoalContract(
+        task_hash="contract-1",
+        redacted_objective="locate target",
+        objective_length=13,
+        success_criteria=[
+            SuccessCriterion(
+                "topic",
+                "target visible",
+                "vlm_judge",
+                predicate=CORE_PREDICATE_CATALOG.create_spec(
+                    "semantic.entity_matches", "target"
+                ),
+            )
+        ],
+        compile_status="compiled",
+    )
+    ledger = []
+    for epoch, status in enumerate(("matched", *("unknown" for _ in range(64))), start=1):
+        ledger = append_evaluation_entries(
+            ledger,
+            evaluation={
+                "evidence": {
+                    "per_criterion": {
+                        "topic": {
+                            "status": status,
+                            "reason": "accessibility_observation",
+                            "source": "accessibility",
+                        }
+                    }
+                }
+            },
+            contract_id="contract-1",
+            screen_id=f"screen-{epoch}",
+            observation_epoch=epoch,
+            predicate_ids={"topic": "semantic.entity_matches"},
+            target_app_entered=True,
+        )
+
+    assert unattested_raw_text_bindings(
+        ledger, contract, contract_id="contract-1"
+    ) == []
+
+
+def test_raw_text_attestation_waits_for_target_app_and_accessibility() -> None:
+    contract = GoalContract(
+        task_hash="contract-1",
+        redacted_objective="locate target",
+        objective_length=13,
+        success_criteria=[
+            SuccessCriterion(
+                "topic",
+                "target visible",
+                "vlm_judge",
+                predicate=CORE_PREDICATE_CATALOG.create_spec(
+                    "semantic.entity_matches", "target"
+                ),
+            )
+        ],
+        compile_status="compiled",
+    )
+    ledger = []
+    for epoch in range(1, 4):
+        ledger = append_evaluation_entries(
+            ledger,
+            evaluation={
+                "evidence": {
+                    "per_criterion": {
+                        "topic": {
+                            "status": "unknown",
+                            "reason": "not_observed_in_view",
+                            "source": "accessibility",
+                        }
+                    }
+                }
+            },
+            contract_id="contract-1",
+            screen_id=f"screen-{epoch}",
+            observation_epoch=epoch,
+            predicate_ids={"topic": "semantic.entity_matches"},
+            target_app_entered=False,
+        )
+
+    assert unattested_raw_text_bindings(
+        ledger, contract, contract_id="contract-1"
+    ) == []
+
+    for epoch in range(4, 6):
+        ledger = append_evaluation_entries(
+            ledger,
+            evaluation={
+                "evidence": {
+                    "per_criterion": {
+                        "topic": {
+                            "status": "unknown",
+                            "reason": "not_observed_in_view",
+                            "source": "accessibility",
+                        }
+                    }
+                }
+            },
+            contract_id="contract-1",
+            screen_id=f"screen-{epoch}",
+            observation_epoch=epoch,
+            predicate_ids={"topic": "semantic.entity_matches"},
+            target_app_entered=True,
+        )
+
+    assert unattested_raw_text_bindings(
+        ledger, contract, contract_id="contract-1"
+    ) == []
+    ledger = append_evaluation_entries(
+        ledger,
+        evaluation={
+            "evidence": {
+                "per_criterion": {
+                    "topic": {
+                        "status": "unknown",
+                        "reason": "not_observed_in_view",
+                        "source": "accessibility",
+                    }
+                }
+            }
+        },
+        contract_id="contract-1",
+        screen_id="screen-6",
+        observation_epoch=6,
+        predicate_ids={"topic": "semantic.entity_matches"},
+        target_app_entered=True,
+    )
+    assert unattested_raw_text_bindings(
+        ledger, contract, contract_id="contract-1"
+    ) == ["topic"]
+
+
+def test_target_app_entry_does_not_require_a_foreground_criterion() -> None:
+    contract = GoalContract(
+        task_hash="contract-1",
+        redacted_objective="observe settings label",
+        objective_length=22,
+        success_criteria=[
+            SuccessCriterion(
+                "label",
+                "target visible",
+                "vlm_judge",
+                predicate=CORE_PREDICATE_CATALOG.create_spec(
+                    "semantic.entity_matches", "target"
+                ),
+            )
+        ],
+        target_app_hint="settings",
+        compile_status="compiled",
+    )
+
+    assert target_app_entered(
+        contract,
+        collected=None,
+        current_app="com.android.settings",
+        foreground_activity="com.android.settings/.Settings",
+    )
 
 
 def test_private_typed_expected_value_is_not_serialized_to_agent_state() -> None:

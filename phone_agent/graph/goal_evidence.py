@@ -5,6 +5,11 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from typing import Any, Literal
 
+from phone_agent.config.apps import DEFAULT_APP_REGISTRY
+from phone_agent.config.policy import DEFAULT_VERIFICATION_POLICY
+from phone_agent.graph.goal import GoalContract
+from phone_agent.graph.predicates import CORE_PREDICATE_CATALOG
+
 
 CriterionEvidenceStatus = Literal[
     "invalid", "contradicted", "stale", "missing", "unknown", "unobserved", "matched"
@@ -24,9 +29,13 @@ class CriterionEvidenceEntry:
     contract_id: str
     screen_id: str | None
     observation_epoch: int | None
+    target_app_entered: bool | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        value = asdict(self)
+        if self.target_app_entered is None:
+            value.pop("target_app_entered")
+        return value
 
 
 def append_evaluation_entries(
@@ -37,6 +46,7 @@ def append_evaluation_entries(
     screen_id: str | None,
     observation_epoch: int | None,
     predicate_ids: dict[str, str | None],
+    target_app_entered: bool | None = None,
     limit: int = 64,
 ) -> list[dict[str, Any]]:
     """Append safe per-criterion results from one Reflect evaluation."""
@@ -78,6 +88,124 @@ def append_evaluation_entries(
                 contract_id=contract_id,
                 screen_id=screen_id,
                 observation_epoch=observation_epoch,
+                target_app_entered=target_app_entered,
             ).to_dict()
         )
-    return entries[-max(1, limit) :]
+    return _bounded_entries(entries, limit=max(1, limit))
+
+
+def _bounded_entries(entries: list[dict[str, Any]], *, limit: int) -> list[dict[str, Any]]:
+    if len(entries) <= limit:
+        return entries
+    anchor_indices: dict[tuple[Any, Any], int] = {}
+    for index, item in enumerate(entries):
+        if (
+            item.get("status") == "matched"
+            and item.get("source_kind") == "accessibility"
+            and item.get("target_app_entered") is True
+        ):
+            anchor_indices[(item.get("contract_id"), item.get("criterion_id"))] = index
+    anchors = set(anchor_indices.values())
+    tail = [index for index in range(len(entries) - 1, -1, -1) if index not in anchors]
+    selected = anchors | set(tail[: max(0, limit - len(anchors))])
+    return [entries[index] for index in sorted(selected)[-limit:]]
+
+
+def target_app_entered(
+    contract: GoalContract,
+    collected: dict[str, dict] | None,
+    *,
+    current_app: str | None = None,
+    foreground_activity: str | None = None,
+) -> bool:
+    """Return whether device facts place this observation in the target app."""
+
+    if not contract.target_app_hint:
+        return True
+    for criterion in contract.success_criteria:
+        predicate = criterion.predicate
+        if predicate is None or not predicate.predicate_id.startswith("app.foreground"):
+            continue
+        result = (collected or {}).get(criterion.name)
+        if isinstance(result, dict) and result.get("status") == "matched":
+            return True
+    target = DEFAULT_APP_REGISTRY.resolve_term(contract.target_app_hint)
+    if target.status != "resolved" or target.identity is None:
+        return False
+    observed_values = (current_app, foreground_activity)
+    for value in observed_values:
+        observed = str(value or "").strip()
+        if not observed:
+            continue
+        package = observed.partition("/")[0]
+        package_resolution = DEFAULT_APP_REGISTRY.resolve_package(package)
+        if (
+            package_resolution.status == "resolved"
+            and package_resolution.identity == target.identity
+        ):
+            return True
+        term_resolution = DEFAULT_APP_REGISTRY.resolve_term(observed)
+        if term_resolution.status == "resolved" and term_resolution.identity == target.identity:
+            return True
+    return False
+
+
+def unattested_raw_text_bindings(
+    ledger: list[dict[str, Any]],
+    contract: GoalContract,
+    *,
+    contract_id: str,
+) -> list[str]:
+    """Return raw-text bindings never observed after target-app entry."""
+
+    window = int(
+        DEFAULT_VERIFICATION_POLICY.value("binding_attestation_observations")
+    )
+    unattested: list[str] = []
+    for criterion in contract.success_criteria:
+        predicate = criterion.predicate
+        if predicate is None:
+            continue
+        if CORE_PREDICATE_CATALOG.get(predicate.predicate_id).value_domain != "raw_text":
+            continue
+        entries = [
+            item
+            for item in ledger
+            if item.get("contract_id") == contract_id
+            and item.get("criterion_id") == criterion.name
+            and item.get("source_kind") == "accessibility"
+            and item.get("target_app_entered") is True
+        ]
+        if any(item.get("status") == "matched" for item in entries):
+            continue
+        by_observation: dict[tuple[Any, Any], dict[str, Any]] = {}
+        for item in entries:
+            by_observation[(item.get("screen_id"), item.get("observation_epoch"))] = item
+        latest = list(by_observation.values())[-window:]
+        if len(latest) == window:
+            unattested.append(criterion.name)
+    return unattested
+
+
+def criterion_history_from_ledger(
+    ledger: list[dict[str, Any]], *, contract_id: str
+) -> list[dict[str, Any]]:
+    """Group bounded ledger entries into per-observation criterion snapshots."""
+
+    snapshots: dict[tuple[Any, Any], dict[str, Any]] = {}
+    for item in ledger:
+        if item.get("contract_id") != contract_id:
+            continue
+        key = (item.get("screen_id"), item.get("observation_epoch"))
+        snapshot = snapshots.setdefault(
+            key,
+            {
+                "screen_id": key[0],
+                "observation_epoch": key[1],
+                "per_criterion": {},
+            },
+        )
+        snapshot["per_criterion"][str(item.get("criterion_id"))] = str(
+            item.get("status") or "unknown"
+        )
+    return list(snapshots.values())

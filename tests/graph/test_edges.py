@@ -166,6 +166,16 @@ def test_should_continue_routes_takeover_after_terminal_guard(base_state) -> Non
     assert should_continue(base_state) == "end"
 
 
+def test_stuck_liveness_replans_without_takeover(base_state) -> None:
+    base_state["gui_memory"]["task_progress"] = {
+        "trajectory_liveness": "stuck",
+        "novelty_streak": 20,
+    }
+
+    assert should_continue(base_state) == "replan"
+    assert base_state.get("pending_interrupt") != "takeover"
+
+
 def test_reflect_conditional_edges_include_takeover_route() -> None:
     from phone_agent.graph.builder import create_agent_graph
 

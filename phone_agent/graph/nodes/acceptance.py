@@ -25,16 +25,12 @@ from typing import TYPE_CHECKING
 
 from langchain_core.runnables import RunnableConfig
 
+from phone_agent.config.policy import DEFAULT_VERIFICATION_POLICY
 from phone_agent.device_factory import ObservationCaptureError
 from phone_agent.graph.context import get_context_mode, sanitize_context_payload
 from phone_agent.graph.device_observation import capture_device_observation
 from phone_agent.graph.fact_providers import (
-    ExternalProbeFactProvider,
-    ExtractorFactProvider,
-    FactCollector,
-    FactRequest,
-    OptionalAdapterRegistry,
-    default_core_fact_providers,
+    collect_goal_facts,
 )
 from phone_agent.graph.goal import (
     build_goal_prompt_block,
@@ -48,7 +44,11 @@ from phone_agent.graph.goal_evaluator import (
     evaluate_finish_claim,
     pure_goal_evaluator,
 )
-from phone_agent.graph.goal_evidence import append_evaluation_entries
+from phone_agent.graph.goal_evidence import (
+    append_evaluation_entries,
+    target_app_entered,
+    unattested_raw_text_bindings,
+)
 from phone_agent.graph.nodes.observation_capture import (
     build_after_observation,
     collect_device_verifier_signals,
@@ -57,7 +57,6 @@ from phone_agent.graph.nodes.observation_capture import (
     state_before_observation_payload,
     verifier_observation_payload,
 )
-from phone_agent.graph.runtime_observation import RuntimeObservationContext
 from phone_agent.graph.screenshot_status import screenshot_failure_code
 from phone_agent.graph.trace import emit_trace
 from phone_agent.graph.verifier import verify_action_outcome
@@ -142,74 +141,6 @@ def parse_acceptance_response(raw: str) -> tuple[bool, str, list[dict] | None]:
     return completed, message, evidence
 
 
-def _collect_goal_facts(
-    *,
-    goal_contract,
-    configurable: dict,
-    screenshot,
-    after_observation,
-    runtime_contract_id: str | None,
-) -> dict[str, dict] | None:
-    """Run the fact providers for every typed criterion in the contract."""
-
-    requests = tuple(
-        FactRequest(criterion.name, criterion.predicate)
-        for criterion in goal_contract.success_criteria
-        if criterion.predicate is not None
-        and criterion.predicate.expected_value is not None
-    )
-    if not requests:
-        return None
-
-    providers = list(default_core_fact_providers())
-    visual_extractor = configurable.get("visual_fact_extractor")
-    if callable(visual_extractor):
-        providers.append(
-            ExtractorFactProvider(
-                "visual_region",
-                visual_extractor,
-                provider_id="core.visual_region",
-                provider_version="visual_region_v1",
-            )
-        )
-    whole_screen_extractor = configurable.get("whole_screen_fact_extractor")
-    if callable(whole_screen_extractor):
-        providers.append(
-            ExtractorFactProvider(
-                "whole_screen",
-                whole_screen_extractor,
-                provider_id="core.whole_screen",
-                provider_version="whole_screen_v1",
-            )
-        )
-    goal_probes = configurable.get("goal_probes")
-    if isinstance(goal_probes, dict):
-        providers.append(ExternalProbeFactProvider(goal_probes))
-    adapter_registry = configurable.get("optional_fact_adapter_registry")
-    if isinstance(adapter_registry, OptionalAdapterRegistry):
-        providers.extend(adapter_registry.providers)
-
-    runtime_context = RuntimeObservationContext(
-        screenshot=screenshot,
-        observation=after_observation,
-        screen_id=after_observation.snapshot.screen_id,
-        observation_epoch=after_observation.snapshot.observation_epoch,
-    )
-    try:
-        collected = FactCollector(tuple(providers)).collect_and_resolve(
-            runtime_context, requests, contract_id=runtime_contract_id
-        )
-    finally:
-        runtime_context.invalidate()
-    return {
-        "collected": collected,
-        "predicate_ids": {
-            request.criterion_id: request.predicate.predicate_id
-            for request in requests
-        },
-    }
-
-
 def _hard_veto(collected: dict[str, dict] | None, goal_contract) -> list[str]:
     """Required criteria that collected facts directly contradict (layer 1)."""
 
@@ -287,7 +218,7 @@ def acceptance_node(state: "AgentState", config: RunnableConfig) -> dict:
             "suggested_strategy": "wait",
             "grounding_error": exc.code,
             "grounding_failure_code": exc.code,
-            "retry_count": int(state.get("retry_count") or 0) + 1,
+            "observation_retry_count": int(state.get("observation_retry_count") or 0) + 1,
             "context_mode": context_mode,
         }
     screenshot = device_capture.screenshot
@@ -346,7 +277,7 @@ def acceptance_node(state: "AgentState", config: RunnableConfig) -> dict:
     ledger = list(state.get("goal_evidence_ledger") or []) if has_runtime_binding else []
 
     # --- layers 1 & 2: what the system can establish on its own ---
-    facts = _collect_goal_facts(
+    facts = collect_goal_facts(
         goal_contract=goal_contract,
         configurable=configurable,
         screenshot=screenshot,
@@ -354,6 +285,12 @@ def acceptance_node(state: "AgentState", config: RunnableConfig) -> dict:
         runtime_contract_id=runtime_contract_id,
     )
     collected = facts["collected"] if facts else None
+    in_target_app = target_app_entered(
+        goal_contract,
+        collected,
+        current_app=current_app,
+        foreground_activity=after_observation.snapshot.foreground_activity,
+    )
     if facts:
         ledger = append_evaluation_entries(
             ledger,
@@ -362,6 +299,29 @@ def acceptance_node(state: "AgentState", config: RunnableConfig) -> dict:
             screen_id=after_observation.snapshot.screen_id,
             observation_epoch=after_observation.snapshot.observation_epoch,
             predicate_ids=facts["predicate_ids"],
+            target_app_entered=in_target_app,
+        )
+
+    unattested = unattested_raw_text_bindings(
+        ledger,
+        goal_contract,
+        contract_id=runtime_contract_id,
+    )
+    adequacy_update: dict = {}
+    if unattested:
+        adequacy_update = {
+            "contract_adequacy_status": "degraded",
+            "contract_adequacy_reasons": sorted(
+                set(state.get("contract_adequacy_reasons") or [])
+                | {"binding_never_observed"}
+            ),
+        }
+        emit_trace(
+            config,
+            state,
+            "acceptance",
+            "binding_never_observed",
+            {"criterion_ids": unattested, "status": "degraded"},
         )
 
     vetoed = _hard_veto(collected, goal_contract)
@@ -390,6 +350,7 @@ def acceptance_node(state: "AgentState", config: RunnableConfig) -> dict:
             ledger=ledger,
             observation=after_observation,
             current_app=current_app,
+            extra_update=adequacy_update,
         )
 
     # --- layer 3: semantic judgement, only where it is actually needed ---
@@ -512,6 +473,7 @@ def acceptance_node(state: "AgentState", config: RunnableConfig) -> dict:
             ledger=ledger,
             observation=after_observation,
             current_app=current_app,
+            extra_update=adequacy_update,
         )
 
     return {
@@ -521,12 +483,14 @@ def acceptance_node(state: "AgentState", config: RunnableConfig) -> dict:
         "finish_validation_status": evaluation.status,
         "finish_validation_evidence": evaluation.to_dict(),
         "goal_evidence_ledger": ledger,
+        "observation_retry_count": 0,
         "action_succeeded": True,
         "reflection_verdict": "succeeded",
         "failure_cause": None,
         "suggested_strategy": "finish",
         "reflection": model_message or "task complete: goal criteria satisfied",
         "context_mode": context_mode,
+        **adequacy_update,
     }
 
 def _observation_update(after_observation, current_app: str) -> dict:
@@ -551,9 +515,13 @@ def _rejected(
     ledger: list[dict] | None = None,
     observation=None,
     current_app: str | None = None,
+    extra_update: dict | None = None,
 ) -> dict:
     """Reject a finish claim and send the run back to planning."""
 
+    acceptance_round_count = int(state.get("acceptance_round_count") or 0) + 1
+    round_limit = int(DEFAULT_VERIFICATION_POLICY.value("acceptance_round_limit"))
+    limit_reached = acceptance_round_count >= round_limit
     update: dict = {
         "pending_finish": False,
         "finished": False,
@@ -562,15 +530,25 @@ def _rejected(
         "action_succeeded": False,
         "reflection_verdict": "failed",
         "failure_cause": "goal_not_satisfied",
-        "suggested_strategy": "continue",
-        "reflection": message,
-        "retry_count": int(state.get("retry_count") or 0) + 1,
+        "suggested_strategy": (
+            "avoid_repeated_finish_claim" if limit_reached else "continue"
+        ),
+        "reflection": (
+            f"{message}; acceptance round limit reached, continue without repeating "
+            "the same finish claim"
+            if limit_reached
+            else message
+        ),
+        "acceptance_round_count": acceptance_round_count,
         "context_mode": context_mode,
     }
     if ledger is not None:
         update["goal_evidence_ledger"] = ledger
     if observation is not None and current_app is not None:
         update.update(_observation_update(observation, current_app))
+        update["observation_retry_count"] = 0
+    if extra_update:
+        update.update(extra_update)
     return update
 
 

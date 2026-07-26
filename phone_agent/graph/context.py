@@ -12,6 +12,9 @@ from phone_agent.config.policy import DEFAULT_VERIFICATION_POLICY
 REPEATED_ACTION_THRESHOLD = int(
     DEFAULT_VERIFICATION_POLICY.value("repeated_action_threshold")
 )
+NOVELTY_EXHAUSTION_STEPS = int(
+    DEFAULT_VERIFICATION_POLICY.value("novelty_exhaustion_steps")
+)
 CONTEXT_MODES = {"off", "observe", "inject"}
 DEFAULT_CONTEXT_MODE = "inject"
 DEFAULT_CONTEXT_BUDGET: dict[str, int] = {
@@ -596,6 +599,72 @@ def detect_repeated_action(
     return prior >= REPEATED_ACTION_THRESHOLD
 
 
+def trajectory_liveness(
+    *,
+    tried_actions: list[dict],
+    visited_states: list[dict],
+    criterion_history: list[dict],
+    budget: dict[str, int],
+) -> dict[str, Any]:
+    """Purely classify goal-relative trajectory movement from bounded history."""
+
+    if _criterion_moved_toward_satisfaction(criterion_history):
+        return {
+            "state": "advancing",
+            "reasons": ["criterion_movement"],
+            "novelty_streak": 0,
+        }
+
+    state_history = visited_states if visited_states else tried_actions
+    states = [
+        (item.get("surface"), item.get("screen_id"))
+        for item in state_history
+        if item.get("surface") is not None and item.get("screen_id") is not None
+    ]
+    novelty_streak = 0
+    seen: set[tuple[Any, Any]] = set()
+    for identity in states:
+        if identity in seen:
+            novelty_streak += 1
+        else:
+            seen.add(identity)
+            novelty_streak = 0
+    threshold = max(
+        1, int(budget.get("novelty_exhaustion_steps", NOVELTY_EXHAUSTION_STEPS))
+    )
+    if novelty_streak >= threshold:
+        return {
+            "state": "stuck",
+            "reasons": ["novelty_exhausted"],
+            "novelty_streak": novelty_streak,
+        }
+    return {
+        "state": "exploring",
+        "reasons": ["new_state" if novelty_streak == 0 else "revisiting_state"],
+        "novelty_streak": novelty_streak,
+    }
+
+
+def _criterion_moved_toward_satisfaction(history: list[dict]) -> bool:
+    if len(history) < 2:
+        return False
+    previous = history[-2].get("per_criterion") or {}
+    current = history[-1].get("per_criterion") or {}
+    rank = {
+        "invalid": 0,
+        "contradicted": 0,
+        "missing": 0,
+        "stale": 0,
+        "unobserved": 1,
+        "unknown": 1,
+        "matched": 2,
+    }
+    return any(
+        rank.get(str(status), 0) > rank.get(str(previous.get(criterion)), 0)
+        for criterion, status in current.items()
+    )
+
+
 def _repeated_action_key(item: dict[str, Any]) -> tuple[Any, ...] | None:
     if not isinstance(item, dict):
         return None
@@ -609,7 +678,11 @@ def _repeated_action_key(item: dict[str, Any]) -> tuple[Any, ...] | None:
 
 
 def update_gui_memory(
-    state: dict[str, Any], *, current_app: str, screen_id: str | None
+    state: dict[str, Any],
+    *,
+    current_app: str,
+    screen_id: str | None,
+    reached_surface: str | None = None,
 ) -> dict[str, Any]:
     """Update GUI memory using only bounded identifiers and sanitized summaries."""
 
@@ -619,10 +692,13 @@ def update_gui_memory(
         visited = list(memory.get("visited_screens") or [])
         item = {
             "screen_id": screen_id,
+            "surface": reached_surface,
             "current_app": sanitize_context_text_regex(current_app or "unknown"),
             "step_count": step,
         }
-        if not visited or visited[-1].get("screen_id") != screen_id:
+        if not visited or (
+            visited[-1].get("screen_id"), visited[-1].get("surface")
+        ) != (screen_id, reached_surface):
             visited.append(item)
         memory["visited_screens"] = visited[-10:]
 
@@ -894,8 +970,13 @@ def _build_avoid_repeating(state: dict[str, Any]) -> dict[str, Any]:
     if not tried:
         return {}
     latest = tried[-1]
+    progress = raw_memory.get("task_progress") or {}
+    liveness_stuck = (
+        isinstance(progress, dict) and progress.get("trajectory_liveness") == "stuck"
+    )
     if not (
-        state.get("repeated_action_detected")
+        liveness_stuck
+        or state.get("repeated_action_detected")
         or detect_repeated_action(tried[:-1], latest)
     ):
         return {}
@@ -909,6 +990,7 @@ def _build_avoid_repeating(state: dict[str, Any]) -> dict[str, Any]:
         "target_center": latest.get("target_center"),
         "surface": _short_surface(latest.get("surface")),
         "repeat_count": repeats,
+        "trajectory_liveness": progress.get("trajectory_liveness"),
         "next_hint": (
             "This target on this surface has already been used; it produced no new "
             "progress. Choose a different target, scroll to reveal new content, or "

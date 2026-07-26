@@ -28,6 +28,7 @@ from phone_agent.graph.goal_requirements import (
     extract_entity_spans,
     parse_chinese_ordinal,
     parse_toggle_intent,
+    raw_text_binding_is_observable,
     _digest as _requirement_digest,
 )
 from phone_agent.graph.predicates import CORE_PREDICATE_CATALOG
@@ -100,24 +101,9 @@ def _extract_entities_sha(text: str) -> list[str]:
     """Digests of the entity spans, used for adequacy intersection only.
 
     These hashes are a *binding* device (requirement side vs contract side),
-    never a match target: no fact provider emits hashes for
-    ``semantic.entity_matches``, so a predicate must bind the raw span
-    instead — see ``_primary_entity_span``.
+    never a match target.
     """
     return [_requirement_digest(item) for item in _extract_entity_spans(text)]
-
-
-def _primary_entity_span(text: str) -> str | None:
-    """Raw primary entity span used as a ``semantic.entity_matches`` expectation.
-
-    Fact providers emit raw on-screen text for this predicate
-    (``AccessibilityFactProvider`` yields ``node.text_summary``), so the
-    expectation must live in the same value domain. The raw value is
-    privacy-protected by the predicate's PRIVATE_RUNTIME projection, which
-    keeps it out of state, trace, and checkpoints.
-    """
-    spans = _extract_entity_spans(text)
-    return spans[0] if spans else None
 
 
 # ----------------------------------------------------------------------
@@ -154,7 +140,6 @@ class HeuristicGoalCompiler:
         app_hint = _detect_app_hint(text)
         ordinal = _detect_ordinal(text)
         entities_sha = _extract_entities_sha(text)
-        entity_span = _primary_entity_span(text)
         toggle_state = parse_toggle_intent(text)
         redacted_obj = redact_objective(text)
 
@@ -206,13 +191,6 @@ class HeuristicGoalCompiler:
                     or "Task objective visible on final screen",
                     verification="vlm_judge",
                     required=True,
-                    predicate=(
-                        CORE_PREDICATE_CATALOG.create_spec(
-                            "semantic.entity_matches", entity_span
-                        )
-                        if entity_span
-                        else None
-                    ),
                 ),
             )
         return GoalContract(
@@ -458,7 +436,8 @@ class LLMGoalCompiler:
             target_app_hint = app_resolution.identity.canonical_id
 
         entities_sha = _extract_entities_sha(task)
-        entity_span = _primary_entity_span(task)
+        entity_spans = _extract_entity_spans(task)
+        entity_span = entity_spans[0] if entity_spans else None
         toggle_state = parse_toggle_intent(task)
         if toggle_state is not None and not any(
             item.verification == "toggle_state_match" for item in criteria
@@ -570,21 +549,30 @@ def _attach_core_predicates(
                     "ui.text_hash_present", match.group(1).casefold()
                 )
             else:
-                expected_text = criterion.description.strip() or entity_span
+                expected_text = _quoted_span(criterion.description)
+                if expected_text is None and raw_text_binding_is_observable(entity_span):
+                    expected_text = entity_span
                 if expected_text:
                     predicate = CORE_PREDICATE_CATALOG.create_spec(
                         "semantic.entity_matches", expected_text
                     )
-        elif criterion.verification == "vlm_judge" and entity_span:
-            # Semantic coverage for entity-bearing tasks: bind the raw primary
-            # entity span, which is the domain fact providers actually emit for
-            # this predicate. Binding a hash here made the expectation
-            # unsatisfiable (casefold_exact(hash, screen_text) never matches).
-            predicate = CORE_PREDICATE_CATALOG.create_spec(
-                "semantic.entity_matches", entity_span
-            )
         migrated.append(replace(criterion, predicate=predicate))
     return migrated
+
+
+def _quoted_span(description: str) -> str | None:
+    """Extract the most specific non-empty literal from supported quote pairs."""
+
+    candidates: list[str] = []
+    for left, right in (("“", "”"), ('"', '"'), ("《", "》"), ("「", "」")):
+        candidates.extend(
+            item.strip()
+            for item in re.findall(
+                rf"{re.escape(left)}([^\n]*?){re.escape(right)}", description
+            )
+            if item.strip()
+        )
+    return min(candidates, key=len) if candidates else None
 
 
 # ----------------------------------------------------------------------
