@@ -26,6 +26,7 @@ PrivacyClass = Literal["public", "private", "sensitive"]
 ProjectionKind = Literal["full", "redacted", "metadata", "omit"]
 PersistencePolicy = Literal["runtime_only", "checkpoint_safe"]
 MatchStatus = Literal["matched", "contradicted", "unknown"]
+EvidenceScope = Literal["existential", "screen_singular", "element_scoped"]
 
 
 @dataclass(frozen=True)
@@ -60,6 +61,7 @@ class PredicateDefinition:
     projection: PrivacyProjection
     whole_screen_allowed: bool = False
     value_domain: ValueDomain = "scalar"
+    evidence_scope: EvidenceScope = "screen_singular"
 
     def __post_init__(self) -> None:
         if not self.predicate_id or "." not in self.predicate_id:
@@ -72,6 +74,12 @@ class PredicateDefinition:
             raise ValueError(
                 "whole-screen policy requires whole_screen as an allowed source"
             )
+        if self.evidence_scope not in {
+            "existential",
+            "screen_singular",
+            "element_scoped",
+        }:
+            raise ValueError("invalid evidence scope")
 
 
 @dataclass(frozen=True)
@@ -263,6 +271,8 @@ class Matcher:
             else:
                 matched = expected_values.isdisjoint(observed_values)
         return MatchResult(
+            # Per-fact comparison remains binary. EvidenceAuthorityPolicy owns
+            # the scope-aware polarity of a non-match across a screen.
             "matched" if matched else "contradicted",
             spec.matcher_id,
             "values_match" if matched else "values_conflict",
@@ -337,7 +347,24 @@ class EvidenceAuthorityPolicy:
         authoritative = self.highest_authority(tuple(current))
         if not authoritative:
             return AuthorityResolution("unknown", "no_authoritative_fact", 0)
+        definition = CORE_PREDICATE_CATALOG.get(spec.predicate_id)
+        source = authoritative[0].source
+        scope = definition.evidence_scope
+        if scope == "existential" and source in {"visual_region", "whole_screen"}:
+            scope = "screen_singular"
         statuses = {Matcher.match(spec, fact).status for fact in authoritative}
+        if scope == "existential":
+            if "matched" in statuses:
+                return AuthorityResolution(
+                    "matched", "existential_match", len(authoritative)
+                )
+            if "unknown" in statuses:
+                return AuthorityResolution(
+                    "unknown", "existential_inconclusive", len(authoritative)
+                )
+            return AuthorityResolution(
+                "unknown", "not_observed_in_view", len(authoritative)
+            )
         if "unknown" in statuses or len(statuses) != 1:
             return AuthorityResolution(
                 "unknown", "same_tier_conflict", len(authoritative)
@@ -409,6 +436,7 @@ def _definition(
     projection: PrivacyProjection = PUBLIC_CHECKPOINT,
     whole_screen_allowed: bool = False,
     value_domain: ValueDomain = "scalar",
+    evidence_scope: EvidenceScope = "screen_singular",
 ) -> PredicateDefinition:
     return PredicateDefinition(
         predicate_id=predicate_id,
@@ -418,6 +446,7 @@ def _definition(
         projection=projection,
         whole_screen_allowed=whole_screen_allowed,
         value_domain=value_domain,
+        evidence_scope=evidence_scope,
     )
 
 
@@ -453,6 +482,7 @@ CORE_PREDICATE_CATALOG = PredicateCatalog(
             matcher_id="casefold_exact",
             projection=PRIVATE_RUNTIME,
             value_domain="raw_text",
+            evidence_scope="existential",
         ),
         _definition(
             "ui.text_hash_present",
@@ -461,6 +491,7 @@ CORE_PREDICATE_CATALOG = PredicateCatalog(
             # The provider digests node text before emitting, so the
             # expectation must also be a digest.
             value_domain="digest",
+            evidence_scope="existential",
         ),
         _definition(
             "ui.reference_text_changed", "boolean", {"accessibility", "visual_region"}
@@ -470,6 +501,7 @@ CORE_PREDICATE_CATALOG = PredicateCatalog(
             "string",
             {"screen_object", "mark"},
             value_domain="identifier",
+            evidence_scope="existential",
         ),
         _definition(
             "ui.object_absent",
@@ -483,7 +515,13 @@ CORE_PREDICATE_CATALOG = PredicateCatalog(
             {"screen_object", "accessibility"},
             value_domain="identifier",
         ),
-        _definition("ui.object_rank", "integer", {"screen_object", "accessibility"}),
+        _definition(
+            "ui.object_rank",
+            "integer",
+            {"screen_object", "accessibility"},
+            # Existential folding would make rank N true on every screen with N objects.
+            evidence_scope="element_scoped",
+        ),
         _definition(
             "ui.value_equals",
             "string",
@@ -491,9 +529,16 @@ CORE_PREDICATE_CATALOG = PredicateCatalog(
             matcher_id="casefold_exact",
             projection=PRIVATE_RUNTIME,
             value_domain="raw_text",
+            evidence_scope="element_scoped",
         ),
         _definition("ui.value_changed", "boolean", {"accessibility", "screen_object"}),
-        _definition("ui.toggle_state", "boolean", {"accessibility", "screen_object"}),
+        _definition(
+            "ui.toggle_state",
+            "boolean",
+            {"accessibility", "screen_object"},
+            # Existential folding would detach the state from the selected toggle.
+            evidence_scope="element_scoped",
+        ),
         _definition(
             "ui.collection_contains",
             "string_list",
@@ -544,6 +589,7 @@ CORE_PREDICATE_CATALOG = PredicateCatalog(
             projection=PRIVATE_RUNTIME,
             whole_screen_allowed=True,
             value_domain="raw_text",
+            evidence_scope="existential",
         ),
         _definition(
             "external.effect_confirmed",

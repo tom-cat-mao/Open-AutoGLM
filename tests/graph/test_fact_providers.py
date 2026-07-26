@@ -136,6 +136,175 @@ def test_core_sidecar_providers_emit_bound_neutral_facts() -> None:
     assert mark_only["mark"]["status"] == "matched"
 
 
+def test_accessibility_existential_match_survives_nonmatching_sibling_nodes() -> None:
+    target = "限速摩卡"
+    screen_nodes = [
+        (target, "n1"),
+        ("关注", "n2"),
+        ("节目上新：干货满满银石复盘有人想听吗🥳", "n3"),
+        ("hello，大家好，这里是限速摩卡，一档新晋赛车题材播客栏目🤩", "n4"),
+        ("说点什么...", "n5"),
+        ("点赞 6", "n6"),
+        ("收藏 2", "n7"),
+        ("评论 2", "n8"),
+    ]
+    structure = ScreenStructure(
+        screen_id="screen-1",
+        nodes={
+            node_id: StructureNode(
+                node_id=node_id,
+                path=f"/root/{node_id}",
+                parent_id=None,
+                text_summary=text,
+                visible=True,
+            )
+            for text, node_id in screen_nodes
+        },
+    )
+    context = _context(structures=[structure])
+    request = FactRequest(
+        "entity",
+        CORE_PREDICATE_CATALOG.create_spec("semantic.entity_matches", target),
+    )
+
+    result = FactCollector((AccessibilityFactProvider(),)).collect_and_resolve(
+        context, (request,), contract_id="contract-1"
+    )
+
+    assert result["entity"]["status"] == "matched"
+
+
+def test_accessibility_existential_absence_is_unknown() -> None:
+    structure = ScreenStructure(
+        screen_id="screen-1",
+        nodes={
+            f"n{index}": StructureNode(
+                node_id=f"n{index}",
+                path=f"/root/n{index}",
+                parent_id=None,
+                text_summary=text,
+                visible=True,
+            )
+            for index, text in enumerate(("alpha", "beta", "gamma"), start=1)
+        },
+    )
+    request = FactRequest(
+        "entity",
+        CORE_PREDICATE_CATALOG.create_spec("semantic.entity_matches", "delta"),
+    )
+
+    result = FactCollector((AccessibilityFactProvider(),)).collect_and_resolve(
+        _context(structures=[structure]), (request,), contract_id="contract-1"
+    )
+
+    assert result["entity"]["status"] == "unknown"
+    assert result["entity"]["reason"] == "not_observed_in_view"
+
+
+def test_unknown_existential_absence_neither_hard_vetoes_nor_succeeds() -> None:
+    from phone_agent.graph.nodes.acceptance import _hard_veto
+
+    collected = {
+        "entity": {
+            "status": "unknown",
+            "reason": "not_observed_in_view",
+            "source_count": 3,
+        }
+    }
+    predicate = CORE_PREDICATE_CATALOG.create_spec(
+        "semantic.entity_matches", "unobserved"
+    )
+    contract = GoalContract(
+        task_hash="contract-1",
+        redacted_objective="locate a target",
+        objective_length=15,
+        success_criteria=[
+            SuccessCriterion("entity", "target visible", "vlm_judge", predicate=predicate)
+        ],
+        compile_status="compiled",
+    )
+    ledger = append_evaluation_entries(
+        [],
+        evaluation={"evidence": {"per_criterion": collected}},
+        contract_id="contract-1",
+        screen_id="screen-1",
+        observation_epoch=7,
+        predicate_ids={"entity": "semantic.entity_matches"},
+    )
+
+    evaluation = PureGoalEvaluator().evaluate(
+        contract=contract,
+        contract_id="contract-1",
+        evidence_ledger=ledger,
+        finish_claim_matched=["entity"],
+        screen_id="screen-1",
+        observation_epoch=7,
+    )
+
+    assert _hard_veto(collected, contract) == []
+    assert evaluation.status == "unknown"
+    assert evaluation.status != "success"
+
+
+def test_accessibility_existential_contains_matches_longer_node_text() -> None:
+    target = "限速摩卡"
+    structure = ScreenStructure(
+        screen_id="screen-1",
+        nodes={
+            "n1": StructureNode(
+                node_id="n1",
+                path="/root/n1",
+                parent_id=None,
+                text_summary=f"F1题材的播客栏目有人会喜欢吗？ hello 大家好…{target}Furious mo&ca…",
+                visible=True,
+            ),
+            "n2": StructureNode(
+                node_id="n2",
+                path="/root/n2",
+                parent_id=None,
+                text_summary="2025-03-10",
+                visible=True,
+            ),
+        },
+    )
+    request = FactRequest(
+        "entity",
+        CORE_PREDICATE_CATALOG.create_spec("semantic.entity_matches", target),
+    )
+
+    result = FactCollector((AccessibilityFactProvider(),)).collect_and_resolve(
+        _context(structures=[structure]), (request,), contract_id="contract-1"
+    )
+
+    assert result["entity"]["status"] == "matched"
+
+
+def test_element_scoped_rank_does_not_fold_existentially() -> None:
+    objects = ObjectRegistry(
+        screen_id="screen-1",
+        objects={
+            f"object-{rank}": ScreenObject(
+                object_id=f"object-{rank}",
+                object_type="list_item",
+                atomic_mark_ids=[f"mark-{rank}"],
+                primary_mark_id=f"mark-{rank}",
+                ordinal_index=rank,
+            )
+            for rank in range(1, 7)
+        },
+    )
+    request = FactRequest(
+        "rank", CORE_PREDICATE_CATALOG.create_spec("ui.object_rank", 3)
+    )
+
+    result = FactCollector((ObjectFactProvider(),)).collect_and_resolve(
+        _context(objects=objects), (request,), contract_id="contract-1"
+    )
+
+    assert result["rank"]["status"] == "unknown"
+    assert result["rank"]["reason"] == "same_tier_conflict"
+
+
 def test_adapters_disabled_semantic_mismatch_reaches_goal_fold() -> None:
     context = _context()
     spec = CORE_PREDICATE_CATALOG.create_spec("semantic.entity_matches", "Silverstone")

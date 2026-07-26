@@ -190,6 +190,43 @@ def test_authority_resolution_rejects_stale_and_same_tier_conflicts() -> None:
     assert conflict.source_count == 2
 
 
+def test_screen_singular_positive_counter_observation_still_contradicts() -> None:
+    spec = CORE_PREDICATE_CATALOG.create_spec(
+        "app.foreground_identity", "expected-app"
+    )
+    policy = EvidenceAuthorityPolicy(
+        (AuthorityRule("app.foreground_identity", "device", 1, 0.8),)
+    )
+
+    result = policy.resolve(
+        spec,
+        (_fact("app.foreground_identity", "other-app", source="device"),),
+        contract_id="contract-1",
+        screen_id="screen-1",
+        observation_epoch=7,
+    )
+
+    assert result.status == "contradicted"
+    assert result.reason_code == "authority_resolved"
+
+
+def test_summary_semantic_counter_observation_still_contradicts() -> None:
+    spec = CORE_PREDICATE_CATALOG.create_spec("semantic.entity_matches", "expected")
+    policy = EvidenceAuthorityPolicy(
+        (AuthorityRule("semantic.entity_matches", "visual_region", 1, 0.8),)
+    )
+
+    result = policy.resolve(
+        spec,
+        (_fact("semantic.entity_matches", "different", source="visual_region"),),
+        contract_id="contract-1",
+        screen_id="screen-1",
+        observation_epoch=7,
+    )
+
+    assert result.status == "contradicted"
+
+
 @pytest.mark.parametrize(
     ("predicate_id", "value", "source"),
     [

@@ -581,9 +581,13 @@ class AggregatingGoalEvaluator:
             expected = [expected_text] if expected_text else []
         matched, missing = _match_expected_text(expected, text_blob)
         if missing:
-            return {"status": "missing", "reason": "text_not_found", "missing": missing}
+            return {
+                "status": "unknown",
+                "reason": "not_observed_in_view",
+                "missing": missing,
+            }
         if not matched:
-            return {"status": "missing", "reason": "text_not_found"}
+            return {"status": "unknown", "reason": "not_observed_in_view"}
         return {"status": "matched", "reason": "text_matched", "matched": matched}
 
     def _check_object_hash(
@@ -596,7 +600,7 @@ class AggregatingGoalEvaluator:
             "same_surface_still_visible"
         ):
             return {"status": "missing", "reason": "wrong_object_or_surface"}
-        return {"status": "missing", "reason": "no_object_hash_signal"}
+        return {"status": "unknown", "reason": "no_object_hash_signal"}
 
     def _check_object_rank(
         self,

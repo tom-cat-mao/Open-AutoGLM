@@ -175,6 +175,16 @@ def test_observability_map_has_no_phantom_entries() -> None:
     assert unknown == []
 
 
+def test_provider_predicates_declare_closed_evidence_scopes() -> None:
+    scopes = {
+        CORE_PREDICATE_CATALOG.get(predicate_id).evidence_scope
+        for predicate_id in CORE_PROVIDER_PREDICATES
+    }
+    assert scopes <= {"existential", "screen_singular", "element_scoped"}
+    assert CORE_PREDICATE_CATALOG.get("ui.object_rank").evidence_scope == "element_scoped"
+    assert CORE_PREDICATE_CATALOG.get("ui.toggle_state").evidence_scope == "element_scoped"
+
+
 def test_probe_values_cover_every_observable_predicate() -> None:
     """Guard the guard: a new producer must come with a probe value, or the
     parametrised test above would silently skip it."""

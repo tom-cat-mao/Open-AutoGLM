@@ -37,14 +37,15 @@ def test_accessibility_text_match_matches_when_sha256_stub_present() -> None:
     assert "title" in result.matched
 
 
-def test_accessibility_text_match_fails_when_text_not_found() -> None:
+def test_accessibility_text_match_is_unknown_when_text_not_found() -> None:
     contract = _contract([
         SuccessCriterion(name="title", description="screen shows sha256:0123456789ab", verification="accessibility_text_match"),
     ])
     obs = {"marks": [{"text_summary": "other text"}]}
     result = evaluate_finish_claim(contract=contract, after_observation=obs)
-    assert result.status == "failure"
-    assert "title" in result.missing
+    assert result.status == "unknown"
+    assert "title" not in result.missing
+    assert "title" not in result.matched
 
 
 def test_accessibility_text_match_uses_raw_visible_text() -> None:
