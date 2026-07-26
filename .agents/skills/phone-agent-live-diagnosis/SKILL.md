@@ -119,8 +119,30 @@ the fastest way to verify the report pipeline.
 --trace-unredacted-prompt           # DANGEROUS: skip privacy redaction in trace
 ```
 
-Most flags fall back to `PHONE_AGENT_*` environment variables (loaded from the
-project `.env`); only override what you need.
+## Configuration Precedence
+
+`run_diagnosis.py` calls `load_project_env()` before `parse_args()`, so the
+resolution order is:
+
+1. Explicit CLI flag.
+2. Shell environment (`PHONE_AGENT_*` already exported — never overwritten).
+3. Project `.env` at the repo root (only keys prefixed `PHONE_AGENT_`, quotes
+   stripped, `export ` prefix tolerated).
+4. The hardcoded argparse default.
+
+So a bare `run_diagnosis.py "目标"` already picks up `.env` values for base URL,
+model, API key, device ID, grounding provider, and the trace debug flags. Verify
+what was actually resolved in `preflight.json` (`device_id`, `grounding_provider`,
+`output_mode`) and in `summary.json` → `command` (API key redacted) rather than
+assuming. Only pass flags you intend to override.
+
+Two `.env` conditions to call out in the report rather than silently inherit:
+
+- `PHONE_AGENT_TRACE_UNREDACTED_PROMPT=true` — records unredacted prompt text.
+  Surfaces in `summary.json` → `dangerous_debug` and as a red banner in the HTML.
+- `PHONE_AGENT_REMOTE_GROUNDING_*` — dead config (provider reverted in `e0a2e4b`).
+  If a real API key is still sitting in these keys, flag it as a stale secret worth
+  rotating; it has no effect on the run.
 
 ## Workflow
 
@@ -169,6 +191,25 @@ The HTML report is the primary deliverable. It must connect:
 - relevant source files and symbols
 - concrete modification suggestions
 
+## Graph Shape
+
+The graph is `START → goal → plan → execute → [confirm|takeover|acceptance|reflect|replan|end]`,
+with `acceptance → after_acceptance → [takeover|replan→goal|end]`.
+
+Two questions are answered by two different nodes, at two different time scales:
+
+- `reflect` — "did this action work?" — runs every step.
+- `acceptance` — "is the whole task done?" — runs **only** on a finish claim, and
+  is the sole finish gate. Authority is ordered: hard veto > hard confirm >
+  semantic judgement, fail-closed throughout.
+
+`nodes/observation_capture.py` is shared post-action observation capture, so
+reflect and acceptance cannot disagree about "the screen right now". When the two
+seem to contradict each other, look there first.
+
+Do not attribute finish-gate failures to `nodes/reflect.py` — that split landed in
+commit `46f5bd6`.
+
 ## Source Mapping
 
 When diagnosis points to a layer, inspect the corresponding files. The reflection
@@ -184,34 +225,61 @@ system (see P0 constraint #13a in `AGENTS.md`).
 | safety/HITL | `phone_agent/actions/safety.py`, `phone_agent/config/policy.py`, `phone_agent/graph/edges.py`, `phone_agent/graph/nodes/confirm.py`, `phone_agent/graph/nodes/takeover.py` |
 | capability | `phone_agent/actions/capability.py`, `phone_agent/actions/receipt.py`, `phone_agent/graph/nodes/execute.py` |
 | execution | `phone_agent/graph/nodes/execute.py`, `phone_agent/graph/tools/`, `phone_agent/adb/device.py`, `phone_agent/adb/input.py` |
-| goal contract | `phone_agent/graph/nodes/goal_node.py`, `phone_agent/graph/goal_requirements.py`, `phone_agent/graph/goal_compiler.py`, `phone_agent/graph/goal.py`, `phone_agent/graph/goal_binding.py` |
-| reflection / finish gate | `phone_agent/graph/goal.py`, `phone_agent/graph/goal_evaluator.py`, `phone_agent/graph/nodes/reflect.py`, `phone_agent/graph/verifier.py`, `phone_agent/graph/fact_providers.py`, `phone_agent/graph/predicates.py`, `phone_agent/graph/goal_evidence.py`, `phone_agent/graph/compatibility_adapters.py` |
+| goal contract | `phone_agent/graph/nodes/goal_node.py`, `phone_agent/graph/goal_requirements.py`, `phone_agent/graph/goal_compiler.py`, `phone_agent/graph/goal.py`, `phone_agent/graph/predicates.py`, `phone_agent/graph/fact_providers.py`, `phone_agent/graph/goal_binding.py` |
+| reflection (per-step) | `phone_agent/graph/nodes/reflect.py`, `phone_agent/graph/nodes/observation_capture.py`, `phone_agent/graph/verifier.py`, `phone_agent/graph/expected_outcome.py` |
+| acceptance / finish gate | `phone_agent/graph/nodes/acceptance.py`, `phone_agent/graph/goal_evaluator.py`, `phone_agent/graph/goal.py`, `phone_agent/graph/verifier.py`, `phone_agent/graph/fact_providers.py`, `phone_agent/graph/predicates.py`, `phone_agent/graph/goal_evidence.py`, `phone_agent/graph/nodes/observation_capture.py`, `phone_agent/graph/compatibility_adapters.py` |
 | checkpoint / goal resume | `phone_agent/checkpoint/goal_resume.py`, `phone_agent/checkpoint/serde.py` |
 | context | `phone_agent/graph/context.py`, `phone_agent/graph/nodes/plan.py` |
 | eval/trace | `evals/run_eval.py`, `phone_agent/graph/trace.py`, `phone_agent/agent.py` |
 
-Key reflection/finish-gate signals to surface in the report:
+Acceptance / finish-gate signals to surface in the report (all from the
+`acceptance` node, not reflect):
 
 - `goal_not_satisfied` — finish claim rejected by `GoalEvaluator`; replan.
+- `acceptance_no_contract` — verification attempted with no compiled contract.
+  Fail-closed rejection, so the root cause is in the **goal** layer, not here.
+- `acceptance_hard_veto` — programmatic signals contradicted the finish claim
+  outright; trust the programmatic side.
+- `pure_evaluation_degraded` — a criterion was unobservable, so the kept verdict
+  differs from the pure evaluation; report both statuses.
 - `matched_terminal_evidence` — criteria the model named as satisfied.
 - `missing_terminal_evidence` — required criteria the model failed to name
   (hard gate; never auto-upgrade to success).
 - `needs_recompile` — mid-task contract swap requested (has no writer today; only
   via `configurable["task_goal_contract_override"]`).
 - `soft_match_accepted` — finish relied on the detail-only soft match (evidence
-  relaxation without content-hash confirmation); verify the opened page manually.
+  relaxation without content confirmation); verify the opened page manually.
 - `programmatic_contradiction_override` — programmatic signals overrode a
   `vlm_judge` self-attestation; trust the programmatic side.
+- `typed_fact_not_yet_collected` — if a criterion stays here, the predicate and
+  the fact provider disagree; check `value_domain` alignment (see below).
 - `verifier_status` / `verifier_evidence.matched_postconditions` /
   `verifier_evidence.missing_postconditions` / `weak_signals` /
   `dynamic_change_only` / `fallback_chain` when present.
 
-Signals from the 9-phase rebuild (commit `7dc6946`) to route to the new layers:
+Contract adequacy signals (compile-time, from the `goal_compile_result` trace
+event — **not** present in `result.json`):
+
+- `predicate_unobservable` — no fact provider can ever emit this predicate.
+- `predicate_domain_mismatch` — the predicate's declared `value_domain`
+  (`raw_text`/`digest`/`identifier`/`scalar`/`structured`) does not match what the
+  provider actually produces. Historically the compiler emitted a sha256 digest
+  while the evaluator compared raw screen text, making the criterion structurally
+  unsatisfiable with a green test suite (fixed in `6b133b4`).
+- `task_binding_mismatch` / `required_criteria_missing` — the other two
+  `STRUCTURAL_REASON_CODES` in `graph/goal_requirements.py`.
+
+Structural rejections mean the contract could never be satisfied. Fix the
+predicate binding or the fact provider; never widen the gate to get past them.
+Severity is three-tier: structural → `inadequate` (takeover), semantic →
+`degraded` (keep working, weaker verification), ambiguous → `needs_clarification`.
+
+Other signals from the 9-phase rebuild (commit `7dc6946`):
 
 - `capability_missing` / `capability_unavailable` — capability gate rejected
   dispatch; check `actions/capability.py` registry coverage before anything else.
 - `unsupported_semantics` / `needs_goal_clarification` — goal contract adequacy
-  rejection; the usual root cause is a task verb missing from
+  rejection; a common root cause is a task verb missing from
   `TaskRequirementExtractor._OPERATIONS` in `graph/goal_requirements.py`.
 - `goal_resume_*` — HMAC-bound goal resume failures; check
   `checkpoint/goal_resume.py` key consistency and serde egress collapsing.
@@ -225,6 +293,11 @@ style:
 - Fira Code for IDs, paths, timestamps, and code symbols.
 - Tabs: Overview, Timeline, Source Analysis, Recommendations, Raw Evidence.
 - Filters for step, event, layer, severity, and source file.
+- Overview must carry two separate verification cards: per-step postcondition
+  verification (reflect) and the finish gate (acceptance), including
+  `per_criterion` status/reason per criterion and the contract adequacy
+  status/`reason_codes`. A finish-gate status string alone is not enough — the
+  reason is what points at the source file.
 - Include `<base target="_blank">`.
 - Apply `word-break: break-all` and `overflow-wrap: break-word` to long paths/URLs.
 - Never include raw screenshot base64, API keys, verification codes, or unredacted
@@ -237,6 +310,14 @@ style:
   and `run_output.log`.
 - Do not propose modifications without linking them to trace evidence and source
   files.
+- Do not blame `nodes/reflect.py` for a finish-gate rejection. Check the
+  `acceptance` node's own events first (`acceptance_result`,
+  `acceptance_hard_veto`, `acceptance_no_contract`).
+- Do not read a green offline suite as proof a criterion is satisfiable. A
+  value-domain mismatch can make a criterion unsatisfiable at runtime while every
+  test passes; the compile-time adequacy `reason_codes` are the check for that.
+- `--dry-run` never enters the graph (`by_node` is just `eval`), so it validates
+  the report pipeline only — never finish-gate or grounding behavior.
 - Do not auto-edit business code from this skill unless the user separately asks
   for a fix.
 - Prefer `.venv/bin/python`; fall back only if `.venv` is unavailable.

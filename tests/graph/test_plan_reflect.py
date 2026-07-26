@@ -1373,9 +1373,21 @@ def test_expected_outcome_and_verifier_evidence_are_regex_redacted(
     assert '"redacted": true' in serialized_result
 
 
-def test_reflect_result_stubs_non_regex_vlm_private_text(
-    base_state, fake_device
+def test_reflect_keeps_readable_reflection_in_state_and_stubs_it_at_trace_egress(
+    base_state, fake_device, tmp_path
 ) -> None:
+    """Reflection text must stay readable in state so plan can inject it.
+
+    Privacy lives at trace/checkpoint egress (`AGENTS.md` #10): both layers list
+    `reflection` as a private key. Stubbing it at state-write time instead made
+    plan inject the literal `{'redacted': True, 'length': 36}` into the prompt.
+    """
+
+    from phone_agent.graph.trace import JsonlTraceWriter
+
+    writer = JsonlTraceWriter(
+        trace_id="reflection-egress", trace_dir=tmp_path, redact=True
+    )
     private_phrase = "张三家庭住址"
     base_state["expected_outcome"] = {
         "kind": "generic",
@@ -1410,14 +1422,17 @@ def test_reflect_result_stubs_non_regex_vlm_private_text(
             "configurable": {
                 "model_client": model,
                 "device_factory": fake_device,
+                "trace_writer": writer,
                 "verbose": False,
             }
         },
     )
 
-    serialized = json.dumps(result, ensure_ascii=False)
-    assert private_phrase not in serialized
-    assert result["reflection"]["redacted"] is True
+    assert isinstance(result["reflection"], str)
+    assert private_phrase in result["reflection"]
+    assert "redacted" not in result["reflection"]
+    # Egress still protects it.
+    assert private_phrase not in writer.path.read_text(encoding="utf-8")
     assert result["screen_belief"]["summary"].startswith("verdict=")
 
 
@@ -2096,11 +2111,18 @@ def test_reflect_node_selected_object_text_matches_detail_page(
     )
 
     assert result["verifier_status"] == "success"
-    assert result["reflection_verdict"] == "succeeded"
     assert (
         result["verifier_evidence"]["selected_object_signals"]["selected_object_match"]
         is True
     )
+    # Text containment is admissible but weak evidence, so it no longer outranks a
+    # model reflection that read the screenshot and reported the wrong page. It also
+    # stays below `verified_reflection_skip_confidence`, so reflection actually runs
+    # instead of being short-circuited.
+    assert result["verifier_evidence"]["selected_object_signals"][
+        "selected_object_text_match"
+    ] is True
+    assert result["reflection_verdict"] == "failed"
 
 
 def test_reflect_node_selected_object_detects_wrong_detail(

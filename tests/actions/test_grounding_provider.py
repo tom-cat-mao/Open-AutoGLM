@@ -443,13 +443,17 @@ def test_parse_uiautomator_drops_password_text_and_resource_id_pollution() -> No
 
     assert marks[0]["password"] is True
     assert marks[0]["text_summary"] is None
-    assert marks[1]["text_summary"] == "Button"
+    # A text-less node reports no text summary; its class name stays in `role` so the
+    # value is never mistaken for on-screen text by text-matching consumers.
+    assert marks[1]["text_summary"] is None
+    assert marks[1]["role"] == "Button"
     assert structure is not None
     assert structure.nodes["node_1"].password is True
     assert structure.nodes["node_1"].text_summary is None
     assert registry.marks["ax_1"].password is True
     assert registry.marks["ax_1"].text_summary is None
-    assert registry.marks["ax_2"].text_summary == "Button"
+    assert registry.marks["ax_2"].text_summary is None
+    assert registry.marks["ax_2"].role == "Button"
 
 
 def test_parse_uiautomator_structure_preserves_topology_and_signed_bounds() -> None:

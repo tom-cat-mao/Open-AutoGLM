@@ -7,6 +7,11 @@ import re
 from dataclasses import asdict, dataclass
 from typing import Any
 
+from phone_agent.config.policy import DEFAULT_VERIFICATION_POLICY
+
+REPEATED_ACTION_THRESHOLD = int(
+    DEFAULT_VERIFICATION_POLICY.value("repeated_action_threshold")
+)
 CONTEXT_MODES = {"off", "observe", "inject"}
 DEFAULT_CONTEXT_MODE = "inject"
 DEFAULT_CONTEXT_BUDGET: dict[str, int] = {
@@ -14,10 +19,21 @@ DEFAULT_CONTEXT_BUDGET: dict[str, int] = {
     "summarized_history_chars": 800,
     "failure_memory_items": 3,
     "action_outcome_items": 1,
-    "context_block_chars": 1500,
+    # Raised from 1500: the per-section allowances below sum to more than that, so
+    # some section had to starve on every step regardless of ordering. For scale, the
+    # marks block in the same prompt runs ~11k chars, so this is a small share.
+    "context_block_chars": 2200,
     "request_recent_messages": 6,
     "reflect_recent_outcomes": 3,
     "reflect_context_block_chars": 1200,
+    # Per-section floors. The block used to be concatenated and then cut from the
+    # tail, so sections assembled last were starved as `summarized_history` grew with
+    # step count — and `tried_actions`, the only record of which target was used, sat
+    # near the end. Loop evidence now gets reserved room instead of competing for it.
+    "gui_memory_chars": 700,
+    "avoid_repeating_chars": 300,
+    "tried_action_items": 6,
+    "visited_screen_items": 6,
 }
 DEFAULT_PROMPT_VERSION = "context_harness_v1"
 CONTEXT_SECTION_IDS = (
@@ -27,6 +43,7 @@ CONTEXT_SECTION_IDS = (
     "summarized_history",
     "short_term_memory",
     "action_ledger",
+    "avoid_repeating",
     "gui_memory.visited_screens",
     "gui_memory.tried_actions",
     "gui_memory.scroll_memory",
@@ -418,6 +435,13 @@ def build_action_outcome_summary(state: dict[str, Any]) -> dict[str, Any]:
             else raw_message
         ),
         "current_app": state.get("current_app") or "unknown",
+        # Which target was acted on. Without it, a history of "action=Tap" lines cannot
+        # distinguish progress from re-tapping one element.
+        "target_mark_id": (
+            (state.get("intent_raw") or {}).get("target_mark_id")
+            if isinstance(state.get("intent_raw"), dict)
+            else None
+        ),
         "reflection_verdict": state.get("reflection_verdict"),
         "failure_cause": state.get("failure_cause"),
         "suggested_strategy": state.get("suggested_strategy"),
@@ -480,6 +504,7 @@ def update_summarized_history(
     active_budget = budget or DEFAULT_CONTEXT_BUDGET
     line = (
         f"step={outcome.get('step_count')} action={outcome.get('action')} "
+        f"target={outcome.get('target_mark_id') or 'none'} "
         f"success={outcome.get('execution_success')} verdict={outcome.get('reflection_verdict')} "
         f"cause={outcome.get('failure_cause') or 'none'} strategy={outcome.get('suggested_strategy') or 'none'}"
     )
@@ -518,6 +543,71 @@ def default_gui_memory() -> dict[str, Any]:
     }
 
 
+def _action_target_center(
+    state: dict[str, Any], action: dict[str, Any]
+) -> list[float] | None:
+    """Return the grounded tap target centre, rounded to absorb sub-pixel jitter."""
+
+    grounding = state.get("grounding_observation")
+    raw = grounding.get("center") if isinstance(grounding, dict) else None
+    if not isinstance(raw, (list, tuple)):
+        raw = action.get("element")
+    if not isinstance(raw, (list, tuple)) or len(raw) != 2:
+        return None
+    try:
+        return [round(float(raw[0]), 1), round(float(raw[1]), 1)]
+    except (TypeError, ValueError):
+        return None
+
+
+def _state_surface_identity(state: dict[str, Any]) -> str | None:
+    """Return the foreground activity of the screen the action was issued on."""
+
+    observation = state.get("observation")
+    snapshot = (
+        observation.get("snapshot")
+        if isinstance(observation, dict) and isinstance(observation.get("snapshot"), dict)
+        else {}
+    )
+    for key in ("foreground_activity", "top_activity", "focused_window"):
+        value = snapshot.get(key)
+        if isinstance(value, str) and value.strip():
+            return sanitize_context_text_regex(value.strip())
+    return None
+
+
+def detect_repeated_action(
+    tried_actions: list[dict[str, Any]], outcome: dict[str, Any]
+) -> bool:
+    """Detect a target being re-actioned on the same surface, regardless of success.
+
+    :func:`detect_repeated_failure` answers "am I retrying something that failed?" and
+    is blind to a loop where every step verifies as successful — repeatedly opening the
+    same list item does advance the surface each time, so no per-step check objects.
+    That trajectory-level question has no other owner, so it is answered here on the
+    identity that stays stable across re-observation: action plus target geometry plus
+    surface.
+    """
+
+    key = _repeated_action_key(outcome)
+    if key is None:
+        return False
+    prior = sum(1 for item in tried_actions or [] if _repeated_action_key(item) == key)
+    return prior >= REPEATED_ACTION_THRESHOLD
+
+
+def _repeated_action_key(item: dict[str, Any]) -> tuple[Any, ...] | None:
+    if not isinstance(item, dict):
+        return None
+    center = item.get("target_center")
+    if not isinstance(center, (list, tuple)) or len(center) != 2:
+        return None
+    action = item.get("action")
+    if not action:
+        return None
+    return (str(action), tuple(center), item.get("surface"))
+
+
 def update_gui_memory(
     state: dict[str, Any], *, current_app: str, screen_id: str | None
 ) -> dict[str, Any]:
@@ -550,6 +640,11 @@ def update_gui_memory(
                     if isinstance(state.get("intent_raw"), dict)
                     else None
                 ),
+                # Geometry and surface, not screen_id, identify a repeated target:
+                # screen_id is content-derived, so it changes when a feed reorders
+                # while the same card stays in the same place.
+                "target_center": _action_target_center(state, action),
+                "surface": _state_surface_identity(state),
                 "result_success": (
                     (state.get("action_result") or {}).get("success")
                     if isinstance(state.get("action_result"), dict)
@@ -736,25 +831,38 @@ def build_plan_context_block(
         component_truncated = True
 
     gui_memory = _sanitize_gui_memory_for_block(
-        state.get("gui_memory"), task_context=task_context, consumer=consumer
+        state.get("gui_memory"),
+        task_context=task_context,
+        consumer=consumer,
+        budget=budget,
     )
     grounding_obs = sanitize_context_payload(
         state.get("grounding_observation"),
         "grounding_observation",
         consumer=consumer,
     )
+    avoid_repeating = _build_avoid_repeating(state)
 
     parts = []
-    for label, value in (
-        ("screen_belief", belief),
-        ("last_action_outcome", outcome),
-        ("latest_failure_memory", failure_memory),
-        ("summarized_history", summarized_history),
-        ("gui_memory", gui_memory),
-        ("grounding_observation", grounding_obs),
+    # Each section is trimmed against its own allowance. Trimming the concatenated
+    # block instead starved whichever section was assembled last, which is how loop
+    # evidence disappeared exactly as the trajectory started looping.
+    for label, value, section_budget in (
+        ("screen_belief", belief, None),
+        ("last_action_outcome", outcome, None),
+        ("latest_failure_memory", failure_memory, None),
+        ("avoid_repeating", avoid_repeating, budget.get("avoid_repeating_chars")),
+        ("summarized_history", summarized_history, None),
+        ("gui_memory", gui_memory, budget.get("gui_memory_chars")),
+        ("grounding_observation", grounding_obs, None),
     ):
-        if _context_block_value_is_informative(label, value):
-            parts.append(f"{label}: {json.dumps(value, ensure_ascii=False)}")
+        if not _context_block_value_is_informative(label, value):
+            continue
+        rendered = f"{label}: {json.dumps(value, ensure_ascii=False)}"
+        if section_budget and len(rendered) > section_budget:
+            rendered, section_truncated = trim_text(rendered, section_budget)
+            component_truncated = component_truncated or section_truncated
+        parts.append(rendered)
 
     if not parts:
         return "", {"context_block_chars": 0, "context_truncated": False}
@@ -765,6 +873,47 @@ def build_plan_context_block(
     return block, {
         "context_block_chars": len(block),
         "context_truncated": truncated or component_truncated,
+    }
+
+
+def _build_avoid_repeating(state: dict[str, Any]) -> dict[str, Any]:
+    """Render the loop warning the system prompt already documents.
+
+    ``avoid_repeating`` and ``next_hint`` are described to the model in
+    ``config/prompts_zh.py`` / ``prompts_en.py`` but had no writer, so the model was
+    told how to react to a signal it could never receive.
+
+    Reads raw ``gui_memory`` rather than the block view: the latter renders entries as
+    compact lines, and the repeat key needs the structured fields.
+    """
+
+    raw_memory = state.get("gui_memory")
+    if not isinstance(raw_memory, dict):
+        return {}
+    tried = [item for item in (raw_memory.get("tried_actions") or []) if isinstance(item, dict)]
+    if not tried:
+        return {}
+    latest = tried[-1]
+    if not (
+        state.get("repeated_action_detected")
+        or detect_repeated_action(tried[:-1], latest)
+    ):
+        return {}
+    key = _repeated_action_key(latest)
+    if key is None:
+        return {}
+    repeats = sum(1 for item in tried if _repeated_action_key(item) == key)
+    return {
+        "action": latest.get("action"),
+        "mark_id": latest.get("mark_id"),
+        "target_center": latest.get("target_center"),
+        "surface": _short_surface(latest.get("surface")),
+        "repeat_count": repeats,
+        "next_hint": (
+            "This target on this surface has already been used; it produced no new "
+            "progress. Choose a different target, scroll to reveal new content, or "
+            "go back and take another route."
+        ),
     }
 
 
@@ -814,56 +963,115 @@ def _is_informative_gui_memory(value: dict[str, Any]) -> bool:
     )
 
 
+def _render_tried_action(
+    *,
+    step: Any,
+    action: Any,
+    mark_id: Any,
+    center: Any,
+    surface: Any,
+    success: Any,
+    cause: Any,
+) -> str:
+    """Render one tried action as a compact line.
+
+    A dict per entry spends most of its characters on repeated key names, which is
+    what pushed this section past its allowance and cost the newest entries. The line
+    form keeps the same fields in roughly a third of the space.
+    """
+
+    parts = [f"s{step}", str(action or "?")]
+    if mark_id:
+        parts.append(str(mark_id))
+    if isinstance(center, (list, tuple)) and len(center) == 2:
+        parts.append(f"@{center[0]:g},{center[1]:g}")
+    if surface:
+        parts.append(f"on={surface}")
+    parts.append("ok" if success else "fail")
+    if cause:
+        parts.append(f"cause={cause}")
+    return " ".join(parts)
+
+
+def _short_surface(value: Any) -> str | None:
+    """Return the activity half of a ``package/activity`` component.
+
+    The package repeats on every entry and is already carried by ``current_app``, so
+    only the activity distinguishes one surface from another.
+    """
+
+    if not isinstance(value, str) or not value.strip():
+        return None
+    activity = value.strip().rsplit("/", 1)[-1]
+    return activity.rsplit(".", 1)[-1] or None
+
+
 def _sanitize_gui_memory_for_block(
     gui_memory: Any,
     *,
     task_context: str | None = None,
     consumer: ContextConsumer = "inject",
+    budget: dict[str, int] | None = None,
 ) -> dict[str, Any]:
-    """Produce a regex-redacted view of gui_memory for context block emission."""
+    """Produce a regex-redacted view of gui_memory for context block emission.
+
+    Both lists are bounded here by dropping the OLDEST entries. Character-level
+    trimming cuts from the tail, where the newest entries live, so it removed exactly
+    the recent history a loop check needs.
+    """
     if not isinstance(gui_memory, dict):
         return {}
+    active_budget = budget or DEFAULT_CONTEXT_BUDGET
     visited = []
-    for item in gui_memory.get("visited_screens") or []:
+    for item in (gui_memory.get("visited_screens") or [])[
+        -active_budget["visited_screen_items"] :
+    ]:
         if isinstance(item, dict):
-            visited.append(
-                {
-                    "screen_id": item.get("screen_id"),
-                    "current_app": (
-                        sanitize_context_payload(
-                            item.get("current_app"),
-                            "current_app",
-                            consumer=consumer,
-                            task_context=task_context,
-                        )
-                        if isinstance(item.get("current_app"), str)
-                        else item.get("current_app")
-                    ),
-                    "step_count": item.get("step_count"),
-                }
+            app = (
+                sanitize_context_payload(
+                    item.get("current_app"),
+                    "current_app",
+                    consumer=consumer,
+                    task_context=task_context,
+                )
+                if isinstance(item.get("current_app"), str)
+                else item.get("current_app")
             )
+            # Same compact line form as tried_actions. The screen_id digest is
+            # truncated: it exists only to tell two screens apart, and the full hash
+            # spent characters the loop record needs.
+            screen_id = str(item.get("screen_id") or "")[:8]
+            visited.append(f"s{item.get('step_count')} {app or '?'} {screen_id}".strip())
     tried = []
-    for item in gui_memory.get("tried_actions") or []:
+    for item in (gui_memory.get("tried_actions") or [])[
+        -active_budget["tried_action_items"] :
+    ]:
         if isinstance(item, dict):
             raw_failure = item.get("failure_cause")
+            # Only the fields that identify the target. `screen_id` is omitted: it is
+            # content-derived, so it differs across observations of one logical screen
+            # and cannot key a repeat. Null fields and the package half of the surface
+            # are dropped so entries stay small enough to survive the block budget.
+            cause = (
+                sanitize_context_payload(
+                    raw_failure,
+                    "failure_cause",
+                    consumer=consumer,
+                    task_context=task_context,
+                )
+                if isinstance(raw_failure, str) and raw_failure
+                else None
+            )
             tried.append(
-                {
-                    "step_count": item.get("step_count"),
-                    "screen_id": item.get("screen_id"),
-                    "action": item.get("action"),
-                    "mark_id": item.get("mark_id"),
-                    "result_success": item.get("result_success"),
-                    "failure_cause": (
-                        sanitize_context_payload(
-                            raw_failure,
-                            "failure_cause",
-                            consumer=consumer,
-                            task_context=task_context,
-                        )
-                        if isinstance(raw_failure, str)
-                        else raw_failure
-                    ),
-                }
+                _render_tried_action(
+                    step=item.get("step_count"),
+                    action=item.get("action"),
+                    mark_id=item.get("mark_id"),
+                    center=item.get("target_center"),
+                    surface=_short_surface(item.get("surface")),
+                    success=item.get("result_success"),
+                    cause=cause,
+                )
             )
     scroll_memory = dict(gui_memory.get("scroll_memory") or {})
     progress = sanitize_context_payload(
@@ -872,9 +1080,12 @@ def _sanitize_gui_memory_for_block(
         consumer=consumer,
         task_context=task_context,
     )
+    # `tried_actions` is emitted first because any residual character-level trimming
+    # cuts from the tail. It is the only record of which target was acted on, so it
+    # must not be the first thing sacrificed as the trajectory grows.
     return {
-        "visited_screens": visited,
         "tried_actions": tried,
+        "visited_screens": visited,
         "scroll_memory": scroll_memory,
         "task_progress": progress,
     }

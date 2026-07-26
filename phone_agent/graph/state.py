@@ -157,6 +157,7 @@ class AgentState(TypedDict):
     approx_tokens_after: int  # rough char/4 token estimate after compaction
     failure_memory_hit_count: int  # failure memory 命中次数
     repeated_failure_count: int  # 重复失败计数
+    repeated_action_detected: bool  # 同一目标在同一 surface 上重复操作（与成败无关）
     gui_memory: (
         dict  # GUI 短期记忆：visited_screens/tried_actions/scroll_memory/task_progress
     )

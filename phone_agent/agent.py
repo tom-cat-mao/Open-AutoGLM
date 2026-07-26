@@ -311,6 +311,7 @@ class PhoneAgent:
             "approx_tokens_after": 0,
             "failure_memory_hit_count": 0,
             "repeated_failure_count": 0,
+            "repeated_action_detected": False,
             "gui_memory": default_gui_memory(),
             "verifier_result": None,
             "verifier_status": None,

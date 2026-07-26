@@ -53,7 +53,16 @@ def test_context_defaults_are_json_serializable() -> None:
     }
 
     assert json.loads(json.dumps(payload))["screen_belief"]["summary"] == "unknown"
-    assert payload["context_budget"]["context_block_chars"] == 1500
+    budget = payload["context_budget"]
+    assert budget["context_block_chars"] > 0
+    # The per-section allowances must fit inside the block, otherwise some section is
+    # starved on every step no matter how the block is ordered.
+    assert (
+        budget["screen_belief_summary_chars"]
+        + budget["summarized_history_chars"]
+        + budget["gui_memory_chars"]
+        + budget["avoid_repeating_chars"]
+    ) <= budget["context_block_chars"]
 
 
 def test_failure_taxonomy_normalization_covers_canonical_labels() -> None:

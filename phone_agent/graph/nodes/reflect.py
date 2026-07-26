@@ -13,6 +13,7 @@ from phone_agent.graph.context import (
     build_action_outcome_summary,
     build_screen_belief,
     context_enabled,
+    detect_repeated_action,
     detect_repeated_failure,
     get_context_mode,
     normalize_failure_cause,
@@ -688,7 +689,16 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
         reflection = deterministic_reflection.message
 
     # 4. Parse reflection
-    reflection_state_value = _redacted_private_text(str(reflection or ""))
+    # Keep the reflection readable in state: plan injects it into the next prompt, and
+    # a `{redacted, length}` stub there told the model nothing while costing a block.
+    # That stub is the checkpoint-consumer policy; privacy for this field is enforced
+    # at trace and checkpoint egress, which both classify `reflection` as private.
+    reflection_state_value = sanitize_context_payload(
+        str(reflection or ""),
+        "reflection",
+        consumer="inject",
+        task_context=task if isinstance(task, str) else None,
+    )
     action_succeeded = parsed_reflection.verdict == "succeeded"
 
     reflection_fields = merge_verifier_with_reflection(
@@ -802,6 +812,14 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
             {**state, **context_updates, "action_result": action_result},
             current_app=current_app,
             screen_id=state.get("screen_id"),
+        )
+        # Trajectory-level check, deliberately separate from `detect_repeated_failure`:
+        # a loop where every step verifies as successful is invisible to failure memory,
+        # so re-using one target on one surface is judged on its own terms here.
+        tried_actions = list(context_updates["gui_memory"].get("tried_actions") or [])
+        context_updates["repeated_action_detected"] = bool(
+            tried_actions
+            and detect_repeated_action(tried_actions[:-1], tried_actions[-1])
         )
 
     emit_trace(

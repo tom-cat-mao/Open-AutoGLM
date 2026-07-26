@@ -441,7 +441,11 @@ def _node_to_mark_from_parts(
         "source": source,
         "confidence": confidence,
         "role": role,
-        "text_summary": None if password else text[:MAX_TEXT_SUMMARY_CHARS] or role,
+        # A text-less node has no text summary. Falling back to `role` here put the
+        # Java class name ("FrameLayout") into a field every consumer reads as
+        # on-screen text, which made containment checks against the screen text blob
+        # tautological. `role` travels as its own field, so type info is not lost.
+        "text_summary": None if password else text[:MAX_TEXT_SUMMARY_CHARS] or None,
         "password": password,
     }
 

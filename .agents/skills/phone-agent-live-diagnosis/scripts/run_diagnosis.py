@@ -160,6 +160,8 @@ SOURCE_RULES = [
             "model_reflection_failed",
             "repeated_action",
             "network_or_loading",
+            # Emitted from the shared observation capture used by
+            # plan/reflect/acceptance, so it is not acceptance-specific.
             "context_lost",
             "postcondition_unverified",
             "after_observation_unavailable",
@@ -168,36 +170,56 @@ SOURCE_RULES = [
             "verifier_unknown",
             "verifier_failure",
             "focused_editable_or_keyboard_visible",
+        },
+        "layer": "reflection",
+        "severity": "P2",
+        "title": "单步反思或后置条件校验不稳定",
+        "files": [
+            "phone_agent/graph/nodes/reflect.py",
+            "phone_agent/graph/nodes/observation_capture.py",
+            "phone_agent/graph/verifier.py",
+            "phone_agent/graph/expected_outcome.py",
+            "phone_agent/graph/fact_providers.py",
+            "phone_agent/graph/predicates.py",
+        ],
+        "suggestion": "reflect 只回答“这一步动作生效了吗”，不再决定任务是否完成（finish gate 已移入 acceptance 节点）。检查 ExpectedOutcome、matched/missing postconditions、weak_signals 与模型反思的合并优先级；动态区域变化不能单独证明成功。after-observation 由 nodes/observation_capture.py 统一采集并被 reflect/acceptance 共享——若两者对“当前屏幕”判断不一致，先查这里而不是各自节点。",
+        "verify": "运行搜索框点击、输入、视频打开和动态首页变化 case，对比 expected_outcome、verifier_evidence 与 reflection_verdict。",
+    },
+    {
+        "signals": {
             "goal_not_satisfied",
             "finish_validation_unknown",
             "finish_validation_failure",
             "needs_recompile",
-            "matched_terminal_evidence",
+            # matched_terminal_evidence is intentionally NOT a trigger: it fires
+            # on a clean pass too, and would make every success a P1 finding.
             "missing_terminal_evidence",
             "soft_match_accepted",
             "soft_matched_criteria",
             "programmatic_contradiction_override",
+            "acceptance_no_contract",
+            "acceptance_hard_veto",
+            "acceptance_error",
+            "pure_evaluation_degraded",
+            "typed_fact_not_yet_collected",
         },
-        "layer": "reflection",
-        "severity": "P2",
-        "title": "反思、后置条件或最终目标验证不稳定",
+        "layer": "acceptance",
+        "severity": "P1",
+        "title": "Finish gate（验收）拒绝或判定不稳定",
         "files": [
-            "phone_agent/graph/goal.py",
-            "phone_agent/graph/goal_compiler.py",
+            "phone_agent/graph/nodes/acceptance.py",
             "phone_agent/graph/goal_evaluator.py",
-            "phone_agent/graph/nodes/goal_node.py",
-            "phone_agent/graph/expected_outcome.py",
-            "phone_agent/graph/nodes/reflect.py",
+            "phone_agent/graph/goal.py",
             "phone_agent/graph/verifier.py",
-            "phone_agent/graph/context.py",
+            "phone_agent/graph/goal_evidence.py",
             "phone_agent/graph/fact_providers.py",
             "phone_agent/graph/predicates.py",
-            "phone_agent/graph/goal_evidence.py",
-            "phone_agent/graph/runtime_goal.py",
+            "phone_agent/graph/nodes/observation_capture.py",
             "phone_agent/graph/compatibility_adapters.py",
+            "phone_agent/graph/runtime_goal.py",
         ],
-        "suggestion": "检查 GoalContract、finish_validation、ExpectedOutcome、matched/missing terminal_evidence、matched/missing postconditions、weak_signals 与模型反思合并优先级；vlm_judge 标准未在 matched_terminal_evidence 中点名视为 missing（硬门）；动态区域变化不能单独证明成功；needs_recompile 当前无 writer，mid-task 合约切换仅通过 configurable[\"task_goal_contract_override\"]。若 per_criterion 长期停在 typed_fact_not_yet_collected，检查 fact_providers/predicates 的 typed predicate 与 evidence 对齐。soft_match_accepted 表示 finish 依赖 detail-only 软匹配（证据放宽，无内容哈希确认），需要人工确认打开的是正确的详情页；programmatic_contradiction_override 表示程序信号推翻了 vlm_judge 自称，优先信程序信号。",
-        "verify": "运行搜索框点击、输入、视频打开和动态首页变化 case，对比 goal_contract、finish_validation、expected_outcome、verifier_evidence 与 reflection_verdict。",
+        "suggestion": "finish gate 住在 nodes/acceptance.py（不是 reflect.py），只在模型声明完成时触发，权威顺序固定为 hard veto > hard confirm > semantic judgement，全程 fail-closed。vlm_judge 标准未在 matched_terminal_evidence 点名即视为 missing（硬门）。acceptance_no_contract 表示没有已编译契约就想验收，属 fail-closed 拒绝，查 goal 层而非此处。acceptance_hard_veto 表示程序信号直接否决完成声明，应信程序侧。needs_recompile 当前无 writer，mid-task 合约切换仅通过 configurable[\"task_goal_contract_override\"]。若 per_criterion 长期停在 typed_fact_not_yet_collected，检查 fact_providers/predicates 的 typed predicate 与 evidence 对齐，并确认 predicate 的 value_domain 与 provider 实际产出同域（编译端曾发过 sha256 而比较端拿 raw text，导致条件恒不可满足）。soft_match_accepted 表示依赖 detail-only 软匹配，需人工确认打开的是正确详情页。",
+        "verify": "跑一个会声明完成的任务（如“打开设置并进入 Wi-Fi 页面”），确认 trace 出现 acceptance 节点的 acceptance_result 事件，且 finish_validation.evidence.per_criterion 中每条 required 标准都有 matched/missing 判定与具体 reason。",
     },
     {
         "signals": {
@@ -225,6 +247,13 @@ SOURCE_RULES = [
             "runtime_goal_binding_invalid",
             "runtime_goal_binding_unavailable",
             "runtime_goal_context_missing",
+            "task_binding_mismatch",
+            "required_criteria_missing",
+            "predicate_unobservable",
+            "predicate_domain_mismatch",
+            "contract_adequacy_inadequate",
+            "contract_adequacy_needs_clarification",
+            "contract_adequacy_degraded",
         },
         "layer": "goal",
         "severity": "P1",
@@ -234,10 +263,12 @@ SOURCE_RULES = [
             "phone_agent/graph/goal_requirements.py",
             "phone_agent/graph/goal_compiler.py",
             "phone_agent/graph/goal.py",
+            "phone_agent/graph/predicates.py",
+            "phone_agent/graph/fact_providers.py",
             "phone_agent/graph/goal_binding.py",
         ],
-        "suggestion": "最常见根因：任务动词不在 TaskRequirementExtractor._OPERATIONS 关键词表（中英双语有限集合），导致 operation_kind=unknown、adequacy 校验拒绝契约。先核对 trace 中 task_requirement_set.safe_projection 的 operation_kind/ambiguities，再决定是扩充关键词表还是改用 LLM 编译器；unsupported_semantics 走 takeover，不要降级为静默通过。",
-        "verify": "分别用含表中动词（打开/搜索/播放）和表外动词的任务跑 diagnosis，比较 contract_adequacy.status 与 goal_compile_result trace。",
+        "suggestion": "先分清 adequacy 的三档严重度：structural（inadequate → takeover）、semantic（degraded → 继续跑但验证更弱）、ambiguous（needs_clarification）。STRUCTURAL_REASON_CODES = {task_binding_mismatch, required_criteria_missing, predicate_unobservable, predicate_domain_mismatch}（见 goal_requirements.py）。predicate_unobservable 表示该 predicate 没有任何 fact provider 能产出，predicate_domain_mismatch 表示 predicate 声明的 value_domain（raw_text/digest/identifier/scalar/structured）与 provider 实际产出不同域——这两条是把“契约永不可满足”从运行时潜伏提前到编译期暴露的机制，不要通过放宽 gate 绕过，应修 predicate 绑定或 provider。另一常见根因：任务动词不在 TaskRequirementExtractor._OPERATIONS 关键词表（中英双语有限集合），导致 operation_kind=unknown。先核对 trace 中 task_requirement_set.safe_projection 的 operation_kind/ambiguities；unsupported_semantics 走 takeover，不要降级为静默通过。",
+        "verify": "分别用含表中动词（打开/搜索/播放）和表外动词的任务跑 diagnosis，比较 trace 中 goal_compile_result 的 contract_adequacy status/reason_codes 与 state 的 contract_adequacy_status（注意 result.json 不含该字段，只能从 trace 取）。",
     },
     {
         "signals": {
@@ -258,17 +289,22 @@ SOURCE_RULES = [
     },
 ]
 
+# Keyed by rule["layer"] so inserting or reordering SOURCE_RULES cannot silently
+# repoint a layer fallback at the wrong rule (positional indices used to do this).
+_RULES_BY_LAYER = {rule["layer"]: rule for rule in SOURCE_RULES}
+
 LAYER_FALLBACKS = {
-    "parse": SOURCE_RULES[1],
-    "adapter": SOURCE_RULES[1],
-    "validation": SOURCE_RULES[3],
-    "grounding": SOURCE_RULES[2],
-    "safety": SOURCE_RULES[4],
-    "execution": SOURCE_RULES[5],
-    "reflection": SOURCE_RULES[6],
-    "capability": SOURCE_RULES[7],
-    "goal": SOURCE_RULES[8],
-    "checkpoint": SOURCE_RULES[9],
+    "parse": _RULES_BY_LAYER["parse"],
+    "adapter": _RULES_BY_LAYER["parse"],
+    "validation": _RULES_BY_LAYER["validation"],
+    "grounding": _RULES_BY_LAYER["grounding"],
+    "safety": _RULES_BY_LAYER["safety"],
+    "execution": _RULES_BY_LAYER["execution"],
+    "reflection": _RULES_BY_LAYER["reflection"],
+    "acceptance": _RULES_BY_LAYER["acceptance"],
+    "capability": _RULES_BY_LAYER["capability"],
+    "goal": _RULES_BY_LAYER["goal"],
+    "checkpoint": _RULES_BY_LAYER["checkpoint"],
     "context": {
         "layer": "context",
         "severity": "P2",
@@ -873,6 +909,8 @@ def summarize_trace(events: list[dict[str, Any]]) -> dict[str, Any]:
     verifier = []
     expected_outcomes = []
     finish_validations = []
+    acceptance = []
+    goal_compiles = []
     fallback_chains = []
     timeline = []
     for event in events:
@@ -900,6 +938,16 @@ def summarize_trace(events: list[dict[str, Any]]) -> dict[str, Any]:
             expected_outcomes.append(compact)
         if payload.get("finish_validation") or payload.get("finish_validation_status"):
             finish_validations.append(compact)
+        # The finish gate lives in its own `acceptance` node (not reflect), and
+        # some of its fail-closed events carry no error_code/failure_cause at
+        # all (acceptance_no_contract, acceptance_hard_veto). Collect them by
+        # node/event name so a rejected finish is never invisible.
+        if node == "acceptance" or name.startswith("acceptance_"):
+            acceptance.append(compact)
+        # contract_adequacy.reason_codes (structural rejection codes such as
+        # predicate_domain_mismatch) only ever appear on this event.
+        if payload.get("contract_adequacy") or payload.get("requirement_set"):
+            goal_compiles.append(compact)
         if (
             payload.get("verifier_result")
             or payload.get("verifier_status")
@@ -918,6 +966,8 @@ def summarize_trace(events: list[dict[str, Any]]) -> dict[str, Any]:
         "fallback_chains": fallback_chains[:50],
         "expected_outcomes": expected_outcomes[:50],
         "finish_validations": finish_validations[:50],
+        "acceptance": acceptance[:50],
+        "goal_compiles": goal_compiles[:50],
         "verifier": verifier[:50],
         "timeline": timeline[:200],
     }
@@ -1065,6 +1115,11 @@ def _collect_finish_validation_signals(
         reason = str(criterion_result.get("reason") or "")
         if "soft_match" in reason:
             signals.add("soft_match_accepted")
+        # A criterion parked on typed_fact_not_yet_collected forever usually
+        # means the predicate and the fact provider disagree (unobservable
+        # predicate, or the same fact in two different value domains).
+        if reason == "typed_fact_not_yet_collected":
+            signals.add("typed_fact_not_yet_collected")
         if criterion_result.get("override_reason") == "programmatic_contradiction":
             signals.add("programmatic_contradiction_override")
 
@@ -1124,6 +1179,40 @@ def collect_signals(record: dict[str, Any], trace_summary: dict[str, Any]) -> se
                 signals.add("dynamic_change_only")
         finish_validation = payload.get("finish_validation") or payload.get("finish_validation_evidence")
         _collect_finish_validation_signals(finish_validation, signals)
+    # Acceptance-node events are the finish gate's own record. Several of them
+    # (acceptance_no_contract, acceptance_hard_veto, pure_evaluation_degraded)
+    # are fail-closed rejections that carry no error_code, so signal on the
+    # event name itself rather than waiting for an error field.
+    for item in trace_summary.get("acceptance", []):
+        name = str(item.get("event") or "")
+        # acceptance_result fires on every acceptance run including a clean pass,
+        # so it is not a problem signal — only the fail-closed variants are.
+        if name in {
+            "acceptance_no_contract",
+            "acceptance_hard_veto",
+            "acceptance_error",
+            "pure_evaluation_degraded",
+        }:
+            signals.add(name)
+        payload = item.get("payload") or {}
+        if payload.get("contradicted_criteria"):
+            signals.add("acceptance_hard_veto")
+            for item_value in payload.get("contradicted_criteria") or []:
+                signals.add(str(item_value))
+        _collect_finish_validation_signals(payload.get("finish_validation"), signals)
+    # Adequacy reason codes are compile-time proof that a contract could never
+    # be satisfied (e.g. predicate_domain_mismatch). They exist only on the
+    # goal_compile_result event, never on result.json.
+    for item in trace_summary.get("goal_compiles", []):
+        payload = item.get("payload") or {}
+        adequacy = payload.get("contract_adequacy")
+        if not isinstance(adequacy, dict):
+            continue
+        status = adequacy.get("status")
+        if status and status != "adequate":
+            signals.add(f"contract_adequacy_{status}")
+        for code in adequacy.get("reason_codes") or []:
+            signals.add(str(code))
     for item in trace_summary.get("grounding", []):
         payload = item.get("payload") or {}
         obs = payload.get("grounding_observation")
@@ -1173,7 +1262,8 @@ LAYER_LABELS = {
     "safety": "安全/人工确认",
     "capability": "能力闸门",
     "execution": "设备执行",
-    "reflection": "反思与目标验证",
+    "reflection": "单步反思",
+    "acceptance": "验收 / Finish Gate",
     "goal": "目标契约编译",
     "checkpoint": "检查点恢复",
     "context": "上下文管理",
@@ -1638,6 +1728,15 @@ function renderOverview() {
   const fallbackRows = summary.trace_summary?.fallback_chains || [];
   const finishEvidence = r.finish_validation_evidence || {};
   const softMatched = finishEvidence.soft_matched || [];
+  // The finish gate is the `acceptance` node, not reflect. Prefer its own
+  // trace event, falling back to the result record.
+  const acceptanceRows = summary.trace_summary?.acceptance || [];
+  const lastAcceptance = acceptanceRows.slice(-1)[0] || {};
+  const finishFromTrace = (acceptanceRows.map(e => (e.payload || {}).finish_validation).filter(Boolean).slice(-1)[0]) || {};
+  const finishGate = Object.keys(finishEvidence).length ? finishEvidence : finishFromTrace;
+  const perCriterion = (finishGate.evidence || {}).per_criterion || {};
+  const lastGoalCompile = (summary.trace_summary?.goal_compiles || []).slice(-1)[0] || {};
+  const adequacy = (lastGoalCompile.payload || {}).contract_adequacy || {};
   document.getElementById('overview').innerHTML = `
     <h2 style="margin-bottom:12px">根因分析</h2>
     <div style="margin-bottom:18px">${renderRootCauses()}</div>
@@ -1675,12 +1774,33 @@ function renderOverview() {
         </table>
       </div>
       <div class="card">
-        <h2>后置条件验证</h2>
+        <h2>后置条件验证（单步 reflect）</h2>
         <table>
           ${row('ExpectedOutcome', JSON.stringify(latestExpected))}
           ${row('Matched', JSON.stringify(latestVerifier.matched_postconditions || []))}
           ${row('Missing', JSON.stringify(latestVerifier.missing_postconditions || []))}
           ${row('Dynamic Only', latestVerifier.dynamic_change_only)}
+        </table>
+      </div>
+      <div class="card">
+        <h2>Finish Gate（acceptance 节点）</h2>
+        ${adequacy.status && adequacy.status !== 'adequate' ? `<div class="alert danger">契约 adequacy = ${esc(adequacy.status)}：${esc((adequacy.reason_codes || []).join(', ') || '无 reason_code')}。structural 拒绝（predicate_unobservable / predicate_domain_mismatch / task_binding_mismatch / required_criteria_missing）意味着该契约在编译期即不可满足，应修 predicate 绑定或 fact provider，不要放宽 gate。</div>` : ''}
+        ${lastAcceptance.event === 'acceptance_no_contract' ? '<div class="alert danger">acceptance_no_contract：没有已编译契约就进入验收，已 fail-closed 拒绝——根因在 goal 层。</div>' : ''}
+        ${lastAcceptance.event === 'acceptance_hard_veto' ? '<div class="alert danger">acceptance_hard_veto：程序信号直接否决了模型的完成声明，应信程序侧。</div>' : ''}
+        <table>
+          ${row('验收状态', finishGate.status || r.finish_validation_status || '未触发（模型未声明完成）')}
+          ${row('最后 acceptance 事件', lastAcceptance.event)}
+          ${row('契约 adequacy', adequacy.status ? `${adequacy.status} ${JSON.stringify(adequacy.reason_codes || [])}` : '-')}
+          ${row('已满足标准', JSON.stringify(finishGate.matched_terminal_evidence || []))}
+          ${row('未满足标准', JSON.stringify(finishGate.missing_terminal_evidence || []))}
+          ${row('软匹配标准', (finishGate.soft_matched || softMatched).length ? JSON.stringify(finishGate.soft_matched || softMatched) : '无')}
+        </table>
+        <table><tr><th>标准</th><th>判定</th><th>原因</th></tr>
+          ${Object.keys(perCriterion).length ? Object.entries(perCriterion).map(([name, res]) => `<tr>
+            <td class="mono wrap">${esc(name)}</td>
+            <td class="mono">${badge(esc((res || {}).status || '-'), (res || {}).status === 'matched' ? '' : 'failed')}</td>
+            <td class="mono wrap">${esc((res || {}).override_reason ? `${(res || {}).reason} (override: ${(res || {}).override_reason})` : ((res || {}).reason || '-'))}</td>
+          </tr>`).join('') : '<tr><td colspan="3">无 per_criterion 记录（finish gate 未触发或契约未编译）</td></tr>'}
         </table>
       </div>
       <div class="card">

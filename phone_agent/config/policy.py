@@ -215,6 +215,27 @@ DEFAULT_VERIFICATION_POLICY = VerificationPolicy(
             rationale="Bound repeated failures before human takeover.",
             boundary="at or above routes takeover",
         ),
+        "selected_object_text_match_confidence": _threshold(
+            "selected_object_text_match_confidence",
+            0.75,
+            unit="probability",
+            rationale=(
+                "Selected-object text appearing after a tap shows the action landed "
+                "somewhere plausible, not that the trajectory advanced. Held below "
+                "verified_reflection_skip_confidence so model reflection still runs."
+            ),
+            boundary="below verified_reflection_skip_confidence keeps reflection",
+        ),
+        "repeated_action_threshold": _threshold(
+            "repeated_action_threshold",
+            2,
+            unit="attempts",
+            rationale=(
+                "Repeating one target on one surface this many prior times is a loop "
+                "even when every step verified as successful."
+            ),
+            boundary="at or above reports repeated_action",
+        ),
     },
     source_priority=(
         "device",

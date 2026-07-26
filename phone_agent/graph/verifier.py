@@ -8,9 +8,14 @@ import re
 from typing import Any, Literal
 
 from phone_agent.config.apps import APP_PACKAGES, get_package_name, normalize_app_name
+from phone_agent.config.policy import DEFAULT_VERIFICATION_POLICY
 from phone_agent.graph.compatibility_adapters import PageSignalAdapter
 from phone_agent.graph.expected_outcome import normalize_expected_outcome
 from phone_agent.graph.marks import build_screen_id
+
+SELECTED_OBJECT_TEXT_MATCH_CONFIDENCE = DEFAULT_VERIFICATION_POLICY.value(
+    "selected_object_text_match_confidence"
+)
 
 VerifierStatus = Literal["success", "failure", "unknown", "blocked"]
 
@@ -131,19 +136,18 @@ def verify_action_outcome(
     text_blob = _observation_text(after_observation)
     has_after_observation_text = bool(text_blob.strip())
     selected_object_signals = _selected_object_signals(
-        expected.to_dict(), after_observation, text_blob, page_signal_adapter
+        expected.to_dict(),
+        after_observation,
+        text_blob,
+        page_signal_adapter,
+        before_observation=before_observation,
     )
     if selected_object_signals:
         signals = {**signals, **selected_object_signals}
         evidence["selected_object_signals"] = selected_object_signals
-        if selected_object_signals.get("selected_object_match"):
-            evidence["matched_postconditions"] = ["selected_object_match"]
-            return VerifierResult(
-                status="success",
-                confidence=0.9,
-                signals=signals,
-                evidence=evidence,
-            )
+        # Disconfirming signals are evaluated before confirming ones: verification is
+        # fail-closed, so evidence that the target was not reached outranks evidence
+        # that it might have been.
         if selected_object_signals.get("same_surface_still_visible"):
             evidence["missing_postconditions"] = ["selected_object_detail_not_opened"]
             return VerifierResult(
@@ -160,6 +164,18 @@ def verify_action_outcome(
                 confidence=0.8,
                 signals=signals,
                 failure_cause="wrong_page",
+                evidence=evidence,
+            )
+        if selected_object_signals.get("selected_object_match"):
+            evidence["matched_postconditions"] = ["selected_object_match"]
+            # Content appearing on the new screen shows the action landed somewhere
+            # plausible, but not that the trajectory advanced. Staying below
+            # `verified_reflection_skip_confidence` keeps model reflection in the
+            # loop, which is what answers "is this progress?".
+            return VerifierResult(
+                status="success",
+                confidence=SELECTED_OBJECT_TEXT_MATCH_CONFIDENCE,
+                signals=signals,
                 evidence=evidence,
             )
     focus_signals = _focus_signals(after_observation)
@@ -547,6 +563,11 @@ def _contains_editable_node(value: Any) -> bool:
     return False
 
 
+# Android widget class names as they reach us from the accessibility tree: a single
+# CamelCase identifier, optionally with an inner-class suffix ("ActionBar$Tab").
+# Real on-screen labels do not take this shape.
+CLASS_NAME_EVIDENCE_RE = re.compile(r"[A-Z][A-Za-z0-9]*(?:\$[A-Za-z0-9]+)*")
+
 VISIBLE_TEXT_KEYS = {
     "text",
     "text_summary",
@@ -648,11 +669,52 @@ def _failure_cause_for_expected_kind(kind: str) -> str:
     return "unknown"
 
 
+def _surface_identity(observation: dict[str, Any] | None) -> str:
+    """Return the foreground activity/window identifying the current surface.
+
+    Unlike ``screen_id``, this is not derived from screen content, so it stays
+    stable when a feed reorders and still changes when navigation happens.
+    """
+
+    if not isinstance(observation, dict):
+        return ""
+    signals = observation.get("device_signals")
+    if isinstance(signals, dict):
+        for key in ("top_activity", "focused_window"):
+            value = signals.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    value = _find_string_key(
+        observation,
+        {"top_activity", "foreground_activity", "focused_window", "current_window"},
+    )
+    return str(value or "").strip()
+
+
+def is_content_bearing_evidence(value: Any) -> bool:
+    """Return whether *value* is on-screen content rather than a widget type name.
+
+    Accessibility nodes without text used to report their Java class name as
+    ``text_summary``. Because anonymous containers appear on every screen, using
+    such a value as evidence made containment against the screen text blob true no
+    matter what was tapped, so it is not admissible evidence.
+    """
+
+    if not isinstance(value, str):
+        return False
+    text = value.strip()
+    if not text:
+        return False
+    return not CLASS_NAME_EVIDENCE_RE.fullmatch(text)
+
+
 def _selected_object_signals(
     expected: dict[str, Any],
     observation: dict[str, Any] | None,
     text_blob: str,
     page_signal_adapter: PageSignalAdapter | None,
+    *,
+    before_observation: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     if not isinstance(expected, dict):
         return {}
@@ -666,9 +728,8 @@ def _selected_object_signals(
     ):
         return {}
     text_match = bool(
-        isinstance(evidence_summary, str)
-        and evidence_summary
-        and evidence_summary.casefold() in text_blob.casefold()
+        is_content_bearing_evidence(evidence_summary)
+        and str(evidence_summary).casefold() in text_blob.casefold()
     )
     legacy_shadow_detail = False
     legacy_shadow_feed = False
@@ -694,6 +755,18 @@ def _selected_object_signals(
         "legacy_shadow_detail_signal": legacy_shadow_detail,
         "legacy_shadow_feed_signal": legacy_shadow_feed,
     }
+    # Surface comparison. These two keys had readers in the verifier ladder and in
+    # GoalEvaluator but no producer: the only path that could set them ran through
+    # `page_signal_adapter`, which both runtime call sites pass as None.
+    before_surface = _surface_identity(before_observation)
+    after_surface = _surface_identity(observation)
+    if before_surface and after_surface:
+        signals["selected_object_surface_changed"] = before_surface != after_surface
+        if before_surface == after_surface and expected_page_type not in {
+            "",
+            "input_focused",
+        }:
+            signals["same_surface_still_visible"] = True
     if text_match:
         signals["selected_object_match"] = True
     return signals
