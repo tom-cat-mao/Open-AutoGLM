@@ -143,6 +143,7 @@ def build_mark_provider_hints(
     *,
     task: str | None = None,
     reflection: str | None = None,
+    action: dict[str, Any] | None = None,
     provider_hints: list[str | dict[str, Any] | MarkProviderHint] | None = None,
     max_hints: int = 3,
 ) -> list[MarkProviderHint]:
@@ -191,6 +192,18 @@ def build_mark_provider_hints(
             text = _provider_text(item)
             if text:
                 hints.append(MarkProviderHint(text=text, source="config"))
+    if isinstance(action, dict) and len(hints) < max_hints:
+        for key in ("text", "message", "target_text_hint"):
+            text = _safe_text(action.get(key))
+            if text:
+                hints.append(
+                    MarkProviderHint(
+                        text=text,
+                        source="action",
+                        action=_safe_metadata(action.get("action")) or None,
+                    )
+                )
+                break
     if task and len(hints) < max_hints:
         text = _provider_text(task)
         if text:

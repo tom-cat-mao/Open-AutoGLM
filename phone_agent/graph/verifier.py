@@ -581,9 +581,6 @@ def _match_expected_text(
     matched: list[str] = []
     missing: list[str] = []
     for item in expected:
-        if item == "private_text_unverifiable":
-            missing.append("private_text_unverifiable")
-            continue
         if item.startswith("sha256:"):
             digest = item.split(":", 1)[1]
             if _text_blob_contains_hash(text_blob, digest):
@@ -602,8 +599,6 @@ def _match_expected_text(
 def _match_forbidden_text(forbidden: list[str], text_blob: str) -> list[str]:
     present: list[str] = []
     for item in forbidden:
-        if item == "private_text_unverifiable":
-            continue
         if item.startswith("sha256:"):
             digest = item.split(":", 1)[1]
             if _text_blob_contains_hash(text_blob, digest):
@@ -662,22 +657,18 @@ def _selected_object_signals(
     if not isinstance(expected, dict):
         return {}
     object_type = expected.get("object_type")
-    object_evidence_hash = expected.get("object_evidence_hash")
-    title_hash = expected.get("title_hash")
+    evidence_summary = expected.get("evidence_summary")
     expected_page_type = str(expected.get("expected_page_type") or "")
     expected_rank = expected.get("expected_rank")
     if not any(
         isinstance(value, str) and value
-        for value in (object_type, object_evidence_hash, title_hash, expected_page_type)
+        for value in (object_type, evidence_summary, expected_page_type)
     ):
         return {}
-    hashes = [
-        value
-        for value in (object_evidence_hash, title_hash)
-        if isinstance(value, str) and value
-    ]
-    hash_match = any(
-        _text_blob_contains_hash(text_blob, digest[:12]) for digest in hashes
+    text_match = bool(
+        isinstance(evidence_summary, str)
+        and evidence_summary
+        and evidence_summary.casefold() in text_blob.casefold()
     )
     legacy_shadow_detail = False
     legacy_shadow_feed = False
@@ -698,11 +689,11 @@ def _selected_object_signals(
         "selected_object_expected_rank": (
             expected_rank if isinstance(expected_rank, int) else None
         ),
-        "selected_object_hash_match": hash_match,
+        "selected_object_text_match": text_match,
         "selected_object_detail_signal": detail_signal,
         "legacy_shadow_detail_signal": legacy_shadow_detail,
         "legacy_shadow_feed_signal": legacy_shadow_feed,
     }
-    if hash_match:
+    if text_match:
         signals["selected_object_match"] = True
     return signals

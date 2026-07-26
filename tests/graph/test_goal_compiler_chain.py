@@ -75,6 +75,27 @@ def test_attach_core_predicates_binds_raw_entity_span_for_vlm_judge() -> None:
     assert migrated[0].predicate.expected_value == "猫咪视频"
 
 
+def test_attach_core_predicates_binds_raw_accessibility_text() -> None:
+    criteria = [
+        SuccessCriterion(
+            "search_query_visible",
+            "村长托马斯",
+            "accessibility_text_match",
+        ),
+    ]
+
+    migrated = _attach_core_predicates(
+        criteria,
+        target_app_hint=None,
+        ordinal=None,
+        entity_span=None,
+    )
+
+    assert migrated[0].predicate is not None
+    assert migrated[0].predicate.predicate_id == "semantic.entity_matches"
+    assert migrated[0].predicate.expected_value == "村长托马斯"
+
+
 def test_attach_core_predicates_leaves_vlm_judge_untyped_without_entities() -> None:
     criteria = [
         SuccessCriterion("task_completed", "objective visible", "vlm_judge"),

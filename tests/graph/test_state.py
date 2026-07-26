@@ -216,13 +216,16 @@ def test_mark_provider_hints_keep_raw_text_for_local_provider_use() -> None:
     hints = build_mark_provider_hints(
         task="给 13800138000 发验证码",
         reflection="张三 13900139000 请重试",
+        action={"action": "Type", "text": "VillageThomas"},
         provider_hints=[{"text": "订单123456 搜索按钮", "source": "secret-13800138000", "action": "tap-13900139000"}],
+        max_hints=4,
     )
 
     raw = json.dumps([hint.__dict__ for hint in hints], ensure_ascii=False)
     assert "13800138000" in raw
     assert "13900139000" in raw
     assert "订单123456" in raw
+    assert "VillageThomas" in raw
     assert "secret-13800138000" not in raw
     assert "tap-13900139000" not in raw
 

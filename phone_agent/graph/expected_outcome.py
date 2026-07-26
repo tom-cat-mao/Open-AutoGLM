@@ -8,11 +8,9 @@ executor or safety gate.
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
-import hashlib
-import re
 from typing import Any, Literal
 
-from phone_agent.graph.context import redact_context_text, sanitize_context_payload
+from phone_agent.graph.context import sanitize_context_payload
 from phone_agent.graph.predicates import (
     CORE_PREDICATE_CATALOG,
     ExpectedTransition,
@@ -48,15 +46,6 @@ EXPECTED_OUTCOME_FIELDS = {
     "target_text_hint",
     "timeout_hint",
     "dynamic_regions",
-    "selected_object_id_hash",
-    "object_type",
-    "object_evidence_hash",
-    "title_stub",
-    "title_hash",
-    "container_lineage_hash",
-    "list_lineage_hash",
-    "expected_page_type",
-    "expected_rank",
 }
 EXPECTED_OBJECT_FIELDS = {
     "selected_object_id_hash",
@@ -69,7 +58,13 @@ EXPECTED_OBJECT_FIELDS = {
     "expected_page_type",
     "expected_rank",
 }
-EXPECTED_OBJECT_DIGEST_FIELDS = {
+RUNTIME_EXPECTED_OBJECT_FIELDS = {
+    "object_type",
+    "evidence_summary",
+    "expected_page_type",
+    "expected_rank",
+}
+LEGACY_EXPECTED_OBJECT_FIELDS = {
     "selected_object_id_hash",
     "object_evidence_hash",
     "title_stub",
@@ -77,6 +72,8 @@ EXPECTED_OBJECT_DIGEST_FIELDS = {
     "container_lineage_hash",
     "list_lineage_hash",
 }
+EXPECTED_OUTCOME_FIELDS.update(EXPECTED_OBJECT_FIELDS)
+EXPECTED_OUTCOME_FIELDS.update(RUNTIME_EXPECTED_OBJECT_FIELDS)
 MAX_LIST_ITEMS = 12
 MAX_TEXT_CHARS = 160
 
@@ -92,13 +89,8 @@ class ExpectedOutcome:
     target_text_hint: str | None = None
     timeout_hint: float | None = None
     dynamic_regions: list[str] = field(default_factory=list)
-    selected_object_id_hash: str | None = None
     object_type: str | None = None
-    object_evidence_hash: str | None = None
-    title_stub: str | None = None
-    title_hash: str | None = None
-    container_lineage_hash: str | None = None
-    list_lineage_hash: str | None = None
+    evidence_summary: str | None = None
     expected_page_type: str | None = None
     expected_rank: int | None = None
 
@@ -221,7 +213,7 @@ def sanitize_expected_outcome_dict(
     *,
     task_context: str | None = None,
 ) -> dict[str, Any] | None:
-    """Return a private-text-stubbed outcome dict for state/trace/result storage."""
+    """Return a regex-redacted outcome dict for trace/result storage."""
 
     if outcome is None:
         return None
@@ -238,9 +230,11 @@ def sanitize_expected_outcome_dict(
             raw[key] = _stub_text_list(raw.get(key))
     if "target_text_hint" in raw:
         raw["target_text_hint"] = _stub_text_value(raw.get("target_text_hint"))
-    for key in EXPECTED_OBJECT_FIELDS:
+    for key in RUNTIME_EXPECTED_OBJECT_FIELDS:
         if key in raw:
             raw[key] = _normalize_expected_object_value(key, raw.get(key))
+    for key in LEGACY_EXPECTED_OBJECT_FIELDS:
+        raw.pop(key, None)
     sanitized = sanitize_context_payload(
         raw, consumer="trace_payload", task_context=task_context
     )
@@ -254,16 +248,15 @@ def runtime_expected_outcome_dict(
     *,
     task_context: str | None = None,
 ) -> dict[str, Any] | None:
-    """Return the verifier/runtime contract without raw provider text.
+    """Return the verifier/runtime contract with raw comparison text."""
 
-    The verifier can match sha256 stubs against observed UI text on the fly.
-    Regex-redacted private values become ``private_text_unverifiable``.
-    """
-
-    sanitized = sanitize_expected_outcome_dict(outcome, task_context=task_context)
-    if sanitized is None:
+    if isinstance(outcome, ExpectedOutcome):
+        raw = outcome.to_dict()
+    elif isinstance(outcome, dict):
+        raw = dict(outcome)
+    else:
         return None
-    return normalize_expected_outcome(sanitized).to_dict()
+    return normalize_expected_outcome(raw).to_dict()
 
 
 def expected_outcome_trace_projection(
@@ -276,51 +269,37 @@ def expected_outcome_trace_projection(
     sanitized = sanitize_expected_outcome_dict(outcome, task_context=task_context)
     if sanitized is None:
         return None
-    for key in EXPECTED_OBJECT_DIGEST_FIELDS:
-        value = sanitized.pop(key, None)
-        sanitized[f"{key}_present"] = (
-            value is not None and value != "" and value is not False
-        )
+    evidence_summary = sanitized.pop("evidence_summary", None)
+    sanitized["evidence_summary_present"] = bool(evidence_summary)
     for key in ("must_observe", "must_not_observe", "dynamic_regions"):
         values = sanitized.get(key)
         sanitized[key] = [
             {
                 "present": True,
-                "length": item.get("length"),
+                "length": len(item),
             }
             for item in values or []
-            if isinstance(item, dict)
+            if isinstance(item, str)
         ]
     hint = sanitized.get("target_text_hint")
-    if isinstance(hint, dict):
+    if isinstance(hint, str):
         sanitized["target_text_hint"] = {
             "present": True,
-            "length": hint.get("length"),
+            "length": len(hint),
         }
     return sanitized
 
 
-def _stub_text_list(value: Any) -> list[dict[str, Any]]:
+def _stub_text_list(value: Any) -> list[str]:
     if not isinstance(value, list):
         return []
     return [_stub_text_value(item) for item in value if isinstance(item, str)]
 
 
-def _stub_text_value(value: Any) -> dict[str, Any] | None:
+def _stub_text_value(value: Any) -> str | None:
     if not isinstance(value, str) or not value:
         return None
-    redacted = redact_context_text(value)
-    if redacted != value:
-        return {
-            "redacted": True,
-            "private_text_unverifiable": True,
-            "length": len(value),
-        }
-    return {
-        "redacted": True,
-        "length": len(value),
-        "sha256": hashlib.sha256(value.encode("utf-8")).hexdigest()[:12],
-    }
+    return value
 
 
 def default_expected_outcome(
@@ -404,7 +383,7 @@ def _normalize_selected_object_fields(
     raw: dict[str, Any],
 ) -> dict[str, str | int | None]:
     result: dict[str, str | int | None] = {}
-    for key in EXPECTED_OBJECT_FIELDS:
+    for key in RUNTIME_EXPECTED_OBJECT_FIELDS:
         normalized = _normalize_expected_object_value(key, raw.get(key))
         if normalized is not None:
             result[key] = normalized
@@ -426,15 +405,7 @@ def _normalize_expected_object_value(key: str, value: Any) -> str | int | None:
     text = value.strip()
     if not text:
         return None
-    if key.endswith("_hash") or key.endswith("_id_hash"):
-        return text[:64] if re.fullmatch(r"[0-9a-fA-F]{6,64}", text) else None
-    if key == "title_stub":
-        return (
-            text[:160]
-            if re.fullmatch(r"len:\d{1,6} sha256:[0-9a-fA-F]{6,64}", text)
-            else None
-        )
-    return sanitize_context_payload(text, "message", consumer="trace_payload")[:64]
+    return str(sanitize_context_payload(text, "message", consumer="inject"))[:160]
 
 
 def expected_outcome_prompt_block(
@@ -461,14 +432,8 @@ def _normalize_string_list(value: Any, default: list[str]) -> list[str]:
         if isinstance(item, str):
             text = item.strip()
             if text:
-                if text in {"<redacted>", "<matches_task_value>"}:
-                    result.append("private_text_unverifiable")
-                    continue
                 result.append(text[:MAX_TEXT_CHARS])
         elif isinstance(item, dict):
-            if item.get("private_text_unverifiable") is True:
-                result.append("private_text_unverifiable")
-                continue
             digest = item.get("sha256")
             if isinstance(digest, str) and digest:
                 result.append(f"sha256:{digest[:12]}")
@@ -477,8 +442,6 @@ def _normalize_string_list(value: Any, default: list[str]) -> list[str]:
 
 def _normalize_optional_string(value: Any, default: str | None) -> str | None:
     if isinstance(value, dict):
-        if value.get("private_text_unverifiable") is True:
-            return "private_text_unverifiable"
         digest = value.get("sha256")
         if isinstance(digest, str) and digest:
             return f"sha256:{digest[:12]}"
@@ -487,8 +450,6 @@ def _normalize_optional_string(value: Any, default: str | None) -> str | None:
     if not isinstance(value, str):
         return default
     text = value.strip()
-    if text in {"<redacted>", "<matches_task_value>"}:
-        return "private_text_unverifiable"
     return text[:MAX_TEXT_CHARS] if text else default
 
 

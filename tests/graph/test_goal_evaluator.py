@@ -47,12 +47,20 @@ def test_accessibility_text_match_fails_when_text_not_found() -> None:
     assert "title" in result.missing
 
 
-def test_accessibility_text_match_no_stubs_treated_as_missing() -> None:
+def test_accessibility_text_match_uses_raw_visible_text() -> None:
     contract = _contract([
-        SuccessCriterion(name="c", description="no stubs here", verification="accessibility_text_match"),
+        SuccessCriterion(
+            name="search_query_visible",
+            description="村长托马斯",
+            verification="accessibility_text_match",
+        ),
     ])
-    result = evaluate_finish_claim(contract=contract, after_observation={})
-    assert result.status == "failure"
+    observation = {"marks": [{"text_summary": "搜索结果：村长托马斯"}]}
+
+    result = evaluate_finish_claim(contract=contract, after_observation=observation)
+
+    assert result.status == "success"
+    assert result.matched == ["search_query_visible"]
 
 
 # ----------------------------------------------------------------------

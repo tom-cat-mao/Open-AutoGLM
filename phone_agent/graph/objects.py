@@ -806,18 +806,13 @@ def _infer_sensitivity_tags(value: Any) -> list[str]:
 
 
 def object_selected_evidence(obj: ScreenObject | None) -> dict[str, Any] | None:
-    """Build verifier-only hash/stub evidence for ExpectedOutcome."""
+    """Build verifier-only raw evidence for ExpectedOutcome."""
 
     if obj is None:
         return None
     return {
-        "selected_object_id_hash": _hash_text(obj.object_id),
         "object_type": obj.object_type,
-        "object_evidence_hash": _hash_text(obj.evidence_summary),
-        "title_stub": _stub_title(obj.evidence_summary),
-        "title_hash": obj.title_hash,
-        "container_lineage_hash": obj.lineage_hash,
-        "list_lineage_hash": _hash_text(obj.list_id),
+        "evidence_summary": _safe_evidence(obj.evidence_summary),
         "expected_page_type": _expected_page_type(obj.object_type),
         "expected_rank": obj.ordinal_index,
     }
@@ -1041,15 +1036,6 @@ def _hash_text(value: Any) -> str | None:
     if not text:
         return None
     return hashlib.sha256(text.encode("utf-8")).hexdigest()[:12]
-
-
-def _stub_title(value: Any) -> str | None:
-    text = _safe_evidence(value)
-    if not text:
-        return None
-    if "<redacted>" in text:
-        return "<redacted>"
-    return f"len:{len(text)} sha256:{hashlib.sha256(text.encode('utf-8')).hexdigest()[:12]}"
 
 
 def _expected_page_type(object_type: str) -> str:

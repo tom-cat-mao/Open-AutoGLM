@@ -130,7 +130,6 @@ def ground_intent_to_action(
         }
         if grounding_metadata is not None:
             grounding_metadata["selected_object"] = {
-                "object_id_hash": (object_selected_evidence(selected_object) or {}).get("selected_object_id_hash"),
                 "object_type": selected_object.object_type,
                 "primary_mark_id": selected_object.primary_mark_id,
                 "list_id": selected_object.list_id,
@@ -153,12 +152,6 @@ def ground_intent_to_action(
         sensitivity = _mark_sensitivity(intent, mark)
         if grounding_metadata is not None and grounding_metadata.get("selected_object"):
             grounding_metadata["selected_object"]["sensitivity_route"] = sensitivity
-        # Mark-based Tap should also produce object_selected_evidence when the
-        # mark is bound to a ScreenObject with an ordinal_index. Without this,
-        # expected_outcome.expected_rank / object_evidence_hash / title_hash /
-        # expected_page_type stay null for mark-based Taps (the common path),
-        # and GoalEvaluator._check_object_rank can never reach `matched` even
-        # when the agent really did tap the Nth item. See P0 #13a.
         if (
             grounding_metadata is not None
             and not grounding_metadata.get("selected_object_evidence")
@@ -172,7 +165,6 @@ def ground_intent_to_action(
                     grounding_metadata.setdefault(
                         "selected_object",
                         {
-                            "object_id_hash": evidence.get("selected_object_id_hash"),
                             "object_type": bound_object.object_type,
                             "primary_mark_id": bound_object.primary_mark_id,
                             "list_id": bound_object.list_id,
@@ -235,8 +227,7 @@ def _resolve_object_for_mark(
 ) -> ScreenObject | None:
     """Find the ScreenObject bound to a mark_id (mark-based Tap path).
 
-    Used to backfill object_selected_evidence (object_evidence_hash /
-    title_hash / expected_page_type / expected_rank) for mark-based Taps,
+    Used to backfill object_selected_evidence for mark-based Taps,
     so that GoalEvaluator._check_object_rank can match `ordinal=N` even
     when the model did not use an object selector.
     """

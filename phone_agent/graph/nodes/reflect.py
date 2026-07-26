@@ -273,7 +273,6 @@ SAFE_VERIFIER_EVIDENCE_STRINGS = {
     "input_focused",
     "input_progress",
     "postcondition_unverified",
-    "private_text_unverifiable",
     "typed_text_present",
 }
 

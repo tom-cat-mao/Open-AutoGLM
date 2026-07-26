@@ -1,5 +1,3 @@
-import hashlib
-
 from phone_agent.actions.grounding import GroundingError, ground_intent_to_action
 from phone_agent.actions.safety import decide_safety
 from phone_agent.graph.marks import MarkRegistry
@@ -13,7 +11,7 @@ from phone_agent.graph.objects import (
 from phone_agent.grounding.provider import ScreenBinding
 
 
-def test_object_evidence_hash_uses_stored_evidence_boundary() -> None:
+def test_object_evidence_uses_bounded_raw_summary() -> None:
     evidence = "长" * 140
     selected = object_selected_evidence(
         ScreenObject(
@@ -26,9 +24,9 @@ def test_object_evidence_hash_uses_stored_evidence_boundary() -> None:
     )
 
     assert selected is not None
-    expected = hashlib.sha256(evidence[:120].encode("utf-8")).hexdigest()[:12]
-    assert selected["object_evidence_hash"] == expected
-    assert selected["title_stub"] == f"len:120 sha256:{expected}"
+    assert selected["evidence_summary"] == evidence[:120]
+    assert "object_evidence_hash" not in selected
+    assert "title_stub" not in selected
 
 
 def _structure() -> ScreenStructure:

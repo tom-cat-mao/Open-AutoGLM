@@ -17,7 +17,6 @@ from phone_agent.graph.context import (
     build_context_metrics,
     compact_messages_for_request,
     get_context_mode,
-    _redacted_private_text,
     sanitize_context_payload,
     select_plan_context,
 )
@@ -472,15 +471,11 @@ def _selected_object_evidence_from_grounding(
     selected = grounding_observation.get("selected_object")
     if not isinstance(selected, dict):
         return None
-    object_id_hash = selected.get("object_id_hash")
     object_type = selected.get("object_type")
-    if not isinstance(object_id_hash, str) or not isinstance(object_type, str):
+    if not isinstance(object_type, str):
         return None
     return {
-        "selected_object_id_hash": object_id_hash,
         "object_type": object_type,
-        "container_lineage_hash": None,
-        "list_lineage_hash": None,
         "expected_page_type": (
             "detail_or_player"
             if object_type in {"video", "card", "result"}
@@ -548,11 +543,8 @@ def _action_for_history(action: dict | None) -> dict | None:
 
     if not isinstance(action, dict):
         return action
-    safe = dict(action)
-    for key in ("text", "message"):
-        if isinstance(safe.get(key), str):
-            safe[key] = _redacted_private_text(safe[key])
-    return safe
+    safe = sanitize_context_payload(action, consumer="inject")
+    return safe if isinstance(safe, dict) else None
 
 
 def _recovery_action_for_parse_failure(
@@ -761,6 +753,7 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
     mark_provider_hints = build_mark_provider_hints(
         task=task,
         reflection=state.get("reflection"),
+        action=state.get("action_parsed"),
         provider_hints=configurable.get("mark_provider_hints")
         or configurable.get("grounding_hints"),
     )

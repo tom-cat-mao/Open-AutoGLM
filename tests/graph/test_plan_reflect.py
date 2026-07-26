@@ -665,7 +665,7 @@ def test_plan_expected_outcome_runtime_contract_verifies_plain_text(
             }
         },
     )
-    assert planned["expected_outcome"]["must_observe"][0].startswith("sha256:")
+    assert planned["expected_outcome"]["must_observe"] == ["搜索"]
 
     reflect_state = {
         **base_state,
@@ -702,7 +702,7 @@ def test_plan_expected_outcome_runtime_contract_verifies_plain_text(
     assert result["reflection_verdict"] == "succeeded"
 
 
-def test_plan_node_redacts_expected_outcome_from_action_raw(
+def test_plan_node_keeps_sensitive_expected_outcome_for_runtime_matching(
     base_state, fake_device
 ) -> None:
     model = FakeModelClient(
@@ -733,9 +733,8 @@ def test_plan_node_redacts_expected_outcome_from_action_raw(
         },
     )
 
-    serialized = json.dumps(result, ensure_ascii=False)
-    assert "13800138000" not in serialized
-    assert result["expected_outcome"]["must_observe"] == ["private_text_unverifiable"]
+    assert result["expected_outcome"]["must_observe"] == ["13800138000"]
+    assert "13800138000" not in result["action_raw"]
 
 
 def test_plan_node_action_raw_rebuilds_envelope_without_non_regex_private_text(
@@ -770,14 +769,14 @@ def test_plan_node_action_raw_rebuilds_envelope_without_non_regex_private_text(
         },
     )
 
-    assert result["expected_outcome"]["must_observe"][0].startswith("sha256:")
-    assert result["expected_outcome"]["target_text_hint"].startswith("sha256:")
+    assert result["expected_outcome"]["must_observe"] == [private_phrase]
+    assert result["expected_outcome"]["target_text_hint"] == private_phrase
     action_raw = json.loads(result["action_raw"])
     assert action_raw["expected_outcome"]["must_observe"][0]["present"] is True
     assert "sha256" not in action_raw["expected_outcome"]["must_observe"][0]
 
 
-def test_plan_node_default_type_outcome_does_not_copy_raw_private_text(
+def test_plan_node_keeps_typed_text_in_action_history(
     base_state, fake_device
 ) -> None:
     model = FakeModelClient(
@@ -806,8 +805,7 @@ def test_plan_node_default_type_outcome_does_not_copy_raw_private_text(
     )
 
     assert result["action_parsed"]["text"] == "张三的家庭住址"
-    assert "张三的家庭住址" not in result["action_raw"]
-    assert json.loads(result["action_raw"])["action"]["text"]["redacted"] is True
+    assert json.loads(result["action_raw"])["action"]["text"] == "张三的家庭住址"
     assert result["expected_outcome"]["kind"] == "text_present"
     assert result["expected_outcome"]["must_observe"] == []
 
@@ -1195,8 +1193,7 @@ def test_plan_node_includes_object_registry_sidecars_and_prompt(
     assert result["object_registry_summary"]["object_count"] >= 2
     assert result["screen_structure_summary"]["node_count"] == 4
     assert "target_object_id" not in result["action_parsed"]
-    assert result["expected_outcome"]["selected_object_id_hash"]
-    assert result["expected_outcome"]["title_hash"]
+    assert result["expected_outcome"]["evidence_summary"] == "视频标题一"
     assert result["expected_outcome"]["expected_page_type"] == "detail_or_player"
 
 
@@ -1916,7 +1913,7 @@ def test_reflect_node_launch_matches_package_alias(base_state, fake_device) -> N
     assert result["verifier_result"]["signals"]["launch_matched"] is True
 
 
-def test_private_expected_text_does_not_hash_match_different_private_text(
+def test_sensitive_expected_text_round_trips_in_runtime_contract(
     base_state, fake_device
 ) -> None:
     plan_model = FakeModelClient(
@@ -1944,44 +1941,8 @@ def test_private_expected_text_does_not_hash_match_different_private_text(
             }
         },
     )
-    assert planned["expected_outcome"]["must_observe"] == ["private_text_unverifiable"]
-
-    reflect_state = {
-        **base_state,
-        **planned,
-        "action_result": {"success": True, "message": "ok"},
-    }
-    reflect_model = FakeModelClient(
-        FakeModelResponse(
-            "ok",
-            '{"verdict":"succeeded","failure_cause":"none","suggested_strategy":"continue","message":"ok"}',
-        )
-    )
-    result = reflect_node(
-        reflect_state,
-        {
-            "configurable": {
-                "model_client": reflect_model,
-                "device_factory": fake_device,
-                "verbose": False,
-                "after_screen_marks": [
-                    {
-                        "mark_id": "after_phone",
-                        "bbox": [50, 60, 950, 160],
-                        "role": "TextView",
-                        "text_summary": "13900139000",
-                    }
-                ],
-                "grounding_provider_name": "off",
-            }
-        },
-    )
-
-    assert result["verifier_status"] == "failure"
-    assert result["reflection_verdict"] == "failed"
-    assert result["verifier_evidence"]["missing_postconditions"] == [
-        "private_text_unverifiable"
-    ]
+    assert planned["expected_outcome"]["must_observe"] == ["13800138000"]
+    assert "13800138000" not in planned["action_raw"]
 
 
 def test_reflect_node_type_text_postcondition_success(base_state, fake_device) -> None:
@@ -2080,7 +2041,7 @@ def test_reflect_node_hash_matches_text_segment(base_state, fake_device) -> None
     ]
 
 
-def test_reflect_node_selected_object_hash_matches_detail_page(
+def test_reflect_node_selected_object_text_matches_detail_page(
     base_state, fake_device
 ) -> None:
     base_state["action_parsed"] = {
@@ -2097,8 +2058,7 @@ def test_reflect_node_selected_object_hash_matches_detail_page(
         "timeout_hint": None,
         "dynamic_regions": [],
         "object_type": "video",
-        "object_evidence_hash": "5d0fe1cbd1c0",
-        "title_hash": "5d0fe1cbd1c0",
+        "evidence_summary": "视频标题一",
         "expected_page_type": "detail_or_player",
         "expected_rank": 1,
     }
@@ -2160,8 +2120,7 @@ def test_reflect_node_selected_object_detects_wrong_detail(
         "timeout_hint": None,
         "dynamic_regions": [],
         "object_type": "video",
-        "object_evidence_hash": "5d0fe1cbd1c0",
-        "title_hash": "5d0fe1cbd1c0",
+        "evidence_summary": "视频标题一",
         "expected_page_type": "detail_or_player",
         "expected_rank": 1,
     }
@@ -2200,7 +2159,7 @@ def test_reflect_node_selected_object_detects_wrong_detail(
 
     assert result["verifier_status"] == "unknown"
     signals = result["verifier_evidence"]["selected_object_signals"]
-    assert signals["selected_object_hash_match"] is False
+    assert signals["selected_object_text_match"] is False
     assert "wrong_detail_opened" not in signals
 
 
@@ -2221,8 +2180,7 @@ def test_reflect_node_selected_object_detects_still_on_feed(
         "timeout_hint": None,
         "dynamic_regions": [],
         "object_type": "video",
-        "object_evidence_hash": "5d0fe1cbd1c0",
-        "title_hash": "5d0fe1cbd1c0",
+        "evidence_summary": "视频标题一",
         "expected_page_type": "detail_or_player",
         "expected_rank": 1,
     }
@@ -2282,8 +2240,7 @@ def test_reflect_node_selected_object_feed_terms_win_over_generic_player_terms(
         "timeout_hint": None,
         "dynamic_regions": [],
         "object_type": "video",
-        "object_evidence_hash": "5d0fe1cbd1c0",
-        "title_hash": "5d0fe1cbd1c0",
+        "evidence_summary": "视频标题一",
         "expected_page_type": "detail_or_player",
         "expected_rank": 1,
     }
@@ -2328,7 +2285,7 @@ def test_reflect_node_selected_object_feed_terms_win_over_generic_player_terms(
 
     assert result["verifier_status"] == "success"
     signals = result["verifier_evidence"]["selected_object_signals"]
-    assert signals["selected_object_hash_match"] is True
+    assert signals["selected_object_text_match"] is True
     assert signals["selected_object_detail_signal"] is False
     assert signals["selected_object_match"] is True
     assert "same_surface_still_visible" not in signals
@@ -3589,8 +3546,7 @@ def test_acceptance_node_accepts_pending_finish_with_final_goal_evidence(
         "timeout_hint": None,
         "dynamic_regions": [],
         "object_type": "video",
-        "object_evidence_hash": "5d0fe1cbd1c0",
-        "title_hash": "5d0fe1cbd1c0",
+        "evidence_summary": "视频标题一",
         "expected_page_type": "detail_or_player",
         "expected_rank": 2,
     }
@@ -3804,8 +3760,7 @@ def test_acceptance_node_rejects_ranked_finish_without_expected_rank_match(
         "timeout_hint": None,
         "dynamic_regions": [],
         "object_type": "video",
-        "object_evidence_hash": "5d0fe1cbd1c0",
-        "title_hash": "5d0fe1cbd1c0",
+        "evidence_summary": "视频标题一",
         "expected_page_type": "detail_or_player",
         "expected_rank": 1,
     }

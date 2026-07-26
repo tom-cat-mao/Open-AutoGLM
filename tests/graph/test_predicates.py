@@ -259,7 +259,7 @@ def test_legacy_expected_outcome_translates_to_typed_shadow_contract() -> None:
     assert "True" not in str(transition.trace_projection())
 
 
-def test_plan_shadow_projection_cannot_store_private_expected_value(
+def test_plan_runtime_keeps_private_expected_value_but_history_does_not(
     base_state, fake_device
 ) -> None:
     from types import SimpleNamespace
@@ -285,7 +285,8 @@ def test_plan_shadow_projection_cannot_store_private_expected_value(
         {"configurable": {"model_client": Model(), "device_factory": fake_device}},
     )
 
-    assert "private@example.com" not in str(result)
+    assert result["expected_outcome"]["must_observe"] == ["private@example.com"]
+    assert "private@example.com" not in result["action_raw"]
     assert result["expected_transition"]["schema_version"] == "expected_transition_v1"
 
 

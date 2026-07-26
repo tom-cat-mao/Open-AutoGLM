@@ -9,6 +9,7 @@ and reused across plan/reflect nodes.
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
+import re
 from typing import Any, Literal, get_args
 
 from phone_agent.graph.context import redact_context_text
@@ -32,6 +33,7 @@ VerificationKind = Literal[
 # Derived from the Literal so the runtime allowlist and the type can never
 # list different verification kinds.
 VALID_VERIFICATIONS: frozenset[str] = frozenset(get_args(VerificationKind))
+LEGACY_SHA256_STUB_PATTERN = re.compile(r"sha256:([0-9a-fA-F]{8,64})")
 
 CompileStatus = Literal["pending", "compiled", "failed", "user_override"]
 VerificationStrategy = Literal[

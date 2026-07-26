@@ -13,6 +13,7 @@ from typing import Any, Protocol
 
 from phone_agent.config.apps import DEFAULT_APP_REGISTRY, get_app_registry_summary
 from phone_agent.graph.goal import (
+    LEGACY_SHA256_STUB_PATTERN,
     GoalContract,
     SuccessCriterion,
     VALID_VERIFICATIONS,
@@ -280,7 +281,7 @@ GOAL_COMPILER_SYSTEM_PROMPT_CN = """你是一个任务目标编译器。你的�
 }
 
 verification 枚举说明：
-- accessibility_text_match: 屏幕上可观察到特定文本（在 description 里用 sha256:xxxxxxxxxxxx 形式给出 hash stub）
+- accessibility_text_match: 屏幕上可观察到特定文本（在 description 里逐字写出预期可见文本）
 - object_hash_match: 选中的 UI 对象 hash 匹配
 - object_rank_match: 选中第 ordinal 个列表项
 - app_or_activity_match: 目标 app 或 activity 在前台
@@ -563,11 +564,17 @@ def _attach_core_predicates(
                 "ui.toggle_state", toggle_state
             )
         elif criterion.verification == "accessibility_text_match":
-            match = re.search(r"sha256:([a-fA-F0-9]{8,64})", criterion.description)
+            match = LEGACY_SHA256_STUB_PATTERN.search(criterion.description)
             if match:
                 predicate = CORE_PREDICATE_CATALOG.create_spec(
                     "ui.text_hash_present", match.group(1).casefold()
                 )
+            else:
+                expected_text = criterion.description.strip() or entity_span
+                if expected_text:
+                    predicate = CORE_PREDICATE_CATALOG.create_spec(
+                        "semantic.entity_matches", expected_text
+                    )
         elif criterion.verification == "vlm_judge" and entity_span:
             # Semantic coverage for entity-bearing tasks: bind the raw primary
             # entity span, which is the domain fact providers actually emit for

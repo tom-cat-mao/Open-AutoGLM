@@ -4,7 +4,7 @@ Replaces the keyword-based ``validate_finish_claim``.  For each
 ``SuccessCriterion`` in the contract, checks the criterion using the
 appropriate signal source:
 
-* ``accessibility_text_match`` → sha256 stub matching against after-observation text
+* ``accessibility_text_match`` → raw-text contains matching, with legacy sha256 support
 * ``object_hash_match`` → verifier_evidence.selected_object_match
 * ``object_rank_match`` → verifier_evidence.selected_object_expected_rank == ordinal
 * ``app_or_activity_match`` → current_app / top_activity package match
@@ -24,7 +24,11 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol
 
-from phone_agent.graph.goal import GoalContract, SuccessCriterion
+from phone_agent.graph.goal import (
+    LEGACY_SHA256_STUB_PATTERN,
+    GoalContract,
+    SuccessCriterion,
+)
 from phone_agent.graph.predicates import (
     CORE_PREDICATE_CATALOG,
     EvidenceReference,
@@ -568,17 +572,18 @@ class AggregatingGoalEvaluator:
     ) -> dict[str, Any]:
         from phone_agent.graph.verifier import _match_expected_text, _observation_text
 
-        # Extract sha256 stubs from description (format: "sha256:xxxxxxxxxxxx")
         digest_list = self._extract_sha256_stubs(crit.description)
-        if not digest_list:
-            # No stubs — fall back to vlm_judge-style (can't programmatically verify)
-            return {"status": "missing", "reason": "no_sha256_stubs_in_description"}
-        # _match_expected_text expects items prefixed with "sha256:"
-        stubs = [f"sha256:{d}" for d in digest_list]
-        text_blob = _observation_text(after_observation).lower()
-        matched, missing = _match_expected_text(stubs, text_blob)
+        text_blob = _observation_text(after_observation)
+        if digest_list:
+            expected = [f"sha256:{digest}" for digest in digest_list]
+        else:
+            expected_text = crit.description.strip().strip("\"'` “”‘’「」『』")
+            expected = [expected_text] if expected_text else []
+        matched, missing = _match_expected_text(expected, text_blob)
         if missing:
             return {"status": "missing", "reason": "text_not_found", "missing": missing}
+        if not matched:
+            return {"status": "missing", "reason": "text_not_found"}
         return {"status": "matched", "reason": "text_matched", "matched": matched}
 
     def _check_object_hash(
@@ -753,9 +758,7 @@ class AggregatingGoalEvaluator:
 
     @staticmethod
     def _extract_sha256_stubs(text: str) -> list[str]:
-        import re
-
-        return re.findall(r"sha256:([0-9a-fA-F]{6,16})", text)
+        return LEGACY_SHA256_STUB_PATTERN.findall(text)
 
     @staticmethod
     def _current_app(value: Any) -> str:
