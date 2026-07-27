@@ -132,6 +132,37 @@ def verify_action_outcome(
                 evidence={**evidence, "missing_postconditions": ["app_opened"]},
             )
 
+    if expected.kind == "surface_changed":
+        before_surface = _surface_identity(before_observation)
+        after_surface = _surface_identity(after_observation)
+        before_screen = _find_string_key(before_observation, {"screen_id"})
+        after_screen = _find_string_key(after_observation, {"screen_id"})
+        changed = bool(
+            (before_surface and after_surface and before_surface != after_surface)
+            or (before_screen and after_screen and before_screen != after_screen)
+        )
+        if changed:
+            return VerifierResult(
+                status="success",
+                confidence=0.9,
+                signals={**signals, "surface_changed": True},
+                evidence={**evidence, "matched_postconditions": ["surface_changed"]},
+            )
+        if (before_surface and after_surface) or (before_screen and after_screen):
+            return VerifierResult(
+                status="failure",
+                confidence=0.75,
+                signals={**signals, "surface_changed": False},
+                failure_cause="wrong_page",
+                evidence={**evidence, "missing_postconditions": ["surface_changed"]},
+            )
+        return VerifierResult(
+            status="unknown",
+            confidence=0.0,
+            signals=signals,
+            evidence={**evidence, "missing_postconditions": ["surface_unavailable"]},
+        )
+
     before_text_blob = _observation_text(before_observation)
     text_blob = _observation_text(after_observation)
     has_after_observation_text = bool(text_blob.strip())
@@ -348,6 +379,18 @@ def merge_verifier_with_reflection(
             or "unknown",
         }
     if verifier.status == "success" and verifier.confidence >= 0.9:
+        return {
+            **reflection,
+            "action_succeeded": True,
+            "reflection_verdict": "succeeded",
+            "failure_cause": None,
+        }
+    selected = (verifier.evidence or {}).get("selected_object_signals") or {}
+    if (
+        verifier.status == "success"
+        and selected.get("selected_object_text_match") is True
+        and selected.get("selected_object_surface_changed") is True
+    ):
         return {
             **reflection,
             "action_succeeded": True,
@@ -645,6 +688,40 @@ def _failure_cause_for_expected_kind(kind: str) -> str:
     return "unknown"
 
 
+def _normalize_surface_identity(value: Any) -> str:
+    """Reduce a surface string to a comparable bare activity component.
+
+    The before and after payloads are produced by different code paths that do
+    not agree on shape: ``state_before_observation_payload`` only exposes
+    ``snapshot.foreground_activity`` (a bare activity class), while the after
+    payload additionally carries ``device_signals.top_activity`` as an Android
+    ``package/activity`` component. Comparing the raw strings made the two sides
+    structurally unequal on every single step, so one physical screen reported
+    ``selected_object_surface_changed=True`` and a ``surface_changed``
+    postcondition matched even when nothing had navigated. Normalizing both
+    sides to the activity component restores a comparable identity.
+
+    Two packages exposing the same fully-qualified activity class would collide
+    here, but activity names are fully qualified and app identity is tracked
+    separately via ``before_app`` / ``after_app``.
+    """
+
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    package, separator, activity = text.partition("/")
+    if not separator:
+        return text
+    package = package.strip()
+    activity = activity.strip()
+    if not activity:
+        return package
+    # Android shorthand: "com.pkg/.Inner" denotes activity "com.pkg.Inner".
+    if activity.startswith("."):
+        return f"{package}{activity}"
+    return activity
+
+
 def _surface_identity(observation: dict[str, Any] | None) -> str:
     """Return the foreground activity/window identifying the current surface.
 
@@ -659,12 +736,12 @@ def _surface_identity(observation: dict[str, Any] | None) -> str:
         for key in ("top_activity", "focused_window"):
             value = signals.get(key)
             if isinstance(value, str) and value.strip():
-                return value.strip()
+                return _normalize_surface_identity(value)
     value = _find_string_key(
         observation,
         {"top_activity", "foreground_activity", "focused_window", "current_window"},
     )
-    return str(value or "").strip()
+    return _normalize_surface_identity(value)
 
 
 def is_content_bearing_evidence(value: Any) -> bool:

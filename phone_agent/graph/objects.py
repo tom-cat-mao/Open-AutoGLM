@@ -988,8 +988,85 @@ def _object_type_for(node: StructureNode, mark: Mark) -> str:
     if "button" in haystack or node.clickable:
         return "button"
     if "textview" in haystack and mark.confidence < 1.0:
+        if _looks_like_tab(node, mark):
+            return "control"
         return "card"
     return "control"
+
+
+# Short tab-bar labels (「全部」「用户」「视频」「图文」…) are TextViews too; the
+# live run showed the model tapping them as if they were content cards. Class
+# names and container/resource ids are the structural signals; keep the label
+# list bounded to generic selectors so real cards with specific titles are not
+# demoted.
+_TAB_CLASS_MARKERS = ("tablayout", "tabitem", "tabhost", "pagertabstrip")
+_TAB_CONTAINER_MARKERS = ("tab", "indicator", "navigationbar", "nav_bar")
+_TAB_GENERIC_LABELS = {
+    "全部",
+    "推荐",
+    "用户",
+    "视频",
+    "图文",
+    "直播",
+    "关注",
+    "发现",
+    "附近",
+    "最新",
+    "最热",
+    "精华",
+    "all",
+    "recommend",
+    "recommended",
+    "user",
+    "users",
+    "video",
+    "videos",
+    "live",
+    "following",
+    "latest",
+    "hot",
+    "top",
+}
+_TAB_MAX_LABEL_CHARS = 4
+# Tab-strip entries are short bars (e.g. 124x60 device px at the top of the
+# screen, normalized to ~115x25); content cards span hundreds of px tall.
+# Normalized marks/structures are both in the 0-1000 space, so the thresholds
+# below are directly comparable.
+_TAB_MAX_HEIGHT_NORMALIZED = 80.0
+_TAB_MAX_HEIGHT_TO_WIDTH = 0.5
+
+
+def _looks_like_tab(node: StructureNode, mark: Mark) -> bool:
+    """Conservative tab detector: structural signals first, bounded generic
+    label + tab-strip geometry as fallback. Anything uncertain stays a card."""
+
+    structural = " ".join(
+        str(value or "").lower()
+        for value in (node.class_name, node.path, node.role, mark.role)
+    )
+    if any(marker in structural for marker in _TAB_CLASS_MARKERS):
+        return True
+    if "tab" in structural:
+        return True
+
+    label = str(mark.text_summary or node.text_summary or "").strip()
+    if not label or len(label) > _TAB_MAX_LABEL_CHARS:
+        return False
+    if label.lower() not in _TAB_GENERIC_LABELS:
+        return False
+    return _in_tab_strip_geometry(node, mark)
+
+
+def _in_tab_strip_geometry(node: StructureNode, mark: Mark) -> bool:
+    bounds = node.bounds
+    if bounds is None:
+        x1, y1, x2, y2 = (float(v) for v in mark.bbox)
+        width, height = x2 - x1, y2 - y1
+    else:
+        width, height = float(bounds[2] - bounds[0]), float(bounds[3] - bounds[1])
+    if width <= 0 or height <= 0:
+        return False
+    return height <= _TAB_MAX_HEIGHT_NORMALIZED and (height / width) <= _TAB_MAX_HEIGHT_TO_WIDTH
 
 
 def _prompt_objects(

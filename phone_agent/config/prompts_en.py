@@ -44,7 +44,7 @@ TASK_POLICIES = """# Operation policies
 CONTEXT_USAGE_RULES = """# Context usage rules
 - Prefer the current screenshot and user task; if context conflicts with the screenshot, trust the screenshot.
 - Do not repeat raw context content, and do not copy private context text into action messages.
-- `avoid_repeating` means avoid repeating known failures; `next_hint` is guidance, not a command.
+- `avoid_repeating` means the same target has been repeated; after the threshold, the system rejects the action and consumes a step, so choose a different target or strategy.
 """
 
 FAILURE_RECOVERY_MAP = """# Failure recovery strategies

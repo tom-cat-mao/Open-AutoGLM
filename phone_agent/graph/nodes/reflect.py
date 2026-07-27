@@ -18,6 +18,7 @@ from phone_agent.graph.context import (
     get_context_mode,
     normalize_failure_cause,
     sanitize_context_payload,
+    repeated_action_key,
     select_reflect_context,
     trajectory_liveness,
     _redacted_private_text,
@@ -274,19 +275,24 @@ SAFE_VERIFIER_EVIDENCE_STRINGS = {
 
 
 def _sanitize_verifier_evidence(
-    evidence: dict, *, task_context: str | None = None
+    evidence: dict,
+    *,
+    task_context: str | None = None,
+    consumer: str = "trace_payload",
 ) -> dict:
     """Sanitize verifier evidence while preserving stable machine codes."""
 
-    safe = sanitize_context_payload(
-        evidence, consumer="trace_payload", task_context=task_context
-    )
+    safe = sanitize_context_payload(evidence, consumer=consumer, task_context=task_context)
     if not isinstance(safe, dict):
         return {}
     for key in ("matched_postconditions", "missing_postconditions"):
         value = evidence.get(key) if isinstance(evidence, dict) else None
         if isinstance(value, list):
-            safe[key] = [_sanitize_postcondition_item(item) for item in value]
+            safe[key] = (
+                list(value)
+                if consumer == "reflect_prompt"
+                else [_sanitize_postcondition_item(item) for item in value]
+            )
     return safe
 
 
@@ -303,16 +309,19 @@ def _sanitize_postcondition_item(item):
 
 
 def _sanitize_verifier_result_dict(
-    verifier_result, *, task_context: str | None = None
+    verifier_result,
+    *,
+    task_context: str | None = None,
+    consumer: str = "trace_payload",
 ) -> dict:
     data = verifier_result.to_dict()
     if isinstance(data.get("evidence"), dict):
         data["evidence"] = _sanitize_verifier_evidence(
-            data["evidence"], task_context=task_context
+            data["evidence"], task_context=task_context, consumer=consumer
         )
     if isinstance(data.get("signals"), dict):
         data["signals"] = sanitize_context_payload(
-            data["signals"], consumer="reflect_prompt", task_context=task_context
+            data["signals"], consumer=consumer, task_context=task_context
         )
     return data
 
@@ -483,6 +492,45 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
                 predicate_ids=facts["predicate_ids"],
                 target_app_entered=in_target_app,
             )
+    goal_agenda: list[dict] = []
+    if goal_contract is not None:
+        from phone_agent.graph.goal_evaluator import pure_goal_evaluator
+
+        programmatic_names = [
+            criterion.name
+            for criterion in goal_contract.success_criteria
+            if criterion.verification != "vlm_judge" and criterion.predicate is not None
+        ]
+        folded = pure_goal_evaluator.evaluate(
+            contract=goal_contract,
+            contract_id=runtime_contract_id,
+            evidence_ledger=ledger,
+            finish_claim_matched=programmatic_names,
+            screen_id=after_observation.snapshot.screen_id,
+            observation_epoch=after_observation.snapshot.observation_epoch,
+        )
+        per_criterion = folded.evidence.get("per_criterion") or {}
+        for criterion in goal_contract.success_criteria:
+            raw_status = str(
+                (per_criterion.get(criterion.name) or {}).get("status") or "unknown"
+            )
+            goal_agenda.append(
+                {
+                    "description": sanitize_context_payload(
+                        criterion.description,
+                        "description",
+                        consumer="default",
+                        task_context=task,
+                    ),
+                    "status": "satisfied" if raw_status == "matched" else raw_status,
+                    "verification": criterion.verification,
+                    "predicate_id": (
+                        criterion.predicate.predicate_id
+                        if criterion.predicate is not None
+                        else None
+                    ),
+                }
+            )
     if configurable.get("enable_legacy_page_signal_adapter", False):
         observe_legacy_page_signals(
             expected=state.get("expected_outcome"),
@@ -530,10 +578,17 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
         current_app=current_app,
         screen_id=after_observation.snapshot.screen_id,
         reached_surface=after_observation.snapshot.foreground_activity,
+        semantic_screen_id=after_observation.snapshot.semantic_screen_id,
     )
+    # Liveness novelty reads the raw transition stream: visited_screens is
+    # deduped for display, which would compress oscillation and hide "stuck".
+    transition_stream = [
+        {**item, "_transition_stream": True}
+        for item in (preview_memory.get("screen_transition_stream") or [])
+    ]
     current_liveness = trajectory_liveness(
         tried_actions=list(preview_memory.get("tried_actions") or []),
-        visited_states=list(preview_memory.get("visited_screens") or []),
+        visited_states=transition_stream or list(preview_memory.get("visited_screens") or []),
         criterion_history=goal_evidence.criterion_history_from_ledger(
             ledger, contract_id=runtime_contract_id
         ),
@@ -586,7 +641,9 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
     reflect_context_block = reflect_context_selection.context_block
     if deterministic_reflection is None:
         verifier_signals = str(
-            _sanitize_verifier_result_dict(verifier_result, task_context=task)
+            _sanitize_verifier_result_dict(
+                verifier_result, task_context=task, consumer="reflect_prompt"
+            )
         )
         observation_diff = str(
             observation_shape_diff(
@@ -743,6 +800,7 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
         parsed_reflection.suggested_strategy = "continue"
 
     context_updates = {"context_mode": context_mode}
+    repeat_count = 0
     if context_enabled(context_mode):
         loading = parsed_reflection.failure_cause in {
             "network_or_loading",
@@ -814,6 +872,13 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
             current_app=current_app,
             screen_id=after_observation.snapshot.screen_id,
             reached_surface=after_observation.snapshot.foreground_activity,
+            semantic_screen_id=after_observation.snapshot.semantic_screen_id,
+        )
+        previous_progress = (state.get("gui_memory") or {}).get("task_progress") or {}
+        stuck_rounds = (
+            int(previous_progress.get("stuck_rounds") or 0) + 1
+            if current_liveness["state"] == "stuck"
+            else 0
         )
         context_updates["gui_memory"]["task_progress"] = {
             **dict(
@@ -822,6 +887,7 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
             "trajectory_liveness": current_liveness["state"],
             "liveness_reasons": current_liveness["reasons"],
             "novelty_streak": current_liveness["novelty_streak"],
+            "stuck_rounds": stuck_rounds,
         }
         # Trajectory-level check, deliberately separate from `detect_repeated_failure`:
         # a loop where every step verifies as successful is invisible to failure memory,
@@ -831,6 +897,14 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
             tried_actions
             and detect_repeated_action(tried_actions[:-1], tried_actions[-1])
         )
+        if tried_actions:
+            repeat_key = repeated_action_key(tried_actions[-1])
+            if repeat_key is not None:
+                repeat_count = sum(
+                    1
+                    for item in tried_actions
+                    if repeated_action_key(item) == repeat_key
+                )
 
     emit_trace(
         config,
@@ -855,6 +929,16 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
                 "failure_memory_hit_count", 0
             ),
             "repeated_failure_count": context_updates.get("repeated_failure_count", 0),
+            "repeated_action_detected": context_updates.get(
+                "repeated_action_detected", False
+            ),
+            "repeat_count": repeat_count,
+            "trajectory_liveness": current_liveness["state"],
+            "stuck_rounds": (
+                (context_updates.get("gui_memory") or {})
+                .get("task_progress", {})
+                .get("stuck_rounds", 0)
+            ),
         },
     )
 
@@ -875,6 +959,7 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
         "verifier_failure_cause": verifier_result.failure_cause,
         "verifier_evidence": verifier_evidence,
         "goal_evidence_ledger": ledger,
+        "goal_agenda": goal_agenda,
         "observation_retry_count": 0,
         # Reflect judges a single action and never completes the task; only the
         # acceptance node can set this True, after the goal gate passes.

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import re
 from dataclasses import asdict, dataclass
 from typing import Any
@@ -18,6 +19,7 @@ NOVELTY_EXHAUSTION_STEPS = int(
 CONTEXT_MODES = {"off", "observe", "inject"}
 DEFAULT_CONTEXT_MODE = "inject"
 DEFAULT_CONTEXT_BUDGET: dict[str, int] = {
+    "goal_agenda_chars": 400,
     "screen_belief_summary_chars": 300,
     "summarized_history_chars": 800,
     "failure_memory_items": 3,
@@ -38,8 +40,12 @@ DEFAULT_CONTEXT_BUDGET: dict[str, int] = {
     "tried_action_items": 6,
     "visited_screen_items": 6,
 }
+_SECTION_BUDGETS = {
+    "goal_agenda": 400,
+}
 DEFAULT_PROMPT_VERSION = "context_harness_v1"
 CONTEXT_SECTION_IDS = (
+    "goal_agenda",
     "screen_belief",
     "last_action_outcome",
     "failure_memory",
@@ -543,10 +549,11 @@ def default_gui_memory() -> dict[str, Any]:
         "tried_actions": [],
         "scroll_memory": {},
         "task_progress": {},
+        "screen_transition_stream": [],
     }
 
 
-def _action_target_center(
+def action_target_center(
     state: dict[str, Any], action: dict[str, Any]
 ) -> list[float] | None:
     """Return the grounded tap target centre, rounded to absorb sub-pixel jitter."""
@@ -563,7 +570,7 @@ def _action_target_center(
         return None
 
 
-def _state_surface_identity(state: dict[str, Any]) -> str | None:
+def state_surface_identity(state: dict[str, Any]) -> str | None:
     """Return the foreground activity of the screen the action was issued on."""
 
     observation = state.get("observation")
@@ -592,10 +599,10 @@ def detect_repeated_action(
     surface.
     """
 
-    key = _repeated_action_key(outcome)
+    key = repeated_action_key(outcome)
     if key is None:
         return False
-    prior = sum(1 for item in tried_actions or [] if _repeated_action_key(item) == key)
+    prior = sum(1 for item in tried_actions or [] if repeated_action_key(item) == key)
     return prior >= REPEATED_ACTION_THRESHOLD
 
 
@@ -615,11 +622,16 @@ def trajectory_liveness(
             "novelty_streak": 0,
         }
 
-    state_history = visited_states if visited_states else tried_actions
+    state_history = [
+        item
+        for item in (visited_states if visited_states else tried_actions)
+        if item.get("_transition_stream")
+    ] or (visited_states if visited_states else tried_actions)
     states = [
-        (item.get("surface"), item.get("screen_id"))
+        (item.get("surface"), item.get("semantic_screen_id") or item.get("screen_id"))
         for item in state_history
-        if item.get("surface") is not None and item.get("screen_id") is not None
+        if item.get("surface") is not None
+        and (item.get("semantic_screen_id") is not None or item.get("screen_id") is not None)
     ]
     novelty_streak = 0
     seen: set[tuple[Any, Any]] = set()
@@ -665,16 +677,28 @@ def _criterion_moved_toward_satisfaction(history: list[dict]) -> bool:
     )
 
 
-def _repeated_action_key(item: dict[str, Any]) -> tuple[Any, ...] | None:
+def repeated_action_key(item: dict[str, Any]) -> tuple[Any, ...] | None:
     if not isinstance(item, dict):
         return None
     center = item.get("target_center")
     if not isinstance(center, (list, tuple)) or len(center) != 2:
         return None
     action = item.get("action")
-    if not action:
+    surface = item.get("surface")
+    if not action or surface is None:
         return None
-    return (str(action), tuple(center), item.get("surface"))
+    text_identity = item.get("text_identity")
+    if text_identity is None and str(action) in {"Type", "Type_Name"}:
+        text_identity = action_text_identity(item.get("text"))
+    return (str(action), tuple(center), surface, text_identity)
+
+
+def action_text_identity(value: Any) -> str | None:
+    """Return a privacy-safe identity for text-bearing repeated actions."""
+
+    if not isinstance(value, str):
+        return None
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
 def update_gui_memory(
@@ -683,6 +707,7 @@ def update_gui_memory(
     current_app: str,
     screen_id: str | None,
     reached_surface: str | None = None,
+    semantic_screen_id: str | None = None,
 ) -> dict[str, Any]:
     """Update GUI memory using only bounded identifiers and sanitized summaries."""
 
@@ -692,15 +717,33 @@ def update_gui_memory(
         visited = list(memory.get("visited_screens") or [])
         item = {
             "screen_id": screen_id,
+            "semantic_screen_id": semantic_screen_id,
             "surface": reached_surface,
             "current_app": sanitize_context_text_regex(current_app or "unknown"),
             "step_count": step,
         }
-        if not visited or (
-            visited[-1].get("screen_id"), visited[-1].get("surface")
-        ) != (screen_id, reached_surface):
+        current_identity = semantic_screen_id or screen_id
+        previous_identity = (
+            visited[-1].get("semantic_screen_id") or visited[-1].get("screen_id")
+            if visited
+            else None
+        )
+        if not visited or (visited[-1].get("surface"), previous_identity) != (
+            reached_surface,
+            current_identity,
+        ):
             visited.append(item)
         memory["visited_screens"] = visited[-10:]
+        # Raw transition stream for liveness novelty: visited_screens dedupes
+        # adjacent repeats for display, and any path that collapses repeats
+        # (same-screen dwell, or a caller-side dedupe) would make "stuck"
+        # structurally unreachable. The stream keeps one entry per
+        # observation so repeated identities always accumulate.
+        stream = list(memory.get("screen_transition_stream") or [])
+        stream.append(
+            {"surface": reached_surface, "semantic_screen_id": semantic_screen_id, "screen_id": screen_id}
+        )
+        memory["screen_transition_stream"] = stream[-10:]
 
     action = state.get("action_parsed") or {}
     if isinstance(action, dict) and action.get("_metadata") == "do":
@@ -719,8 +762,9 @@ def update_gui_memory(
                 # Geometry and surface, not screen_id, identify a repeated target:
                 # screen_id is content-derived, so it changes when a feed reorders
                 # while the same card stays in the same place.
-                "target_center": _action_target_center(state, action),
-                "surface": _state_surface_identity(state),
+                "target_center": action_target_center(state, action),
+                "surface": state_surface_identity(state),
+                "text_identity": action_text_identity(action.get("text")),
                 "result_success": (
                     (state.get("action_result") or {}).get("success")
                     if isinstance(state.get("action_result"), dict)
@@ -906,6 +950,9 @@ def build_plan_context_block(
         )
         component_truncated = True
 
+    goal_agenda = _render_goal_agenda(
+        state.get("goal_agenda"), lang=lang, consumer=consumer, task_context=task_context
+    )
     gui_memory = _sanitize_gui_memory_for_block(
         state.get("gui_memory"),
         task_context=task_context,
@@ -924,6 +971,11 @@ def build_plan_context_block(
     # block instead starved whichever section was assembled last, which is how loop
     # evidence disappeared exactly as the trajectory started looping.
     for label, value, section_budget in (
+        (
+            "goal_agenda",
+            goal_agenda,
+            budget.get("goal_agenda_chars", _SECTION_BUDGETS["goal_agenda"]),
+        ),
         ("screen_belief", belief, None),
         ("last_action_outcome", outcome, None),
         ("latest_failure_memory", failure_memory, None),
@@ -950,6 +1002,46 @@ def build_plan_context_block(
         "context_block_chars": len(block),
         "context_truncated": truncated or component_truncated,
     }
+
+
+def _render_goal_agenda(
+    value: Any,
+    *,
+    lang: str,
+    consumer: ContextConsumer,
+    task_context: str | None,
+) -> str:
+    if not isinstance(value, list) or not value:
+        return ""
+    satisfied: list[str] = []
+    unsatisfied: list[str] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        description = sanitize_context_payload(
+            str(item.get("description") or ""),
+            "description",
+            consumer=consumer,
+            task_context=task_context,
+        )
+        if not description:
+            continue
+        predicate = str(item.get("predicate_id") or item.get("verification") or "unknown")
+        status = str(item.get("status") or "unknown")
+        suffix = predicate
+        if item.get("verification") == "vlm_judge" and status != "satisfied":
+            suffix += ", pending acceptance" if lang == "en" else ", 待验收"
+        rendered = f"{description}({suffix})"
+        if status == "satisfied":
+            satisfied.append(rendered)
+        else:
+            unsatisfied.append(rendered)
+    lines = []
+    if satisfied:
+        lines.append(("Satisfied: " if lang == "en" else "已满足: ") + ", ".join(satisfied))
+    if unsatisfied:
+        lines.append(("Not satisfied: " if lang == "en" else "未满足: ") + ", ".join(unsatisfied))
+    return "\n".join(lines)
 
 
 def _build_avoid_repeating(state: dict[str, Any]) -> dict[str, Any]:
@@ -980,10 +1072,11 @@ def _build_avoid_repeating(state: dict[str, Any]) -> dict[str, Any]:
         or detect_repeated_action(tried[:-1], latest)
     ):
         return {}
-    key = _repeated_action_key(latest)
+    key = repeated_action_key(latest)
     if key is None:
         return {}
-    repeats = sum(1 for item in tried if _repeated_action_key(item) == key)
+    repeats = sum(1 for item in tried if repeated_action_key(item) == key)
+    lang = str(state.get("lang") or "cn")
     return {
         "action": latest.get("action"),
         "mark_id": latest.get("mark_id"),
@@ -992,9 +1085,10 @@ def _build_avoid_repeating(state: dict[str, Any]) -> dict[str, Any]:
         "repeat_count": repeats,
         "trajectory_liveness": progress.get("trajectory_liveness"),
         "next_hint": (
-            "This target on this surface has already been used; it produced no new "
-            "progress. Choose a different target, scroll to reveal new content, or "
-            "go back and take another route."
+            "The system will reject another action on this target after the repeat "
+            "threshold and consume a step. Choose a different target or strategy."
+            if lang == "en"
+            else "同一目标超过重复阈值后，系统将拒绝执行并消耗一步；请改换目标或策略。"
         ),
     }
 
@@ -1448,6 +1542,8 @@ def _bound_request_messages(messages: list[dict[str, Any]]) -> list[dict[str, An
 
 
 def _section_has_value(state: dict[str, Any], section: str) -> bool:
+    if section == "goal_agenda":
+        return bool(state.get("goal_agenda"))
     if section == "screen_belief":
         screen_belief = state.get("screen_belief")
         if not isinstance(screen_belief, dict):

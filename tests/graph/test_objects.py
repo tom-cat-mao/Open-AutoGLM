@@ -651,3 +651,68 @@ def test_visual_object_sensitivity_tags_route_to_takeover() -> None:
     )
 
     assert action["action"] == "Take_over"
+
+
+def test_tab_bar_textviews_are_not_objectified_as_cards() -> None:
+    """Regression for the 限速摩卡 live run: search-result tab row (「全部」
+    「用户」…) was objectified as `card rank=2/4` and the model tapped the tabs
+    as if they were content cards until the step budget ran out."""
+    from phone_agent.grounding.accessibility import (
+        parse_uiautomator_marks,
+        parse_uiautomator_structure,
+    )
+
+    xml = """<hierarchy>
+  <node text="" class="android.widget.FrameLayout" enabled="true" bounds="[0,0][1080,2400]">
+    <node text="" class="android.widget.LinearLayout" enabled="true" bounds="[0,96][1080,176]">
+      <node text="全部" class="android.widget.TextView" enabled="true" bounds="[16,104][140,164]" />
+      <node text="用户" class="android.widget.TextView" enabled="true" bounds="[192,104][316,164]" />
+    </node>
+    <node text="" class="androidx.recyclerview.widget.RecyclerView" scrollable="true" enabled="true" bounds="[0,200][1080,2300]">
+      <node text="30岁单身女会计转行干赛车的第一天，来自限速摩卡" class="android.widget.TextView" enabled="true" bounds="[20,240][1060,700]" />
+    </node>
+  </node>
+</hierarchy>"""
+    marks = parse_uiautomator_marks(xml, screen_width=1080, screen_height=2400)
+    structure = parse_uiautomator_structure(xml, screen_width=1080, screen_height=2400)
+    registry = MarkRegistry.from_marks(
+        "screentab", [{**mark, "screen_id": "screentab"} for mark in marks]
+    )
+
+    objects = build_object_registry(
+        screen_id="screentab", structure=structure, mark_registry=registry
+    )
+    by_mark = {obj.primary_mark_id: obj for obj in objects.objects.values()}
+
+    assert by_mark["ax_1"].object_type == "control"
+    assert by_mark["ax_2"].object_type == "control"
+    # A real content card with a specific long title must not be demoted.
+    assert by_mark["ax_4"].object_type == "card"
+    assert by_mark["ax_4"].ordinal_index == 1
+
+
+def test_short_generic_label_on_tall_card_stays_card() -> None:
+    """A generic short word on a tall element is a card, not a tab: geometry
+    is the discriminator once the label list matches."""
+    from phone_agent.grounding.accessibility import (
+        parse_uiautomator_marks,
+        parse_uiautomator_structure,
+    )
+
+    xml = """<hierarchy>
+  <node text="" class="android.widget.FrameLayout" enabled="true" bounds="[0,0][1080,2400]">
+    <node text="全部" class="android.widget.TextView" enabled="true" bounds="[20,240][1060,900]" />
+  </node>
+</hierarchy>"""
+    marks = parse_uiautomator_marks(xml, screen_width=1080, screen_height=2400)
+    structure = parse_uiautomator_structure(xml, screen_width=1080, screen_height=2400)
+    registry = MarkRegistry.from_marks(
+        "screentall", [{**mark, "screen_id": "screentall"} for mark in marks]
+    )
+
+    objects = build_object_registry(
+        screen_id="screentall", structure=structure, mark_registry=registry
+    )
+    obj = next(iter(objects.objects.values()))
+
+    assert obj.object_type == "card"

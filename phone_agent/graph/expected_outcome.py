@@ -26,6 +26,7 @@ OutcomeKind = Literal[
     "content_shifted",
     "target_appeared",
     "loading_finished",
+    "surface_changed",
 ]
 
 VALID_OUTCOME_KINDS: set[str] = {
@@ -37,6 +38,7 @@ VALID_OUTCOME_KINDS: set[str] = {
     "content_shifted",
     "target_appeared",
     "loading_finished",
+    "surface_changed",
 }
 EXPECTED_OUTCOME_FIELDS = {
     "kind",
@@ -123,6 +125,10 @@ class ExpectedOutcome:
         elif self.kind == "loading_finished":
             predicates.append(
                 CORE_PREDICATE_CATALOG.create_spec("screen.loading_state", "finished")
+            )
+        elif self.kind == "surface_changed":
+            predicates.append(
+                CORE_PREDICATE_CATALOG.create_spec("screen.content_changed", True)
             )
 
         for expected_hash in self.must_observe:
@@ -349,6 +355,8 @@ def default_expected_outcome(
             kind="loading_finished",
             must_not_observe=["loading", "spinner", "network_error"],
         )
+    if action_name == "Back":
+        return ExpectedOutcome(kind="surface_changed", must_observe=["surface_changed"])
     return ExpectedOutcome()
 
 
@@ -416,7 +424,7 @@ def expected_outcome_prompt_block(
 ) -> str:
     """Render a compact expected outcome block for verifier prompts."""
 
-    summary = sanitize_expected_outcome_dict(outcome, task_context=task_context)
+    summary = runtime_expected_outcome_dict(outcome, task_context=task_context)
     if summary is None:
         summary = ExpectedOutcome().trace_summary(task_context=task_context)
     if lang == "en":

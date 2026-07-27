@@ -42,6 +42,11 @@ def should_continue(state: AgentState) -> Literal["end", "replan", "takeover"]:
         return "takeover"
     if int(state.get("observation_retry_count") or 0) >= OBSERVATION_RETRY_LIMIT:
         return "takeover"
+    progress = (state.get("gui_memory") or {}).get("task_progress") or {}
+    if progress.get("trajectory_liveness") == "stuck":
+        if int(progress.get("stuck_rounds") or 0) >= 2:
+            return "takeover"
+        return "replan"
     return "replan"
 
 

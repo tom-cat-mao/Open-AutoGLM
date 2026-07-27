@@ -166,14 +166,20 @@ def test_should_continue_routes_takeover_after_terminal_guard(base_state) -> Non
     assert should_continue(base_state) == "end"
 
 
-def test_stuck_liveness_replans_without_takeover(base_state) -> None:
+def test_stuck_liveness_replans_once_then_routes_takeover(base_state) -> None:
+    """A first stuck fold replans; a consecutive stuck fold needs human recovery."""
+
     base_state["gui_memory"]["task_progress"] = {
         "trajectory_liveness": "stuck",
         "novelty_streak": 20,
+        "stuck_rounds": 1,
     }
 
     assert should_continue(base_state) == "replan"
     assert base_state.get("pending_interrupt") != "takeover"
+
+    base_state["gui_memory"]["task_progress"]["stuck_rounds"] = 2
+    assert should_continue(base_state) == "takeover"
 
 
 def test_reflect_conditional_edges_include_takeover_route() -> None:

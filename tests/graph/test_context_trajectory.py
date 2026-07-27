@@ -26,6 +26,7 @@ from phone_agent.graph.context import (
     detect_repeated_failure,
     update_gui_memory,
 )
+from phone_agent.graph.goal_evidence import criterion_history_from_ledger
 
 FEED_SURFACE = "com.xingin.xhs/com.xingin.alioth.search.GlobalSearchActivity"
 NOTE_CARD_CENTER = [747.0, 418.0]
@@ -85,6 +86,98 @@ def test_successful_two_state_oscillation_becomes_stuck() -> None:
     assert result["novelty_streak"] >= 4
 
 
+def test_semantic_two_state_oscillation_is_stuck_despite_unique_screen_hashes() -> None:
+    visited = [
+        {
+            "surface": "ProfileActivity",
+            "screen_id": f"pixel-hash-{index}",
+            "semantic_screen_id": f"semantic-{index % 2}",
+        }
+        for index in range(8)
+    ]
+
+    result = context_module.trajectory_liveness(
+        tried_actions=[],
+        visited_states=visited,
+        criterion_history=[],
+        budget={"novelty_exhaustion_steps": 4},
+    )
+
+    assert result["state"] == "stuck"
+    assert result["novelty_streak"] >= 4
+
+
+def test_update_gui_memory_oscillation_reaches_stuck_via_transition_stream() -> None:
+    """End-to-end: deduped visited_screens compresses A<->B to two entries, so
+    liveness must read the raw transition stream or stuck stays unreachable."""
+
+    memory: dict = {}
+    for index in range(8):
+        state = {
+            "step_count": index,
+            "gui_memory": memory,
+            "observation": {"snapshot": {"foreground_activity": "ProfileActivity"}},
+        }
+        memory = update_gui_memory(
+            state,
+            current_app="小红书",
+            screen_id=f"pixel-hash-{index}",
+            reached_surface="ProfileActivity",
+            semantic_screen_id=f"semantic-{index % 2}",
+        )
+
+    # Display memory dedupes consecutive identical identities; the oscillation
+    # keeps alternating, so only adjacent duplicates are dropped. The raw
+    # stream keeps every transition.
+    assert len(memory["visited_screens"]) == 8
+    assert len(memory["screen_transition_stream"]) == 8
+
+    stream = [
+        {**item, "_transition_stream": True}
+        for item in memory["screen_transition_stream"]
+    ]
+    result = context_module.trajectory_liveness(
+        tried_actions=[],
+        visited_states=stream,
+        criterion_history=[],
+        budget={"novelty_exhaustion_steps": 4},
+    )
+
+    assert result["state"] == "stuck"
+    assert result["novelty_streak"] >= 4
+
+
+def test_update_gui_memory_fresh_surfaces_keep_exploring_via_transition_stream() -> None:
+    memory: dict = {}
+    for index in range(8):
+        state = {
+            "step_count": index,
+            "gui_memory": memory,
+            "observation": {"snapshot": {"foreground_activity": f"Activity-{index}"}},
+        }
+        memory = update_gui_memory(
+            state,
+            current_app="小红书",
+            screen_id=f"pixel-hash-{index}",
+            reached_surface=f"Activity-{index}",
+            semantic_screen_id=f"semantic-{index}",
+        )
+
+    stream = [
+        {**item, "_transition_stream": True}
+        for item in memory["screen_transition_stream"]
+    ]
+    result = context_module.trajectory_liveness(
+        tried_actions=[],
+        visited_states=stream,
+        criterion_history=[],
+        budget={"novelty_exhaustion_steps": 4},
+    )
+
+    assert result["state"] == "exploring"
+    assert result["novelty_streak"] == 0
+
+
 def test_criterion_movement_is_advancing_and_resets_novelty() -> None:
     result = context_module.trajectory_liveness(
         tried_actions=[
@@ -104,6 +197,57 @@ def test_criterion_movement_is_advancing_and_resets_novelty() -> None:
         "reasons": ["criterion_movement"],
         "novelty_streak": 0,
     }
+
+
+def test_goal_agenda_precedes_screen_belief_and_ledger_movement_advances() -> None:
+    ledger = [
+        {
+            "contract_id": "contract-1",
+            "criterion_id": "app_open",
+            "status": "unknown",
+            "screen_id": "screen-1",
+            "observation_epoch": 1,
+        },
+        {
+            "contract_id": "contract-1",
+            "criterion_id": "app_open",
+            "status": "matched",
+            "screen_id": "screen-2",
+            "observation_epoch": 2,
+        },
+    ]
+    history = criterion_history_from_ledger(ledger, contract_id="contract-1")
+    state = {
+        "goal_agenda": [
+            {
+                "description": "打开小红书",
+                "status": "satisfied",
+                "verification": "app_or_activity_match",
+                "predicate_id": "app.foreground_identity",
+            },
+            {
+                "description": "查看银石赛道相关内容",
+                "status": "unknown",
+                "verification": "vlm_judge",
+                "predicate_id": None,
+            },
+        ],
+        "screen_belief": {"summary": "搜索结果页", "confidence": "high"},
+    }
+
+    block, _metrics = build_plan_context_block(state)
+    liveness = context_module.trajectory_liveness(
+        tried_actions=[],
+        visited_states=[],
+        criterion_history=history,
+        budget={"novelty_exhaustion_steps": 4},
+    )
+
+    assert block.index("goal_agenda") < block.index("screen_belief")
+    assert "已满足: 打开小红书(app.foreground_identity)" in block
+    assert "未满足: 查看银石赛道相关内容(vlm_judge, 待验收)" in block
+    assert history
+    assert liveness["state"] == "advancing"
 
 
 def _succeeded_tap(step: int, *, screen_id: str) -> dict[str, object]:

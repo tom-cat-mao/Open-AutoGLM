@@ -126,6 +126,7 @@ class AgentState(TypedDict):
     finish_validation_status: Optional[str]  # pending / success / failure / unknown
     finish_validation_evidence: Optional[dict]  # trace-safe final goal evidence
     goal_evidence_ledger: list[dict]  # bounded privacy-safe criterion evidence; Reflect-owned
+    goal_agenda: list[dict]  # criterion descriptions and folded statuses; no evidence text
 
     # === Reflect 节点输出 ===
     reflection: Optional[str]  # 反思结论

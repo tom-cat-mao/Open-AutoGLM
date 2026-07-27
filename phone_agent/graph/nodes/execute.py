@@ -12,10 +12,15 @@ from phone_agent.actions.gesture import compile_action_to_gesture
 from phone_agent.actions.safety import decide_safety
 from phone_agent.actions.validator import ActionValidationError, validate_action
 from phone_agent.graph.context import (
+    REPEATED_ACTION_THRESHOLD,
+    action_target_center,
+    action_text_identity,
     build_action_outcome_summary,
     context_enabled,
     get_context_mode,
     sanitize_context_payload,
+    repeated_action_key,
+    state_surface_identity,
 )
 from phone_agent.graph.tools import dispatch_tool
 from phone_agent.graph.goal import finish_claim_summary
@@ -224,6 +229,81 @@ def execute_node(state: "AgentState", config: RunnableConfig) -> dict:
             "failure_cause": "action_validation_failed",
             **_layered_error("validation", exc.code),
             **_context_update(result.__dict__),
+        }
+
+    candidate_repeat = {
+        "action": action_parsed.get("action"),
+        "target_center": action_target_center(state, action_parsed),
+        "surface": state_surface_identity(state),
+        "text_identity": action_text_identity(action_parsed.get("text")),
+    }
+    repeat_key = repeated_action_key(candidate_repeat)
+    tried_actions = (state.get("gui_memory") or {}).get("tried_actions") or []
+    prior_repeat_count = (
+        sum(
+            1
+            for item in tried_actions
+            if isinstance(item, dict) and repeated_action_key(item) == repeat_key
+        )
+        if repeat_key is not None
+        else 0
+    )
+    if prior_repeat_count >= REPEATED_ACTION_THRESHOLD:
+        action_name = str(action_parsed.get("action") or "")
+        capability = get_tool_capability(action_name)
+        repeat_count = prior_repeat_count + 1
+        message = (
+            "Repeated target action rejected; choose a different target or strategy."
+            if state.get("lang") == "en"
+            else "重复目标动作已被拒绝；请改换目标或策略。"
+        )
+        result = ActionResult(success=False, should_finish=False, message=message)
+        receipt = (
+            ActionReceipt.create(
+                capability,
+                "rejected",
+                correlation_id=correlation_id,
+                side_effect_receipt={
+                    "reason_code": "repeated_target_loop",
+                    "repeat_count": repeat_count,
+                },
+            )
+            if capability is not None
+            else None
+        )
+        messages = _strip_and_append(messages, thinking, action_raw)
+        emit_trace(
+            config,
+            state,
+            "execute",
+            "execute_result",
+            {
+                "action": action_name,
+                "result": result.__dict__,
+                "action_receipt": receipt.to_dict() if receipt else None,
+                "repeated_action_detected": True,
+                "repeat_count": repeat_count,
+            },
+        )
+        return {
+            "action_result": result.__dict__,
+            "action_receipt": receipt.to_dict() if receipt else None,
+            **(
+                _receipt_ledger_update(state, action_name, receipt)
+                if receipt is not None
+                else {}
+            ),
+            "messages": messages,
+            "finished": False,
+            "failure_cause": "repeated_action",
+            "repeated_action_detected": True,
+            **_context_update(
+                result.__dict__,
+                {
+                    "action_receipt": receipt.to_dict() if receipt else None,
+                    "failure_cause": "repeated_action",
+                },
+            ),
         }
 
     pending_execute_confirmed = state.get("pending_execute") and state.get("interrupt_result") is True

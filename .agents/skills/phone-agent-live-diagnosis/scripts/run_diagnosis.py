@@ -293,6 +293,27 @@ SOURCE_RULES = [
 # repoint a layer fallback at the wrong rule (positional indices used to do this).
 _RULES_BY_LAYER = {rule["layer"]: rule for rule in SOURCE_RULES}
 
+DECISION_LOOP_RULE = {
+    "signals": {
+        "repeated_action_detected",
+        "avoid_repeating_ignored",
+        "budget_exhausted_no_finish",
+        "liveness_stuck",
+        "repeated_failure_count",
+    },
+    "layer": "decision",
+    "severity": "P1",
+    "title": "决策层重复循环：agent 在同一目标/页面上反复动作直至预算耗尽",
+    "files": [
+        "phone_agent/graph/context.py",
+        "phone_agent/graph/edges.py",
+        "phone_agent/graph/nodes/execute.py",
+        "phone_agent/graph/nodes/plan.py",
+    ],
+    "suggestion": "优先核对 execute 层重复目标守卫（repeated_target_loop）是否生效、trajectory_liveness 是否把语义振荡判为 stuck、avoid_repeating 提示是否被模型持续无视；此类失败不是 grounding/执行层故障，不要归因为 reflection。",
+    "verify": "用触发 repeated_action_detected / liveness_stuck 的 trace 重跑诊断，确认 decision finding 取代 reflection 误归因，且 signal_steps 覆盖率达到 confirmed。",
+}
+
 LAYER_FALLBACKS = {
     "parse": _RULES_BY_LAYER["parse"],
     "adapter": _RULES_BY_LAYER["parse"],
@@ -929,7 +950,13 @@ def summarize_trace(events: list[dict[str, Any]]) -> dict[str, Any]:
         }
         timeline.append(compact)
         steps.setdefault(step, []).append(compact)
-        if "error" in name or payload.get("error_code") or payload.get("failure_cause"):
+        # Routine per-step reflection failures are outcomes, not errors: every
+        # reflect_result carries failure_cause, so including them here makes
+        # every run look error-full. Only real error events and execution /
+        # infrastructure failure codes belong in the errors bucket.
+        if "error" in name or payload.get("error_code") or payload.get("grounding_error_code"):
+            errors.append(compact)
+        elif payload.get("failure_cause") and name != "reflect_result":
             errors.append(compact)
         if payload.get("grounding_error_code") or payload.get("grounding_observation") or payload.get("mark_provider_observation"):
             grounding.append(compact)
@@ -995,14 +1022,32 @@ def extract_fallback_chains(payload: dict[str, Any]) -> list[dict[str, Any]]:
 
 def build_code_findings(record: dict[str, Any], trace_summary: dict[str, Any]) -> list[dict[str, Any]]:
     signals = collect_signals(record, trace_summary)
+    step_count = int(trace_summary.get("step_count") or 0)
+    signal_steps = collect_signal_steps(trace_summary)
     findings = []
     matched_titles = set()
     for rule in SOURCE_RULES:
         matched = sorted(rule["signals"] & signals)
         if not matched:
             continue
-        findings.append(finding_from_rule(rule, matched, "confirmed"))
+        confidence = grade_confidence(matched, signal_steps, step_count)
+        finding = finding_from_rule(rule, matched, confidence)
+        finding["signal_steps"] = {
+            signal: signal_steps[signal] for signal in matched if signal in signal_steps
+        }
+        findings.append(finding)
         matched_titles.add(rule["title"])
+    loop_signals = decision_loop_signals(record, signal_steps)
+    loop_matched = sorted(DECISION_LOOP_RULE["signals"] & loop_signals)
+    if loop_matched:
+        confidence = grade_confidence(loop_matched, signal_steps, step_count)
+        finding = finding_from_rule(DECISION_LOOP_RULE, loop_matched, confidence)
+        finding["signal_steps"] = {
+            signal: signal_steps[signal] for signal in loop_matched if signal in signal_steps
+        }
+        findings.insert(0, finding)
+        matched_titles.add(DECISION_LOOP_RULE["title"])
+    _cap_weak_verifier_confidence(findings)
     layer = str(record.get("error_layer") or "")
     if layer and layer in LAYER_FALLBACKS:
         fallback = LAYER_FALLBACKS[layer]
@@ -1231,6 +1276,90 @@ def collect_signals(record: dict[str, Any], trace_summary: dict[str, Any]) -> se
     return signals
 
 
+def collect_signal_steps(trace_summary: dict[str, Any]) -> dict[str, list[str]]:
+    """Map each decision-loop signal to the step ids where it was observed."""
+
+    mapping: dict[str, set[str]] = {}
+    total_steps = max(int(trace_summary.get("step_count") or 0), 1)
+
+    def _add(signal: str, step: Any) -> None:
+        mapping.setdefault(signal, set()).add(str(step if step is not None else "none"))
+
+    for compact in trace_summary.get("timeline", []):
+        step = compact.get("step_id")
+        payload = compact.get("payload") or {}
+        if compact.get("event") != "reflect_result":
+            continue
+        if payload.get("repeated_action_detected"):
+            _add("repeated_action_detected", step)
+        repeat_count = payload.get("repeat_count")
+        if isinstance(repeat_count, int) and repeat_count >= 3:
+            _add("avoid_repeating_ignored", step)
+        liveness = payload.get("trajectory_liveness")
+        state = liveness.get("state") if isinstance(liveness, dict) else liveness
+        if state == "stuck":
+            _add("liveness_stuck", step)
+    return {signal: sorted(steps) for signal, steps in mapping.items()} if total_steps else {}
+
+
+def decision_loop_signals(
+    record: dict[str, Any], signal_steps: dict[str, list[str]]
+) -> set[str]:
+    """Decision-loop signals from the run record and per-step reflect payloads."""
+
+    signals = set(signal_steps)
+    steps = record.get("steps")
+    max_steps = record.get("max_steps")
+    if (
+        isinstance(steps, int)
+        and isinstance(max_steps, int)
+        and max_steps > 0
+        and steps >= max_steps
+        and not record.get("acceptance_round_count")
+        and record.get("finish_validation_status") is None
+    ):
+        signals.add("budget_exhausted_no_finish")
+    repeated_failures = record.get("repeated_failure_count")
+    if isinstance(repeated_failures, int) and repeated_failures >= 3:
+        signals.add("repeated_failure_count")
+    return signals
+
+
+def grade_confidence(matched: list[str], signal_steps: dict[str, list[str]], step_count: int) -> str:
+    """Grade by how much of the run the matched signals actually cover."""
+
+    if step_count <= 0:
+        return "needs-repro"
+    covered = set()
+    for signal in matched:
+        covered.update(signal_steps.get(signal) or [])
+    if not covered:
+        # Record-level signals (budget exhaustion, counters) and reflect
+        # verifier aggregates describe the whole run rather than one step, so
+        # absence of per-step evidence is neutral, not weak.
+        return "likely"
+    coverage = len(covered) / step_count
+    if coverage >= 0.5:
+        return "confirmed"
+    if coverage >= 0.2:
+        return "likely"
+    return "needs-repro"
+
+
+_VERIFIER_WEAK_SIGNALS = {"dynamic_change_only", "missing_postconditions", "verifier_unknown"}
+
+
+def _cap_weak_verifier_confidence(findings: list[dict[str, Any]]) -> None:
+    """A reflection finding built only from sporadic weak verifier signals is
+    never 'confirmed' — those fire on ordinary dynamic screens too."""
+    for finding in findings:
+        if finding.get("layer") != "reflection":
+            continue
+        matched = set(finding.get("matched_signals") or [])
+        if matched and matched <= _VERIFIER_WEAK_SIGNALS and finding.get("confidence") == "confirmed":
+            finding["confidence"] = "likely"
+
+
 def build_recommendations(findings: list[dict[str, Any]], record: dict[str, Any]) -> list[dict[str, Any]]:
     recommendations = []
     for index, finding in enumerate(findings, start=1):
@@ -1267,6 +1396,7 @@ LAYER_LABELS = {
     "goal": "目标契约编译",
     "checkpoint": "检查点恢复",
     "context": "上下文管理",
+    "decision": "决策层循环",
     "success": "无异常",
     "unknown": "未定位",
 }

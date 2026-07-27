@@ -46,7 +46,7 @@ TASK_POLICIES = """# 操作策略
 CONTEXT_USAGE_RULES = """# Context 使用规则
 - 优先相信当前截图和用户任务；context 与截图冲突时，以截图为准。
 - 不要复读 context 内容，不要把其中的隐私文本写入动作 message。
-- `avoid_repeating` 表示应避免重复失败动作；`next_hint` 只是建议，不是强制命令。
+- `avoid_repeating` 表示同一目标已重复；超过阈值后系统会拒绝执行并消耗一步预算，请改换目标或策略。
 """
 
 FAILURE_RECOVERY_MAP = """# 失败恢复策略

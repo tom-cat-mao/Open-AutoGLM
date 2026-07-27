@@ -252,3 +252,66 @@ def test_execute_revalidates_action_and_rejects_dangerous_fields(
     assert result["action_result"]["success"] is False
     assert result["failure_cause"] == "action_validation_failed"
     assert fake_device.calls == []
+
+
+def test_execute_rejects_third_same_surface_target_without_dispatch(
+    base_state, fake_device
+) -> None:
+    surface = "com.xingin.xhs/SearchActivity"
+    base_state["observation"] = {"snapshot": {"foreground_activity": surface}}
+    base_state["gui_memory"]["tried_actions"] = [
+        {"action": "Tap", "target_center": [500.0, 500.0], "surface": surface},
+        {"action": "Tap", "target_center": [500.0, 500.0], "surface": surface},
+    ]
+
+    result = execute_node(
+        base_state, {"configurable": {"device_factory": fake_device, "verbose": False}}
+    )
+
+    assert result["action_result"]["success"] is False
+    assert result["failure_cause"] == "repeated_action"
+    assert result["action_receipt"]["dispatch_status"] == "rejected"
+    assert result["action_receipt"]["side_effect_receipt"] == {
+        "reason_code": "repeated_target_loop",
+        "repeat_count": 3,
+    }
+    assert result["finished"] is False
+    assert fake_device.calls == []
+
+
+def test_execute_repeat_guard_distinguishes_surface_coordinate_and_type_text(
+    base_state, fake_device
+) -> None:
+    from phone_agent.graph.context import action_text_identity
+
+    surface = "com.xingin.xhs/SearchActivity"
+    base_state["action_parsed"] = {"_metadata": "do", "action": "Type", "text": "银石赛道"}
+    base_state["grounding_observation"] = {"center": [500, 500]}
+    base_state["observation"] = {"snapshot": {"foreground_activity": surface}}
+    base_state["gui_memory"]["tried_actions"] = [
+        {
+            "action": "Type",
+            "target_center": [500.0, 500.0],
+            "surface": surface,
+            "text_identity": action_text_identity("限速摩卡"),
+        },
+        {
+            "action": "Type",
+            "target_center": [500.0, 500.0],
+            "surface": "com.xingin.xhs/ProfileActivity",
+            "text_identity": action_text_identity("银石赛道"),
+        },
+        {
+            "action": "Type",
+            "target_center": [510.0, 500.0],
+            "surface": surface,
+            "text_identity": action_text_identity("银石赛道"),
+        },
+    ]
+
+    result = execute_node(
+        base_state, {"configurable": {"device_factory": fake_device, "verbose": False}}
+    )
+
+    assert result["action_result"]["success"] is True
+    assert any(call[0] == "type_text" for call in fake_device.calls)
