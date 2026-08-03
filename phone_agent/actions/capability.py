@@ -81,6 +81,15 @@ _CAPABILITIES = {
             can_advance_goal=False,
         ),
         ToolCapability(
+            action_name="Locate",
+            implementation_status="implemented",
+            side_effect_kind="none",
+            observation_effect="none",
+            required_postconditions=(),
+            retry_safety="safe",
+            can_advance_goal=False,
+        ),
+        ToolCapability(
             action_name="Call_API",
             implementation_status="unavailable",
             side_effect_kind="external",

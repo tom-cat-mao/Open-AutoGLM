@@ -92,6 +92,26 @@ def dispatch_tool(
             success=True, should_finish=True, message=action.get("message", "")
         )
 
+    # F1: Locate is dispatched by the execute-node internal capability branch
+    # (it needs state + config, which dispatch_tool cannot see). A stray call
+    # arriving here — or an un-grounded ``intent`` action that still names
+    # Locate — must not fall into the unknown-type terminal branch: return a
+    # no-device, no-finish result so the graph routes back to plan instead of
+    # killing the run.
+    if action_name := action.get("action"):
+        if str(action_name) == "Locate":
+            return ActionResult(
+                success=True,
+                should_finish=False,
+                message="Locate handled by internal capability dispatch",
+            )
+    if action_type == "intent" and str(action.get("action") or "") == "Locate":
+        return ActionResult(
+            success=True,
+            should_finish=False,
+            message="Locate handled by internal capability dispatch",
+        )
+
     if action_type != "do":
         return ActionResult(
             success=False,

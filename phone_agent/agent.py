@@ -6,6 +6,7 @@ from dataclasses import asdict, dataclass, field
 from typing import Any
 
 from phone_agent.device_factory import get_device_factory
+from langgraph.errors import GraphInterrupt
 from phone_agent.model import ModelClient, ModelConfig
 from phone_agent.graph.builder import create_agent_graph
 from phone_agent.config import PROMPT_VERSION, get_prompt_version
@@ -21,6 +22,7 @@ from phone_agent.graph.context import (
 from phone_agent.graph.state import AgentState
 from phone_agent.graph.trace import JsonlTraceWriter
 from phone_agent.graph.runtime_goal import RuntimeGoalContext
+from phone_agent.config.policy import absolute_max_steps
 from phone_agent.grounding.factory import DEFAULT_GROUNDING_PROVIDER_NAME
 
 
@@ -98,6 +100,9 @@ class RunResult:
     retry_count: int = 0
     observation_retry_count: int = 0
     acceptance_round_count: int = 0
+    locate_count: int = 0
+    continuation_count: int = 0
+    finish_source: str | None = None
     context_mode: str = DEFAULT_CONTEXT_MODE
     context_strategy: str = "unknown"
     prompt_version: str = PROMPT_VERSION
@@ -133,6 +138,35 @@ class RunResult:
     def to_dict(self) -> dict[str, Any]:
         """Serialize the result to a JSON-friendly dictionary."""
         return asdict(self)
+
+
+def interrupt_payload(
+    interrupt: Exception,
+    default: str = "User intervention required",
+) -> tuple[str, str]:
+    """Extract (message, type) from a LangGraph HITL interrupt.
+
+    Different langgraph versions store the interrupt values either on
+    ``interrupt.interrupts`` or in ``exception.args``; the takeover node emits
+    ``{"type": "takeover", "message": ...}``. Returns the first message found.
+    """
+
+    message = default
+    interrupt_type = "takeover"
+    items = getattr(interrupt, "interrupts", None)
+    if not items and getattr(interrupt, "args", None):
+        items = interrupt.args[0] if interrupt.args else None
+    if isinstance(items, (list, tuple)):
+        for item in items:
+            value = getattr(item, "value", None)
+            if isinstance(value, dict):
+                interrupt_type = str(value.get("type") or interrupt_type)
+                message = str(value.get("message") or message)
+                break
+    elif isinstance(items, dict):
+        interrupt_type = str(items.get("type") or interrupt_type)
+        message = str(items.get("message") or message)
+    return message, interrupt_type
 
 
 class PhoneAgent:
@@ -207,6 +241,33 @@ class PhoneAgent:
             initial_state = self._build_initial_state(task, screenshot)
             config = self._build_graph_config(device_factory, trace_id, trace_writer)
             result = self._graph.invoke(initial_state, config)
+        except GraphInterrupt as interrupt:
+            # F2.0: a HITL takeover interrupt is a clean terminal attribution, not
+            # a run error. The interrupt carries the takeover message from
+            # takeover_node; the run simply ends here (no resume path in eval/CLI
+            # structured runs), so it must not be recorded as ``run_error``.
+            message, interrupt_type = interrupt_payload(interrupt)
+            if trace_writer:
+                trace_writer.emit(
+                    "agent",
+                    "run_interrupted",
+                    0,
+                    {"type": interrupt_type, "message": message},
+                )
+            return RunResult(
+                success=False,
+                finished=True,
+                steps=0,
+                duration=time.perf_counter() - started_at,
+                final_message=message,
+                error=None,
+                failure_cause="takeover",
+                hitl_count=1,
+                trace_id=trace_id,
+                trace_path=str(trace_writer.path) if trace_writer else None,
+                context_mode=self.agent_config.context_mode,
+                prompt_version=self.agent_config.prompt_version,
+            )
         except Exception as e:
             if trace_writer:
                 trace_writer.emit("agent", "run_error", 0, {"message": str(e)})
@@ -259,6 +320,10 @@ class PhoneAgent:
             "step_count": 0,
             "max_steps": self.agent_config.max_steps,
             "lang": self.agent_config.lang,
+            "locate_count": 0,
+            "continuation_count": 0,
+            "continuation_last_latch_count": 0,
+            "absolute_max_steps": absolute_max_steps(self.agent_config.max_steps),
             "screen_width": screenshot.width,
             "screen_height": screenshot.height,
             "screenshot_b64": None,
@@ -435,6 +500,9 @@ class PhoneAgent:
             ),
             observation_retry_count=int(state.get("observation_retry_count") or 0),
             acceptance_round_count=int(state.get("acceptance_round_count") or 0),
+            locate_count=int(state.get("locate_count") or 0),
+            continuation_count=int(state.get("continuation_count") or 0),
+            finish_source=state.get("finish_source"),
             verifier_status=state.get("verifier_status"),
             verifier_failure_cause=state.get("verifier_failure_cause"),
             verifier_evidence=state.get("verifier_evidence"),

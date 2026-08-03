@@ -109,6 +109,22 @@ def ground_intent_to_action(
         raise GroundingError("missing_field", "intent requires action")
     action_name = _canonical_action_name(action_name)
 
+    if action_name == "Locate":
+        # F1: Locate is an internal visual-search capability, not a device
+        # action. It must pass through to the execute-node internal dispatch
+        # untouched (grounding never resolves it to a mark): the model asks
+        # "where is X?" and the harness answers by running the visual provider
+        # against the current screenshot.
+        hint = intent.get("target_text_hint")
+        if not isinstance(hint, str) or not hint.strip():
+            raise GroundingError("missing_field", "Locate requires target_text_hint")
+        try:
+            return validate_action(
+                {"_metadata": "do", "action": "Locate", "target_text_hint": hint}
+            )
+        except ActionValidationError as exc:
+            raise GroundingError(exc.code, str(exc)) from exc
+
     mark_id = intent.get("target_mark_id")
     if not mark_id and _has_object_selector(intent):
         registry = _require_mark_registry(registry)

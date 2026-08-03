@@ -12,7 +12,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from phone_agent.agent import AgentConfig, PhoneAgent, RunResult
+from phone_agent.agent import AgentConfig, PhoneAgent, RunResult, interrupt_payload
+from langgraph.errors import GraphInterrupt
 from phone_agent.graph.context import DEFAULT_CONTEXT_MODE, normalize_context_mode
 from phone_agent.graph.trace import JsonlTraceWriter, sanitize_for_trace
 from phone_agent.model import ModelConfig
@@ -122,7 +123,14 @@ def run_dry_task(
 
 
 def run_agent_task(task: EvalTask, args: argparse.Namespace) -> RunResult:
-    """Run a task through PhoneAgent.run_structured()."""
+    """Run a task through PhoneAgent.run_structured().
+
+    F2.0: a takeover interrupt inside the graph raises GraphInterrupt; the
+    agent-level catch converts it to a clean terminal RunResult, but this
+    defensive catch guarantees the eval harness never records it as a run error
+    even if the interrupt escapes.
+    """
+
     agent = PhoneAgent(
         model_config=build_eval_model_config(task, args),
         agent_config=AgentConfig(
@@ -147,7 +155,24 @@ def run_agent_task(task: EvalTask, args: argparse.Namespace) -> RunResult:
             locateanything_max_structure_calls=args.locateanything_max_structure_calls,
         ),
     )
-    return agent.run_structured(task.task)
+    try:
+        return agent.run_structured(task.task)
+    except GraphInterrupt as interrupt:
+        message, _interrupt_type = interrupt_payload(interrupt)
+        return RunResult(
+            success=False,
+            finished=True,
+            steps=0,
+            duration=0.0,
+            final_message=message,
+            error=None,
+            failure_cause="takeover",
+            hitl_count=1,
+            trace_id=f"eval-interrupt-{uuid.uuid4()}",
+            trace_path=None,
+            context_mode=args.context_mode,
+            prompt_version="context_harness_v1",
+        )
 
 
 def build_eval_model_config(task: EvalTask, args: argparse.Namespace) -> ModelConfig:
@@ -298,6 +323,9 @@ def run_eval(args: argparse.Namespace) -> dict[str, Any]:
     total_message_chars_after = 0
     total_failure_memory_hits = 0
     total_repeated_failures = 0
+    total_continuations = 0
+    total_locate_uses = 0
+    finish_source_counts: dict[str, int] = {}
     verifier_status_counts: dict[str, int] = {}
     finish_validation_counts: dict[str, int] = {}
     selected_section_counts: dict[str, int] = {}
@@ -305,6 +333,8 @@ def run_eval(args: argparse.Namespace) -> dict[str, Any]:
         total_retries += int(item.get("retry_count") or 0)
         total_observation_retries += int(item.get("observation_retry_count") or 0)
         total_acceptance_rounds += int(item.get("acceptance_round_count") or 0)
+        total_continuations += int(item.get("continuation_count") or 0)
+        total_locate_uses += int(item.get("locate_count") or 0)
         total_context_chars += int(item.get("context_block_chars") or 0)
         context_truncated_count += 1 if item.get("context_truncated") else 0
         total_messages_before += int(item.get("messages_before") or 0)
@@ -325,6 +355,9 @@ def run_eval(args: argparse.Namespace) -> dict[str, Any]:
         cause = item.get("failure_cause")
         if cause:
             failure_cause_histogram[str(cause)] = failure_cause_histogram.get(str(cause), 0) + 1
+        finish_source = item.get("finish_source")
+        if finish_source:
+            finish_source_counts[str(finish_source)] = finish_source_counts.get(str(finish_source), 0) + 1
         grounding_failure = item.get("grounding_failure_code")
         if grounding_failure:
             grounding_failure_histogram[str(grounding_failure)] = grounding_failure_histogram.get(str(grounding_failure), 0) + 1
@@ -345,6 +378,9 @@ def run_eval(args: argparse.Namespace) -> dict[str, Any]:
             "retry_count": total_retries,
             "observation_retry_count": total_observation_retries,
             "acceptance_round_count": total_acceptance_rounds,
+            "continuation_count": total_continuations,
+            "locate_count": total_locate_uses,
+            "finish_source_counts": finish_source_counts,
             "failure_cause_histogram": failure_cause_histogram,
             "grounding_failure_histogram": grounding_failure_histogram,
             "provider_grounding_count": grounding_count,

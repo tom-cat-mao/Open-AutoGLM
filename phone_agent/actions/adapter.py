@@ -38,6 +38,7 @@ ACTION_ALIASES = {
     "note": "Note",
     "call_api": "Call_API",
     "interact": "Interact",
+    "locate": "Locate",
     "take_over": "Take_over",
 }
 CANONICAL_ACTIONS = set(ACTION_ALIASES.values())
@@ -81,6 +82,7 @@ ALLOWED_PROVIDER_FIELDS_BY_ACTION: dict[str, set[str]] = {
     "Note": COMMON_DO_FIELDS | {"text"},
     "Call_API": COMMON_DO_FIELDS | {"text"},
     "Interact": COMMON_DO_FIELDS | {"text"},
+    "Locate": COMMON_DO_FIELDS | {"target_text_hint"},
     "Take_over": COMMON_DO_FIELDS | {"text"},
 }
 
@@ -193,6 +195,11 @@ def adapt_json_action(payload: str | dict[str, Any]) -> dict[str, Any]:
             action["message"] = text_value
         else:
             action["text"] = text_value
+    elif action_name == "Locate":
+        hint = data.get("target_text_hint")
+        if not isinstance(hint, str) or not hint.strip():
+            raise ActionAdapterError("missing_field", "Locate requires target_text_hint")
+        action["target_text_hint"] = hint
     elif action_name == "Launch":
         app = data.get("app") or data.get("app_name")
         if not isinstance(app, str):

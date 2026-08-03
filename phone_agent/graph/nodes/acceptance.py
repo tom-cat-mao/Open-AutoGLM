@@ -25,9 +25,19 @@ from typing import TYPE_CHECKING
 
 from langchain_core.runnables import RunnableConfig
 
-from phone_agent.config.policy import DEFAULT_VERIFICATION_POLICY
+from phone_agent.config.policy import (
+    CONTINUATION_GRANT_STEPS,
+    CONTINUATION_MAX_GRANTS,
+    DEFAULT_VERIFICATION_POLICY,
+    absolute_max_steps,
+)
 from phone_agent.device_factory import ObservationCaptureError
-from phone_agent.graph.context import get_context_mode, sanitize_context_payload
+from phone_agent.graph.context import (
+    continuation_credential,
+    get_context_mode,
+    latched_criterion_count,
+    sanitize_context_payload,
+)
 from phone_agent.graph.device_observation import capture_device_observation
 from phone_agent.graph.fact_providers import (
     collect_goal_facts,
@@ -198,10 +208,23 @@ def acceptance_node(state: "AgentState", config: RunnableConfig) -> dict:
     )
     budget_update: dict = {}
     if budget_forced:
+        # F2 window budget: the window boundary is either a plain budget-forced
+        # acceptance or the run's absolute step ceiling (initial window * 3). At
+        # the absolute ceiling no continuation can be earned, so the run ends
+        # with an explicit ``absolute_budget_exhausted`` attribution.
+        absolute_cap = int(
+            state.get("absolute_max_steps")
+            or absolute_max_steps(state.get("max_steps"))
+        )
+        is_absolute_exhausted = int(state.get("step_count") or 0) >= absolute_cap
         budget_update = {
             "pending_finish": True,
             "budget_acceptance_done": True,
-            "finish_source": "budget_forced",
+            "finish_source": (
+                "absolute_budget_exhausted"
+                if is_absolute_exhausted
+                else "budget_forced"
+            ),
         }
         emit_trace(
             config,
@@ -211,6 +234,8 @@ def acceptance_node(state: "AgentState", config: RunnableConfig) -> dict:
             {
                 "step_count": state.get("step_count"),
                 "max_steps": state.get("max_steps"),
+                "absolute_max_steps": absolute_cap,
+                "absolute_budget_exhausted": is_absolute_exhausted,
                 "finish_claim": None,
                 "pending_finish": True,
                 "matched_terminal_evidence": [],
@@ -385,6 +410,11 @@ def acceptance_node(state: "AgentState", config: RunnableConfig) -> dict:
                 "authority_layer": "hard_veto",
             },
         )
+        continuation_update = (
+            _continuation_decision(state, config, evaluation=evaluation)
+            if budget_forced
+            else {}
+        )
         return _rejected(
             state,
             context_mode=context_mode,
@@ -393,7 +423,11 @@ def acceptance_node(state: "AgentState", config: RunnableConfig) -> dict:
             ledger=ledger,
             observation=after_observation,
             current_app=current_app,
-            extra_update={**adequacy_update, **budget_update},
+            extra_update={
+                **adequacy_update,
+                **budget_update,
+                **continuation_update,
+            },
         )
 
     # --- layer 3: semantic judgement, only where it is actually needed ---
@@ -508,6 +542,11 @@ def acceptance_node(state: "AgentState", config: RunnableConfig) -> dict:
     )
 
     if evaluation.status != "success":
+        continuation_update = (
+            _continuation_decision(state, config, evaluation=evaluation)
+            if budget_forced
+            else {}
+        )
         return _rejected(
             state,
             context_mode=context_mode,
@@ -516,7 +555,11 @@ def acceptance_node(state: "AgentState", config: RunnableConfig) -> dict:
             ledger=ledger,
             observation=after_observation,
             current_app=current_app,
-            extra_update={**adequacy_update, **budget_update},
+            extra_update={
+                **adequacy_update,
+                **budget_update,
+                **continuation_update,
+            },
         )
 
     return {
@@ -548,6 +591,74 @@ def _observation_update(after_observation, current_app: str) -> dict:
         "observation": after_observation.to_dict(),
         "mark_registry": after_observation.mark_registry.to_dict(),
     }
+
+
+def _continuation_decision(
+    state: "AgentState", config: RunnableConfig, *, evaluation: GoalEvaluation
+) -> dict:
+    """Evaluate and apply the F2 earned-continuation at a rejected window boundary.
+
+    The credential is a pure function (``context.continuation_credential``); the
+    write happens HERE in the node — edges never write state (pi-16 pit #4).
+    Telemetry is emitted before thresholds are adjusted, and grants are capped
+    by ``CONTINUATION_MAX_GRANTS`` and by the absolute step ceiling.
+    """
+
+    credential = continuation_credential(
+        {**state, "finish_validation_evidence": evaluation.to_dict()}
+    )
+    current_latch = latched_criterion_count(state)
+    update = {"continuation_last_latch_count": current_latch}
+    absolute_cap = int(
+        state.get("absolute_max_steps") or absolute_max_steps(state.get("max_steps"))
+    )
+    current_max = int(state.get("max_steps") or 0)
+    granted = (
+        credential.granted
+        and int(state.get("continuation_count") or 0) < CONTINUATION_MAX_GRANTS
+        and current_max + CONTINUATION_GRANT_STEPS <= absolute_cap
+    )
+    if granted:
+        emit_trace(
+            config,
+            state,
+            "acceptance",
+            "continuation_granted",
+            {
+                "branches": list(credential.branches),
+                "reason": credential.reason,
+                "max_steps_before": current_max,
+                "max_steps_after": current_max + CONTINUATION_GRANT_STEPS,
+                "continuation_count": int(state.get("continuation_count") or 0) + 1,
+                "absolute_max_steps": absolute_cap,
+                "step_count": state.get("step_count"),
+            },
+        )
+        update.update(
+            {
+                "max_steps": current_max + CONTINUATION_GRANT_STEPS,
+                "continuation_count": int(state.get("continuation_count") or 0) + 1,
+                "budget_acceptance_done": False,
+                "finish_source": None,
+                "pending_finish": False,
+            }
+        )
+    else:
+        emit_trace(
+            config,
+            state,
+            "acceptance",
+            "continuation_denied",
+            {
+                "branches": list(credential.branches),
+                "reason": credential.reason,
+                "continuation_count": int(state.get("continuation_count") or 0),
+                "absolute_budget_exhausted": bool(
+                    int(state.get("step_count") or 0) >= absolute_cap
+                ),
+            },
+        )
+    return update
 
 
 def _rejected(

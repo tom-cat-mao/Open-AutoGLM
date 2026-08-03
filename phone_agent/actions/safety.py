@@ -43,6 +43,14 @@ def decide_safety(action: dict[str, Any]) -> SafetyDecision:
             reason="sensitive_tap_requires_confirmation",
             sanitized_trace_payload={"action": action_name, "interrupt_type": "confirmation"},
         )
+    if action_name == "Locate":
+        # Internal visual search: pure observation helper, no device side effect,
+        # no HITL, no Goal progress. Never routes to confirm/takeover.
+        return SafetyDecision(
+            route="approved",
+            reason="internal_locate_no_side_effect",
+            sanitized_trace_payload={"action": action_name, "interrupt_type": None},
+        )
     return SafetyDecision(
         route="approved",
         reason="safe_to_execute",

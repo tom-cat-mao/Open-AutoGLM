@@ -60,6 +60,14 @@ class AgentState(TypedDict):
     max_steps: int  # 最大步数
     lang: str  # 语言
 
+    # === F1 locate tool 预算 ===
+    locate_count: int  # 本 run 已执行 locate 次数（上限 LOCATE_MAX_PER_RUN）
+
+    # === F2 窗口预算（earned continuation） ===
+    continuation_count: int  # 已授予的续命窗口次数（上限 CONTINUATION_MAX_GRANTS）
+    continuation_last_latch_count: int  # 上一窗口边界时锁存（ever_matched）标准数
+    absolute_max_steps: int  # 本 run 硬性步数上限（初始窗口 * 3）
+
     # === 屏幕 ===
     screen_width: int  # 设备屏幕宽度（像素）
     screen_height: int  # 设备屏幕高度（像素）

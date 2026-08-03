@@ -314,8 +314,13 @@ Split counters (one meaning each; they used to share `retry_count`):
   failures. At its limit this routes takeover, because it is unrecoverable.
 - `acceptance_round_count` — finish claims rejected by the gate, i.e. replan
   rounds. Not an error count.
-- `max_steps` exhaustion is an **incomplete report, never a takeover**. Takeover
-  means only a human can do this (login / captcha / payment).
+- `max_steps` exhaustion is an **incomplete report, never a takeover**: the
+  window ended and the budget-forced acceptance either rejected the claim
+  (→ `goal_not_satisfied`), granted a continuation (trace
+  `continuation_granted`; `max_steps` grew, `budget_acceptance_done` reset), or
+  hit the run's absolute ceiling (`finish_source=absolute_budget_exhausted`).
+  Takeover means only a human can do this (login / captcha / payment /
+  structural infeasibility).
 
 Contract adequacy signals (compile-time, from the `goal_compile_result` trace
 event — **not** present in `result.json`):
@@ -396,7 +401,9 @@ style:
   candidates that do not pan out; that is the intended state, not a defect. Only
   `stuck` (no new state and no criterion movement) is a loop.
 - Do not report `max_steps` exhaustion as a takeover, and do not report a takeover
-  as "the agent gave up". Takeover means only a human can proceed.
+  as "the agent gave up". Takeover means only a human can proceed. A window
+  exhaustion that earned a continuation is progress, not a defect — check the
+  `continuation_granted` / `continuation_denied` traces before attributing.
 - `--dry-run` never enters the graph (`by_node` is just `eval`), so it validates
   the report pipeline only — never finish-gate or grounding behavior.
 - Do not auto-edit business code from this skill unless the user separately asks

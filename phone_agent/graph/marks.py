@@ -135,6 +135,41 @@ class MarkRegistry:
     def get(self, mark_id: str) -> Mark | None:
         return self.marks.get(str(mark_id))
 
+    def with_extra_marks(self, extra: list[dict[str, Any] | Mark]) -> "MarkRegistry":
+        """Merge additional marks onto the SAME screen snapshot.
+
+        F1 locate: the visual provider is queried against the current
+        screenshot, so the screen binding (``screen_id`` / ``perceptual_hash`` /
+        ``raw_screenshot_hash``) is unchanged — only ``mark_set_version`` is
+        recomputed (P0 #9: hash binding must not mismatch after merging). Marks
+        bound to a different screen are dropped fail-closed. ``mark_id``
+        generation is the caller's job (``locate_N`` from the state counter);
+        this method never invents ids.
+        """
+
+        if not extra:
+            return self
+        merged = dict(self.marks)
+        for index, item in enumerate(extra, start=1):
+            try:
+                mark = item if isinstance(item, Mark) else _coerce_mark(
+                    self.screen_id, item, index
+                )
+            except (TypeError, ValueError):
+                continue
+            if mark.screen_id != self.screen_id:
+                continue
+            merged[mark.mark_id] = mark
+        return MarkRegistry(
+            screen_id=self.screen_id,
+            marks=merged,
+            semantic_screen_id=self.semantic_screen_id,
+            observation_epoch=self.observation_epoch,
+            mark_set_version=build_mark_set_version(merged),
+            perceptual_hash=self.perceptual_hash,
+            raw_screenshot_hash=self.raw_screenshot_hash,
+        )
+
     def trace_summary(self) -> dict[str, Any]:
         return {
             "screen_id": self.screen_id,

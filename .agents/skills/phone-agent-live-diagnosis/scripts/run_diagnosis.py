@@ -298,6 +298,7 @@ DECISION_LOOP_RULE = {
         "repeated_action_detected",
         "avoid_repeating_ignored",
         "budget_exhausted_no_finish",
+        "absolute_budget_exhausted",
         "liveness_stuck",
         "repeated_failure_count",
     },
@@ -1319,6 +1320,8 @@ def decision_loop_signals(
         and record.get("finish_validation_status") is None
     ):
         signals.add("budget_exhausted_no_finish")
+    if record.get("finish_source") == "absolute_budget_exhausted":
+        signals.add("absolute_budget_exhausted")
     repeated_failures = record.get("repeated_failure_count")
     if isinstance(repeated_failures, int) and repeated_failures >= 3:
         signals.add("repeated_failure_count")

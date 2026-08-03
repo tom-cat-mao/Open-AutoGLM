@@ -10,6 +10,33 @@ import unicodedata
 
 SafetyRoute = Literal["confirm", "takeover"]
 
+# ---------------------------------------------------------------------------
+# Run-budget constants (F1 locate tool / F2 earned continuation)
+# ---------------------------------------------------------------------------
+
+# F1: how many locate actions may run per run, and how many locate marks may
+# be merged onto one screen snapshot before fail-closed rejection.
+LOCATE_MAX_PER_RUN = 3
+LOCATE_MAX_MARKS_PER_SCREEN = 5
+
+# F2: window-budget continuation constants. `max_steps` is the current window
+# size; a rejected budget-forced acceptance may earn one more window of
+# CONTINUATION_GRANT_STEPS steps (up to CONTINUATION_MAX_GRANTS times).
+# CONTINUATION_WINDOW_STEPS bounds the credential's criterion-movement lookback
+# and CONTINUATION_NOVELTY_NEGATION_STREAK is the novelty streak that negates
+# branch-free grants. absolute_max_steps() is the hard ceiling on max_steps.
+CONTINUATION_GRANT_STEPS = 10
+CONTINUATION_MAX_GRANTS = 2
+CONTINUATION_WINDOW_STEPS = 6
+CONTINUATION_ABSOLUTE_MULTIPLIER = 3
+CONTINUATION_NOVELTY_NEGATION_STREAK = 4
+
+
+def absolute_max_steps(max_steps: int) -> int:
+    """Return the hard step ceiling for one run (initial window * 3)."""
+
+    return max(1, int(max_steps or 1)) * CONTINUATION_ABSOLUTE_MULTIPLIER
+
 
 @dataclass(frozen=True)
 class SafetyCategory:

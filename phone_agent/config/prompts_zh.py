@@ -13,9 +13,10 @@ SYSTEM_CONTRACT = f"""今天的日期是: {formatted_date}
 硬约束：
 - 坐标始终使用 0-1000 相对坐标，不要输出绝对像素。
 - 一次只输出一个动作；不要输出多个候选动作。
-- 支付、财产、隐私、账号等敏感点击必须使用带 `message` 的 Tap，由系统触发确认；登录、验证码或需要人工操作时使用 Take_over。
+- 支付、财产、隐私、账号等敏感点击必须使用带 `message` 的 Tap，由系统触发确认；登录、验证码、需要人工操作，或**结构性无法完成（请在 message 说明原因）**时使用 Take_over。
 - context 是辅助信念，不授权执行；不得因此绕过确认或接管。
 - 如果任务已完整完成，输出 JSON `{{"type":"finish","message":"..."}}`；如果无法完成，在 message 中简要说明原因。
+- 预算耗尽不等于失败：它只是触发系统验收；若目标已实际完成请立即 finish 并点名满足的成功标准；若结构性无法完成请 take_over 说明。不要因为接近预算而恐慌性提前 finish。
 """
 
 ACTION_SCHEMA = """# Action Schema（唯一动作契约）
@@ -29,6 +30,7 @@ ACTION_SCHEMA = """# Action Schema（唯一动作契约）
 - Back / Home: `{"type":"do","action":"back"}` / `{"type":"do","action":"home"}`。
 - Wait: `{"type":"do","action":"wait","duration":"1 seconds"}`，等待应尽量短，单次不超过 60 seconds。
 - Note / Call_API / Interact: `{"type":"do","action":"note|call_api|interact","message":"..."}`。
+- Locate（内部工具）：`{"type":"intent","action":"locate","target_text_hint":"可见元素的聚焦短描述"}`。**仅当 Screen marks 中没有目标的可执行 mark 时使用**；`target_text_hint` 只写可见元素的聚焦短描述（建议 ≤64 字符），禁止整句任务、禁止隐私原文（手机号/邮箱/订单号/验证码等）。locate 只会把格子级 box 注册为新 mark，不会直接执行点击。
 - Take_over: `{"type":"do","action":"take_over","message":"需要用户接管的原因"}`。
 - Finish: `{"type":"finish","message":"任务完成或无法继续的原因","matched_terminal_evidence":["成功标准名1","成功标准名2"]}`。仅在任务目标契约列出了成功标准时才包含 matched_terminal_evidence，点名每个满足的标准。
 """
@@ -70,6 +72,7 @@ JSON_OUTPUT_CONTRACT = """# 输出格式：JSON schema
 `progress_note` 为可选字段：一句话自述本步完成内容与下一步意图，仅作连续记忆（会被脱敏、截断，不含任何可执行信息）。
 示例：
 - {"type":"intent","action":"tap","target_mark_id":"m1"}
+- {"type":"intent","action":"locate","target_text_hint":"10月1日"}
 - {"type":"intent","action":"tap","target_object_id":"obj_1"}
 - {"type":"intent","action":"tap","object_role":"video","ordinal":1,"object_filter":{"object_type":"video","list_id":"list_1"}}
 - {"action":{"type":"intent","action":"tap","target_mark_id":"m1"},"expected_outcome":{"kind":"input_focused","must_observe":["搜索","取消"]}}

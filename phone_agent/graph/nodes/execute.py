@@ -25,7 +25,9 @@ from phone_agent.graph.context import (
     update_gui_memory,
 )
 from phone_agent.graph.tools import dispatch_tool
+from phone_agent.graph.tools.locate import locate_target, trace_safe_payload
 from phone_agent.graph.goal import finish_claim_summary
+from phone_agent.graph.marks import MarkRegistry
 from phone_agent.graph.trace import emit_trace
 from phone_agent.model.client import MessageBuilder
 
@@ -395,6 +397,146 @@ def execute_node(state: "AgentState", config: RunnableConfig) -> dict:
             **_context_update(
                 result.__dict__,
                 {"action_receipt": receipt.to_dict() if receipt else None},
+            ),
+        }
+
+    # Internal capability dispatch (F1 locate): Locate runs in-process against
+    # the CURRENT observation — no device side effect, no Goal progress, no
+    # reobservation (capability observation_effect="none"/can_advance_goal=False
+    # so after_execute routes back to plan). This branch MUST sit after the
+    # safety gate and before the unknown-action terminal branch so an internal
+    # intent is never intercepted by the `_metadata != "do"` guard. Failure
+    # writes failure_cause here in execute (replan skips reflect, so no other
+    # node would record it).
+    if action_parsed.get("action") == "Locate":
+        locate_capability = get_tool_capability("Locate")
+        hint = str(action_parsed.get("target_text_hint") or "")
+        outcome = locate_target(state, config)
+        emit_trace(
+            config,
+            state,
+            "execute",
+            "locate_result",
+            trace_safe_payload(outcome, hint_length=len(hint)),
+        )
+        if not outcome.success:
+            failure_code = outcome.failure_code or "locate_failed"
+            result = ActionResult(
+                success=False,
+                should_finish=False,
+                message=f"Locate failed: {failure_code}: {outcome.message or ''}",
+            )
+            receipt = ActionReceipt.create(
+                locate_capability,
+                "rejected",
+                correlation_id=correlation_id,
+                side_effect_receipt={
+                    "tool_dispatch_status": "rejected",
+                    "reason_code": failure_code,
+                },
+            )
+            messages = _strip_and_append(messages, thinking, action_raw)
+            emit_trace(
+                config,
+                state,
+                "execute",
+                "execute_error",
+                {"message": result.message, "failure_cause": failure_code},
+            )
+            return {
+                "action_result": result.__dict__,
+                "action_receipt": receipt.to_dict(),
+                **_receipt_ledger_update(state, "Locate", receipt),
+                "messages": messages,
+                "finished": False,
+                "failure_cause": failure_code,
+                "grounding_error": failure_code,
+                "grounding_failure_code": failure_code,
+                "suggested_strategy": "reobserve",
+                "context_mode": context_mode,
+                **_context_update(
+                    result.__dict__,
+                    {
+                        "action_receipt": receipt.to_dict(),
+                        "failure_cause": failure_code,
+                        "grounding_failure_code": failure_code,
+                    },
+                ),
+            }
+        registry = MarkRegistry.from_dict(state.get("mark_registry"))
+        if registry is None:
+            result = ActionResult(
+                success=False,
+                should_finish=False,
+                message="Locate failed: mark registry unavailable",
+            )
+            receipt = ActionReceipt.create(
+                locate_capability,
+                "rejected",
+                correlation_id=correlation_id,
+                side_effect_receipt={
+                    "tool_dispatch_status": "rejected",
+                    "reason_code": "registry_missing",
+                },
+            )
+            messages = _strip_and_append(messages, thinking, action_raw)
+            return {
+                "action_result": result.__dict__,
+                "action_receipt": receipt.to_dict(),
+                **_receipt_ledger_update(state, "Locate", receipt),
+                "messages": messages,
+                "finished": False,
+                "failure_cause": "registry_missing",
+                "grounding_error": "registry_missing",
+                "grounding_failure_code": "registry_missing",
+                "context_mode": context_mode,
+                **_context_update(
+                    result.__dict__,
+                    {
+                        "action_receipt": receipt.to_dict(),
+                        "failure_cause": "registry_missing",
+                    },
+                ),
+            }
+        new_registry = registry.with_extra_marks([outcome.mark])
+        locate_count = int(state.get("locate_count") or 0) + 1
+        result = ActionResult(
+            success=True,
+            should_finish=False,
+            message=f"Locate registered {outcome.mark.mark_id} from {outcome.provider or 'visual provider'}",
+        )
+        receipt = ActionReceipt.create(
+            locate_capability,
+            "accepted",
+            correlation_id=correlation_id,
+            side_effect_receipt={
+                "tool_dispatch_status": "accepted",
+                "mark_id": outcome.mark.mark_id,
+                "provider": outcome.provider,
+                "latency_ms": outcome.latency_ms,
+            },
+        )
+        messages = _strip_and_append(messages, thinking, action_raw)
+        return {
+            "action_result": result.__dict__,
+            "action_receipt": receipt.to_dict(),
+            **_receipt_ledger_update(state, "Locate", receipt),
+            "messages": messages,
+            "finished": False,
+            "mark_registry": new_registry.to_dict(),
+            "locate_count": locate_count,
+            "failure_cause": None,
+            "grounding_error": None,
+            "grounding_failure_code": None,
+            "grounding_result": {
+                "provider": outcome.provider,
+                "mark_id": outcome.mark.mark_id,
+                "bbox": [round(v, 1) for v in outcome.mark.bbox],
+                "center": [round(v, 1) for v in outcome.mark.center],
+            },
+            "context_mode": context_mode,
+            **_context_update(
+                result.__dict__, {"action_receipt": receipt.to_dict()}
             ),
         }
 

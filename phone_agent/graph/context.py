@@ -8,7 +8,13 @@ import re
 from dataclasses import asdict, dataclass
 from typing import Any, Literal
 
-from phone_agent.config.policy import DEFAULT_VERIFICATION_POLICY
+from phone_agent.config.policy import (
+    CONTINUATION_GRANT_STEPS,
+    CONTINUATION_MAX_GRANTS,
+    CONTINUATION_NOVELTY_NEGATION_STREAK,
+    CONTINUATION_WINDOW_STEPS,
+    DEFAULT_VERIFICATION_POLICY,
+)
 
 REPEATED_ACTION_THRESHOLD = int(
     DEFAULT_VERIFICATION_POLICY.value("repeated_action_threshold")
@@ -735,6 +741,259 @@ def _criterion_moved_toward_satisfaction(history: list[dict]) -> bool:
     )
 
 
+# ----------------------------------------------------------------------
+# F2 earned-continuation credential (pure; written only by node code)
+# ----------------------------------------------------------------------
+
+CRITERION_STATUS_RANK = {
+    "invalid": 0,
+    "contradicted": 0,
+    "stale": 0,
+    "missing": 0,
+    "unobserved": 1,
+    "unknown": 1,
+    "matched": 2,
+}
+
+
+@dataclass(frozen=True)
+class ContinuationCredential:
+    """Pure decision about whether a rejected budget window earns another one."""
+
+    granted: bool
+    branches: tuple[str, ...] = ()
+    reason: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "granted": self.granted,
+            "branches": list(self.branches),
+            "reason": self.reason,
+        }
+
+
+def _ledger_snapshots(
+    ledger: list[dict[str, Any]], *, contract_id: str, limit: int
+) -> list[dict[str, Any]]:
+    """Group ledger entries into per-observation criterion-status snapshots."""
+
+    snapshots: list[dict[str, Any]] = []
+    index: dict[tuple[Any, Any], int] = {}
+    for item in ledger:
+        if not isinstance(item, dict) or item.get("contract_id") != contract_id:
+            continue
+        key = (item.get("screen_id"), item.get("observation_epoch"))
+        if key not in index:
+            index[key] = len(snapshots)
+            snapshots.append({"per_criterion": {}})
+        per_criterion = snapshots[index[key]].get("per_criterion")
+        criterion_id = str(item.get("criterion_id") or "")
+        if criterion_id:
+            per_criterion[criterion_id] = str(item.get("status") or "unknown")
+    return snapshots[-limit:]
+
+
+def _criterion_rank(status: Any) -> int:
+    return CRITERION_STATUS_RANK.get(str(status or "unknown"), 0)
+
+
+def _criterion_moved_up_in_window(
+    ledger: list[dict[str, Any]], *, contract_id: str
+) -> bool:
+    """Branch 1: any criterion's rank rose across the recent window.
+
+    Compares the LATEST snapshot against the EARLIEST snapshot in the window,
+    so a pure A-B-A-B oscillation (start rank == end rank) never earns a
+    continuation — only a net upward movement does.
+    """
+
+    snapshots = _ledger_snapshots(
+        ledger, contract_id=contract_id, limit=CONTINUATION_WINDOW_STEPS
+    )
+    if len(snapshots) < 2:
+        return False
+    earliest = snapshots[0].get("per_criterion") or {}
+    latest = snapshots[-1].get("per_criterion") or {}
+    return any(
+        _criterion_rank(status) > _criterion_rank(earliest.get(criterion))
+        for criterion, status in latest.items()
+    )
+
+
+def _ever_matched_latch(
+    ledger: list[dict[str, Any]], *, contract_id: str, criterion_id: str
+) -> bool:
+    """Fold the ledger into one criterion latch (mirror of ever_matched)."""
+
+    latched = False
+    for item in ledger:
+        if not isinstance(item, dict):
+            continue
+        if item.get("contract_id") != contract_id:
+            continue
+        if str(item.get("criterion_id") or "") != criterion_id:
+            continue
+        status = str(item.get("status") or "unknown")
+        if status == "contradicted":
+            latched = False
+        elif status == "matched" and item.get("target_app_entered") is True:
+            latched = True
+    return latched
+
+
+def _goal_contract_view(state: dict[str, Any]) -> tuple[str, list[str]]:
+    """Return (contract_id, criterion names) from dict or dataclass contracts."""
+
+    contract = state.get("goal_contract")
+    if isinstance(contract, dict):
+        contract_id = str(contract.get("runtime_reference") or "")
+        names = [
+            str(item.get("name") or "")
+            for item in (contract.get("success_criteria") or [])
+            if isinstance(item, dict) and item.get("name")
+        ]
+        return contract_id, names
+    if contract is not None:
+        contract_id = str(getattr(contract, "task_hash", "") or "")
+        names = [
+            str(item.name)
+            for item in getattr(contract, "success_criteria", []) or []
+            if getattr(item, "name", None)
+        ]
+        return contract_id, names
+    return "", []
+
+
+def _latched_criterion_count(state: dict[str, Any]) -> int:
+    """Count goal criteria currently pinned by the ever-matched latch."""
+
+    contract_id, criteria = _goal_contract_view(state)
+    ledger = list(state.get("goal_evidence_ledger") or [])
+    return sum(
+        1
+        for name in criteria
+        if name and _ever_matched_latch(ledger, contract_id=contract_id, criterion_id=name)
+    )
+
+
+def latched_criterion_count(state: dict[str, Any]) -> int:
+    """Public alias: count ever-matched latched criteria for window bookkeeping."""
+
+    return _latched_criterion_count(state)
+
+
+def _judge_near_miss(state: dict[str, Any]) -> bool:
+    """Branch 3: the last acceptance's judge named evidence or hard-confirmed ≥1."""
+
+    evidence = state.get("finish_validation_evidence")
+    if not isinstance(evidence, dict):
+        return False
+    matched = evidence.get("matched") or evidence.get("matched_terminal_evidence")
+    return isinstance(matched, list) and any(matched)
+
+
+def _novelty_streak(state: dict[str, Any]) -> int:
+    progress = (state.get("gui_memory") or {}).get("task_progress") or {}
+    if not isinstance(progress, dict):
+        return 0
+    try:
+        return int(progress.get("novelty_streak") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def continuation_credential(state: dict[str, Any]) -> ContinuationCredential:
+    """Decide whether a rejected budget-forced acceptance earns another window.
+
+    Pure function of state; the caller (acceptance node) writes the outcome.
+    Branches:
+    1. criterion movement — any criterion status rank rose across the last
+       ``CONTINUATION_WINDOW_STEPS`` observations (net, so oscillation does not
+       grant);
+    2. new latch — the ever-matched milestone count grew since the previous
+       window boundary (Goal facts; exempt from novelty negation);
+    3. judge near-miss — the forced acceptance produced non-empty named
+       evidence or at least one hard confirm.
+    Negation: with no branch 1/3, a novelty streak >= the negation threshold
+    (revisiting the same states) denies; branch 2 is never negated.
+    """
+
+    contract_id, _ = _goal_contract_view(state)
+    ledger = list(state.get("goal_evidence_ledger") or [])
+
+    branches: list[str] = []
+    if _criterion_moved_up_in_window(ledger, contract_id=contract_id):
+        branches.append("criterion_movement")
+    current_latch = _latched_criterion_count(state)
+    previous_latch = int(state.get("continuation_last_latch_count") or 0)
+    if current_latch > previous_latch:
+        branches.append("new_latch")
+    if _judge_near_miss(state):
+        branches.append("judge_near_miss")
+
+    if branches:
+        return ContinuationCredential(
+            granted=True,
+            branches=tuple(branches),
+            reason=";".join(branches),
+        )
+    if _novelty_streak(state) >= CONTINUATION_NOVELTY_NEGATION_STREAK:
+        return ContinuationCredential(
+            granted=False,
+            branches=(),
+            reason="novelty_exhausted",
+        )
+    return ContinuationCredential(
+        granted=False,
+        branches=(),
+        reason="no_progress_evidence",
+    )
+
+
+def build_budget_section(state: dict[str, Any], lang: str = "cn") -> str:
+    """Render the plan-block budget section (F2.2).
+
+    Dynamic context only — never system/goal blocks (P5 prefix-cache). Carries
+    the three-piece message: remaining steps in this window, continuations
+    granted, and "exhaustion != failure".
+    """
+
+    max_steps = int(state.get("max_steps") or 0)
+    step_count = int(state.get("step_count") or 0)
+    if max_steps <= 0:
+        return ""
+    remaining = max(0, max_steps - step_count)
+    grants = int(state.get("continuation_count") or 0)
+    if lang == "en":
+        lines = [
+            f"Budget: {remaining}/{max_steps} steps left in this window; "
+            f"continuations granted {grants}/{CONTINUATION_MAX_GRANTS}."
+        ]
+        lines.append(
+            "Budget exhaustion is NOT failure — it only triggers a system "
+            "acceptance check. If the goal is actually done, finish now and "
+            "name the satisfied success criteria; if the task is structurally "
+            "infeasible, take_over and explain."
+        )
+        if remaining <= max(1, max_steps // 4):
+            lines.append(
+                "This window is nearly exhausted: spend the remaining steps on "
+                "the most decisive action."
+            )
+    else:
+        lines = [
+            f"预算：本窗口剩余 {remaining}/{max_steps} 步；"
+            f"已续命 {grants}/{CONTINUATION_MAX_GRANTS} 次。"
+        ]
+        lines.append(
+            "预算耗尽≠失败：它只是触发系统验收；若目标已实际完成请立即 "
+            "finish 并点名满足的成功标准；若结构性无法完成请 take_over 说明。"
+        )
+        if remaining <= max(1, max_steps // 4):
+            lines.append("本窗口即将耗尽：请把剩余步骤用在最有决定性的一步上。")
+    return " ".join(lines)
+
+
 def repeated_action_key(item: dict[str, Any]) -> tuple[Any, ...] | None:
     if not isinstance(item, dict):
         return None
@@ -1044,12 +1303,14 @@ def build_plan_context_block(
     # Each section is trimmed against its own allowance. Trimming the concatenated
     # block instead starved whichever section was assembled last, which is how loop
     # evidence disappeared exactly as the trajectory started looping.
+    budget_section = build_budget_section(state, lang)
     for label, value, section_budget in (
         (
             "goal_agenda",
             goal_agenda,
             budget.get("goal_agenda_chars", _SECTION_BUDGETS["goal_agenda"]),
         ),
+        ("budget", budget_section, None),
         ("liveness_note", liveness_note, None),
         ("last_action_outcome", outcome, None),
         ("failure_memory", failure_memory_block, None),

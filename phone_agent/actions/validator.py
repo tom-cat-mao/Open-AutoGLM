@@ -38,6 +38,7 @@ ALLOWED_FIELDS_BY_ACTION: dict[str, set[str]] = {
     "Note": {"_metadata", "action", "message"},
     "Call_API": {"_metadata", "action", "message"},
     "Interact": {"_metadata", "action", "message"},
+    "Locate": {"_metadata", "action", "target_text_hint"},
     "Take_over": {"_metadata", "action", "message"},
 }
 CANONICAL_ACTIONS = set(ALLOWED_FIELDS_BY_ACTION)
@@ -90,6 +91,13 @@ def validate_action(action: dict[str, Any] | ActionIR) -> dict[str, Any]:
         _require_str(action_dict, "text")
     elif action_name in {"Note", "Call_API", "Interact", "Take_over"}:
         _require_str(action_dict, "message")
+    elif action_name == "Locate":
+        _require_str(action_dict, "target_text_hint")
+        hint = action_dict["target_text_hint"].strip()
+        if not hint:
+            raise ActionValidationError("missing_field", "Locate target_text_hint must be non-empty")
+        if len(hint) > 240:
+            raise ActionValidationError("unsafe_value", "Locate target_text_hint must be <= 240 characters")
     elif action_name == "Launch":
         _require_str(action_dict, "app")
         from phone_agent.config.apps import normalize_app_name
