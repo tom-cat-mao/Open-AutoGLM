@@ -21,13 +21,22 @@ def after_goal(state: AgentState) -> Literal["plan", "end", "takeover"]:
     return "plan"
 
 
-def should_continue(state: AgentState) -> Literal["end", "replan", "takeover"]:
+def should_continue(
+    state: AgentState,
+) -> Literal["end", "replan", "takeover", "acceptance"]:
     """
     Decide whether to continue looping or end after reflect node.
 
     Routes:
-    - "end" if finished, error, or max_steps reached
-    - "takeover" if reflect requested a takeover interrupt
+    - "end" if finished or errored — always wins (P0 #5)
+    - "acceptance" once when the step budget is exhausted and the goal
+      contract was compiled but never validated (budget-forced acceptance,
+      model-delegation refactor 2.1). The acceptance node itself sets
+      ``budget_acceptance_done`` so this fires at most once per run; if the
+      forced claim is rejected, ``after_acceptance`` still routes to "end"
+      at max_steps, so this never loops.
+    - "takeover" if reflect requested a takeover interrupt, or observation
+      infrastructure failures exceeded the retry limit
     - "replan" otherwise (route to goal → plan; goal_node no-ops when the
       contract is already compiled and needs_recompile is False, otherwise
       it re-runs the compilation chain)
@@ -37,16 +46,16 @@ def should_continue(state: AgentState) -> Literal["end", "replan", "takeover"]:
     if state.get("error"):
         return "end"
     if state["step_count"] >= state["max_steps"]:
+        if (
+            state.get("goal_contract_status") == "compiled"
+            and not state.get("budget_acceptance_done")
+        ):
+            return "acceptance"
         return "end"
     if state.get("pending_interrupt") == "takeover":
         return "takeover"
     if int(state.get("observation_retry_count") or 0) >= OBSERVATION_RETRY_LIMIT:
         return "takeover"
-    progress = (state.get("gui_memory") or {}).get("task_progress") or {}
-    if progress.get("trajectory_liveness") == "stuck":
-        if int(progress.get("stuck_rounds") or 0) >= 2:
-            return "takeover"
-        return "replan"
     return "replan"
 
 
@@ -58,6 +67,8 @@ def after_execute(
 
     Routes:
     - "end" if the state is terminal (finished or errored) — always wins
+    - "replan" if the repeat guard rejected the action (system decision: no
+      reflect, no failure_memory, straight back to planning)
     - "confirm" / "takeover" if a pending HITL interrupt is waiting to be
       dispatched (resume path only — terminal guard above prevents this
       from firing when the run is already done)
@@ -77,6 +88,16 @@ def after_execute(
     # should_continue() and after_interrupt().
     if state.get("finished") or state.get("error"):
         return "end"
+
+    # A repeat-guard rejection is a system decision, not an action failure:
+    # route straight back to planning without reflect (no verdict, no
+    # failure_memory write) so the system's own decision is not recorded as
+    # the action failing. The rejected action was already counted in
+    # gui_memory.tried_actions by execute_node, and the rejection reason +
+    # count reach the next plan prompt through avoid_repeating /
+    # last_action_outcome. plan_node clears the flag on its next run.
+    if state.get("repeat_rejected"):
+        return "replan"
 
     # Check pending interrupt (resume path — safe now that terminal states
     # have been filtered out above).

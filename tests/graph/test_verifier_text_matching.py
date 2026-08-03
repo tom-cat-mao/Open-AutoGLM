@@ -18,15 +18,19 @@ FEED_SURFACE = "com.xingin.xhs/com.xingin.alioth.search.GlobalSearchActivity"
 DETAIL_SURFACE = "com.xingin.xhs/com.xingin.matrix.notedetail.NoteDetailActivity"
 
 
-def test_selected_object_text_and_surface_change_override_model_failure() -> None:
+def test_selected_object_success_vs_model_failed_becomes_disputed() -> None:
+    """P3 #1b: verifier success with matched postconditions vs a model failed
+    verdict is a conflict — neither wins; the step becomes partial/unknown with
+    disputed=True, and the verifier evidence rides along as advisory."""
     verifier = VerifierResult(
         status="success",
         confidence=0.75,
         evidence={
+            "matched_postconditions": ["selected_object_match"],
             "selected_object_signals": {
                 "selected_object_text_match": True,
                 "selected_object_surface_changed": True,
-            }
+            },
         },
     )
 
@@ -39,9 +43,132 @@ def test_selected_object_text_and_surface_change_override_model_failure() -> Non
         },
     )
 
-    assert merged["action_succeeded"] is True
+    assert merged["action_succeeded"] is False
+    assert merged["reflection_verdict"] == "partial"
+    assert merged["failure_cause"] == "unknown"
+    assert merged["disputed"] is True
+    advisory = merged["verifier_advisory"]
+    assert advisory["status"] == "success"
+    assert advisory["confidence"] == 0.75
+    assert advisory["matched_postconditions"] == ["selected_object_match"]
+    assert advisory["selected_object_signals"]["selected_object_text_match"] is True
+
+
+def test_verifier_high_confidence_success_vs_model_failed_is_disputed() -> None:
+    """P3: a conf>=0.9 verifier success still does not override the model — but
+    with matched postconditions present it is a conflict (disputed), not a
+    straight model win."""
+    verifier = VerifierResult(
+        status="success",
+        confidence=0.9,
+        evidence={"matched_postconditions": ["input_focused"]},
+    )
+
+    merged = merge_verifier_with_reflection(
+        verifier,
+        {
+            "action_succeeded": False,
+            "reflection_verdict": "failed",
+            "failure_cause": "element_not_found",
+        },
+    )
+
+    assert merged["reflection_verdict"] == "partial"
+    assert merged["disputed"] is True
+    assert merged["verifier_advisory"]["confidence"] == 0.9
+
+
+def test_verifier_success_without_matched_postconditions_stays_advisory() -> None:
+    """P3: verifier success without matched postconditions carries no positive
+    evidence, so a model failure is not disputed — the model verdict passes
+    through and the advisory rides along."""
+    verifier = VerifierResult(
+        status="success", confidence=0.9, evidence={"matched_postconditions": []}
+    )
+
+    merged = merge_verifier_with_reflection(
+        verifier,
+        {
+            "action_succeeded": False,
+            "reflection_verdict": "failed",
+            "failure_cause": "unknown",
+        },
+    )
+
+    assert merged["reflection_verdict"] == "failed"
+    assert merged["disputed"] is False
+    assert merged["verifier_advisory"]["status"] == "success"
+
+
+def test_verifier_failure_is_advisory_not_model_override() -> None:
+    """The conf>=0.7 failure branch is gone: only hard_failure overrides."""
+    verifier = VerifierResult(
+        status="failure",
+        confidence=0.75,
+        failure_cause="wrong_page",
+        evidence={"missing_postconditions": ["selected_object_detail_not_opened"]},
+    )
+
+    merged = merge_verifier_with_reflection(
+        verifier,
+        {
+            "action_succeeded": True,
+            "reflection_verdict": "succeeded",
+            "failure_cause": None,
+        },
+    )
+
     assert merged["reflection_verdict"] == "succeeded"
-    assert merged["failure_cause"] is None
+    assert merged["verifier_advisory"]["missing_postconditions"] == [
+        "selected_object_detail_not_opened"
+    ]
+
+
+def test_verifier_unknown_missing_postconditions_do_not_override_success() -> None:
+    """The unknown+missing->failed override is gone: absence stays advisory."""
+    verifier = VerifierResult(
+        status="unknown",
+        confidence=0.0,
+        evidence={"missing_postconditions": ["after_observation_unavailable"]},
+    )
+
+    merged = merge_verifier_with_reflection(
+        verifier,
+        {
+            "action_succeeded": True,
+            "reflection_verdict": "succeeded",
+            "failure_cause": None,
+            "reflection_has_evidence": False,
+        },
+    )
+
+    assert merged["reflection_verdict"] == "succeeded"
+    assert merged["verifier_advisory"]["status"] == "unknown"
+
+
+def test_hard_failure_still_overrides_model_success() -> None:
+    """The single remaining override: deterministic execution failure."""
+    verifier = VerifierResult(
+        status="failure",
+        confidence=0.9,
+        hard_failure=True,
+        failure_cause="app_not_responding",
+        evidence={"result_message_summary": "Action failed: boom"},
+    )
+
+    merged = merge_verifier_with_reflection(
+        verifier,
+        {
+            "action_succeeded": True,
+            "reflection_verdict": "succeeded",
+            "failure_cause": None,
+        },
+    )
+
+    assert merged["action_succeeded"] is False
+    assert merged["reflection_verdict"] == "failed"
+    assert merged["failure_cause"] == "app_not_responding"
+    assert merged["verifier_advisory"]["status"] == "failure"
 
 
 def test_back_default_outcome_verifies_surface_change_programmatically() -> None:
@@ -136,11 +263,16 @@ def test_same_physical_screen_is_not_reported_as_a_surface_change() -> None:
         before_observation=_before_payload(BARE_PROFILE_ACTIVITY),
     )
 
+    assert "page_changed_object_check_skipped" not in signals
     assert signals["selected_object_surface_changed"] is False
     assert signals["same_surface_still_visible"] is True
 
 
-def test_real_navigation_is_still_reported_as_a_surface_change() -> None:
+def test_real_navigation_degrades_selected_object_check() -> None:
+    """P3 #4: when the mark set is rebuilt across pages (here signalled by
+    activity migration), selected-object comparison is skipped entirely instead
+    of claiming a surface change — before-page mark bindings no longer hold on
+    the after page, so the group must not feed success/failure judgement."""
     signals = _selected_object_signals(
         {
             "object_type": "input",
@@ -153,7 +285,9 @@ def test_real_navigation_is_still_reported_as_a_surface_change() -> None:
         before_observation=_before_payload(BARE_PROFILE_ACTIVITY),
     )
 
-    assert signals["selected_object_surface_changed"] is True
+    assert signals.get("page_changed_object_check_skipped") is True
+    assert "selected_object_surface_changed" not in signals
+    assert "selected_object_match" not in signals
     assert "same_surface_still_visible" not in signals
 
 
@@ -317,3 +451,189 @@ def test_surface_change_clears_same_surface_signal() -> None:
     )
 
     assert not signals.get("same_surface_still_visible")
+
+
+def test_arbitration_matrix() -> None:
+    """P3 #1 four-combination matrix for verifier-vs-model arbitration."""
+    success_verifier = VerifierResult(
+        status="success",
+        confidence=0.9,
+        evidence={"matched_postconditions": ["app_opened"]},
+    )
+    failure_verifier = VerifierResult(
+        status="failure",
+        confidence=0.75,
+        failure_cause="wrong_page",
+        evidence={"missing_postconditions": ["app_opened"]},
+    )
+    unknown_verifier = VerifierResult(
+        status="unknown", confidence=0.0, evidence={"matched_postconditions": []}
+    )
+
+    # a. hard_failure overrides model success.
+    hard = merge_verifier_with_reflection(
+        VerifierResult(
+            status="failure", hard_failure=True, failure_cause="app_not_responding"
+        ),
+        {"action_succeeded": True, "reflection_verdict": "succeeded"},
+    )
+    assert hard["reflection_verdict"] == "failed"
+    assert hard["disputed"] is False
+
+    # b. verifier success + matched vs model failed → disputed partial.
+    disputed = merge_verifier_with_reflection(
+        success_verifier,
+        {"action_succeeded": False, "reflection_verdict": "failed", "failure_cause": "wrong_page"},
+    )
+    assert disputed["reflection_verdict"] == "partial"
+    assert disputed["failure_cause"] == "unknown"
+    assert disputed["disputed"] is True
+
+    # c. consensus failure (verifier failure + model failed) keeps failure.
+    consensus = merge_verifier_with_reflection(
+        failure_verifier,
+        {"action_succeeded": False, "reflection_verdict": "failed", "failure_cause": "wrong_page"},
+    )
+    assert consensus["reflection_verdict"] == "failed"
+    assert consensus["disputed"] is False
+
+    # d. pass-through: verifier unknown + model failed → model keeps the verdict.
+    passthrough = merge_verifier_with_reflection(
+        unknown_verifier,
+        {"action_succeeded": False, "reflection_verdict": "failed", "failure_cause": "unknown"},
+    )
+    assert passthrough["reflection_verdict"] == "failed"
+    assert passthrough["disputed"] is False
+    # pass-through: verifier failure + model succeeded → model keeps the verdict.
+    passthrough_success = merge_verifier_with_reflection(
+        failure_verifier,
+        {"action_succeeded": True, "reflection_verdict": "succeeded", "failure_cause": None},
+    )
+    assert passthrough_success["reflection_verdict"] == "succeeded"
+    assert passthrough_success["disputed"] is False
+
+
+def test_wrong_page_narrow_veto_disputes_when_activity_migrated() -> None:
+    """P3 #1b: model claims wrong_page but before/after observations show the
+    activity migrated — the 'wrong page' judgement lacks evidence, so the step
+    is disputed even when the verifier is not success."""
+    verifier = VerifierResult(
+        status="unknown", confidence=0.25, evidence={"missing_postconditions": []}
+    )
+    merged = merge_verifier_with_reflection(
+        verifier,
+        {
+            "action_succeeded": False,
+            "reflection_verdict": "failed",
+            "failure_cause": "wrong_page",
+        },
+        observation_before={
+            "snapshot": {"foreground_activity": FEED_SURFACE, "screen_id": "feed"}
+        },
+        observation_after={
+            "snapshot": {"foreground_activity": DETAIL_SURFACE, "screen_id": "detail"}
+        },
+    )
+
+    assert merged["disputed"] is True
+    assert merged["reflection_verdict"] == "partial"
+    assert merged["failure_cause"] == "unknown"
+
+
+def test_wrong_page_without_migration_keeps_failure() -> None:
+    verifier = VerifierResult(
+        status="unknown", confidence=0.25, evidence={"missing_postconditions": []}
+    )
+    merged = merge_verifier_with_reflection(
+        verifier,
+        {
+            "action_succeeded": False,
+            "reflection_verdict": "failed",
+            "failure_cause": "wrong_page",
+        },
+        observation_before={
+            "snapshot": {"foreground_activity": FEED_SURFACE, "screen_id": "same"}
+        },
+        observation_after={
+            "snapshot": {"foreground_activity": FEED_SURFACE, "screen_id": "same"}
+        },
+    )
+
+    assert merged["disputed"] is False
+    assert merged["reflection_verdict"] == "failed"
+    assert merged["failure_cause"] == "wrong_page"
+
+
+def test_selected_object_degrades_when_mark_set_version_changes() -> None:
+    """P3 #4: a rebuilt mark set (cross-page mark_id reassignment) skips the
+    selected-object group instead of producing a false match or false failure."""
+    before = {
+        "snapshot": {
+            "screen_id": "feed",
+            "foreground_activity": FEED_SURFACE,
+            "semantic_screen_id": "semantic-1",
+            "mark_set_version": "version-a",
+        },
+        "marks": [],
+    }
+    after = {
+        "snapshot": {
+            "screen_id": "detail",
+            "foreground_activity": DETAIL_SURFACE,
+            "semantic_screen_id": "semantic-2",
+            "mark_set_version": "version-b",
+        },
+        "marks": [{"mark_id": "m1", "role": "TextView", "text_summary": "视频标题一"}],
+    }
+
+    signals = _selected_object_signals(
+        {
+            "object_type": "video",
+            "evidence_summary": "视频标题一",
+            "expected_page_type": "detail_or_player",
+        },
+        after,
+        "视频标题一",
+        None,
+        before_observation=before,
+    )
+
+    assert signals.get("page_changed_object_check_skipped") is True
+    assert "selected_object_match" not in signals
+    assert "selected_object_text_match" not in signals
+    assert "same_surface_still_visible" not in signals
+
+
+def test_selected_object_compares_when_mark_set_version_stable() -> None:
+    """Same mark set version → same page mark binding → comparison proceeds."""
+    before = {
+        "snapshot": {
+            "screen_id": "feed",
+            "foreground_activity": FEED_SURFACE,
+            "mark_set_version": "version-a",
+        },
+        "marks": [],
+    }
+    after = {
+        "snapshot": {
+            "screen_id": "feed-2",
+            "foreground_activity": FEED_SURFACE,
+            "mark_set_version": "version-a",
+        },
+        "marks": [{"mark_id": "m1", "role": "TextView", "text_summary": "视频标题一"}],
+    }
+
+    signals = _selected_object_signals(
+        {
+            "object_type": "video",
+            "evidence_summary": "视频标题一",
+            "expected_page_type": "detail_or_player",
+        },
+        after,
+        "视频标题一",
+        None,
+        before_observation=before,
+    )
+
+    assert "page_changed_object_check_skipped" not in signals
+    assert signals["selected_object_match"] is True

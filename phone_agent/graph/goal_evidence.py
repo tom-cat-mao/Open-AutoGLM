@@ -150,6 +150,78 @@ def target_app_entered(
     return False
 
 
+@dataclass(frozen=True)
+class MilestoneLatch:
+    """Plan-side milestone latch over one criterion's bounded ledger history.
+
+    Display-only projection: "was this criterion ever satisfied at a trusted
+    observation?" It is consumed by the plan agenda only. Acceptance keeps its
+    own strict ``current_observation`` freshness semantics and never reads it.
+    """
+
+    latched: bool = False
+    matched_epoch: int | None = None
+    matched_screen_id: str | None = None
+
+
+def ever_matched(
+    ledger: list[dict[str, Any]],
+    *,
+    criterion_id: str,
+    contract_id: str,
+) -> MilestoneLatch:
+    """Fold chronological ledger entries into a milestone latch.
+
+    Rules (ledger is append-order, so the latest decisive entry wins):
+
+    * ``status == "contradicted"`` → deterministic counter-evidence: unlock.
+      A later positive re-observation can re-latch.
+    * ``status == "matched"`` **and** ``target_app_entered is True`` → latch
+      (target-app gate prevents pre-entry matches from pinning a milestone).
+    * transient statuses (``stale`` / ``missing`` / ``unknown`` /
+      ``unobserved``) never move the latch — this is exactly the keyboard-popup
+      case that used to flip a satisfied milestone back to unsatisfied.
+
+    ``contradicted`` after a ``matched`` unlocks; a ``matched`` after a
+    ``contradicted`` re-latches; a ``matched`` without the target-app gate only
+    carries the current fold and never pins.
+    """
+
+    latched = False
+    matched_epoch: int | None = None
+    matched_screen_id: str | None = None
+    for entry in ledger:
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("contract_id") != contract_id:
+            continue
+        if str(entry.get("criterion_id") or "") != criterion_id:
+            continue
+        status = str(entry.get("status") or "unknown")
+        if status == "contradicted":
+            latched = False
+            matched_epoch = None
+            matched_screen_id = None
+        elif (
+            status == "matched"
+            and entry.get("target_app_entered") is True
+        ):
+            latched = True
+            matched_epoch = (
+                int(entry["observation_epoch"])
+                if isinstance(entry.get("observation_epoch"), int)
+                else None
+            )
+            matched_screen_id = (
+                str(entry.get("screen_id")) if entry.get("screen_id") else None
+            )
+    return MilestoneLatch(
+        latched=latched,
+        matched_epoch=matched_epoch,
+        matched_screen_id=matched_screen_id,
+    )
+
+
 def unattested_raw_text_bindings(
     ledger: list[dict[str, Any]],
     contract: GoalContract,

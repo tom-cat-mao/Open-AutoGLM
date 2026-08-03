@@ -1,3 +1,4 @@
+from phone_agent.graph.context import build_plan_context_block
 from phone_agent.graph.nodes.execute import execute_node
 
 
@@ -315,3 +316,183 @@ def test_execute_repeat_guard_distinguishes_surface_coordinate_and_type_text(
 
     assert result["action_result"]["success"] is True
     assert any(call[0] == "type_text" for call in fake_device.calls)
+
+
+def test_execute_repeat_rejection_counts_tried_actions_and_sets_flag(
+    base_state, fake_device
+) -> None:
+    """1.2: a rejected repeat is a system decision — the action must still be
+    counted in gui_memory.tried_actions (the guard's counting source) so the
+    repeat count escalates, and repeat_rejected must route the next edge."""
+    surface = "com.xingin.xhs/SearchActivity"
+    base_state["observation"] = {"snapshot": {"foreground_activity": surface}}
+    base_state["grounding_observation"] = {"center": [500, 500]}
+    base_state["gui_memory"]["tried_actions"] = [
+        {"action": "Tap", "target_center": [500.0, 500.0], "surface": surface},
+        {"action": "Tap", "target_center": [500.0, 500.0], "surface": surface},
+    ]
+
+    result = execute_node(
+        base_state, {"configurable": {"device_factory": fake_device, "verbose": False}}
+    )
+
+    assert result["repeat_rejected"] is True
+    assert result["finished"] is False
+    tried = result["gui_memory"]["tried_actions"]
+    assert len(tried) == 3
+    latest = tried[-1]
+    assert latest["action"] == "Tap"
+    assert latest["target_center"] == [500.0, 500.0]
+    assert latest["surface"] == surface
+    assert latest["failure_cause"] == "repeated_action"
+    assert latest["result_success"] is False
+    assert fake_device.calls == []
+    # No failure_memory write: the rejection must not pollute failure memory.
+    assert "failure_memory" not in result
+
+
+def test_execute_repeat_rejection_escalates_count_via_tried_actions(
+    base_state, fake_device
+) -> None:
+    """A model that keeps proposing the same target sees an escalating count:
+    each rejection appends to tried_actions, which the next rejection counts."""
+    surface = "com.xingin.xhs/SearchActivity"
+    base_state["observation"] = {"snapshot": {"foreground_activity": surface}}
+    base_state["grounding_observation"] = {"center": [500, 500]}
+    base_state["gui_memory"]["tried_actions"] = [
+        {"action": "Tap", "target_center": [500.0, 500.0], "surface": surface},
+        {"action": "Tap", "target_center": [500.0, 500.0], "surface": surface},
+    ]
+    base_state["failure_memory"] = [
+        {"step_count": 1, "action": "Tap", "failure_cause": "wrong_page"}
+    ]
+
+    first = execute_node(
+        base_state, {"configurable": {"device_factory": fake_device, "verbose": False}}
+    )
+    assert first["action_receipt"]["side_effect_receipt"]["repeat_count"] == 3
+
+    second_state = {
+        **base_state,
+        "gui_memory": first["gui_memory"],
+        "failure_memory": base_state["failure_memory"],
+    }
+    second = execute_node(
+        second_state,
+        {"configurable": {"device_factory": fake_device, "verbose": False}},
+    )
+    assert second["action_receipt"]["side_effect_receipt"]["repeat_count"] == 4
+
+
+def test_execute_repeat_rejection_outcome_flows_into_context(
+    base_state, fake_device
+) -> None:
+    """The rejection reason must reach the next plan prompt through the
+    existing context mechanism (last_action_outcome / avoid_repeating)."""
+    surface = "com.xingin.xhs/SearchActivity"
+    base_state["observation"] = {"snapshot": {"foreground_activity": surface}}
+    base_state["grounding_observation"] = {"center": [500, 500]}
+    base_state["gui_memory"]["tried_actions"] = [
+        {"action": "Tap", "target_center": [500.0, 500.0], "surface": surface},
+        {"action": "Tap", "target_center": [500.0, 500.0], "surface": surface},
+    ]
+
+    result = execute_node(
+        base_state, {"configurable": {"device_factory": fake_device, "verbose": False}}
+    )
+
+    outcome = result["action_outcome_summary"]
+    assert outcome["dispatch_status"] == "rejected"
+    assert outcome["failure_cause"] == "repeated_action"
+    assert "重复目标动作已被拒绝" in outcome["result_message_summary"]
+
+    block, _metrics = build_plan_context_block(
+        {**base_state, **result, "action_parsed": {"_metadata": "do", "action": "Tap"}}
+    )
+    assert "avoid_repeating" in block
+    assert "repeat_count" in block
+    assert "重复目标动作已被拒绝" in block
+
+
+def test_execute_swipe_repeat_guard_rejects_same_gesture(
+    base_state, fake_device
+) -> None:
+    """P3 #3: the repeat guard also covers Swipe — identical start/end gestures
+    on the same surface (up to grid jitter) are rejected like repeated taps."""
+    surface = "com.xingin.xhs/SearchActivity"
+    base_state["action_parsed"] = {
+        "_metadata": "do",
+        "action": "Swipe",
+        "start": [500, 900],
+        "end": [500, 300],
+    }
+    base_state["observation"] = {"snapshot": {"foreground_activity": surface}}
+    base_state["gui_memory"]["tried_actions"] = [
+        {
+            "action": "Swipe",
+            "start": [500.0, 900.0],
+            "end": [500.0, 300.0],
+            "surface": surface,
+        },
+        {
+            "action": "Swipe",
+            "start": [505.0, 895.0],
+            "end": [498.0, 302.0],
+            "surface": surface,
+        },
+    ]
+
+    result = execute_node(
+        base_state, {"configurable": {"device_factory": fake_device, "verbose": False}}
+    )
+
+    assert result["repeat_rejected"] is True
+    assert result["finished"] is False
+    assert result["action_receipt"]["dispatch_status"] == "rejected"
+    assert fake_device.calls == []
+    # The rejected swipe is still recorded (with its geometry) so the count
+    # escalates on the next identical proposal.
+    tried = result["gui_memory"]["tried_actions"]
+    assert len(tried) == 3
+    latest = tried[-1]
+    assert latest["action"] == "Swipe"
+    assert latest["start"] == [500.0, 900.0]
+    assert latest["end"] == [500.0, 300.0]
+    assert latest["failure_cause"] == "repeated_action"
+    assert "failure_memory" not in result
+
+
+def test_execute_swipe_repeat_guard_allows_different_start(
+    base_state, fake_device
+) -> None:
+    """A swipe from a different start point is progress, not a repeat."""
+    surface = "com.xingin.xhs/SearchActivity"
+    base_state["action_parsed"] = {
+        "_metadata": "do",
+        "action": "Swipe",
+        "start": [800, 900],
+        "end": [800, 300],
+    }
+    base_state["observation"] = {"snapshot": {"foreground_activity": surface}}
+    base_state["gui_memory"]["tried_actions"] = [
+        {
+            "action": "Swipe",
+            "start": [500.0, 900.0],
+            "end": [500.0, 300.0],
+            "surface": surface,
+        },
+        {
+            "action": "Swipe",
+            "start": [500.0, 900.0],
+            "end": [500.0, 300.0],
+            "surface": surface,
+        },
+    ]
+
+    result = execute_node(
+        base_state, {"configurable": {"device_factory": fake_device, "verbose": False}}
+    )
+
+    assert result["action_result"]["success"] is True
+    assert result["action_receipt"]["dispatch_status"] == "accepted"
+    assert any(call[0] == "swipe" for call in fake_device.calls)

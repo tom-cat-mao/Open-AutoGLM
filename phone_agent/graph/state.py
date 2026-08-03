@@ -80,6 +80,9 @@ class AgentState(TypedDict):
 
     # === Plan 节点输出 ===
     thinking: str  # 模型思考过程
+    progress_note: Optional[
+        str
+    ]  # P4: 模型一句话自述（上轮完成+下一步意图），下轮 plan 注入“上轮意图”；inject 脱敏后存储
     action_raw: str  # 模型原始 action 文本
     action_parsed: Optional[dict]  # validated canonical ActionIR
     intent_raw: Optional[
@@ -122,7 +125,13 @@ class AgentState(TypedDict):
     ]  # dispatch-only receipt; never transition/Goal success
     action_result: Optional[dict]  # ActionResult 序列化为 dict
     pending_finish: bool  # finish claim pending reflect validation
-    finish_claim: Optional[dict]  # trace-safe finish claim summary
+    finish_claim: Optional[
+        dict
+    ]  # trace-safe finish claim summary
+    finish_source: Optional[
+        str
+    ]  # who asked for the acceptance: model_claim / budget_forced
+    budget_acceptance_done: bool  # budget-forced acceptance already ran this run
     finish_validation_status: Optional[str]  # pending / success / failure / unknown
     finish_validation_evidence: Optional[dict]  # trace-safe final goal evidence
     goal_evidence_ledger: list[dict]  # bounded privacy-safe criterion evidence; Reflect-owned
@@ -134,6 +143,12 @@ class AgentState(TypedDict):
     reflection_verdict: Optional[str]  # succeeded / failed / partial
     failure_cause: Optional[str]  # 结构化失败原因分类
     suggested_strategy: Optional[str]  # 建议恢复策略
+    disputed: Optional[
+        bool
+    ]  # P3: verifier 高置信 success 与模型 failed 冲突仲裁为 partial；disputed 步不写 failure_memory
+    reflection_directive_filtered: bool  # 反思 message 命中指令模式被过滤（保险丝）
+    model_skipped: Optional[bool]  # P5: 确定性验证路径跳过 reflect 模型调用
+    model_skip_reason: Optional[str]  # P5: 跳过原因（仅稳定机器码，不包含原始屏幕文本）
     observation_retry_count: int  # consecutive observation infrastructure failures
     acceptance_round_count: int  # rejected finish claims requiring replanning
 
@@ -160,6 +175,7 @@ class AgentState(TypedDict):
     failure_memory_hit_count: int  # failure memory 命中次数
     repeated_failure_count: int  # 重复失败计数
     repeated_action_detected: bool  # 同一目标在同一 surface 上重复操作（与成败无关）
+    repeat_rejected: bool  # 重复守卫拒绝最近一次动作（系统决策，非动作失败）
     gui_memory: (
         dict  # GUI 短期记忆：visited_screens/tried_actions/scroll_memory/task_progress
     )

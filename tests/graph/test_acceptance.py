@@ -1,6 +1,7 @@
 """Acceptance node: terminal goal verification, split out of Reflect."""
 
 from phone_agent.graph.edges import after_acceptance, after_execute
+from phone_agent.graph.nodes.acceptance import acceptance_node
 from phone_agent.graph.nodes.acceptance import (
     _hard_veto,
     _needs_semantic_judgement,
@@ -152,3 +153,174 @@ def test_reflect_no_longer_owns_goal_evaluation() -> None:
         "append_evaluation_entries",
     ):
         assert not hasattr(reflect_module, attribute), attribute
+
+
+# ----------------------------------------------------------------------
+# 2.1 Budget-forced acceptance: should_continue routes here at max_steps
+# ----------------------------------------------------------------------
+
+from dataclasses import dataclass
+
+
+@dataclass
+class _FakeModelResponse:
+    thinking: str
+    action: str
+
+
+class _FakeModelClient:
+    def __init__(self, response: _FakeModelResponse) -> None:
+        self.response = response
+
+    def request(self, messages, **kwargs):
+        return self.response
+
+
+def _budget_state(**overrides) -> dict:
+    state = {
+        "task": "测试任务",
+        "goal_contract": HeuristicGoalCompiler().compile(task="测试任务"),
+        "goal_contract_status": "compiled",
+        "lang": "cn",
+        "step_count": 20,
+        "max_steps": 20,
+        "finished": False,
+        "error": None,
+        "pending_finish": False,
+        "budget_acceptance_done": False,
+        "action_parsed": {"_metadata": "do", "action": "Tap", "element": [500, 500]},
+        "action_result": {"success": True, "should_finish": False, "message": "ok"},
+        "observation_retry_count": 0,
+        "acceptance_round_count": 0,
+        "context_mode": "inject",
+        "screen_belief": {},
+        "goal_evidence_ledger": [],
+        "expected_outcome": None,
+        "failure_memory": [],
+        "summarized_history": "",
+        "gui_memory": {},
+    }
+    state.update(overrides)
+    return state
+
+
+def test_budget_forced_acceptance_marks_flags_and_fails_closed_without_evidence(
+    base_state, fake_device
+) -> None:
+    """2.1: at max_steps without a model claim, acceptance still runs the full
+    authority stack; with no evidence the judge rejection attributes
+    goal_not_satisfied instead of unknown."""
+    model = _FakeModelClient(
+        _FakeModelResponse("ok", '{"completed":false,"message":"任务未完成"}')
+    )
+    state = _budget_state()
+
+    result = acceptance_node(
+        state,
+        {
+            "configurable": {
+                "model_client": model,
+                "device_factory": fake_device,
+                "verbose": False,
+                "after_screen_marks": [
+                    {
+                        "mark_id": "tab",
+                        "bbox": [0, 0, 1000, 100],
+                        "role": "TextView",
+                        "text_summary": "首页",
+                    }
+                ],
+                "grounding_provider_name": "off",
+            }
+        },
+    )
+
+    assert result["budget_acceptance_done"] is True
+    assert result["finish_source"] == "budget_forced"
+    assert result["pending_finish"] is True
+    assert result["finished"] is False
+    assert result["failure_cause"] == "goal_not_satisfied"
+    assert result["finish_validation_status"] != "success"
+    # after_acceptance still routes to end at max_steps (edges are pure, so
+    # the merged state is simulated), so the run terminates with a real
+    # attribution instead of unknown.
+    assert after_acceptance({**state, **result}) == "end"
+
+
+def test_budget_forced_acceptance_model_can_recognize_actual_completion(
+    base_state, fake_device
+) -> None:
+    """2.1: the semantic judge may recognize the task really completed (e.g.
+    the target content is already open) and open the finish gate."""
+    model = _FakeModelClient(
+        _FakeModelResponse(
+            "ok",
+            '{"completed":true,"message":"已完成",'
+            '"named_evidence":[{"criterion":"task_completed",'
+            '"screen_reference":"mark_id=done","observed_value":"测试任务"}]}',
+        )
+    )
+    state = _budget_state()
+
+    result = acceptance_node(
+        state,
+        {
+            "configurable": {
+                "model_client": model,
+                "device_factory": fake_device,
+                "verbose": False,
+                "after_screen_marks": [
+                    {
+                        "mark_id": "done",
+                        "bbox": [50, 60, 950, 160],
+                        "role": "TextView",
+                        "text_summary": "测试任务",
+                    }
+                ],
+                "grounding_provider_name": "off",
+            }
+        },
+    )
+
+    assert result["budget_acceptance_done"] is True
+    assert result["finish_source"] == "budget_forced"
+    assert result["finished"] is True
+    assert result["failure_cause"] is None
+    assert result["finish_validation_status"] == "success"
+
+
+def test_budget_flags_not_set_for_model_finish_claim_channel(
+    base_state, fake_device
+) -> None:
+    """A model finish claim at max_steps is not budget-forced: the flag stays
+    unset so a later rejection could still trigger the forced channel."""
+    model = _FakeModelClient(
+        _FakeModelResponse("ok", '{"completed":false,"message":"未完成"}')
+    )
+    state = _budget_state(pending_finish=True)
+
+    result = acceptance_node(
+        state,
+        {
+            "configurable": {
+                "model_client": model,
+                "device_factory": fake_device,
+                "verbose": False,
+                "after_screen_marks": [
+                    {
+                        "mark_id": "tab",
+                        "bbox": [0, 0, 1000, 100],
+                        "role": "TextView",
+                        "text_summary": "首页",
+                    }
+                ],
+                "grounding_provider_name": "off",
+            }
+        },
+    )
+
+    # The node did not claim the budget channel: no flags in the update, so
+    # the merged state keeps the incoming False / None values.
+    assert result.get("budget_acceptance_done") is None
+    assert result.get("finish_source") is None
+    assert result["pending_finish"] is False

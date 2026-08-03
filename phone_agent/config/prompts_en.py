@@ -63,13 +63,15 @@ When Structured Reflection indicates failure, follow this mapping:
 
 JSON_OUTPUT_CONTRACT = """# Output format: JSON schema
 Return exactly one JSON object.
-You may use a provider envelope: {"action": <one action JSON below>, "expected_outcome": {"kind":"...","must_observe":["..."],"must_not_observe":["..."],"target_mark_id":"m1","target_text_hint":"..."}}.
+You may use a provider envelope: {"action": <one action JSON below>, "expected_outcome": {"kind":"...","must_observe":["..."],"must_not_observe":["..."],"target_mark_id":"m1","target_text_hint":"..."}, "progress_note": "..."}.
 `expected_outcome` is only a post-action verification contract, not execution authorization. It must not contain raw private text, commands, device config, provider, or backend fields; execution still comes only from `action`.
+`progress_note` is optional: one sentence describing what this step completed and the next-step intent, for continuity memory only (it is sanitized, truncated, and carries no executable information).
 Examples:
 - {"type":"intent","action":"tap","target_mark_id":"m1"}
 - {"type":"intent","action":"tap","target_object_id":"obj_1"}
 - {"type":"intent","action":"tap","object_role":"video","ordinal":1,"object_filter":{"object_type":"video","list_id":"list_1"}}
 - {"action":{"type":"intent","action":"tap","target_mark_id":"m1"},"expected_outcome":{"kind":"input_focused","must_observe":["Search","Cancel"]}}
+- {"action":{"type":"do","action":"wait","duration":"1 seconds"},"expected_outcome":{"kind":"loading_finished"},"progress_note":"waited for loading, next tap Settings"}
 - {"type":"intent","action":"tap","target_mark_id":"m2","message":"confirm payment"}
 - {"type":"do","action":"swipe","start":[500,800],"end":[500,200]}
 - {"type":"do","action":"type","text":"hello"}

@@ -78,6 +78,9 @@ EXPECTED_OUTCOME_FIELDS.update(EXPECTED_OBJECT_FIELDS)
 EXPECTED_OUTCOME_FIELDS.update(RUNTIME_EXPECTED_OBJECT_FIELDS)
 MAX_LIST_ITEMS = 12
 MAX_TEXT_CHARS = 160
+# P4 #1: bounded provider self-note for next-step intent continuity.
+PROGRESS_NOTE_MAX_CHARS = 120
+PROGRESS_NOTE_FIELD = "progress_note"
 
 
 @dataclass(frozen=True)
@@ -143,6 +146,27 @@ class ExpectedOutcome:
             predicates=tuple(predicates),
             compatibility_source=f"legacy_expected_outcome:{self.kind}",
         )
+
+
+def extract_progress_note(payload: Any) -> str | None:
+    """Extract the optional provider self-note from the envelope top level.
+
+    ``progress_note`` lives at the same level as ``expected_outcome`` because
+    ``_extract_provider_action_payload`` strips every envelope top-level field
+    except ``action``. It is a bounded string: non-string values, empty text,
+    and over-long payloads are dropped or truncated here so downstream state
+    writes and prompt injection stay bounded.
+    """
+
+    if not isinstance(payload, dict):
+        return None
+    note = payload.get(PROGRESS_NOTE_FIELD)
+    if not isinstance(note, str):
+        return None
+    text = note.strip()
+    if not text:
+        return None
+    return text[:PROGRESS_NOTE_MAX_CHARS]
 
 
 def extract_provider_envelope(payload: Any) -> tuple[Any, dict[str, Any] | None]:

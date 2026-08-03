@@ -1,11 +1,17 @@
 import json
 import importlib.util
+import time
 from pathlib import Path
 
 import pytest
 
 from phone_agent.config import get_system_prompt
-from phone_agent.model.client import ModelClient, ModelConfig, ModelParseError
+from phone_agent.model.client import (
+    ModelClient,
+    ModelConfig,
+    ModelParseError,
+    TTFTCircuitBreakerError,
+)
 
 MAIN_PATH = Path(__file__).resolve().parents[2] / "main.py"
 MAIN_SPEC = importlib.util.spec_from_file_location("phone_agent_cli_main", MAIN_PATH)
@@ -479,7 +485,7 @@ def test_stream_consumer_handles_reasoning_content_without_polluting_action(caps
 
     client = ModelClient(ModelConfig(stream=True))
 
-    raw_content, tool_calls, first_token, thinking_end = client._consume_stream(
+    raw_content, thinking, tool_calls, first_token, thinking_end = client._consume_stream(
         [
             Chunk(Delta(reasoning_content="先思考")),
             Chunk(Delta(content='<answer>{"type":"do","action":"home"}</answer>')),
@@ -491,6 +497,10 @@ def test_stream_consumer_handles_reasoning_content_without_polluting_action(caps
     assert tool_calls == {}
     assert first_token is not None
     assert thinking_end is not None
+    # P4 #2: reasoning_content is captured as thinking, never merged into
+    # raw_content so structured JSON parsing stays unpolluted.
+    assert thinking == "先思考"
+    assert "先思考" not in raw_content
     assert "先思考" not in capsys.readouterr().out
 
 
@@ -511,7 +521,7 @@ def test_stream_consumer_can_opt_in_to_stdout(capsys) -> None:
 
     client = ModelClient(ModelConfig(stream=True, stream_stdout=True))
 
-    client._consume_stream(
+    _raw, thinking, _tool_calls, _first_token, _thinking_end = client._consume_stream(
         [
             Chunk(Delta(reasoning_content="先思考")),
             Chunk(Delta(content='<answer>{"type":"do","action":"home"}</answer>')),
@@ -519,6 +529,7 @@ def test_stream_consumer_can_opt_in_to_stdout(capsys) -> None:
         0,
     )
 
+    assert thinking == "先思考"
     assert "先思考" in capsys.readouterr().out
 
 
@@ -574,6 +585,197 @@ def test_tool_spec_app_has_description() -> None:
     assert "available apps" in app_prop["description"].lower() or "system prompt" in app_prop["description"].lower()
 
 
+# ---------------------------------------------------------------------------
+# P5 #3 TTFT circuit breaker
+# ---------------------------------------------------------------------------
+
+
+def test_ttft_config_rejects_invalid_threshold_and_limit() -> None:
+    with pytest.raises(ValueError, match="ttft_threshold_seconds"):
+        ModelConfig(ttft_threshold_seconds=0)
+    with pytest.raises(ValueError, match="ttft_consecutive_limit"):
+        ModelConfig(ttft_consecutive_limit=0)
+
+
+def test_ttft_breaker_trips_after_consecutive_slow_calls() -> None:
+    client = ModelClient(
+        ModelConfig(ttft_threshold_seconds=60.0, ttft_consecutive_limit=3)
+    )
+
+    client._record_ttft(61.0)
+    client._record_ttft(70.0)
+    assert client.ttft_consecutive_slow == 2
+    assert client.ttft_breaker_triggered is False
+
+    with pytest.raises(TTFTCircuitBreakerError) as exc:
+        client._record_ttft(90.0)
+    assert exc.value.consecutive_slow == 3
+    assert exc.value.threshold == 60.0
+    assert exc.value.ttft_history == [61.0, 70.0, 90.0]
+    assert client.ttft_breaker_triggered is True
+
+
+def test_ttft_breaker_occasional_slow_call_resets_streak() -> None:
+    """A single fast call between slow ones resets the streak: only genuinely
+    consecutive degradation trips the breaker (偶发慢不熔断)."""
+    client = ModelClient(
+        ModelConfig(ttft_threshold_seconds=60.0, ttft_consecutive_limit=3)
+    )
+
+    client._record_ttft(61.0)
+    client._record_ttft(70.0)
+    client._record_ttft(0.4)  # fast — resets the streak
+    assert client.ttft_consecutive_slow == 0
+
+    client._record_ttft(80.0)
+    client._record_ttft(85.0)
+    with pytest.raises(TTFTCircuitBreakerError):
+        client._record_ttft(95.0)
+
+
+def test_ttft_breaker_can_be_disabled() -> None:
+    client = ModelClient(
+        ModelConfig(
+            ttft_circuit_breaker_enabled=False,
+            ttft_threshold_seconds=60.0,
+            ttft_consecutive_limit=3,
+        )
+    )
+
+    client._record_ttft(61.0)
+    client._record_ttft(70.0)
+    client._record_ttft(90.0)
+    assert client.ttft_breaker_triggered is False
+    # Disabled: no TTFT state is recorded at all.
+    assert client.ttft_consecutive_slow == 0
+    assert client.ttft_history == []
+
+
+def test_ttft_breaker_run_state_resets_per_run() -> None:
+    """Eval harness runs many tasks on one process; counters must reset at
+    each run start so a slow previous task cannot trip the next run (P5 #3)."""
+    client = ModelClient(
+        ModelConfig(ttft_threshold_seconds=60.0, ttft_consecutive_limit=3)
+    )
+    client._record_ttft(61.0)
+    client._record_ttft(70.0)
+
+    client.reset_run_state()
+
+    assert client.ttft_history == []
+    assert client.ttft_consecutive_slow == 0
+    assert client.ttft_breaker_triggered is False
+    client._record_ttft(1.0)
+    client._record_ttft(2.0)
+    client._record_ttft(3.0)
+    assert client.ttft_breaker_triggered is False
+
+
+def test_ttft_breaker_trips_through_request_path(monkeypatch) -> None:
+    """End-to-end: three consecutive slow requests abort through the request
+    path (non-streaming TTFT uses total_time as the natural proxy)."""
+    captured = {}
+
+    class FakeCompletions:
+        def create(self, **kwargs):
+            captured["calls"] = captured.get("calls", 0) + 1
+            time.sleep(0.02)
+            message = type(
+                "Msg",
+                (),
+                {
+                    "content": '{"type":"do","action":"home"}',
+                    "tool_calls": None,
+                    "reasoning_content": None,
+                },
+            )()
+            return type("Resp", (), {"choices": [type("C", (), {"message": message})()]})()
+
+    class FakeOpenAI:
+        def __init__(self, **kwargs):
+            self.chat = type("Chat", (), {"completions": FakeCompletions()})()
+
+    monkeypatch.setattr("phone_agent.model.client.OpenAI", FakeOpenAI)
+    client = ModelClient(
+        ModelConfig(
+            stream=False,
+            max_retries=0,
+            ttft_threshold_seconds=0.01,
+            ttft_consecutive_limit=3,
+        )
+    )
+
+    client.request(
+        [{"role": "user", "content": "a"}],
+        output_mode="json_schema",
+        validate_action=False,
+    )
+    client.request(
+        [{"role": "user", "content": "b"}],
+        output_mode="json_schema",
+        validate_action=False,
+    )
+    with pytest.raises(TTFTCircuitBreakerError):
+        client.request(
+            [{"role": "user", "content": "c"}],
+            output_mode="json_schema",
+            validate_action=False,
+        )
+    assert captured["calls"] == 3
+
+
+# ---------------------------------------------------------------------------
+# P5 #2 prompt cache hints
+# ---------------------------------------------------------------------------
+
+
+def test_prompt_cache_hints_applied_to_request(monkeypatch) -> None:
+    captured = {}
+
+    class FakeCompletions:
+        def create(self, **kwargs):
+            captured.update(kwargs)
+            message = type(
+                "Msg",
+                (),
+                {
+                    "content": '{"type":"do","action":"home"}',
+                    "tool_calls": None,
+                    "reasoning_content": None,
+                },
+            )()
+            return type("Resp", (), {"choices": [type("C", (), {"message": message})()]})()
+
+    class FakeOpenAI:
+        def __init__(self, **kwargs):
+            self.chat = type("Chat", (), {"completions": FakeCompletions()})()
+
+    monkeypatch.setattr("phone_agent.model.client.OpenAI", FakeOpenAI)
+    client = ModelClient(
+        ModelConfig(
+            stream=False,
+            max_retries=0,
+            prompt_cache_key="autoglm-eval:t1",
+            enable_cache_control=True,
+        )
+    )
+    messages = [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "goal block"},
+        {"role": "user", "content": [{"type": "text", "text": "dynamic"}]},
+    ]
+
+    client.request(messages, output_mode="json_schema", validate_action=False)
+
+    assert captured["prompt_cache_key"] == "autoglm-eval:t1"
+    assert captured["messages"][1]["extra_body"]["cache_control"] == {
+        "type": "ephemeral"
+    }
+    # The caller's message list is not mutated.
+    assert "extra_body" not in messages[1]
+    assert messages[1]["content"] == "goal block"
+
+
 def test_tool_spec_target_mark_has_grounding_description() -> None:
     client = ModelClient(ModelConfig())
     specs = client._build_tool_specs()
@@ -593,6 +795,166 @@ def test_tool_spec_target_mark_has_grounding_description() -> None:
     assert "strict flat" in properties["object_filter"]["description"].lower()
     assert properties["object_filter"]["additionalProperties"] is False
     assert "title_hash_prefix" in properties["object_filter"]["properties"]
+
+
+def test_stream_consumer_no_reasoning_keeps_empty_thinking() -> None:
+    """P4 #2: providers without a reasoning channel must stay format-identical."""
+
+    class Delta:
+        def __init__(self, content=None, reasoning_content=None):
+            self.content = content
+            self.reasoning_content = reasoning_content
+            self.tool_calls = None
+
+    class Choice:
+        def __init__(self, delta):
+            self.delta = delta
+
+    class Chunk:
+        def __init__(self, delta):
+            self.choices = [Choice(delta)]
+
+    client = ModelClient(ModelConfig(stream=True))
+
+    raw_content, thinking, tool_calls, first_token, thinking_end = client._consume_stream(
+        [Chunk(Delta(content='{"type":"do","action":"home"}'))],
+        0,
+    )
+
+    assert raw_content == '{"type":"do","action":"home"}'
+    assert thinking == ""
+    assert tool_calls == {}
+    assert first_token is not None
+    assert thinking_end is not None
+
+
+def test_request_surfaces_streamed_reasoning_as_thinking(monkeypatch) -> None:
+    """P4 #2: request() exposes captured reasoning as ModelResponse.thinking."""
+
+    class Delta:
+        def __init__(self, content=None, reasoning_content=None):
+            self.content = content
+            self.reasoning_content = reasoning_content
+            self.tool_calls = None
+
+    class Choice:
+        def __init__(self, delta):
+            self.delta = delta
+
+    class Chunk:
+        def __init__(self, delta):
+            self.choices = [Choice(delta)]
+
+    class FakeCompletions:
+        def create(self, **kwargs):
+            return [
+                Chunk(Delta(reasoning_content="先思考，再行动")),
+                Chunk(
+                    Delta(content='{"type":"do","action":"wait","duration":"1 seconds"}')
+                ),
+            ]
+
+    class FakeChat:
+        def __init__(self):
+            self.completions = FakeCompletions()
+
+    class FakeOpenAI:
+        def __init__(self, **kwargs):
+            self.chat = FakeChat()
+
+    monkeypatch.setattr("phone_agent.model.client.OpenAI", FakeOpenAI)
+
+    client = ModelClient(ModelConfig(output_mode="json_schema", stream=True))
+    response = client.request([{"role": "user", "content": "hi"}], validate_action=True)
+
+    assert response.thinking == "先思考，再行动"
+    assert '"action": "Wait"' in response.action
+
+
+def test_request_no_reasoning_keeps_empty_thinking(monkeypatch) -> None:
+    """P4 #2: no reasoning channel → thinking stays empty (zero format change)."""
+
+    class Delta:
+        def __init__(self, content=None, reasoning_content=None):
+            self.content = content
+            self.reasoning_content = reasoning_content
+            self.tool_calls = None
+
+    class Choice:
+        def __init__(self, delta):
+            self.delta = delta
+
+    class Chunk:
+        def __init__(self, delta):
+            self.choices = [Choice(delta)]
+
+    class FakeCompletions:
+        def create(self, **kwargs):
+            return [Chunk(Delta(content='{"type":"do","action":"home"}'))]
+
+    class FakeChat:
+        def __init__(self):
+            self.completions = FakeCompletions()
+
+    class FakeOpenAI:
+        def __init__(self, **kwargs):
+            self.chat = FakeChat()
+
+    monkeypatch.setattr("phone_agent.model.client.OpenAI", FakeOpenAI)
+
+    client = ModelClient(ModelConfig(output_mode="json_schema", stream=True))
+    response = client.request([{"role": "user", "content": "hi"}], validate_action=True)
+
+    assert response.thinking == ""
+    assert '"action": "Home"' in response.action
+
+
+def test_envelope_progress_note_survives_action_payload_extraction() -> None:
+    """P4 #1: envelope top-level progress_note must not be stripped.
+
+    ``_extract_provider_action_payload`` only returns the ``action`` member, so
+    the raw envelope (including progress_note) is what flows to plan.py; the
+    extraction there re-reads progress_note at the envelope top level.
+    """
+
+    client = ModelClient(ModelConfig(output_mode="json_schema"))
+
+    _thinking, action, metadata = client._parse_response_with_metadata(
+        json.dumps(
+            {
+                "action": {"type": "do", "action": "Wait", "duration": "1 seconds"},
+                "expected_outcome": {"kind": "loading_finished"},
+                "progress_note": "已等待加载，下一步点击设置",
+            },
+            ensure_ascii=False,
+        )
+    )
+
+    assert metadata["parse_success"] is True
+    assert metadata["expected_outcome_present"] is True
+    assert '"progress_note"' in action
+    assert "已等待加载" in action
+
+
+def test_envelope_progress_note_plain_action_dict_fails_closed() -> None:
+    """P4 #1: progress_note inside a plain (non-envelope) action dict is rejected."""
+
+    client = ModelClient(ModelConfig(output_mode="json_schema"))
+
+    with pytest.raises(ModelParseError) as exc_info:
+        client._parse_response_with_metadata(
+            json.dumps(
+                {
+                    "type": "do",
+                    "action": "Wait",
+                    "duration": "1 seconds",
+                    "progress_note": "not allowed here",
+                },
+                ensure_ascii=False,
+            )
+        )
+
+    assert exc_info.value.parse_metadata["parse_error_code"] == "unsafe_value"
 
 
 def test_tool_calls_do_tap_with_object_selector_maps_to_intent() -> None:

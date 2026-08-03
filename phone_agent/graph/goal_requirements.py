@@ -261,6 +261,12 @@ class ContractAdequacyValidator:
             requirements.required_terminal_state, predicate_ids, has_vlm_judge
         ):
             reasons.append("terminal_state_uncovered")
+        if any(
+            item.verification == "vlm_judge"
+            and not judge_description_is_observable(item.description)
+            for item in contract.success_criteria
+        ):
+            reasons.append("judge_description_not_observable")
         if requirements.constraint_hashes:
             contract_constraint_hashes = {
                 _digest(item) for item in contract.constraints if str(item).strip()
@@ -344,6 +350,73 @@ def raw_text_binding_is_observable(value: Any) -> bool:
         ):
             return False
     return True
+
+
+def judge_description_is_observable(description: str) -> bool:
+    """Heuristic: whether a vlm_judge description names concrete screen content.
+
+    Diagnostic only (severity=degraded, never a hard reject): an abstract
+    description ("task complete") cannot be grounded to screen evidence, so the
+    finish gate would depend on self-attestation. A quoted literal
+    ("出现含'银石'字样的卡片") always counts as observable; otherwise the
+    description must retain substantive content after abstract status terms are
+    stripped. Conservative by design — false positives merely degrade.
+    """
+
+    text = str(description or "").strip()
+    if not text:
+        return False
+    if len(text) < 4:
+        return False
+    for left, right in (("“", "”"), ('"', '"'), ("《", "》"), ("「", "」")):
+        if left in text and right in text:
+            return True
+    stripped = text
+    for term in sorted(_ABSTRACT_JUDGE_TERMS, key=len, reverse=True):
+        stripped = stripped.replace(term, " ")
+    stripped = re.sub(
+        r"[\s,，。.!！?？、:：;；'\"“”‘’《》「」()（）\[\]]+", "", stripped
+    )
+    return len(stripped) >= 4
+
+
+_ABSTRACT_JUDGE_TERMS: tuple[str, ...] = (
+    "可观察",
+    "显示",
+    "展示",
+    "出现",
+    "进入",
+    "达到",
+    "达成",
+    "完成",
+    "成功",
+    "生效",
+    "屏幕",
+    "页面",
+    "界面",
+    "可见",
+    "符合",
+    "满足",
+    "visible",
+    "appear",
+    "display",
+    "screen",
+    "page",
+    "interface",
+    "complete",
+    "completed",
+    "done",
+    "success",
+    "successful",
+    "achieve",
+    "achieved",
+    "finish",
+    "finished",
+    "final",
+    "target",
+    "goal",
+    "task",
+)
 
 
 def _expected_value_in_domain(domain: str, value: Any) -> bool:

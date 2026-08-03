@@ -50,6 +50,10 @@ class AgentConfig:
     goal_compile_retry: int = 1
     require_goal_approval: bool = False
     enable_prompt_cache: bool = False
+    # P5 #1: skip the reflect model call when the deterministic verifier
+    # answers the action question with high confidence and no goal-contract
+    # vlm_judge evidence is still pending collection.
+    skip_reflect_on_high_confidence: bool = True
     locateanything_context_max_chars: int = 0
     locateanything_structure_mode: str | None = None
     locateanything_max_visual_candidates: int = 30
@@ -189,6 +193,10 @@ class PhoneAgent:
         """
         started_at = time.perf_counter()
         trace_id = str(uuid.uuid4())
+        # P5 #3: run-scoped TTFT breaker counters must not leak across tasks
+        # (eval harness runs many tasks sequentially on one process, and
+        # interactive mode reuses the same agent for multiple runs).
+        self.model_client.reset_run_state()
         device_factory = get_device_factory()
         trace_writer = self._build_trace_writer(trace_id)
         if trace_writer:
@@ -260,6 +268,7 @@ class PhoneAgent:
             "observation": None,
             "mark_registry": None,
             "thinking": "",
+            "progress_note": None,
             "action_raw": "",
             "action_parsed": None,
             "intent_raw": None,
@@ -283,6 +292,8 @@ class PhoneAgent:
             "action_receipt": None,
             "pending_finish": False,
             "finish_claim": None,
+            "finish_source": None,
+            "budget_acceptance_done": False,
             "finish_validation_status": None,
             "finish_validation_evidence": None,
             "goal_evidence_ledger": [],
@@ -315,6 +326,7 @@ class PhoneAgent:
             "failure_memory_hit_count": 0,
             "repeated_failure_count": 0,
             "repeated_action_detected": False,
+            "repeat_rejected": False,
             "gui_memory": default_gui_memory(),
             "verifier_result": None,
             "verifier_status": None,
@@ -372,6 +384,9 @@ class PhoneAgent:
                 "goal_compile_retry": self.agent_config.goal_compile_retry,
                 "require_goal_approval": self.agent_config.require_goal_approval,
                 "enable_prompt_cache": self.agent_config.enable_prompt_cache,
+                "skip_reflect_on_high_confidence": (
+                    self.agent_config.skip_reflect_on_high_confidence
+                ),
                 "locateanything_context_max_chars": self.agent_config.locateanything_context_max_chars,
                 "locateanything_structure_mode": self.agent_config.locateanything_structure_mode,
                 "locateanything_max_visual_candidates": self.agent_config.locateanything_max_visual_candidates,

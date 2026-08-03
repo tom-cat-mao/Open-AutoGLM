@@ -124,21 +124,7 @@ def run_dry_task(
 def run_agent_task(task: EvalTask, args: argparse.Namespace) -> RunResult:
     """Run a task through PhoneAgent.run_structured()."""
     agent = PhoneAgent(
-        model_config=ModelConfig(
-            base_url=args.base_url,
-            model_name=args.model,
-            api_key=args.apikey,
-            timeout=args.model_timeout,
-            max_retries=args.model_max_retries,
-            default_headers=build_model_headers(args),
-            stream=args.stream,
-            extra_body=args.model_extra_body_dict,
-            thinking_mode=args.thinking_mode,
-            thinking_param=args.thinking_param,
-            trace_raw_model_response=args.trace_raw_model_response,
-            lang=args.lang,
-            output_mode=args.output_mode,
-        ),
+        model_config=build_eval_model_config(task, args),
         agent_config=AgentConfig(
             max_steps=task.max_steps,
             device_id=args.device_id,
@@ -162,6 +148,42 @@ def run_agent_task(task: EvalTask, args: argparse.Namespace) -> RunResult:
         ),
     )
     return agent.run_structured(task.task)
+
+
+def build_eval_model_config(task: EvalTask, args: argparse.Namespace) -> ModelConfig:
+    """Build the ModelConfig for one eval task.
+
+    P5 #2 prompt-cache defaults: cache_control hints are on by default and the
+    prompt_cache_key defaults to a run-stable value derived from the task id
+    (stable across every step of one run, distinct per task). Both can be
+    turned off via env/CLI for providers that reject cache hints.
+    P5 #3 TTFT circuit breaker: on by default so a degraded endpoint aborts
+    the run instead of burning the step budget.
+    """
+
+    return ModelConfig(
+        base_url=args.base_url,
+        model_name=args.model,
+        api_key=args.apikey,
+        timeout=args.model_timeout,
+        max_retries=args.model_max_retries,
+        default_headers=build_model_headers(args),
+        stream=args.stream,
+        extra_body=args.model_extra_body_dict,
+        thinking_mode=args.thinking_mode,
+        thinking_param=args.thinking_param,
+        trace_raw_model_response=args.trace_raw_model_response,
+        lang=args.lang,
+        output_mode=args.output_mode,
+        prompt_cache_key=(
+            args.prompt_cache_key
+            or (f"autoglm-eval:{task.id}" if args.enable_cache_control else None)
+        ),
+        enable_cache_control=args.enable_cache_control,
+        ttft_circuit_breaker_enabled=args.ttft_circuit_breaker,
+        ttft_threshold_seconds=args.ttft_threshold,
+        ttft_consecutive_limit=args.ttft_consecutive_limit,
+    )
 
 
 def parse_bool(value: str | None, default: bool = False) -> bool:
@@ -412,6 +434,39 @@ def parse_args() -> argparse.Namespace:
         default=os.getenv("PHONE_AGENT_OUTPUT_MODE", "json_schema"),
         help="Model output mode",
     )
+    parser.add_argument(
+        "--prompt-cache-key",
+        default=os.getenv("PHONE_AGENT_PROMPT_CACHE_KEY"),
+        help="Stable prompt-cache key (OpenAI-style prompt_cache_key). When unset "
+        "and cache is enabled, a run-stable key derived from the task id is used.",
+    )
+    parser.add_argument(
+        "--enable-cache-control",
+        action="store_true",
+        default=parse_bool(os.getenv("PHONE_AGENT_ENABLE_CACHE_CONTROL"), True),
+        help="Inject Anthropic-style cache_control hints on the static "
+        "goal-contract message (default: on; disable for providers that "
+        "reject cache hints)",
+    )
+    parser.add_argument(
+        "--ttft-circuit-breaker",
+        action="store_true",
+        default=parse_bool(os.getenv("PHONE_AGENT_TTFT_CIRCUIT_BREAKER"), True),
+        help="Abort the run after N consecutive slow time-to-first-token calls "
+        "(default: on)",
+    )
+    parser.add_argument(
+        "--ttft-threshold",
+        type=float,
+        default=float(os.getenv("PHONE_AGENT_TTFT_THRESHOLD", "60")),
+        help="TTFT threshold in seconds (default: 60)",
+    )
+    parser.add_argument(
+        "--ttft-consecutive-limit",
+        type=int,
+        default=int(os.getenv("PHONE_AGENT_TTFT_CONSECUTIVE_LIMIT", "3")),
+        help="Consecutive slow TTFT calls that trip the breaker (default: 3)",
+    )
     parser.add_argument("--device-id", default=None, help="ADB device id")
     parser.add_argument(
         "--lang", choices=["cn", "en"], default="cn", help="Prompt language"
@@ -518,6 +573,10 @@ def parse_args() -> argparse.Namespace:
         parser.error("--model-timeout must be positive")
     if args.model_max_retries < 0:
         parser.error("--model-max-retries must be non-negative")
+    if args.ttft_threshold <= 0:
+        parser.error("--ttft-threshold must be positive")
+    if args.ttft_consecutive_limit < 1:
+        parser.error("--ttft-consecutive-limit must be at least 1")
     try:
         args.model_extra_body_dict = parse_json_object(
             args.model_extra_body, "--model-extra-body / PHONE_AGENT_MODEL_EXTRA_BODY"

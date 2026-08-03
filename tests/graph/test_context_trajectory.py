@@ -199,7 +199,7 @@ def test_criterion_movement_is_advancing_and_resets_novelty() -> None:
     }
 
 
-def test_goal_agenda_precedes_screen_belief_and_ledger_movement_advances() -> None:
+def test_goal_agenda_precedes_other_sections_and_ledger_movement_advances() -> None:
     ledger = [
         {
             "contract_id": "contract-1",
@@ -233,6 +233,7 @@ def test_goal_agenda_precedes_screen_belief_and_ledger_movement_advances() -> No
             },
         ],
         "screen_belief": {"summary": "搜索结果页", "confidence": "high"},
+        "failure_memory": [{"failure_cause": "wrong_page", "action": "Tap"}],
     }
 
     block, _metrics = build_plan_context_block(state)
@@ -243,9 +244,12 @@ def test_goal_agenda_precedes_screen_belief_and_ledger_movement_advances() -> No
         budget={"novelty_exhaustion_steps": 4},
     )
 
-    assert block.index("goal_agenda") < block.index("screen_belief")
+    # 1.4: screen_belief is no longer rendered in the plan block at all, so
+    # goal_agenda is the first rendered section.
+    assert block.index("goal_agenda") < block.index("failure_memory")
     assert "已满足: 打开小红书(app.foreground_identity)" in block
     assert "未满足: 查看银石赛道相关内容(vlm_judge, 待验收)" in block
+    assert "screen_belief" not in block
     assert history
     assert liveness["state"] == "advancing"
 
@@ -413,3 +417,247 @@ def test_repeat_warning_reaches_the_injected_block() -> None:
 
     assert "avoid_repeating" in block
     assert "repeated_action" in json.dumps(metrics, ensure_ascii=False) or "avoid_repeating" in block
+
+
+def test_failure_memory_renders_up_to_budget_with_repeat_count() -> None:
+    """1.3: failure_memory renders the full budget (3), not just the last item,
+    and carries the repeated_failure_count counter line."""
+    state = {
+        "failure_memory": [
+            {"step_count": 1, "action": "Tap", "failure_cause": "wrong_page"},
+            {"step_count": 2, "action": "Tap", "failure_cause": "wrong_page"},
+            {"step_count": 3, "action": "Type", "failure_cause": "element_not_found"},
+            {"step_count": 4, "action": "Tap", "failure_cause": "wrong_page"},
+        ],
+        "repeated_failure_count": 7,
+    }
+
+    block, _metrics = build_plan_context_block(state)
+
+    assert "failure_memory" in block
+    # The oldest entry (step 1) is dropped; the newest three survive.
+    assert "\"step_count\": 1" not in block
+    assert "\"step_count\": 2" in block
+    assert "\"step_count\": 4" in block
+    assert "\"repeated_failure_count\": 7" in block
+
+
+def test_liveness_note_heads_the_plan_context_block() -> None:
+    """2.2: liveness state is a natural-language hint at the top of the block,
+    carrying novelty streak and repeat counts, in both languages."""
+    tried = [
+        _succeeded_tap(4, screen_id="a"),
+        _succeeded_tap(6, screen_id="b"),
+        _succeeded_tap(7, screen_id="b"),
+        _succeeded_tap(8, screen_id="b"),
+    ]
+    state = {
+        "lang": "cn",
+        "gui_memory": {
+            "visited_screens": [],
+            "tried_actions": tried,
+            "scroll_memory": {},
+            "task_progress": {
+                "trajectory_liveness": "stuck",
+                "novelty_streak": 3,
+                "stuck_rounds": 2,
+            },
+        },
+        "failure_memory": [],
+    }
+
+    block, _metrics = build_plan_context_block(state)
+    assert block.index("轨迹提示") < block.index("gui_memory")
+    assert "陷入循环" in block
+    assert "novelty_streak=3" in block
+    assert "stuck_rounds=2" in block
+    assert "已重复 4 次" in block
+
+    en_block, _ = build_plan_context_block({**state, "lang": "en"})
+    assert "Trajectory note: stuck" in en_block
+    assert "repeated 4x" in en_block
+
+
+def test_liveness_note_absent_without_liveness_state() -> None:
+    block, _metrics = build_plan_context_block(
+        {"gui_memory": {"tried_actions": [], "task_progress": {}}}
+    )
+    assert "轨迹提示" not in block
+    assert "liveness_note" not in block
+
+
+def test_verifier_advisory_renders_in_last_action_outcome() -> None:
+    """1.1: verifier signals ride into the next plan prompt as advisory
+    evidence inside last_action_outcome."""
+    state = {
+        "action_outcome_summary": {
+            "action": "Tap",
+            "execution_success": True,
+            "reflection_verdict": "succeeded",
+            "failure_cause": None,
+            "verifier_advisory": {
+                "status": "unknown",
+                "confidence": 0.0,
+                "failure_cause": None,
+                "matched_postconditions": [],
+                "missing_postconditions": ["postcondition_unverified"],
+                "selected_object_signals": {},
+            },
+        },
+        "reflection_verdict": "succeeded",
+        "failure_cause": None,
+        "suggested_strategy": "continue",
+    }
+
+    block, _metrics = build_plan_context_block(state)
+
+    assert "last_action_outcome" in block
+    assert "verifier_advisory" in block
+    assert "postcondition_unverified" in block
+
+
+def test_verifier_advisory_sensitive_postcondition_is_redacted() -> None:
+    """Advisory postconditions can echo raw screen text: regex redaction must
+    apply before the block is emitted."""
+    state = {
+        "action_outcome_summary": {
+            "action": "Type",
+            "execution_success": True,
+            "reflection_verdict": "succeeded",
+            "failure_cause": None,
+            "verifier_advisory": {
+                "status": "success",
+                "confidence": 0.9,
+                "failure_cause": None,
+                "matched_postconditions": ["订单 order:ABCD1234", "13800138000"],
+                "missing_postconditions": [],
+                "selected_object_signals": {},
+            },
+        },
+        "reflection_verdict": "succeeded",
+        "failure_cause": None,
+        "suggested_strategy": "continue",
+    }
+
+    block, _metrics = build_plan_context_block(state)
+
+    assert "13800138000" not in block
+    assert "verifier_advisory" in block
+
+
+def _swipe_entry(
+    start: list[float], end: list[float], *, surface: str = FEED_SURFACE
+) -> dict[str, object]:
+    return {
+        "action": "Swipe",
+        "start": start,
+        "end": end,
+        "target_center": None,
+        "surface": surface,
+    }
+
+
+def test_swipe_repeat_key_uses_grid_and_direction() -> None:
+    """P3 #3: a Swipe without a target center keys on (action, surface,
+    direction, start-grid, end-grid); sub-50px jitter lands in the same grid."""
+    base = _swipe_entry([500, 900], [500, 300])
+    jittered = _swipe_entry([505, 895], [498, 302])
+    other_start = _swipe_entry([800, 900], [800, 300])
+    other_surface = _swipe_entry([500, 900], [500, 300], surface="other-surface")
+
+    assert context_module.repeated_action_key(base) is not None
+    assert context_module.repeated_action_key(base) == context_module.repeated_action_key(
+        jittered
+    )
+    assert context_module.repeated_action_key(base) != context_module.repeated_action_key(
+        other_start
+    )
+    assert context_module.repeated_action_key(base) != context_module.repeated_action_key(
+        other_surface
+    )
+
+
+def test_swipe_missing_geometry_has_no_repeat_key() -> None:
+    assert context_module.repeated_action_key({"action": "Swipe", "surface": FEED_SURFACE}) is None
+    assert context_module.repeated_action_key({"action": "Tap", "surface": FEED_SURFACE}) is None
+
+
+def test_detect_repeated_action_counts_swipe_gestures() -> None:
+    """Same swipe twice on the same surface reaches the repeat threshold; a
+    different start point is progress, not a repeat."""
+    history = [
+        _swipe_entry([500, 900], [500, 300]),
+        _swipe_entry([500, 900], [500, 300]),
+    ]
+    candidate = _swipe_entry([505, 895], [498, 302])
+
+    assert detect_repeated_action(history, candidate) is True
+    assert detect_repeated_action(history[:-1], _swipe_entry([800, 900], [800, 300])) is False
+
+
+def test_gui_memory_records_swipe_geometry_for_dedup() -> None:
+    state = {
+        "step_count": 6,
+        "action_parsed": {
+            "_metadata": "do",
+            "action": "Swipe",
+            "start": [500, 900],
+            "end": [500, 300],
+        },
+        "observation": {"snapshot": {"foreground_activity": FEED_SURFACE}},
+        "action_result": {"success": True},
+    }
+
+    memory = update_gui_memory(state, current_app="小红书", screen_id="screen-1")
+
+    latest = memory["tried_actions"][-1]
+    assert latest["action"] == "Swipe"
+    assert latest["target_center"] is None
+    assert latest["start"] == [500.0, 900.0]
+    assert latest["end"] == [500.0, 300.0]
+    assert context_module.repeated_action_key(latest) is not None
+
+
+def test_failure_memory_write_mode_matrix() -> None:
+    """P3 #2 matrix: hard_failure/consensus → verified; model-alone → unverified;
+    disputed and non-failure → skip."""
+    cases = [
+        # (verifier_status, verdict, hard_failure, disputed, expected)
+        ("failure", "failed", False, False, "verified"),
+        ("failure", "failed", True, False, "verified"),
+        ("unknown", "failed", False, False, "unverified"),
+        ("blocked", "partial", False, False, "unverified"),
+        ("success", "failed", False, False, "unverified"),
+        ("success", "failed", False, True, "skip"),
+        ("failure", "failed", False, True, "skip"),
+        ("unknown", "succeeded", False, False, "skip"),
+        ("failure", "succeeded", False, False, "skip"),
+    ]
+    for verifier_status, verdict, hard_failure, disputed, expected in cases:
+        assert (
+            context_module.failure_memory_write_mode(
+                verifier_status=verifier_status,
+                verdict=verdict,
+                hard_failure=hard_failure,
+                disputed=disputed,
+            )
+            == expected
+        ), (verifier_status, verdict, hard_failure, disputed)
+
+
+def test_update_failure_memory_marks_unverified_only_when_flagged() -> None:
+    outcome = {
+        "step_count": 7,
+        "action": "Tap",
+        "current_app": "小红书",
+        "failure_cause": "element_not_found",
+        "reflection_verdict": "failed",
+        "suggested_strategy": "retry",
+    }
+
+    verified = context_module.update_failure_memory([], outcome, unverified=False)
+    assert "unverified" not in verified[0]
+
+    unverified = context_module.update_failure_memory([], outcome, unverified=True)
+    assert unverified[0]["unverified"] is True
+    assert unverified[0]["failure_cause"] == "element_not_found"

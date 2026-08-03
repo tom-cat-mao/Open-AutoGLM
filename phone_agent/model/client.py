@@ -23,6 +23,28 @@ class ModelParseError(ValueError):
         self.parse_metadata = parse_metadata
 
 
+class TTFTCircuitBreakerError(RuntimeError):
+    """Model endpoint degraded: consecutive slow time-to-first-token calls.
+
+    Raised from ``ModelClient.request()`` so graph nodes route through their
+    existing model-failure path (plan's generic exception handler terminates
+    the run) instead of burning the step budget on a degraded endpoint. The
+    exception carries the recent TTFT sequence for the ``ttft_circuit_breaker``
+    trace event.
+    """
+
+    def __init__(
+        self, *, consecutive_slow: int, threshold: float, ttft_history: list[float]
+    ) -> None:
+        super().__init__(
+            f"ttft_circuit_breaker: {consecutive_slow} consecutive calls with "
+            f"time-to-first-token > {threshold}s"
+        )
+        self.consecutive_slow = consecutive_slow
+        self.threshold = threshold
+        self.ttft_history = list(ttft_history)
+
+
 @dataclass
 class ModelConfig:
     """Configuration for the AI model."""
@@ -50,6 +72,14 @@ class ModelConfig:
     # goal_contract static message block. Defaults to off for backward compatibility.
     prompt_cache_key: str | None = None
     enable_cache_control: bool = False
+    # TTFT circuit breaker (P5 #3): N consecutive calls whose time-to-first-token
+    # exceeds the threshold abort the run through the existing model-failure path.
+    # Enabled by default; the CLI/env layer can disable it for slow-but-healthy
+    # endpoints. For non-streaming calls the whole response arrives at once, so
+    # total_time is the natural time-to-first-token proxy.
+    ttft_circuit_breaker_enabled: bool = True
+    ttft_threshold_seconds: float = 60.0
+    ttft_consecutive_limit: int = 3
 
     def __post_init__(self) -> None:
         """Validate runtime configuration values not enforced by type hints."""
@@ -67,6 +97,10 @@ class ModelConfig:
             raise ValueError(
                 "thinking_param must be one of: enable_thinking, chat_template_kwargs"
             )
+        if self.ttft_threshold_seconds <= 0:
+            raise ValueError("ttft_threshold_seconds must be positive")
+        if self.ttft_consecutive_limit < 1:
+            raise ValueError("ttft_consecutive_limit must be at least 1")
 
 
 @dataclass
@@ -100,6 +134,19 @@ class ModelClient:
             max_retries=self.config.max_retries,
             default_headers=self.config.default_headers or None,
         )
+        # Run-scoped TTFT breaker state. Reset per run (``reset_run_state()``)
+        # so consecutive evals or interactive runs never leak counters across
+        # tasks (P5 #3).
+        self.ttft_history: list[float] = []
+        self.ttft_consecutive_slow = 0
+        self.ttft_breaker_triggered = False
+
+    def reset_run_state(self) -> None:
+        """Reset run-scoped performance counters (called once per run)."""
+
+        self.ttft_history = []
+        self.ttft_consecutive_slow = 0
+        self.ttft_breaker_triggered = False
 
     def request(
         self,
@@ -165,13 +212,18 @@ class ModelClient:
 
         raw_content = ""
         tool_call_deltas: dict[int, dict[str, Any]] = {}
+        stream_thinking = ""
         if self.config.stream:
             stream: Any = self.client.chat.completions.create(
                 **request_kwargs,
             )
-            raw_content, tool_call_deltas, time_to_first_token, time_to_thinking_end = (
-                self._consume_stream(stream, start_time)
-            )
+            (
+                raw_content,
+                stream_thinking,
+                tool_call_deltas,
+                time_to_first_token,
+                time_to_thinking_end,
+            ) = self._consume_stream(stream, start_time)
         else:
             response: Any = self.client.chat.completions.create(
                 **request_kwargs,
@@ -185,9 +237,21 @@ class ModelClient:
                         index: self._tool_call_to_dict(tool_call)
                         for index, tool_call in enumerate(tool_calls)
                     }
+                reasoning_content = getattr(message, "reasoning_content", None)
+                if isinstance(reasoning_content, str) and reasoning_content.strip():
+                    stream_thinking = reasoning_content
 
         # Calculate total time
         total_time = time.time() - start_time
+
+        # TTFT circuit breaker: consecutive slow first-token times abort the run
+        # before the step budget burns on a degraded endpoint. Occasional slow
+        # calls reset the streak; only a consecutive run trips the breaker.
+        effective_ttft = (
+            time_to_first_token if time_to_first_token is not None else total_time
+        )
+        if effective_ttft is not None:
+            self._record_ttft(effective_ttft)
 
         # Parse thinking and action from response
         thinking, action, parse_metadata = self._parse_response_with_metadata(
@@ -196,6 +260,13 @@ class ModelClient:
             output_mode=effective_output_mode,
             validate_action=validate_action,
         )
+        # P4 #2: structured output parsing never produces thinking; when the
+        # provider streamed ``reasoning_content`` (or returned it non-streaming),
+        # surface it as the model's captured thinking instead of an empty string.
+        # Providers without a reasoning channel keep the historical empty value
+        # so assistant-history formatting is byte-identical for them.
+        if not thinking and stream_thinking:
+            thinking = stream_thinking
 
         # Print performance metrics
         lang = self.config.lang
@@ -226,6 +297,30 @@ class ModelClient:
             parse_metadata=parse_metadata,
         )
 
+    def _record_ttft(self, ttft: float) -> None:
+        """Accumulate the consecutive slow-TTFT streak and trip the breaker.
+
+        ``ttft_history`` keeps only the recent calls (bounded) so trace payloads
+        stay small. A single fast call resets the consecutive counter — the
+        breaker only fires on a genuinely continuous degraded streak. When the
+        breaker is disabled, no TTFT state is recorded at all.
+        """
+
+        if not self.config.ttft_circuit_breaker_enabled:
+            return
+        self.ttft_history = (self.ttft_history + [ttft])[-10:]
+        if ttft > self.config.ttft_threshold_seconds:
+            self.ttft_consecutive_slow += 1
+        else:
+            self.ttft_consecutive_slow = 0
+        if self.ttft_consecutive_slow >= self.config.ttft_consecutive_limit:
+            self.ttft_breaker_triggered = True
+            raise TTFTCircuitBreakerError(
+                consecutive_slow=self.ttft_consecutive_slow,
+                threshold=self.config.ttft_threshold_seconds,
+                ttft_history=list(self.ttft_history),
+            )
+
     def _build_extra_body(self) -> dict[str, Any]:
         """Build provider-specific request body extensions."""
         extra_body = dict(self.config.extra_body)
@@ -243,9 +338,18 @@ class ModelClient:
 
     def _consume_stream(
         self, stream: Any, start_time: float
-    ) -> tuple[str, dict[int, dict[str, Any]], float | None, float | None]:
-        """Consume a streaming OpenAI-compatible response."""
+    ) -> tuple[
+        str, str, dict[int, dict[str, Any]], float | None, float | None
+    ]:
+        """Consume a streaming OpenAI-compatible response.
+
+        Returns ``(raw_content, reasoning, tool_call_deltas, ttft, thinking_end)``.
+        ``reasoning`` is the concatenated ``reasoning_content`` channel and is the
+        P4 #2 source for captured model thinking; it is never merged into
+        ``raw_content`` so structured JSON parsing stays unpolluted.
+        """
         raw_content = ""
+        reasoning_buffer = ""
         tool_call_deltas: dict[int, dict[str, Any]] = {}
         time_to_first_token = None
         time_to_thinking_end = None
@@ -268,6 +372,7 @@ class ModelClient:
 
             reasoning_content = getattr(delta, "reasoning_content", None)
             if reasoning_content:
+                reasoning_buffer += reasoning_content
                 saw_reasoning_content = True
                 if not first_token_received:
                     time_to_first_token = time.time() - start_time
@@ -335,7 +440,13 @@ class ModelClient:
                         print(buffer, end="", flush=True)
                     buffer = ""
 
-        return raw_content, tool_call_deltas, time_to_first_token, time_to_thinking_end
+        return (
+            raw_content,
+            reasoning_buffer,
+            tool_call_deltas,
+            time_to_first_token,
+            time_to_thinking_end,
+        )
 
     def _parse_response_with_metadata(
         self,

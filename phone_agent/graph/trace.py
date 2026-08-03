@@ -106,6 +106,11 @@ def sanitize_for_trace(
     if normalized_key in SENSITIVE_KEYS:
         return "<redacted>"
     if normalized_key in PRIVATE_TEXT_KEYS and isinstance(value, str):
+        # Dangerous debug mode (trace_unredacted_prompt) exists precisely so
+        # failures are debuggable; an error ``message`` that is always
+        # redacted hides the one artifact that explains the crash.
+        if allow_raw_request_debug:
+            return value
         return _redacted_text(value)
     if isinstance(value, str) and re.search(
         r"(?<!hmac-)sha256:[0-9a-fA-F]{6,64}", value

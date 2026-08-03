@@ -365,10 +365,34 @@ def verify_action_outcome(
 
 
 def merge_verifier_with_reflection(
-    verifier: VerifierResult, reflection: dict[str, Any]
+    verifier: VerifierResult,
+    reflection: dict[str, Any],
+    *,
+    observation_before: dict[str, Any] | None = None,
+    observation_after: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Apply local postcondition precedence after reflection has run."""
+    """Arbitrate deterministic postcondition evidence against the model verdict.
 
+    Authority is tiered (P3 #1):
+    1. ``hard_failure`` overrides everything: a deterministic execution failure
+       (``result.success=False``, e.g. dispatch failure / app not responding)
+       is the single remaining code-side override.
+    2. ``disputed``: verifier success with matched postconditions vs a model
+       ``failed`` verdict (including ``wrong_page``) — the two sources disagree,
+       so neither wins: the step is re-labelled ``partial`` with
+       ``failure_cause=unknown`` and ``disputed=True`` so the conflict is
+       visible and countable instead of silently letting the model's failure
+       claim win. A ``wrong_page`` claim that before/after observations
+       contradict (the foreground activity migrated, so "wrong page" lacks
+       evidence) is disputed too, even when the verifier is not success.
+    3. Consensus failure (verifier failure + model failure, or hard_failure)
+       keeps the normal failure semantics.
+    4. Everything else (verifier unknown / model succeeded, no conflict) passes
+       the model verdict through with the verifier evidence attached as
+       ``verifier_advisory``.
+    """
+
+    advisory = _verifier_advisory(verifier)
     if verifier.hard_failure:
         return {
             **reflection,
@@ -377,63 +401,58 @@ def merge_verifier_with_reflection(
             "failure_cause": verifier.failure_cause
             or reflection.get("failure_cause")
             or "unknown",
+            "disputed": False,
+            "verifier_advisory": advisory,
         }
-    if verifier.status == "success" and verifier.confidence >= 0.9:
-        return {
-            **reflection,
-            "action_succeeded": True,
-            "reflection_verdict": "succeeded",
-            "failure_cause": None,
-        }
-    selected = (verifier.evidence or {}).get("selected_object_signals") or {}
-    if (
+    model_verdict = str(reflection.get("reflection_verdict") or "")
+    matched_postconditions = list(
+        (verifier.evidence or {}).get("matched_postconditions") or []
+    )
+    page_migrated = _observation_page_migrated(observation_before, observation_after)
+    disputed = (
         verifier.status == "success"
-        and selected.get("selected_object_text_match") is True
-        and selected.get("selected_object_surface_changed") is True
-    ):
-        return {
-            **reflection,
-            "action_succeeded": True,
-            "reflection_verdict": "succeeded",
-            "failure_cause": None,
-        }
-    if verifier.status == "failure" and verifier.confidence >= 0.7:
-        return {
-            **reflection,
-            "action_succeeded": False,
-            "reflection_verdict": "failed",
-            "failure_cause": verifier.failure_cause
-            or reflection.get("failure_cause")
-            or "unknown",
-        }
-    missing = (verifier.evidence or {}).get("missing_postconditions")
-    if (
-        verifier.status == "unknown"
-        and missing
-        and reflection.get("reflection_verdict") == "succeeded"
-    ):
-        return {
-            **reflection,
-            "action_succeeded": False,
-            "reflection_verdict": "failed",
-            "failure_cause": reflection.get("failure_cause")
-            or verifier.failure_cause
-            or "unknown",
-        }
-    matched = (verifier.evidence or {}).get("matched_postconditions")
-    if (
-        verifier.status == "unknown"
-        and not matched
-        and reflection.get("reflection_verdict") == "succeeded"
-        and not reflection.get("reflection_has_evidence")
-    ):
+        and bool(matched_postconditions)
+        and model_verdict == "failed"
+    ) or (
+        model_verdict == "failed"
+        and reflection.get("failure_cause") == "wrong_page"
+        and page_migrated
+    )
+    if disputed:
         return {
             **reflection,
             "action_succeeded": False,
             "reflection_verdict": "partial",
-            "failure_cause": reflection.get("failure_cause") or "unknown",
+            "failure_cause": "unknown",
+            "disputed": True,
+            "verifier_advisory": advisory,
         }
-    return reflection
+    return {**reflection, "disputed": False, "verifier_advisory": advisory}
+
+
+def _verifier_advisory(verifier: VerifierResult) -> dict[str, Any]:
+    """Project verifier evidence into a bounded advisory dict for prompt injection.
+
+    Only postcondition codes and selected-object signals are carried; the raw
+    evidence container also holds weak/progress signals that are already
+    re-derived from the observation text on every step.
+    """
+
+    evidence = verifier.evidence or {}
+    return {
+        "status": verifier.status,
+        "confidence": verifier.confidence,
+        "failure_cause": verifier.failure_cause,
+        "matched_postconditions": list(
+            evidence.get("matched_postconditions") or []
+        ),
+        "missing_postconditions": list(
+            evidence.get("missing_postconditions") or []
+        ),
+        "selected_object_signals": dict(
+            evidence.get("selected_object_signals") or {}
+        ),
+    }
 
 
 def _observation_text(observation: dict[str, Any] | None) -> str:
@@ -688,6 +707,56 @@ def _failure_cause_for_expected_kind(kind: str) -> str:
     return "unknown"
 
 
+def _observation_page_migrated(
+    before: dict[str, Any] | None, after: dict[str, Any] | None
+) -> bool:
+    """Return whether before/after observations show app/activity migration.
+
+    The foreground activity (``top_activity`` / ``foreground_activity``) is the
+    stable navigation identity; ``semantic_screen_id`` (app + viewport digest)
+    is secondary corroboration. Content-derived ``screen_id`` is deliberately
+    excluded — a feed reorder changes it without any navigation, and that would
+    wrongly turn every content refresh into "page migrated".
+    """
+
+    if not isinstance(before, dict) or not isinstance(after, dict):
+        return False
+    before_surface = _surface_identity(before)
+    after_surface = _surface_identity(after)
+    if before_surface and after_surface and before_surface != after_surface:
+        return True
+    before_semantic = _find_string_key(before, {"semantic_screen_id"})
+    after_semantic = _find_string_key(after, {"semantic_screen_id"})
+    return bool(
+        before_semantic and after_semantic and before_semantic != after_semantic
+    )
+
+
+def _observation_page_changed(
+    before: dict[str, Any] | None, after: dict[str, Any] | None
+) -> bool:
+    """Return whether the mark set was rebuilt between before and after.
+
+    ``mark_set_version`` is a digest of the mark topology (mark_id + bbox + role
+    + source): a cross-page mark_id reassignment rebuilds the mark set, so a
+    version mismatch is the direct signal that before-page mark bindings no
+    longer hold on the after page (0731 s5/s10 false verdict root cause).
+    Activity migration is the fallback.
+    """
+
+    if not isinstance(before, dict) or not isinstance(after, dict):
+        return False
+    before_snapshot = before.get("snapshot")
+    after_snapshot = after.get("snapshot")
+    before_snapshot = before_snapshot if isinstance(before_snapshot, dict) else {}
+    after_snapshot = after_snapshot if isinstance(after_snapshot, dict) else {}
+    before_version = before_snapshot.get("mark_set_version")
+    after_version = after_snapshot.get("mark_set_version")
+    if before_version and after_version and str(before_version) != str(after_version):
+        return True
+    return _observation_page_migrated(before, after)
+
+
 def _normalize_surface_identity(value: Any) -> str:
     """Reduce a surface string to a comparable bare activity component.
 
@@ -780,6 +849,21 @@ def _selected_object_signals(
         for value in (object_type, evidence_summary, expected_page_type)
     ):
         return {}
+    signals: dict[str, Any] = {
+        "selected_object_expected_page_type": expected_page_type or None,
+        "selected_object_expected_rank": (
+            expected_rank if isinstance(expected_rank, int) else None
+        ),
+    }
+    # P3 #4: cross-page degradation. If the mark set was rebuilt between the
+    # before and after pages, before-page mark_ids no longer bind to the same
+    # elements — comparing selected-object evidence across that boundary would
+    # produce false failures (0731 s5) and false successes (0731 s10). The whole
+    # selected-object signal group is therefore skipped (it never feeds the
+    # success/failure ladder) and the skip is flagged explicitly.
+    if _observation_page_changed(before_observation, observation):
+        signals["page_changed_object_check_skipped"] = True
+        return signals
     text_match = bool(
         is_content_bearing_evidence(evidence_summary)
         and str(evidence_summary).casefold() in text_blob.casefold()
@@ -798,16 +882,14 @@ def _selected_object_signals(
         )
     else:
         detail_signal = False
-    signals: dict[str, Any] = {
-        "selected_object_expected_page_type": expected_page_type or None,
-        "selected_object_expected_rank": (
-            expected_rank if isinstance(expected_rank, int) else None
-        ),
-        "selected_object_text_match": text_match,
-        "selected_object_detail_signal": detail_signal,
-        "legacy_shadow_detail_signal": legacy_shadow_detail,
-        "legacy_shadow_feed_signal": legacy_shadow_feed,
-    }
+    signals.update(
+        {
+            "selected_object_text_match": text_match,
+            "selected_object_detail_signal": detail_signal,
+            "legacy_shadow_detail_signal": legacy_shadow_detail,
+            "legacy_shadow_feed_signal": legacy_shadow_feed,
+        }
+    )
     # Surface comparison. These two keys had readers in the verifier ladder and in
     # GoalEvaluator but no producer: the only path that could set them ran through
     # `page_signal_adapter`, which both runtime call sites pass as None.

@@ -155,10 +155,26 @@ def test_should_continue_ends_on_error_finished_or_max_steps(base_state) -> None
     assert should_continue(base_state) == "end"
     base_state["error"] = None
     base_state["step_count"] = base_state["max_steps"]
+    # 2.1: budget exhaustion with a compiled contract triggers one acceptance.
+    assert should_continue(base_state) == "acceptance"
+    base_state["budget_acceptance_done"] = True
     assert should_continue(base_state) == "end"
 
 
-def test_should_continue_routes_takeover_after_terminal_guard(base_state) -> None:
+def test_should_continue_budget_acceptance_requires_compiled_contract(
+    base_state,
+) -> None:
+    base_state["step_count"] = base_state["max_steps"]
+    base_state["goal_contract_status"] = "failed"
+    assert should_continue(base_state) == "end"
+
+    base_state["goal_contract_status"] = "compiled"
+    base_state["finished"] = True
+    # Terminal guard still wins over budget acceptance (P0 #5).
+    assert should_continue(base_state) == "end"
+
+
+def test_should_continue_takeover_after_terminal_guard(base_state) -> None:
     base_state["pending_interrupt"] = "takeover"
     assert should_continue(base_state) == "takeover"
 
@@ -166,19 +182,33 @@ def test_should_continue_routes_takeover_after_terminal_guard(base_state) -> Non
     assert should_continue(base_state) == "end"
 
 
-def test_stuck_liveness_replans_once_then_routes_takeover(base_state) -> None:
-    """A first stuck fold replans; a consecutive stuck fold needs human recovery."""
+def test_stuck_liveness_is_a_hint_not_a_route(base_state) -> None:
+    """2.2: stuck no longer routes to replan/takeover; only observation-retry
+    exhaustion and HITL interrupts route to takeover."""
 
     base_state["gui_memory"]["task_progress"] = {
         "trajectory_liveness": "stuck",
         "novelty_streak": 20,
-        "stuck_rounds": 1,
+        "stuck_rounds": 2,
     }
 
     assert should_continue(base_state) == "replan"
     assert base_state.get("pending_interrupt") != "takeover"
 
-    base_state["gui_memory"]["task_progress"]["stuck_rounds"] = 2
+    base_state["observation_retry_count"] = 10
+    assert should_continue(base_state) == "takeover"
+
+
+def test_should_continue_observation_retry_takeover_survives_stuck(base_state) -> None:
+    """The observation-retry takeover is the surviving liveness-adjacent route."""
+
+    from phone_agent.graph.edges import OBSERVATION_RETRY_LIMIT
+
+    base_state["gui_memory"]["task_progress"] = {
+        "trajectory_liveness": "stuck",
+        "stuck_rounds": 3,
+    }
+    base_state["observation_retry_count"] = OBSERVATION_RETRY_LIMIT
     assert should_continue(base_state) == "takeover"
 
 
@@ -188,6 +218,37 @@ def test_reflect_conditional_edges_include_takeover_route() -> None:
     graph = create_agent_graph()
     edges = graph.get_graph().edges
     assert any(edge.source == "reflect" and edge.target == "takeover" for edge in edges)
+
+
+def test_after_execute_repeat_rejection_routes_replan_before_reflect(
+    base_state,
+) -> None:
+    """1.2: a repeat-guard rejection is a system decision — skip reflect,
+    skip confirm/takeover, go straight back to planning."""
+    base_state["action_parsed"] = {
+        "_metadata": "do",
+        "action": "Tap",
+        "element": [500, 500],
+    }
+    base_state["repeat_rejected"] = True
+    base_state["action_confirmed"] = True
+
+    assert after_execute(base_state) == "replan"
+
+    # Terminal guard still wins over the rejection flag.
+    base_state["finished"] = True
+    assert after_execute(base_state) == "end"
+
+
+def test_after_execute_ignores_repeat_rejection_without_flag(base_state) -> None:
+    base_state["action_parsed"] = {
+        "_metadata": "do",
+        "action": "Tap",
+        "element": [500, 500],
+    }
+    base_state["repeat_rejected"] = False
+
+    assert after_execute(base_state) == "reflect"
 
 
 def test_after_goal_fails_closed_before_plan(base_state) -> None:

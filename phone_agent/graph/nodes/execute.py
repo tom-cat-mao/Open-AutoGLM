@@ -13,6 +13,7 @@ from phone_agent.actions.safety import decide_safety
 from phone_agent.actions.validator import ActionValidationError, validate_action
 from phone_agent.graph.context import (
     REPEATED_ACTION_THRESHOLD,
+    action_point,
     action_target_center,
     action_text_identity,
     build_action_outcome_summary,
@@ -21,6 +22,7 @@ from phone_agent.graph.context import (
     sanitize_context_payload,
     repeated_action_key,
     state_surface_identity,
+    update_gui_memory,
 )
 from phone_agent.graph.tools import dispatch_tool
 from phone_agent.graph.goal import finish_claim_summary
@@ -34,13 +36,24 @@ if TYPE_CHECKING:
 def _strip_and_append(
     messages: list[dict], thinking: str, action_raw: str
 ) -> list[dict]:
-    """Strip images from last user message and append assistant message."""
+    """Strip images from last user message and append assistant message.
+
+    P4 #2: when a real thinking trace was captured (reasoning_content streamed
+    by the provider), it is wrapped in proper ``<think>...</think>`` tags so the
+    model sees its own reasoning in history. Providers without a reasoning
+    channel keep the historical ``<think...>...</think...>`` placeholder
+    byte-for-byte, so no-reasoning runs are format-identical to before.
+    """
     if messages:
         messages[-1] = MessageBuilder.remove_images_from_message(messages[-1])
-    messages.append(
-        MessageBuilder.create_assistant_message(
+    if thinking and thinking.strip():
+        assistant_content = f"<think>{thinking}</think>\n<answer>{action_raw}</answer>"
+    else:
+        assistant_content = (
             f"<think...>{thinking}</think...>\n<answer>{action_raw}</answer>"
         )
+    messages.append(
+        MessageBuilder.create_assistant_message(assistant_content)
     )
     return messages
 
@@ -236,6 +249,10 @@ def execute_node(state: "AgentState", config: RunnableConfig) -> dict:
         "target_center": action_target_center(state, action_parsed),
         "surface": state_surface_identity(state),
         "text_identity": action_text_identity(action_parsed.get("text")),
+        # Swipe geometry (P3 #3): Swipe has no target center, so the repeat
+        # guard keys on start/end instead of center.
+        "start": action_point(action_parsed.get("start")),
+        "end": action_point(action_parsed.get("end")),
     }
     repeat_key = repeated_action_key(candidate_repeat)
     tried_actions = (state.get("gui_memory") or {}).get("tried_actions") or []
@@ -282,8 +299,25 @@ def execute_node(state: "AgentState", config: RunnableConfig) -> dict:
                 "result": result.__dict__,
                 "action_receipt": receipt.to_dict() if receipt else None,
                 "repeated_action_detected": True,
+                "repeat_rejected": True,
                 "repeat_count": repeat_count,
             },
+        )
+        # The rejected action is a system decision, not an action failure: it must
+        # NOT enter failure_memory (that path runs through reflect, which is
+        # skipped) — but it MUST still be counted in gui_memory.tried_actions,
+        # which is the repeat guard's counting source. Without the write, a model
+        # that keeps proposing the same target would see a constant repeat_count
+        # instead of an escalating one. `update_gui_memory` is the same writer
+        # reflect uses, so the recorded entry has the identical shape.
+        rejected_memory = update_gui_memory(
+            {
+                **state,
+                "action_result": result.__dict__,
+                "failure_cause": "repeated_action",
+            },
+            current_app=state.get("current_app") or "unknown",
+            screen_id=None,
         )
         return {
             "action_result": result.__dict__,
@@ -293,10 +327,12 @@ def execute_node(state: "AgentState", config: RunnableConfig) -> dict:
                 if receipt is not None
                 else {}
             ),
+            "gui_memory": rejected_memory,
             "messages": messages,
             "finished": False,
             "failure_cause": "repeated_action",
             "repeated_action_detected": True,
+            "repeat_rejected": True,
             **_context_update(
                 result.__dict__,
                 {

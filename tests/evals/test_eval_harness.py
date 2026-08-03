@@ -149,3 +149,76 @@ def test_eval_summary_counts_finish_and_intent_grounding(monkeypatch, tmp_path) 
     assert output["summary"]["finish_validation_counts"] == {"success": 1}
     assert output["summary"]["intent_grounding_count"] == 1
     assert output["summary"]["provider_grounding_count"] == 1
+
+
+def test_parse_args_enables_prompt_cache_and_ttft_breaker_by_default(
+    monkeypatch,
+) -> None:
+    """P5 #2/#3: evals default to cache hints on and TTFT breaker on; both are
+    configurable via env so providers that reject the hints can disable them."""
+    monkeypatch.delenv("PHONE_AGENT_ENABLE_CACHE_CONTROL", raising=False)
+    monkeypatch.delenv("PHONE_AGENT_TTFT_CIRCUIT_BREAKER", raising=False)
+    monkeypatch.delenv("PHONE_AGENT_TTFT_THRESHOLD", raising=False)
+    monkeypatch.delenv("PHONE_AGENT_TTFT_CONSECUTIVE_LIMIT", raising=False)
+    monkeypatch.setattr("sys.argv", ["run_eval.py", "--dry-run"])
+
+    args = parse_args()
+
+    assert args.enable_cache_control is True
+    assert args.ttft_circuit_breaker is True
+    assert args.ttft_threshold == 60.0
+    assert args.ttft_consecutive_limit == 3
+
+
+def test_parse_args_env_can_disable_prompt_cache(monkeypatch) -> None:
+    monkeypatch.setenv("PHONE_AGENT_ENABLE_CACHE_CONTROL", "0")
+    monkeypatch.setenv("PHONE_AGENT_TTFT_CIRCUIT_BREAKER", "0")
+    monkeypatch.setattr("sys.argv", ["run_eval.py", "--dry-run"])
+
+    args = parse_args()
+
+    assert args.enable_cache_control is False
+    assert args.ttft_circuit_breaker is False
+
+
+def test_build_eval_model_config_enables_run_stable_prompt_cache(
+    monkeypatch,
+) -> None:
+    """The eval ModelConfig gets a run-stable prompt_cache_key (stable across
+    every step of one run, derived from the task id) plus the TTFT breaker."""
+    task = run_eval_module.EvalTask(id="t1", task="open settings")
+    monkeypatch.setattr("sys.argv", ["run_eval.py", "--dry-run"])
+
+    config = run_eval_module.build_eval_model_config(task, parse_args())
+
+    assert config.prompt_cache_key == "autoglm-eval:t1"
+    assert config.enable_cache_control is True
+    assert config.ttft_circuit_breaker_enabled is True
+    assert config.ttft_threshold_seconds == 60.0
+    assert config.ttft_consecutive_limit == 3
+
+
+def test_build_eval_model_config_cache_off_sends_no_key(monkeypatch) -> None:
+    task = run_eval_module.EvalTask(id="t2", task="open settings")
+    monkeypatch.setattr("sys.argv", ["run_eval.py", "--dry-run"])
+    args = parse_args()
+    args.enable_cache_control = False
+
+    config = run_eval_module.build_eval_model_config(task, args)
+
+    assert config.prompt_cache_key is None
+    assert config.enable_cache_control is False
+
+
+def test_build_eval_model_config_ttft_breaker_env_off(monkeypatch) -> None:
+    task = run_eval_module.EvalTask(id="t3", task="open settings")
+    monkeypatch.setattr(
+        "sys.argv", ["run_eval.py", "--dry-run", "--ttft-threshold", "30"]
+    )
+    args = parse_args()
+    args.ttft_circuit_breaker = False
+
+    config = run_eval_module.build_eval_model_config(task, args)
+
+    assert config.ttft_circuit_breaker_enabled is False
+    assert config.ttft_threshold_seconds == 30.0

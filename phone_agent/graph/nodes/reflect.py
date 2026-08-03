@@ -15,6 +15,7 @@ from phone_agent.graph.context import (
     context_enabled,
     detect_repeated_action,
     detect_repeated_failure,
+    failure_memory_write_mode,
     get_context_mode,
     normalize_failure_cause,
     sanitize_context_payload,
@@ -58,7 +59,7 @@ if TYPE_CHECKING:
     from phone_agent.graph.state import AgentState
 
 
-REFLECT_SYSTEM_PROMPT_CN = """你是一个手机自动化任务的反思专家。你的职责是观察动作执行后的屏幕截图，判断动作是否生效，并给出下一步建议。
+REFLECT_SYSTEM_PROMPT_CN = """你是一个手机自动化任务的反思专家。你的职责是观察动作执行后的屏幕截图，判断动作是否生效。
 
 你必须只输出一个 JSON 对象，不要 Markdown、XML、函数调用或多余文本：
 {"verdict":"succeeded|failed|partial","failure_cause":"none|element_not_found|wrong_page|app_not_responding|network_or_loading|permission_or_login_or_captcha|unsafe_or_sensitive|coordinate_or_tap_offset|context_lost|repeated_action|model_parse_failed|unknown","suggested_strategy":"continue|retry|retry_with_offset|go_back|swipe_to_find|wait|takeover|finish","message":"xxx","named_evidence":[{"criterion":"criterion_name","screen_reference":"mark_id 或屏幕上的具体元素","observed_value":"你在该处实际看到的文字"}]}
@@ -70,6 +71,7 @@ REFLECT_SYSTEM_PROMPT_CN = """你是一个手机自动化任务的反思专家�
 4. 任务完成：如果当前页面显示任务已经完成，输出 {"verdict":"succeeded","failure_cause":"none","suggested_strategy":"finish","message":"任务已完成","named_evidence":[{"criterion":"成功标准名","screen_reference":"屏幕证据引用"}]}
 
 重要约束：
+- message 只描述当前屏幕观察到的客观状态；禁止行动指令、禁止目标名/输入内容建议。
 - named_evidence 仅在 suggested_strategy="finish" 时需要输出，且只列出契约中标记为 [judge] 的成功标准。标记为 [auto] 的标准由系统读取设备状态自行核验，你不需要点名或回报。
 - 每条证据给出：criterion（标准名）、screen_reference（mark_id 或屏幕上的具体元素，不要写"区域1"/"屏幕"这类占位）、observed_value（你在该处实际看到的原文）。照实回报你看到的文字即可，不要猜测系统内部使用的取值。observed_value 仅用于当前 node 匹配，不写入 state/trace。
 - 只有在截图明确显示加载中、空白页、网络错误、进度条/转圈、或执行结果表示应用无响应时，才使用 failure_cause="network_or_loading" 和 suggested_strategy="wait"。
@@ -78,7 +80,7 @@ REFLECT_SYSTEM_PROMPT_CN = """你是一个手机自动化任务的反思专家�
 - 广告、banner、推荐流、热词、计数器或首页动态内容变化只能作为噪声，不能单独证明 Tap/Type/搜索/打开视频成功；必须引用后置条件证据。
 """
 
-REFLECT_SYSTEM_PROMPT_EN = """You are a mobile automation reflection expert. Your job is to observe the screenshot after an action and judge whether the action succeeded, then give next-step advice.
+REFLECT_SYSTEM_PROMPT_EN = """You are a mobile automation reflection expert. Your job is to observe the screenshot after an action and judge whether the action succeeded.
 
 You MUST output exactly one JSON object. Do not output Markdown, XML, function calls, or extra text:
 {"verdict":"succeeded|failed|partial","failure_cause":"none|element_not_found|wrong_page|app_not_responding|network_or_loading|permission_or_login_or_captcha|unsafe_or_sensitive|coordinate_or_tap_offset|context_lost|repeated_action|model_parse_failed|unknown","suggested_strategy":"continue|retry|retry_with_offset|go_back|swipe_to_find|wait|takeover|finish","message":"xxx","named_evidence":[{"criterion":"criterion_name","screen_reference":"mark_id or a concrete on-screen element","observed_value":"the text you actually see there"}]}
@@ -90,6 +92,7 @@ Judgment criteria:
 4. Task completed: if the current page shows the task is done, output {"verdict":"succeeded","failure_cause":"none","suggested_strategy":"finish","message":"Task completed","named_evidence":[{"criterion":"criterion_name","screen_reference":"screen evidence reference"}]}
 
 Important constraints:
+- message describes only the objective state observed on the current screen; no action instructions, no target names, and no input-content suggestions.
 - named_evidence is only required when suggested_strategy="finish", and only for criteria marked [judge] in the contract. Criteria marked [auto] are verified by the system from device state — do not cite or report them.
 - For each evidence item give: criterion (its name), screen_reference (a mark_id or concrete on-screen element — never a placeholder like "region-1"/"screen"), and observed_value (the text you actually see there). Report what you see verbatim; do not guess values the system uses internally. observed_value is node-local and must not enter state or trace.
 - Use failure_cause="network_or_loading" and suggested_strategy="wait" only when the screenshot clearly shows loading, a blank page, a network error, a spinner/progress indicator, or the execution result indicates the app is not responding.
@@ -111,6 +114,36 @@ VALID_STRATEGIES = {
     "finish",
 }
 
+# Directive-fuse markers: reflection `message` is observation-only; if the
+# model still emits an imperative/suggestion sentence, blank it and flag the
+# event. This is a fuse, not the primary defense (the prompt role already
+# forbids action instructions); false positives are acceptable.
+_DIRECTIVE_CN_MARKERS = (
+    "可以输入",
+    "请点击",
+    "请搜索",
+    "请进入",
+    "建议你",
+    "你可以",
+    "应该输入",
+    "应该点击",
+)
+_DIRECTIVE_EN_MARKERS = (
+    "should type",
+    "should tap",
+    "should search",
+    "please type",
+    "please tap",
+    "you can type",
+)
+
+
+def _message_contains_directive(message: str) -> bool:
+    lowered = message.lower()
+    return any(marker in message for marker in _DIRECTIVE_CN_MARKERS) or any(
+        marker in lowered for marker in _DIRECTIVE_EN_MARKERS
+    )
+
 
 @dataclass
 class ReflectionResult:
@@ -120,12 +153,71 @@ class ReflectionResult:
     message: str
     has_evidence: bool = False
     named_evidence: list[dict[str, object]] | None = None
+    directive_filtered: bool = False
+    # P5 #1: set when the model call was skipped (deterministic path). The
+    # reason distinguishes hard_failure from verifier high-confidence success
+    # so the reflect_result trace can explain why no model call happened.
+    model_skipped: bool = False
+    model_skip_reason: str | None = None
+
+
+def _judge_evidence_pending(goal_agenda: list[dict] | None) -> bool:
+    """Whether any goal-contract vlm_judge criterion still awaits evidence.
+
+    vlm_judge criteria are settled by model observation (named_evidence at
+    finish), so the deterministic reflect skip must not fire while such a
+    criterion is still unsatisfied — the model still needs to observe the
+    screen to collect that evidence. The agenda here is the reflect-side
+    fold of the same acceptance ledger (P5 #1 precondition), where a vlm_judge
+    criterion counts as satisfied only once its evidence was collected at a
+    trusted target-app observation and latched (P2).
+    """
+
+    for item in goal_agenda or []:
+        if str(item.get("verification") or "") == "vlm_judge" and str(
+            item.get("status") or ""
+        ) != "satisfied":
+            return True
+    return False
+
+
+# Stable machine codes only: the skip reason and message are written into the
+# reflect_result trace and the state ``reflection`` field respectively, so they
+# must never embed raw on-screen text (P0 #10 privacy at trace/checkpoint egress).
+_SKIP_SAFE_POSTCONDITION_CODES = frozenset(
+    {
+        "app_opened",
+        "surface_changed",
+        "typed_text_present",
+        "input_focused",
+        "focused_editable_or_keyboard_visible",
+        "selected_object_match",
+    }
+)
 
 
 def _reflection_from_verifier(
-    verifier_result, *, action: dict | None, liveness: dict[str, object]
+    verifier_result,
+    *,
+    action: dict | None,
+    liveness: dict[str, object],
+    goal_agenda: list[dict] | None = None,
+    allow_skip: bool = True,
 ) -> ReflectionResult | None:
-    """Skip model reflection only for self-evident action questions."""
+    """Skip model reflection for self-evident action questions (P5 #1).
+
+    The verifier's deterministic success signals answer "did this action take
+    effect?" without a vision-language call. The skip is gated by:
+    1. ``hard_failure`` never skips — it produces the deterministic failure.
+    2. A pending vlm_judge criterion (``_judge_evidence_pending``) forces the
+       model call so finish evidence can still be collected.
+    3. status=success with confidence >= 0.9 (app_opened / surface_changed /
+       typed_text_present / input_focused / text_present), or an explicit
+       same-page ``selected_object_match`` (0.75 confidence but gated by P3 #4
+       cross-page degradation, which already suppresses that signal across a
+       page rebuild — so a match here is same-page evidence).
+    4. Trajectory not stuck — a stuck run keeps the model in the loop.
+    """
 
     if verifier_result.hard_failure:
         return ReflectionResult(
@@ -134,21 +226,53 @@ def _reflection_from_verifier(
             "retry",
             "deterministic verifier hard failure",
             True,
+            model_skipped=True,
+            model_skip_reason="hard_failure",
         )
-    action_name = str((action or {}).get("action") or "")
-    if (
+    if not allow_skip:
+        return None
+    if liveness.get("state") == "stuck":
+        return None
+    if _judge_evidence_pending(goal_agenda):
+        return None
+    matched_postconditions = list(
+        (verifier_result.evidence or {}).get("matched_postconditions") or []
+    )
+    high_confidence = verifier_result.status == "success" and float(
+        verifier_result.confidence or 0.0
+    ) >= 0.9
+    same_page_selected_object = (
         verifier_result.status == "success"
-        and action_name == "Launch"
-        and liveness.get("state") != "stuck"
-    ):
-        return ReflectionResult(
-            "succeeded",
-            None,
-            "continue",
-            "deterministic postconditions matched",
-            True,
-        )
-    return None
+        and "selected_object_match" in matched_postconditions
+    )
+    if not (high_confidence or same_page_selected_object):
+        return None
+    progress_signals = (
+        (verifier_result.evidence or {}).get("progress_signals") or {}
+    )
+    safe_codes = [
+        code
+        for code in matched_postconditions
+        if code in _SKIP_SAFE_POSTCONDITION_CODES
+    ]
+    safe_codes += [
+        code
+        for code in _SKIP_SAFE_POSTCONDITION_CODES
+        if progress_signals.get(code) is True and code not in safe_codes
+    ]
+    matched_text = ", ".join(safe_codes) or "verifier success"
+    return ReflectionResult(
+        "succeeded",
+        None,
+        "continue",
+        "deterministic postconditions matched",
+        True,
+        model_skipped=True,
+        model_skip_reason=(
+            f"verifier_high_confidence status=success "
+            f"confidence={verifier_result.confidence:.2f} matched={matched_text}"
+        ),
+    )
 
 
 def parse_reflection_action(raw_action: str) -> ReflectionResult:
@@ -243,8 +367,17 @@ def parse_reflection_action(raw_action: str) -> ReflectionResult:
             named_evidence.append(evidence_item)
     if named_evidence:
         has_evidence = True
+    directive_filtered = _message_contains_directive(message)
+    if directive_filtered:
+        message = ""
     return ReflectionResult(
-        verdict, parsed_cause, suggested_strategy, message, has_evidence, named_evidence
+        verdict,
+        parsed_cause,
+        suggested_strategy,
+        message,
+        has_evidence,
+        named_evidence,
+        directive_filtered=directive_filtered,
     )
 
 
@@ -514,23 +647,39 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
             raw_status = str(
                 (per_criterion.get(criterion.name) or {}).get("status") or "unknown"
             )
-            goal_agenda.append(
-                {
-                    "description": sanitize_context_payload(
-                        criterion.description,
-                        "description",
-                        consumer="default",
-                        task_context=task,
-                    ),
-                    "status": "satisfied" if raw_status == "matched" else raw_status,
-                    "verification": criterion.verification,
-                    "predicate_id": (
-                        criterion.predicate.predicate_id
-                        if criterion.predicate is not None
-                        else None
-                    ),
-                }
-            )
+            status = "satisfied" if raw_status == "matched" else raw_status
+            item: dict = {
+                "description": sanitize_context_payload(
+                    criterion.description,
+                    "description",
+                    consumer="default",
+                    task_context=task,
+                ),
+                "status": status,
+                "verification": criterion.verification,
+                "predicate_id": (
+                    criterion.predicate.predicate_id
+                    if criterion.predicate is not None
+                    else None
+                ),
+            }
+            if status != "satisfied":
+                # P2 milestone latch: plan-side display only. A criterion once
+                # matched at a trusted target-app observation stays "已满足"
+                # across transient current-observation staleness (keyboard
+                # popup, partial overlays). Deterministic counter-evidence
+                # (contradicted) unlocks. Acceptance never reads this field and
+                # keeps strict current_observation freshness semantics.
+                latch = goal_evidence.ever_matched(
+                    ledger,
+                    criterion_id=criterion.name,
+                    contract_id=runtime_contract_id,
+                )
+                if latch.latched:
+                    item["status"] = "satisfied"
+                    item["latched"] = True
+                    item["latched_epoch"] = latch.matched_epoch
+            goal_agenda.append(item)
     if configurable.get("enable_legacy_page_signal_adapter", False):
         observe_legacy_page_signals(
             expected=state.get("expected_outcome"),
@@ -599,7 +748,19 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
         },
     )
     deterministic_reflection = _reflection_from_verifier(
-        verifier_result, action=action_parsed, liveness=current_liveness
+        verifier_result,
+        action=action_parsed,
+        liveness=current_liveness,
+        goal_agenda=goal_agenda,
+        allow_skip=bool(
+            configurable.get("skip_reflect_on_high_confidence", True)
+        ),
+    )
+    model_skipped = deterministic_reflection is not None
+    model_skip_reason = (
+        deterministic_reflection.model_skip_reason
+        if deterministic_reflection is not None
+        else None
     )
 
     # 2. Build reflection prompt with language selection
@@ -786,6 +947,8 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
             "failure_cause": parsed_reflection.failure_cause,
             "reflection_has_evidence": parsed_reflection.has_evidence,
         },
+        observation_before=before_verifier_observation,
+        observation_after=after_verifier_observation,
     )
     action_succeeded = bool(reflection_fields["action_succeeded"])
     final_verdict = reflection_fields["reflection_verdict"]
@@ -801,6 +964,7 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
 
     context_updates = {"context_mode": context_mode}
     repeat_count = 0
+    memory_mode: str | None = None
     if context_enabled(context_mode):
         loading = parsed_reflection.failure_cause in {
             "network_or_loading",
@@ -837,10 +1001,46 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
         }
         outcome = build_action_outcome_summary(outcome_state)
         outcome["action_receipt"] = state.get("action_receipt")
+        outcome["disputed"] = bool(reflection_fields.get("disputed"))
+        advisory = reflection_fields.get("verifier_advisory")
+        if isinstance(advisory, dict) and advisory:
+            # Verifier signals are advisory evidence for the next plan prompt:
+            # the model keeps the verdict, but it must see what the verifier
+            # observed so its judgement is grounded (model-delegation refactor 1.1).
+            # Regex-redacted at write time: matched/missing postconditions can
+            # echo raw screen text (e.g. a phone number) into the state copy.
+            outcome["verifier_advisory"] = sanitize_context_payload(
+                advisory,
+                "verifier_advisory",
+                consumer="inject",
+                task_context=task if isinstance(task, str) else None,
+            )
         existing_failure_memory = list(state.get("failure_memory") or [])
-        repeated = detect_repeated_failure(existing_failure_memory, outcome)
-        failure_memory = update_failure_memory(
-            existing_failure_memory, outcome, state.get("context_budget")
+        # P3 #2: failure-memory writes are isolated by the arbitration result.
+        # Disputed steps never write memory and never count as repeated
+        # failures; consensus failures (verifier failure + model failure, or
+        # hard failure) are verified; a model-alone failure with an unknown
+        # verifier is written but flagged ``unverified``.
+        memory_mode = failure_memory_write_mode(
+            verifier_status=verifier_result.status,
+            verdict=final_verdict,
+            hard_failure=verifier_result.hard_failure,
+            disputed=bool(reflection_fields.get("disputed")),
+        )
+        repeated = (
+            detect_repeated_failure(existing_failure_memory, outcome)
+            if memory_mode != "skip"
+            else False
+        )
+        failure_memory = (
+            update_failure_memory(
+                existing_failure_memory,
+                outcome,
+                state.get("context_budget"),
+                unverified=(memory_mode == "unverified"),
+            )
+            if memory_mode != "skip"
+            else list(existing_failure_memory)
         )
         summarized_history, history_truncated = update_summarized_history(
             str(state.get("summarized_history") or ""),
@@ -853,12 +1053,6 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
             "action_outcome_summary": outcome,
             "failure_memory": failure_memory,
             "summarized_history": summarized_history,
-            "short_term_memory": {
-                "screen_belief": belief,
-                "last_action_outcome": outcome,
-                "latest_failures": failure_memory[-3:],
-                "grounding_observation": state.get("grounding_observation"),
-            },
             "action_ledger": (list(state.get("action_ledger") or []) + [outcome])[-10:],
             "context_truncated": bool(state.get("context_truncated"))
             or history_truncated,
@@ -917,6 +1111,7 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
             "reflection_verdict": final_verdict,
             "failure_cause": final_failure_cause,
             "suggested_strategy": parsed_reflection.suggested_strategy,
+            "reflection_directive_filtered": parsed_reflection.directive_filtered,
             "action_succeeded": action_succeeded,
             "verifier_result": verifier_result_dict,
             "verifier_status": verifier_result.status,
@@ -932,6 +1127,18 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
             "repeated_action_detected": context_updates.get(
                 "repeated_action_detected", False
             ),
+            "disputed": bool(reflection_fields.get("disputed")),
+            "failure_memory_write_mode": memory_mode,
+            "verifier_advisory": (
+                sanitize_context_payload(
+                    reflection_fields.get("verifier_advisory"),
+                    "verifier_advisory",
+                    consumer="trace_payload",
+                    task_context=task if isinstance(task, str) else None,
+                )
+                if isinstance(reflection_fields.get("verifier_advisory"), dict)
+                else None
+            ),
             "repeat_count": repeat_count,
             "trajectory_liveness": current_liveness["state"],
             "stuck_rounds": (
@@ -939,6 +1146,8 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
                 .get("task_progress", {})
                 .get("stuck_rounds", 0)
             ),
+            "model_skipped": model_skipped,
+            "model_skip_reason": model_skip_reason,
         },
     )
 
@@ -954,6 +1163,10 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
         "reflection_verdict": final_verdict,
         "failure_cause": final_failure_cause,
         "suggested_strategy": parsed_reflection.suggested_strategy,
+        "reflection_directive_filtered": parsed_reflection.directive_filtered,
+        "disputed": bool(reflection_fields.get("disputed")),
+        "model_skipped": model_skipped,
+        "model_skip_reason": model_skip_reason,
         "verifier_result": verifier_result_dict,
         "verifier_status": verifier_result.status,
         "verifier_failure_cause": verifier_result.failure_cause,

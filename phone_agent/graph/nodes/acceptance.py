@@ -167,7 +167,15 @@ def _needs_semantic_judgement(goal_contract) -> bool:
     )
 
 def acceptance_node(state: "AgentState", config: RunnableConfig) -> dict:
-    """Validate a pending finish claim against the goal contract."""
+    """Validate a pending finish claim against the goal contract.
+
+    Two entry channels: a model finish claim (``pending_finish=True`` routed
+    from ``after_execute``) and a budget-forced acceptance (``should_continue``
+    routed here when the step budget is exhausted without a claim). Both run
+    the same three authority layers — hard veto → hard confirm → semantic
+    judgement — so a budget-forced run with an empty ``matched_terminal_evidence``
+    fails closed unless the semantic judge names grounded evidence.
+    """
 
     configurable = config.get("configurable", {})
     device_factory = configurable["device_factory"]
@@ -177,6 +185,37 @@ def acceptance_node(state: "AgentState", config: RunnableConfig) -> dict:
     context_mode = get_context_mode(state, config)
     action_parsed = state.get("action_parsed")
     action_result = state.get("action_result")
+
+    # Budget-forced entry: should_continue is a pure function and cannot write
+    # state, so the acceptance node marks the run here. The flag prevents a
+    # second forced acceptance; pending_finish is set so downstream state
+    # consumers see an in-flight claim exactly like the model-claim channel.
+    budget_forced = bool(
+        state.get("goal_contract_status") == "compiled"
+        and not state.get("budget_acceptance_done")
+        and not state.get("pending_finish")
+        and int(state.get("step_count") or 0) >= int(state.get("max_steps") or 0)
+    )
+    budget_update: dict = {}
+    if budget_forced:
+        budget_update = {
+            "pending_finish": True,
+            "budget_acceptance_done": True,
+            "finish_source": "budget_forced",
+        }
+        emit_trace(
+            config,
+            state,
+            "acceptance",
+            "budget_forced_acceptance",
+            {
+                "step_count": state.get("step_count"),
+                "max_steps": state.get("max_steps"),
+                "finish_claim": None,
+                "pending_finish": True,
+                "matched_terminal_evidence": [],
+            },
+        )
 
     goal_contract = ensure_goal_contract(state, config)
     if goal_contract is None:
@@ -220,17 +259,21 @@ def acceptance_node(state: "AgentState", config: RunnableConfig) -> dict:
             "grounding_failure_code": exc.code,
             "observation_retry_count": int(state.get("observation_retry_count") or 0) + 1,
             "context_mode": context_mode,
+            **budget_update,
         }
     screenshot = device_capture.screenshot
     current_app = device_capture.current_app
     if screenshot_failure_code(screenshot):
-        return screenshot_failure_update(
-            state=state,
-            config=config,
-            screenshot=screenshot,
-            current_app=current_app,
-            context_mode=context_mode,
-        )
+        return {
+            **screenshot_failure_update(
+                state=state,
+                config=config,
+                screenshot=screenshot,
+                current_app=current_app,
+                context_mode=context_mode,
+            ),
+            **budget_update,
+        }
 
     after_observation = build_after_observation(
         state=state,
@@ -350,7 +393,7 @@ def acceptance_node(state: "AgentState", config: RunnableConfig) -> dict:
             ledger=ledger,
             observation=after_observation,
             current_app=current_app,
-            extra_update=adequacy_update,
+            extra_update={**adequacy_update, **budget_update},
         )
 
     # --- layer 3: semantic judgement, only where it is actually needed ---
@@ -473,7 +516,7 @@ def acceptance_node(state: "AgentState", config: RunnableConfig) -> dict:
             ledger=ledger,
             observation=after_observation,
             current_app=current_app,
-            extra_update=adequacy_update,
+            extra_update={**adequacy_update, **budget_update},
         )
 
     return {
@@ -491,6 +534,7 @@ def acceptance_node(state: "AgentState", config: RunnableConfig) -> dict:
         "reflection": model_message or "task complete: goal criteria satisfied",
         "context_mode": context_mode,
         **adequacy_update,
+        **budget_update,
     }
 
 def _observation_update(after_observation, current_app: str) -> dict:

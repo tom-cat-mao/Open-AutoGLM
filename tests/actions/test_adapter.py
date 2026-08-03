@@ -421,14 +421,17 @@ def test_build_screen_belief_accepts_derived_fields() -> None:
 
 
 def test_build_screen_belief_redacts_free_text_summary_by_default() -> None:
-    from phone_agent.graph.context import build_plan_context_block, build_screen_belief
+    from phone_agent.graph.context import (
+        build_reflect_context_block,
+        build_screen_belief,
+    )
 
     belief = build_screen_belief(
         current_app="Chat",
         step_count=2,
         summary="请联系13800138000获取内部信息",
     )
-    block, _ = build_plan_context_block({"screen_belief": belief}, lang="en")
+    block, _ = build_reflect_context_block({"screen_belief": belief}, lang="en")
 
     assert "13800138000" not in block
     assert "请联系" in block

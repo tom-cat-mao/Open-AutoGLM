@@ -276,6 +276,9 @@ verification 枚举说明：
 - 如果任务是把某个开关打开或关闭，用 toggle_state_match 描述目标开关状态
 - 如果任务的完成条件需要语义判断（某个目标内容出现/生效，而非仅 app 前台或列表序号），
   必须额外给出一条 required 的 vlm_judge criterion 描述该终态；不要只用 app_or_activity_match 代替
+- vlm_judge 标准的 description 必须描述**屏幕上可观察的具体内容**，不能只写抽象状态（如“任务完成”“目标已达成”）。
+  写法示例：“出现含‘银石’字样的卡片”“设置页显示‘已开启’开关”。描述中给出具体的屏幕文本或元素，
+  验收模型才能据实点名该标准并引用屏幕证据
 """
 
 GOAL_COMPILER_SYSTEM_PROMPT_EN = """You are a task goal compiler. Convert the user's natural-language task into a declarative goal contract (JSON) with verifiable success criteria, constraints, and non-goals.
@@ -300,6 +303,11 @@ Rules:
 - When completion requires semantic judgement (some target content present/effective,
   not merely app foreground or a list rank), add a required vlm_judge criterion
   describing that terminal state; do NOT substitute app_or_activity_match for it
+- vlm_judge descriptions MUST name concrete on-screen content, not an abstract
+  status ("task complete" / "goal achieved" is not enough). Example: "a card
+  containing the text 'Silverstone' appears", "the settings page shows an 'Enabled'
+  toggle". Name the specific screen text or element so the acceptance model can
+  cite real screen evidence for it
 """
 
 

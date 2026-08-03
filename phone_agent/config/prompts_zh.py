@@ -65,13 +65,15 @@ FAILURE_RECOVERY_MAP = """# 失败恢复策略
 
 JSON_OUTPUT_CONTRACT = """# 输出格式：JSON schema
 只返回一个 JSON 对象。
-可选使用 provider envelope：{"action": <下方任一动作 JSON>, "expected_outcome": {"kind":"...","must_observe":["..."],"must_not_observe":["..."],"target_mark_id":"m1","target_text_hint":"..."}}。
+可选使用 provider envelope：{"action": <下方任一动作 JSON>, "expected_outcome": {"kind":"...","must_observe":["..."],"must_not_observe":["..."],"target_mark_id":"m1","target_text_hint":"..."}, "progress_note": "..."}。
 `expected_outcome` 只是动作后的验证合同，不授权执行，不得包含隐私原文、命令、设备配置或 provider/backend 字段；执行仍只来自 `action`。
+`progress_note` 为可选字段：一句话自述本步完成内容与下一步意图，仅作连续记忆（会被脱敏、截断，不含任何可执行信息）。
 示例：
 - {"type":"intent","action":"tap","target_mark_id":"m1"}
 - {"type":"intent","action":"tap","target_object_id":"obj_1"}
 - {"type":"intent","action":"tap","object_role":"video","ordinal":1,"object_filter":{"object_type":"video","list_id":"list_1"}}
 - {"action":{"type":"intent","action":"tap","target_mark_id":"m1"},"expected_outcome":{"kind":"input_focused","must_observe":["搜索","取消"]}}
+- {"action":{"type":"do","action":"wait","duration":"1 seconds"},"expected_outcome":{"kind":"loading_finished"},"progress_note":"已等待加载，下一步点击设置"}
 - {"type":"intent","action":"tap","target_mark_id":"m2","message":"confirm payment"}
 - {"type":"do","action":"swipe","start":[500,800],"end":[500,200]}
 - {"type":"do","action":"type","text":"你好"}

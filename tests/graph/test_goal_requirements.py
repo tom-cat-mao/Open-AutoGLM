@@ -2,6 +2,7 @@ import pytest
 
 from phone_agent.graph.goal import GoalContract, SuccessCriterion
 from phone_agent.graph.goal_requirements import (
+    STRUCTURAL_REASON_CODES,
     ContractAdequacyValidator,
     TaskRequirementExtractor,
 )
@@ -82,7 +83,11 @@ def test_adequacy_validator_accepts_vlm_judge_semantic_fallback() -> None:
         task_hash=requirements.task_hash,
         redacted_objective="search target",
         objective_length=18,
-        success_criteria=[SuccessCriterion("done", "target visible", "vlm_judge")],
+        success_criteria=[
+            SuccessCriterion(
+                "done", "出现含 Silverstone 字样的卡片", "vlm_judge"
+            )
+        ],
         target_app_hint="settings",
         entities_sha=list(requirements.target_entity_hashes),
         compile_status="compiled",
@@ -102,7 +107,7 @@ def test_adequacy_validator_accepts_typed_semantic_criterion() -> None:
         success_criteria=[
             SuccessCriterion(
                 "topic",
-                "target visible",
+                "出现含 Silverstone 字样的搜索结果",
                 "vlm_judge",
                 predicate=CORE_PREDICATE_CATALOG.create_spec(
                     "semantic.entity_matches", "Silverstone"
@@ -459,3 +464,103 @@ def test_degraded_contract_still_compiles_and_reaches_plan() -> None:
     assert result["contract_adequacy_status"] == "degraded"
     assert result["contract_adequacy_reasons"]
     assert after_goal(result) == "plan"
+
+
+# ----------------------------------------------------------------------
+# 2.3 vlm_judge description observability (degraded heuristic, never fatal)
+# ----------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "description",
+    [
+        "出现含'银石'字样的卡片",
+        "出现含“银石”字样的卡片",
+        "设置页显示'已开启'开关",
+        "关闭蓝牙",
+        "搜索结果里出现 Python 教程",
+        "打开哔哩哔哩",
+    ],
+)
+def test_judge_description_concrete_content_is_observable(description: str) -> None:
+    from phone_agent.graph.goal_requirements import judge_description_is_observable
+
+    assert judge_description_is_observable(description)
+
+
+@pytest.mark.parametrize(
+    "description",
+    [
+        "",
+        "完成",
+        "任务完成",
+        "目标已达成",
+        "页面显示完成状态",
+        "task complete",
+        "目标可见",
+        "done",
+    ],
+)
+def test_judge_description_abstract_status_is_not_observable(description: str) -> None:
+    from phone_agent.graph.goal_requirements import judge_description_is_observable
+
+    assert judge_description_is_observable(description) is False
+
+
+def test_abstract_vlm_judge_description_degrades_but_never_blocks() -> None:
+    """2.3: judge_description_not_observable is severity=degraded — recorded,
+    never a hard reject, and compilation still proceeds to plan."""
+    requirements = TaskRequirementExtractor().extract("在设置里搜索 Silverstone")
+    candidate = GoalContract(
+        task_hash=requirements.task_hash,
+        redacted_objective="search target",
+        objective_length=18,
+        success_criteria=[
+            SuccessCriterion("done", "任务完成", "vlm_judge"),
+            SuccessCriterion(
+                "app",
+                "设置页面已打开",
+                "app_or_activity_match",
+                predicate=CORE_PREDICATE_CATALOG.create_spec(
+                    "app.foreground_identity", "settings"
+                ),
+            ),
+        ],
+        target_app_hint="settings",
+        entities_sha=list(requirements.target_entity_hashes),
+        compile_status="compiled",
+    )
+
+    result = ContractAdequacyValidator().validate(requirements, candidate)
+
+    assert result.status == "degraded"
+    assert "judge_description_not_observable" in result.reason_codes
+    # Never structural: the task must not die at the gate over this.
+    assert "judge_description_not_observable" not in STRUCTURAL_REASON_CODES
+
+
+def test_concrete_vlm_judge_description_does_not_trigger_the_heuristic() -> None:
+    requirements = TaskRequirementExtractor().extract("在设置里搜索 Silverstone")
+    candidate = GoalContract(
+        task_hash=requirements.task_hash,
+        redacted_objective="search target",
+        objective_length=18,
+        success_criteria=[
+            SuccessCriterion("done", "出现含 Silverstone 字样的卡片", "vlm_judge"),
+            SuccessCriterion(
+                "app",
+                "设置页面已打开",
+                "app_or_activity_match",
+                predicate=CORE_PREDICATE_CATALOG.create_spec(
+                    "app.foreground_identity", "settings"
+                ),
+            ),
+        ],
+        target_app_hint="settings",
+        entities_sha=list(requirements.target_entity_hashes),
+        compile_status="compiled",
+    )
+
+    result = ContractAdequacyValidator().validate(requirements, candidate)
+
+    assert "judge_description_not_observable" not in result.reason_codes

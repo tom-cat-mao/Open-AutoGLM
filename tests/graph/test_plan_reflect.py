@@ -256,8 +256,12 @@ def test_plan_node_returns_only_new_messages_and_resets_action_confirmed(
         },
     )
 
-    assert len(result["messages"]) == 2
+    assert len(result["messages"]) == 3
     assert result["messages"][0]["role"] == "system"
+    # P5 #2: the goal-contract block is its own static message after system
+    # (cache-friendly prefix), before the dynamic screen message.
+    assert result["messages"][1]["role"] == "user"
+    assert result["messages"][2]["role"] == "user"
     assert result["action_confirmed"] is False
     assert result["action_parsed"]["action"] == "Wait"
 
@@ -699,7 +703,15 @@ def test_plan_expected_outcome_runtime_contract_verifies_plain_text(
     )
 
     assert result["verifier_status"] == "success"
-    assert result["reflection_verdict"] == "succeeded"
+    # P3 #1b: the verifier's success is a conflict with the model's failed
+    # verdict — neither wins; the step is disputed (partial/unknown) and the
+    # matched postcondition rides along as advisory evidence.
+    assert result["reflection_verdict"] == "partial"
+    assert result["failure_cause"] == "unknown"
+    assert result["disputed"] is True
+    advisory = (result.get("action_outcome_summary") or {}).get("verifier_advisory")
+    assert advisory is not None
+    assert advisory["matched_postconditions"] == ["搜索"]
 
 
 def test_plan_node_keeps_sensitive_expected_outcome_for_runtime_matching(
@@ -1376,11 +1388,10 @@ def test_expected_outcome_and_verifier_evidence_are_regex_redacted(
 def test_reflect_keeps_readable_reflection_in_state_and_stubs_it_at_trace_egress(
     base_state, fake_device, tmp_path
 ) -> None:
-    """Reflection text must stay readable in state so plan can inject it.
-
-    Privacy lives at trace/checkpoint egress (`AGENTS.md` #10): both layers list
-    `reflection` as a private key. Stubbing it at state-write time instead made
-    plan inject the literal `{'redacted': True, 'length': 36}` into the prompt.
+    """Reflection text must stay readable in state: `build_mark_provider_hints`
+    consumes it as a grounding hint (P0 #8); it is no longer injected into the
+    plan prompt (P1 #1). Privacy lives at trace/checkpoint egress (`AGENTS.md`
+    #10): both layers list `reflection` as a private key.
     """
 
     from phone_agent.graph.trace import JsonlTraceWriter
@@ -1654,6 +1665,7 @@ def test_parse_reflection_action_structured_json_only() -> None:
     assert structured.failure_cause == "wrong_page"
     assert structured.suggested_strategy == "go_back"
     assert structured.message == "页面不对"
+    assert structured.directive_filtered is False
     assert (
         parse_reflection_action(
             '{"verdict":"succeeded","failure_cause":"none","suggested_strategy":"continue","message":"ok"}'
@@ -1668,6 +1680,148 @@ def test_parse_reflection_action_structured_json_only() -> None:
     assert retry.suggested_strategy == "retry"
     malformed = parse_reflection_action('reflection(verdict="failed"')
     assert malformed.failure_cause == "unknown"
+    assert malformed.directive_filtered is False
+
+
+def test_parse_reflection_action_filters_directive_messages_cn() -> None:
+    for directive in (
+        "可以输入",
+        "请点击",
+        "请搜索",
+        "请进入",
+        "建议你",
+        "你可以",
+        "应该输入",
+        "应该点击",
+    ):
+        parsed = parse_reflection_action(
+            json.dumps(
+                {
+                    "verdict": "partial",
+                    "failure_cause": "unknown",
+                    "suggested_strategy": "continue",
+                    "message": f"{directive}搜索按钮继续",
+                },
+                ensure_ascii=False,
+            )
+        )
+        assert parsed.message == "", directive
+        assert parsed.directive_filtered is True, directive
+        assert parsed.verdict == "partial"
+        assert parsed.suggested_strategy == "continue"
+
+
+def test_parse_reflection_action_filters_directive_messages_en() -> None:
+    for directive in (
+        "should type",
+        "should tap",
+        "should search",
+        "please type",
+        "please tap",
+        "you can type",
+    ):
+        parsed = parse_reflection_action(
+            json.dumps(
+                {
+                    "verdict": "partial",
+                    "failure_cause": "unknown",
+                    "suggested_strategy": "continue",
+                    "message": f"Next, {directive} the search box.",
+                }
+            )
+        )
+        assert parsed.message == "", directive
+        assert parsed.directive_filtered is True, directive
+        assert parsed.verdict == "partial"
+
+
+def test_parse_reflection_action_keeps_observation_messages() -> None:
+    parsed = parse_reflection_action(
+        '{"verdict":"failed","failure_cause":"wrong_page","suggested_strategy":"go_back","message":"页面显示错误提示"}'
+    )
+    assert parsed.message == "页面显示错误提示"
+    assert parsed.directive_filtered is False
+
+
+def test_reflect_prompts_forbid_next_step_advice_cn_en() -> None:
+    from phone_agent.graph.nodes.reflect import (
+        REFLECT_SYSTEM_PROMPT_CN,
+        REFLECT_SYSTEM_PROMPT_EN,
+    )
+
+    assert "给出下一步建议" not in REFLECT_SYSTEM_PROMPT_CN
+    assert "give next-step advice" not in REFLECT_SYSTEM_PROMPT_EN
+    assert "判断动作是否生效" in REFLECT_SYSTEM_PROMPT_CN
+    assert "judge whether the action succeeded" in REFLECT_SYSTEM_PROMPT_EN
+    assert "禁止行动指令" in REFLECT_SYSTEM_PROMPT_CN
+    assert "no action instructions" in REFLECT_SYSTEM_PROMPT_EN
+    # suggested_strategy stays in the schema (trace consumer); the role just no
+    # longer invites the model to author free-form next-step advice.
+    assert "suggested_strategy" in REFLECT_SYSTEM_PROMPT_CN
+    assert "suggested_strategy" in REFLECT_SYSTEM_PROMPT_EN
+
+
+def test_reflect_node_marks_directive_filtered_in_state_and_trace(
+    base_state, fake_device, tmp_path
+) -> None:
+    from phone_agent.graph.trace import JsonlTraceWriter
+
+    writer = JsonlTraceWriter(
+        trace_id="directive-fuse", trace_dir=tmp_path, redact=True
+    )
+    model = FakeModelClient(
+        FakeModelResponse(
+            "think",
+            '{"verdict":"partial","failure_cause":"unknown","suggested_strategy":"continue","message":"请点击搜索按钮"}',
+        )
+    )
+
+    result = reflect_node(
+        base_state,
+        {
+            "configurable": {
+                "model_client": model,
+                "device_factory": fake_device,
+                "trace_writer": writer,
+                "verbose": False,
+            }
+        },
+    )
+
+    assert result["reflection_directive_filtered"] is True
+    # message was blanked by the fuse; the state reflection falls back to think.
+    assert result["reflection"] == "think"
+    records = [
+        json.loads(line)
+        for line in writer.path.read_text(encoding="utf-8").splitlines()
+    ]
+    reflect_result = next(item for item in records if item["event"] == "reflect_result")
+    assert reflect_result["payload"]["reflection_directive_filtered"] is True
+
+
+def test_reflect_node_directive_free_message_keeps_state_reflection(
+    base_state, fake_device
+) -> None:
+    model = FakeModelClient(
+        FakeModelResponse(
+            "",
+            '{"verdict":"partial","failure_cause":"unknown","suggested_strategy":"continue","message":"屏幕显示加载中"}',
+        )
+    )
+
+    result = reflect_node(
+        base_state,
+        {
+            "configurable": {
+                "model_client": model,
+                "device_factory": fake_device,
+                "verbose": False,
+            }
+        },
+    )
+
+    assert result["reflection_directive_filtered"] is False
+    assert result["reflection"] == "屏幕显示加载中"
 
 
 def test_parse_reflection_action_rejects_success_with_missing_postconditions() -> None:
@@ -1844,7 +1998,9 @@ def test_reflect_node_screen_change_is_only_weak_signal(
     )
 
     assert result["verifier_status"] == "unknown"
-    assert result["reflection_verdict"] == "failed"
+    # 1.1: unknown+missing no longer overrides the model's succeeded verdict;
+    # the missing postcondition is advisory evidence for the next plan prompt.
+    assert result["reflection_verdict"] == "succeeded"
     assert result["verifier_evidence"]["missing_postconditions"] == [
         "after_observation_unavailable"
     ]
@@ -1886,7 +2042,8 @@ def test_reflect_node_swipe_hash_change_is_not_success(base_state, fake_device) 
     )
 
     assert result["verifier_status"] == "unknown"
-    assert result["reflection_verdict"] == "failed"
+    # 1.1: content-shift unverified is advisory; the model verdict stands.
+    assert result["reflection_verdict"] == "succeeded"
     assert result["verifier_evidence"]["weak_signals"]["screen_changed"] is True
     assert result["verifier_evidence"]["missing_postconditions"] == [
         "content_shift_unverified"
@@ -1894,6 +2051,8 @@ def test_reflect_node_swipe_hash_change_is_not_success(base_state, fake_device) 
 
 
 def test_reflect_node_launch_matches_package_alias(base_state, fake_device) -> None:
+    from phone_agent.graph.goal import GoalContract, CriterionSpec
+
     base_state["action_parsed"] = {"_metadata": "do", "action": "Launch", "app": "设置"}
     base_state["expected_outcome"] = {
         "kind": "app_opened",
@@ -1904,6 +2063,23 @@ def test_reflect_node_launch_matches_package_alias(base_state, fake_device) -> N
         "timeout_hint": None,
         "dynamic_regions": [],
     }
+    # P5 #1: the deterministic reflect skip requires no pending vlm_judge
+    # criterion — use a programmatic-only contract so the Launch success skips
+    # the model call (vlm_judge-pending Launch is covered separately).
+    base_state["goal_contract"] = GoalContract(
+        task_hash="test",
+        redacted_objective="打开设置",
+        objective_length=4,
+        compile_status="compiled",
+        success_criteria=[
+            CriterionSpec(
+                name="settings_open",
+                description="设置页已打开",
+                verification="app_or_activity_match",
+                required=True,
+            )
+        ],
+    )
     model = FakeModelClient(
         FakeModelResponse(
             "ok",
@@ -1961,7 +2137,12 @@ def test_sensitive_expected_text_round_trips_in_runtime_contract(
     assert "13800138000" not in planned["action_raw"]
 
 
-def test_reflect_node_type_text_postcondition_success(base_state, fake_device) -> None:
+def test_reflect_node_type_text_postcondition_verifier_signal_is_advisory(
+    base_state, fake_device
+) -> None:
+    """The verifier matched the typed text, but the model read the screenshot
+    and said failed: under P3 the two disagree, so the step is disputed
+    (partial/unknown) and the verifier signal is attached as advisory."""
     base_state["action_parsed"] = {"_metadata": "do", "action": "Type", "text": "hello"}
     base_state["expected_outcome"] = {
         "kind": "text_present",
@@ -2003,10 +2184,15 @@ def test_reflect_node_type_text_postcondition_success(base_state, fake_device) -
     )
 
     assert result["verifier_status"] == "success"
-    assert result["reflection_verdict"] == "succeeded"
-    assert result["action_succeeded"] is True
+    assert result["reflection_verdict"] == "partial"
+    assert result["failure_cause"] == "unknown"
+    assert result["disputed"] is True
+    assert result["action_succeeded"] is False
     assert result["verifier_evidence"]["matched_postconditions"][0]["redacted"] is True
     assert "sha256" not in result["verifier_evidence"]["matched_postconditions"][0]
+    advisory = (result.get("action_outcome_summary") or {}).get("verifier_advisory")
+    assert advisory is not None
+    assert advisory["matched_postconditions"] == ["hello"]
 
 
 def test_reflect_node_hash_matches_text_segment(base_state, fake_device) -> None:
@@ -2116,12 +2302,15 @@ def test_reflect_node_selected_object_text_matches_detail_page(
         result["verifier_evidence"]["selected_object_signals"]["selected_object_match"]
         is True
     )
-    # Text containment is admissible but weak evidence, so it no longer outranks a
-    # model reflection that read the screenshot and reported the wrong page.
+    # P3 #1b: text containment is admissible but weak evidence, so a verifier
+    # success vs the model's failed verdict is a conflict — the step is
+    # disputed (partial/unknown) instead of either side winning outright.
     assert result["verifier_evidence"]["selected_object_signals"][
         "selected_object_text_match"
     ] is True
-    assert result["reflection_verdict"] == "failed"
+    assert result["reflection_verdict"] == "partial"
+    assert result["failure_cause"] == "unknown"
+    assert result["disputed"] is True
 
 
 def test_reflect_node_selected_object_detects_wrong_detail(
@@ -2590,9 +2779,10 @@ def test_reflect_node_vlm_success_with_missing_postconditions_does_not_succeed(
     assert result["finished"] is False
 
 
-def test_reflect_node_input_focused_succeeds_with_keyboard_signal(
+def test_reflect_node_input_focused_keyboard_signal_is_disputed(
     base_state, fake_device
 ) -> None:
+    """P3: keyboard-visible verifier success vs model failed is a conflict."""
     base_state["action_parsed"] = {
         "_metadata": "do",
         "action": "Tap",
@@ -2636,14 +2826,17 @@ def test_reflect_node_input_focused_succeeds_with_keyboard_signal(
     )
 
     assert result["verifier_status"] == "success"
-    assert result["reflection_verdict"] == "succeeded"
+    assert result["reflection_verdict"] == "partial"
+    assert result["failure_cause"] == "unknown"
+    assert result["disputed"] is True
     assert result["verifier_result"]["signals"]["keyboard_visible"] is True
     assert model.calls == 1
 
 
-def test_reflect_node_input_focused_succeeds_with_focused_editable_signal(
+def test_reflect_node_input_focused_focused_editable_signal_is_disputed(
     base_state, fake_device
 ) -> None:
+    """P3: focused-editable verifier success vs model failed is a conflict."""
     base_state["action_parsed"] = {
         "_metadata": "do",
         "action": "Tap",
@@ -2687,7 +2880,9 @@ def test_reflect_node_input_focused_succeeds_with_focused_editable_signal(
     )
 
     assert result["verifier_status"] == "success"
-    assert result["reflection_verdict"] == "succeeded"
+    assert result["reflection_verdict"] == "partial"
+    assert result["failure_cause"] == "unknown"
+    assert result["disputed"] is True
     assert result["verifier_result"]["signals"]["focused_editable"] is True
 
 
@@ -2735,7 +2930,9 @@ def test_reflect_node_does_not_use_stale_before_observation_for_postcondition(
     )
 
     assert result["verifier_status"] == "failure"
-    assert result["reflection_verdict"] == "failed"
+    # 1.1: the verifier's failure (not hard) is advisory; the model's
+    # succeeded verdict stands and the missing postcondition is evidence.
+    assert result["reflection_verdict"] == "succeeded"
     assert result["verifier_evidence"]["missing_postconditions"][0]["redacted"] is True
     assert "sha256" not in result["verifier_evidence"]["missing_postconditions"][0]
 
@@ -3056,7 +3253,7 @@ def test_reflect_prompt_includes_before_after_observation_summaries(
     assert base_state["messages"][0]["content"][1]["type"] == "image_url"
 
 
-def test_plan_node_includes_structured_reflection_context(
+def test_plan_node_drops_reflection_free_text_and_keeps_structured_in_context(
     base_state, fake_device
 ) -> None:
     base_state["reflection"] = "上一步失败"
@@ -3081,8 +3278,16 @@ def test_plan_node_includes_structured_reflection_context(
     )
 
     text = model.messages[-1]["content"][-1]["text"]
-    assert "failure_cause: element_not_found" in text
-    assert "suggested_strategy: swipe_to_find" in text
+    # P1 #1: reflect free text and the dedicated reflection blocks are gone (I2).
+    assert "** Reflection **" not in text
+    assert "** Structured Reflection **" not in text
+    assert "上一步失败" not in text
+    # P1 #2: the original task text is injected at the top of every step (I1).
+    assert text.startswith(f"任务：{base_state['task']}")
+    # Structured verdict/cause/strategy still reach plan through the context
+    # block's last_action_outcome section, not through a reflection block.
+    assert '"failure_cause": "element_not_found"' in text
+    assert '"suggested_strategy": "swipe_to_find"' in text
 
 
 def test_plan_node_observe_mode_does_not_inject_context(
@@ -3114,8 +3319,10 @@ def test_plan_node_observe_mode_does_not_inject_context(
 
 def test_plan_node_inject_mode_adds_bounded_context(base_state, fake_device) -> None:
     base_state["context_mode"] = "inject"
-    base_state["screen_belief"] = {"summary": "safe summary", "current_app": "FakeApp"}
-    base_state["failure_memory"] = [{"failure_cause": "wrong_page", "action": "Tap"}]
+    base_state["failure_memory"] = [
+        {"failure_cause": "wrong_page", "action": "Tap", "step_count": 1},
+        {"failure_cause": "wrong_page", "action": "Tap", "step_count": 2},
+    ]
     model = FakeModelClient(
         FakeModelResponse(
             "think", '{"type":"do","action":"Wait","duration":"1 seconds"}'
@@ -3135,11 +3342,12 @@ def test_plan_node_inject_mode_adds_bounded_context(base_state, fake_device) -> 
 
     text = model.messages[-1]["content"][-1]["text"]
     assert "短期上下文" in text
-    assert "safe summary" in text
     assert "wrong_page" in text
     assert result["context_block_chars"] <= 1500
     assert result["context_strategy"] == "inject_redacted_block"
-    assert "screen_belief" in result["selected_sections"]
+    # 1.4: screen_belief is no longer a plan-context section (reflect keeps it).
+    assert "screen_belief" not in result["selected_sections"]
+    assert "failure_memory" in result["selected_sections"]
 
 
 def test_plan_node_can_trace_unredacted_prompt_debug(
@@ -3189,11 +3397,17 @@ def test_plan_node_inject_mode_redacts_sensitive_context(
     base_state, fake_device
 ) -> None:
     base_state["context_mode"] = "inject"
-    base_state["screen_belief"] = {
-        "summary": "允许存储权限",
-        "visible_text": "13800138000",
-    }
-    base_state["summarized_history"] = "sk-secret 明天三点见"
+    # P2: summarized_history is no longer injected into the plan prompt; the
+    # redaction contract is now exercised on the goal_agenda description, which
+    # still reaches the block.
+    base_state["goal_agenda"] = [
+        {
+            "description": "允许存储权限 13800138000 sk-secret 明天三点见",
+            "status": "unknown",
+            "verification": "vlm_judge",
+            "predicate_id": None,
+        }
+    ]
     model = FakeModelClient(
         FakeModelResponse(
             "think", '{"type":"do","action":"Wait","duration":"1 seconds"}'
@@ -3242,7 +3456,9 @@ def test_reflect_node_updates_context_memory(base_state, fake_device) -> None:
     assert "context_lost" in result["summarized_history"]
 
 
-def test_reflection_context_redacts_raw_reflection(base_state, fake_device) -> None:
+def test_reflection_free_text_not_injected_into_plan_prompt(
+    base_state, fake_device
+) -> None:
     base_state["reflection"] = "张三 13800138000 请重试"
     base_state["context_mode"] = "inject"
     model = FakeModelClient(
@@ -3263,9 +3479,69 @@ def test_reflection_context_redacts_raw_reflection(base_state, fake_device) -> N
     )
 
     text = model.messages[-1]["content"][-1]["text"]
-    assert "张三" in text  # regex-only preserves non-sensitive Chinese text
-    assert "13800138000" not in text  # phone number regex-redacted
-    assert "请重试" in text
+    # P1 #1: reflection free text is no longer a plan-prompt channel (I2); the
+    # context block (structured sections only) and the task line may carry data.
+    assert "张三" not in text
+    assert "请重试" not in text
+    assert "13800138000" not in text
+    assert text.startswith(f"任务：{base_state['task']}")
+
+
+def test_plan_node_injects_truncated_task_text_each_step(
+    base_state, fake_device
+) -> None:
+    long_task = "长任务内容" * 80  # 400 chars
+    base_state["task"] = long_task
+    model = FakeModelClient(
+        FakeModelResponse(
+            "think", '{"type":"do","action":"Wait","duration":"1 seconds"}'
+        )
+    )
+
+    plan_node(
+        base_state,
+        {
+            "configurable": {
+                "model_client": model,
+                "device_factory": fake_device,
+            }
+        },
+    )
+
+    text = model.messages[-1]["content"][-1]["text"]
+    first_line = text.split("\n", 1)[0]
+    assert first_line.startswith("任务：")
+    # ~200-char cap on the injected task line (P1 #2).
+    assert len(first_line) <= 204
+    assert "长任务内容" in first_line
+    assert "任务：" not in first_line[5:]
+
+
+def test_plan_node_task_line_sanitizes_sensitive_values(
+    base_state, fake_device
+) -> None:
+    base_state["task"] = "给 13800138000 发短信"
+    model = FakeModelClient(
+        FakeModelResponse(
+            "think", '{"type":"do","action":"Wait","duration":"1 seconds"}'
+        )
+    )
+
+    plan_node(
+        base_state,
+        {
+            "configurable": {
+                "model_client": model,
+                "device_factory": fake_device,
+            }
+        },
+    )
+
+    text = model.messages[-1]["content"][-1]["text"]
+    first_line = text.split("\n", 1)[0]
+    assert first_line.startswith("任务：")
+    assert "13800138000" not in first_line
+    assert "<matches_task_value>" in first_line
 
 
 def test_plan_node_request_compaction_strips_historical_images_only(
@@ -3313,8 +3589,8 @@ def test_plan_node_request_compaction_strips_historical_images_only(
     )
     assert result["screenshot_b64"] is None
     assert base_state["messages"][1]["content"][0]["type"] == "image_url"
-    assert result["messages_before"] == 4
-    assert result["messages_after"] == 4
+    assert result["messages_before"] == 5
+    assert result["messages_after"] == 5
     assert result["message_chars_after"] <= result["message_chars_before"]
 
 
@@ -3448,9 +3724,14 @@ def test_plan_node_injects_task_goal_after_message_compaction(
     )
 
     text = model.messages[-1]["content"][-1]["text"]
-    assert "任务目标契约" in text
-    assert "bilibili" in text  # target_app_hint from heuristic compiler
-    assert "vlm_judge_at_finish" in text  # verification_strategy
+    # P5 #2: the goal contract block moved to its own static message right
+    # before the dynamic one (cache-friendly prefix), so it is no longer
+    # embedded in the last user message.
+    goal_block_text = model.messages[-2]["content"][-1]["text"]
+    assert "任务目标契约" in goal_block_text
+    assert "bilibili" in goal_block_text  # target_app_hint from heuristic compiler
+    assert "vlm_judge_at_finish" in goal_block_text  # verification_strategy
+    assert "任务：去b站看逗比的雀巢的第二个视频" in text
     # P0-2: plan no longer writes goal_contract to state (goal_node owns it)
     assert "goal_contract" not in result or result.get("goal_contract") is None
     # But the contract in base_state should be preserved (plan doesn't overwrite)
@@ -3941,3 +4222,201 @@ def test_private_goal_value_survives_runtime_context_and_folds_semantics(
     assert observed not in json.dumps(
         result["goal_evidence_ledger"], ensure_ascii=False
     )
+
+
+def _reflect_with_model(base_state, fake_device, model, **configurable):
+    return reflect_node(
+        base_state,
+        {
+            "configurable": {
+                "model_client": model,
+                "device_factory": fake_device,
+                "verbose": False,
+                **configurable,
+            }
+        },
+    )
+
+
+def test_reflect_disputed_step_does_not_write_failure_memory(
+    base_state, fake_device
+) -> None:
+    """P3 #2: a disputed step (verifier success w/ matched postconditions vs
+    model failed) never enters failure memory and never counts as a repeated
+    failure."""
+    base_state["action_parsed"] = {
+        "_metadata": "do",
+        "action": "Tap",
+        "element": [500, 120],
+    }
+    base_state["expected_outcome"] = {
+        "kind": "input_focused",
+        "must_observe": ["搜索"],
+        "must_not_observe": [],
+        "target_mark_id": "search",
+        "target_text_hint": "搜索",
+        "timeout_hint": None,
+        "dynamic_regions": [],
+    }
+    model = FakeModelClient(
+        FakeModelResponse(
+            "ok",
+            '{"verdict":"failed","failure_cause":"wrong_page","suggested_strategy":"retry","message":"not sure"}',
+        )
+    )
+
+    result = _reflect_with_model(
+        base_state,
+        fake_device,
+        model,
+        keyboard_visible=True,
+        after_screen_marks=[
+            {
+                "mark_id": "after_search",
+                "bbox": [50, 60, 950, 160],
+                "role": "EditText",
+                "text_summary": "搜索",
+            }
+        ],
+        grounding_provider_name="off",
+    )
+
+    assert result["verifier_status"] == "success"
+    assert result["disputed"] is True
+    assert result["reflection_verdict"] == "partial"
+    assert result["failure_cause"] == "unknown"
+    assert result["failure_memory"] == []
+    assert result["repeated_failure_count"] == 0
+    assert result["failure_memory_hit_count"] == 0
+    assert result["action_outcome_summary"]["disputed"] is True
+
+
+def test_reflect_model_alone_failure_writes_unverified_memory(
+    base_state, fake_device
+) -> None:
+    """P3 #2: a model-alone failure (verifier unknown) still writes failure
+    memory, but each item is flagged unverified."""
+    base_state["action_parsed"] = {
+        "_metadata": "do",
+        "action": "Tap",
+        "element": [500, 120],
+    }
+    base_state["expected_outcome"] = {
+        "kind": "generic",
+        "must_observe": [],
+        "must_not_observe": [],
+        "target_mark_id": None,
+        "target_text_hint": None,
+        "timeout_hint": None,
+        "dynamic_regions": [],
+    }
+    model = FakeModelClient(
+        FakeModelResponse(
+            "ok",
+            '{"verdict":"failed","failure_cause":"element_not_found","suggested_strategy":"retry","message":"missed"}',
+        )
+    )
+
+    result = _reflect_with_model(
+        base_state, fake_device, model, grounding_provider_name="off"
+    )
+
+    assert result["verifier_status"] == "unknown"
+    assert result["disputed"] is False
+    assert result["reflection_verdict"] == "failed"
+    assert len(result["failure_memory"]) == 1
+    item = result["failure_memory"][-1]
+    assert item["failure_cause"] == "element_not_found"
+    assert item["unverified"] is True
+
+
+def test_reflect_consensus_failure_writes_verified_memory(
+    base_state, fake_device
+) -> None:
+    """P3 #2: verifier failure + model failure is a consensus failure — memory
+    is written without the unverified flag."""
+    base_state["action_parsed"] = {
+        "_metadata": "do",
+        "action": "Tap",
+        "element": [500, 120],
+    }
+    base_state["expected_outcome"] = {
+        "kind": "input_focused",
+        "must_observe": ["不存在的文本"],
+        "must_not_observe": [],
+        "target_mark_id": "search",
+        "target_text_hint": "搜索",
+        "timeout_hint": None,
+        "dynamic_regions": [],
+    }
+    model = FakeModelClient(
+        FakeModelResponse(
+            "ok",
+            '{"verdict":"failed","failure_cause":"element_not_found","suggested_strategy":"retry","message":"missed"}',
+        )
+    )
+
+    result = _reflect_with_model(
+        base_state,
+        fake_device,
+        model,
+        grounding_provider_name="off",
+        after_screen_marks=[
+            {
+                "mark_id": "after_feed",
+                "bbox": [50, 60, 950, 160],
+                "role": "TextView",
+                "text_summary": "首页",
+            }
+        ],
+    )
+
+    assert result["verifier_status"] == "failure"
+    assert result["disputed"] is False
+    assert result["reflection_verdict"] == "failed"
+    assert len(result["failure_memory"]) == 1
+    assert "unverified" not in result["failure_memory"][-1]
+
+
+def test_reflect_wrong_page_with_activity_migration_is_disputed(
+    base_state, fake_device
+) -> None:
+    """P3 #1b narrow veto: model says wrong_page but the activity migrated —
+    the claim lacks evidence, so the step is disputed even with an unknown
+    verifier."""
+    base_state["observation"] = {
+        "snapshot": {"foreground_activity": "com.xhs/FeedActivity", "screen_id": "feed"}
+    }
+    base_state["action_parsed"] = {
+        "_metadata": "do",
+        "action": "Tap",
+        "element": [500, 120],
+    }
+    base_state["expected_outcome"] = {
+        "kind": "generic",
+        "must_observe": [],
+        "must_not_observe": [],
+        "target_mark_id": None,
+        "target_text_hint": None,
+        "timeout_hint": None,
+        "dynamic_regions": [],
+    }
+    model = FakeModelClient(
+        FakeModelResponse(
+            "ok",
+            '{"verdict":"failed","failure_cause":"wrong_page","suggested_strategy":"retry","message":"wrong page"}',
+        )
+    )
+
+    result = _reflect_with_model(
+        base_state,
+        fake_device,
+        model,
+        top_activity="com.xhs/DetailActivity",
+        grounding_provider_name="off",
+    )
+
+    assert result["disputed"] is True
+    assert result["reflection_verdict"] == "partial"
+    assert result["failure_cause"] == "unknown"
+    assert result["failure_memory"] == []

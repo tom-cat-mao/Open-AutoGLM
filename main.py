@@ -704,6 +704,49 @@ Examples:
     )
 
     parser.add_argument(
+        "--prompt-cache-key",
+        type=str,
+        default=os.getenv("PHONE_AGENT_PROMPT_CACHE_KEY"),
+        help="Stable prompt-cache key (OpenAI-style prompt_cache_key); "
+        "when unset no request-level cache key is sent",
+    )
+    parser.add_argument(
+        "--enable-cache-control",
+        action="store_true",
+        default=parse_env_bool("PHONE_AGENT_ENABLE_CACHE_CONTROL", True),
+        help="Inject Anthropic-style cache_control hints on the static "
+        "goal-contract message (default: on; disable for providers that "
+        "reject cache hints)",
+    )
+    parser.add_argument(
+        "--ttft-circuit-breaker",
+        action="store_true",
+        default=parse_env_bool("PHONE_AGENT_TTFT_CIRCUIT_BREAKER", True),
+        help="Abort the run after N consecutive slow time-to-first-token calls "
+        "(default: on)",
+    )
+    parser.add_argument(
+        "--ttft-threshold",
+        type=float,
+        default=float(os.getenv("PHONE_AGENT_TTFT_THRESHOLD", "60")),
+        help="TTFT threshold in seconds (default: 60)",
+    )
+    parser.add_argument(
+        "--ttft-consecutive-limit",
+        type=int,
+        default=int(os.getenv("PHONE_AGENT_TTFT_CONSECUTIVE_LIMIT", "3")),
+        help="Consecutive slow TTFT calls that trip the breaker (default: 3)",
+    )
+
+    parser.add_argument(
+        "--skip-reflect-on-high-confidence",
+        action="store_true",
+        default=parse_env_bool("PHONE_AGENT_SKIP_REFLECT_ON_HIGH_CONFIDENCE", True),
+        help="Skip the reflect model call when the deterministic verifier "
+        "answers the action question with high confidence (default: on)",
+    )
+
+    parser.add_argument(
         "--max-steps",
         type=int,
         default=int(os.getenv("PHONE_AGENT_MAX_STEPS", "100")),
@@ -880,6 +923,10 @@ Examples:
         parser.error("--model-timeout must be positive")
     if args.model_max_retries < 0:
         parser.error("--model-max-retries must be non-negative")
+    if args.ttft_threshold <= 0:
+        parser.error("--ttft-threshold must be positive")
+    if args.ttft_consecutive_limit < 1:
+        parser.error("--ttft-consecutive-limit must be at least 1")
     try:
         args.model_extra_body_dict = parse_json_object(
             args.model_extra_body, "--model-extra-body / PHONE_AGENT_MODEL_EXTRA_BODY"
@@ -1042,6 +1089,11 @@ def main():
         lang=args.lang,
         output_mode=args.output_mode,
         trace_raw_model_response=args.trace_raw_model_response,
+        prompt_cache_key=args.prompt_cache_key,
+        enable_cache_control=args.enable_cache_control,
+        ttft_circuit_breaker_enabled=args.ttft_circuit_breaker,
+        ttft_threshold_seconds=args.ttft_threshold,
+        ttft_consecutive_limit=args.ttft_consecutive_limit,
     )
 
     agent_config = AgentConfig(
@@ -1055,6 +1107,7 @@ def main():
         trace_unredacted_prompt=args.trace_unredacted_prompt,
         context_mode=args.context_mode,
         grounding_provider_name=args.grounding_provider,
+        skip_reflect_on_high_confidence=args.skip_reflect_on_high_confidence,
         accessibility_marks=args.accessibility_marks,
         accessibility_timeout=args.accessibility_timeout,
         accessibility_max_marks=args.accessibility_max_marks,

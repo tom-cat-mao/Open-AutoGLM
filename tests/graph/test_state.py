@@ -92,8 +92,20 @@ def test_plan_context_block_truncates_and_redacts() -> None:
         {
             "screen_belief": {"summary": "张三", "current_app": "App"},
             "action_outcome_summary": {"result_message_summary": "13800138000"},
+            # P2: summarized_history no longer reaches the plan block; the
+            # agenda description now carries the long payload that forces the
+            # per-section trim, and the sensitive markers that must be redacted.
+            "goal_agenda": [
+                {
+                    # Long, regex-safe payload: forces the per-section trim while
+                    # still carrying the sensitive marker that must be redacted.
+                    "description": "sk-secret " + "目标内容确认 " * 300,
+                    "status": "unknown",
+                    "verification": "vlm_judge",
+                    "predicate_id": None,
+                }
+            ],
             "failure_memory": [{"failure_cause": "wrong_page"}],
-            "summarized_history": "sk-secret " + "x" * 2000,
             "context_budget": default_context_budget(),
         }
     )
@@ -141,7 +153,16 @@ def test_plan_context_block_marks_task_value_in_derived_fields() -> None:
             "task": "帮我拨 13800138000",
             "action_parsed": {"action": "Type", "text": "13800138000"},
             "action_result": {"success": True, "message": "已输入13800138000"},
-            "summarized_history": "step=1 text=13800138000 other=13900139000",
+            # P2: agenda descriptions are the derived field that still reaches
+            # the plan block; both task-value marking and regex redaction apply.
+            "goal_agenda": [
+                {
+                    "description": "step=1 text=13800138000 other=13900139000",
+                    "status": "unknown",
+                    "verification": "vlm_judge",
+                    "predicate_id": None,
+                }
+            ],
         }
     )
 
@@ -163,14 +184,21 @@ def test_chinese_ui_text_not_falsely_redacted() -> None:
 
 
 def test_inject_context_preserves_model_summary() -> None:
-    """Inject mode should keep reflect-generated screen descriptions readable."""
-    result = select_plan_context(
+    """Inject mode should keep reflect-generated screen descriptions readable.
+
+    1.4: screen_belief left plan context; the reflect block still carries it,
+    so the belief summary readability contract is asserted there.
+    """
+    from phone_agent.graph.context import select_reflect_context
+
+    result = select_reflect_context(
         {
-            "reflection": "当前页面是设置列表，显示了Wi-Fi、蓝牙、显示等选项",
-            "current_app": "com.android.settings",
-            "screen_belief": {"summary": "redacted_stub", "current_app": "com.android.settings"},
-            "action_parsed": {"action": "Tap", "coordinate": [100, 460]},
-            "action_result": {"success": True, "message": "Tapped at (100, 460)"},
+            "screen_belief": {
+                "summary": "当前页面是设置列表，显示了Wi-Fi、蓝牙、显示等选项",
+                "current_app": "com.android.settings",
+                "confidence": "high",
+            },
+            "action_outcome_summary": {"action": "Tap", "result_message_summary": "Tapped at (100, 460)"},
             "reflection_verdict": "succeeded",
             "failure_cause": None,
             "suggested_strategy": "continue",
@@ -190,11 +218,15 @@ def test_inject_context_preserves_model_summary() -> None:
 
 def test_inject_context_redacts_phone_in_summary() -> None:
     """Inject mode must still redact regex-matched sensitive data."""
-    result = select_plan_context(
+    from phone_agent.graph.context import select_reflect_context
+
+    result = select_reflect_context(
         {
-            "reflection": "用户手机号是13800138000，请联系",
-            "current_app": "com.app",
-            "screen_belief": {"summary": "stub", "current_app": "com.app"},
+            "screen_belief": {
+                "summary": "用户手机号是13800138000，请联系",
+                "current_app": "com.app",
+                "confidence": "high",
+            },
             "reflection_verdict": "failed",
             "failure_cause": "element_not_found",
             "failure_memory": [],

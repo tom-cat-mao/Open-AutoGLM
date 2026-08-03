@@ -22,6 +22,7 @@ from phone_agent.graph.context import (
 )
 from phone_agent.graph.expected_outcome import (
     expected_outcome_trace_projection,
+    extract_progress_note,
     extract_provider_envelope,
     normalize_expected_outcome,
     runtime_expected_outcome_dict,
@@ -42,36 +43,47 @@ from phone_agent.grounding.factory import build_mark_providers
 from phone_agent.grounding.provider import ScreenBinding
 from phone_agent.model.client import MessageBuilder
 from phone_agent.model.client import ModelParseError
+from phone_agent.model.client import TTFTCircuitBreakerError
 
 if TYPE_CHECKING:
     from phone_agent.graph.state import AgentState
 
 
-def _build_reflection_context(state: "AgentState", *, consumer: str = "inject") -> str:
-    reflection = state.get("reflection")
-    task_context = state.get("task") if isinstance(state.get("task"), str) else None
-    verdict = state.get("reflection_verdict")
-    cause = state.get("failure_cause")
-    strategy = state.get("suggested_strategy")
-    parts = []
-    if reflection:
-        safe_reflection = sanitize_context_payload(
-            reflection,
-            "reflection",
-            consumer=consumer,
-            task_context=task_context,
+def _build_task_context_line(task: str | None, *, max_chars: int = 200) -> str:
+    """Inject the original task text at the top of every step's user prompt.
+
+    Keeps the task visible on every plan request (roadmap I1) while bounding
+    length and regex-redacting sensitive values through the inject consumer,
+    mirroring the ``task_context`` usage elsewhere.
+    """
+
+    raw_task = task if isinstance(task, str) else ""
+    safe_task = str(
+        sanitize_context_payload(
+            raw_task, "task", consumer="inject", task_context=raw_task
         )
-        parts.append(f"** Reflection **\n\n{safe_reflection}")
-    structured = []
-    if verdict:
-        structured.append(f"verdict: {verdict}")
-    if cause:
-        structured.append(f"failure_cause: {cause}")
-    if strategy:
-        structured.append(f"suggested_strategy: {strategy}")
-    if structured:
-        parts.append("** Structured Reflection **\n\n" + "\n".join(structured))
-    return "\n\n".join(parts)
+    )
+    return f"任务：{safe_task[:max_chars]}"
+
+
+def _build_progress_note_line(
+    state: "AgentState", *, max_chars: int = 120
+) -> str:
+    """Build the ``上轮意图`` continuity line from the last model self-note.
+
+    P4 #1 (roadmap I6): the previous step's ``progress_note`` is replayed into
+    the next plan prompt so the model keeps its intent across screenshots.
+    The stored value is already inject-sanitized at state write; this pass
+    re-sanitizes defensively and bounds the line length.
+    """
+
+    note = state.get("progress_note")
+    if not isinstance(note, str) or not note.strip():
+        return ""
+    safe_note = str(
+        sanitize_context_payload(note.strip(), consumer="inject")
+    )
+    return f"上轮意图：{safe_note[:max_chars]}"
 
 
 def _validate_with_limited_repair(
@@ -328,6 +340,7 @@ def _parse_and_ground_response(
     parse_metadata = getattr(response, "parse_metadata", {}) or {}
     intent_raw = None
     raw_expected_outcome = None
+    progress_note = None
     grounding_error = None
     grounding_observation: dict = {}
     structured_json_response = False
@@ -339,6 +352,7 @@ def _parse_and_ground_response(
             action_payload, raw_expected_outcome = extract_provider_envelope(
                 provider_payload
             )
+            progress_note = extract_progress_note(provider_payload)
             action_parsed = adapt_json_action(action_payload)
         else:
             raise ActionAdapterError(
@@ -462,6 +476,7 @@ def _parse_and_ground_response(
         grounding_observation,
         expected_outcome_dict,
         expected_outcome_trace,
+        progress_note,
     )
 
 
@@ -599,6 +614,7 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
             },
         )
         return {
+            "repeat_rejected": False,
             "messages": [],
             "step_count": step_count + 1,
             "thinking": "",
@@ -664,6 +680,7 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
             },
         )
         return {
+            "repeat_rejected": False,
             "messages": [],
             "step_count": step_count + 1,
             "screenshot_b64": None,
@@ -839,8 +856,17 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
             system_prompt = f"{system_prompt}\n\n{app_registry}"
         new_messages.append(MessageBuilder.create_system_message(system_prompt))
 
+        # P5 #2 prompt-cache: the goal contract block is task-static and is
+        # injected as its own message right after system, mirroring reflect.py,
+        # so the system + goal-contract prefix is byte-stable across the run
+        # and cacheable by prefix-caching providers.
+        if task_goal_block:
+            new_messages.append(
+                MessageBuilder.create_user_message(text=task_goal_block)
+            )
+
         screen_info = MessageBuilder.build_screen_info(current_app)
-        text_content = f"{task}\n\n{task_goal_block}\n\n{screen_info}"
+        text_content = f"{task}\n\n{screen_info}"
         objects_block = (
             observation.object_registry.prompt_block(
                 mark_registry=mark_registry,
@@ -865,11 +891,22 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
         )
     else:
         screen_info = MessageBuilder.build_screen_info(current_app)
-        reflection_context = _build_reflection_context(state)
-        if reflection_context:
-            text_content = f"{task_goal_block}\n\n** Screen Info **\n\n{screen_info}\n\n{reflection_context}"
-        else:
-            text_content = f"{task_goal_block}\n\n** Screen Info **\n\n{screen_info}"
+        task_context_line = _build_task_context_line(task)
+        progress_note_line = _build_progress_note_line(state)
+        intent_continuity_block = (
+            f"{task_context_line}\n\n{progress_note_line}"
+            if progress_note_line
+            else task_context_line
+        )
+        # P5 #2 prompt-cache: the goal contract block is task-static; keeping it
+        # as its own message (not embedded in the per-step dynamic text) keeps
+        # the system + static-prefix stable for prefix-caching providers.
+        if task_goal_block:
+            new_messages.append(
+                MessageBuilder.create_user_message(text=task_goal_block)
+            )
+        screen_info = MessageBuilder.build_screen_info(current_app)
+        text_content = f"{intent_continuity_block}\n\n** Screen Info **\n\n{screen_info}"
         objects_block = (
             observation.object_registry.prompt_block(
                 mark_registry=mark_registry,
@@ -977,6 +1014,7 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
                     },
                 )
                 return {
+                    "repeat_rejected": False,
                     "messages": state_messages,
                     "step_count": step_count + 1,
                     "screenshot_b64": None,
@@ -1028,6 +1066,7 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
                 },
             )
             return {
+                "repeat_rejected": False,
                 "messages": state_messages,
                 "step_count": step_count + 1,
                 "screenshot_b64": None,
@@ -1063,6 +1102,22 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
             print(f"Model error: {type(e).__name__}")
         error_message = f"Model error: {type(e).__name__}"
         parse_metadata = getattr(e, "parse_metadata", {}) or {}
+        if isinstance(e, TTFTCircuitBreakerError):
+            # P5 #3: degraded endpoint — the TTFT streak tripped the breaker.
+            # Emit the dedicated event with the recent TTFT sequence, then the
+            # run terminates through the standard plan model-failure path below.
+            emit_trace(
+                config,
+                state,
+                "plan",
+                "ttft_circuit_breaker",
+                {
+                    "message": error_message,
+                    "consecutive_slow": e.consecutive_slow,
+                    "threshold_seconds": e.threshold,
+                    "recent_ttft_seconds": e.ttft_history,
+                },
+            )
         error_fields = {
             "error_layer": "adapter",
             "error_code": parse_metadata.get("parse_error_code")
@@ -1086,6 +1141,7 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
             },
         )
         return {
+            "repeat_rejected": False,
             "messages": state_messages,
             "step_count": step_count + 1,
             "screenshot_b64": None,
@@ -1128,6 +1184,7 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
         grounding_observation,
         expected_outcome,
         expected_outcome_trace,
+        progress_note,
     ) = _parse_and_ground_response(
         response,
         parse_configurable,
@@ -1170,6 +1227,7 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
                 retry_grounding_observation,
                 retry_expected_outcome,
                 retry_expected_outcome_trace,
+                retry_progress_note,
             ) = _parse_and_ground_response(
                 retry_response,
                 parse_configurable,
@@ -1190,6 +1248,7 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
             grounding_observation = retry_grounding_observation
             expected_outcome = retry_expected_outcome
             expected_outcome_trace = retry_expected_outcome_trace
+            progress_note = retry_progress_note
         except Exception as exc:
             parse_metadata = {
                 **parse_metadata,
@@ -1247,6 +1306,18 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
             task_context=task,
         )
     )
+    # P4 #1: store the provider self-note inject-sanitized and bounded; it is
+    # replayed as ``上轮意图`` on the next plan round. Raw text never enters
+    # state/trace (AGENTS.md #10 privacy: sanitize at write, not only egress).
+    progress_note_safe = None
+    if isinstance(progress_note, str) and progress_note.strip():
+        progress_note_safe = str(
+            sanitize_context_payload(
+                progress_note,
+                consumer="inject",
+                task_context=task,
+            )
+        )[:120]
 
     emit_trace(
         config,
@@ -1280,6 +1351,7 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
             "grounding_candidate_count": grounding_candidate_count,
             "selected_grounding_candidate_id": selected_grounding_candidate_id,
             "expected_outcome": expected_outcome_trace,
+            "progress_note": progress_note_safe,
             "task_goal_contract": task_goal_trace,
             "task_goal_injected": True,
             "task_goal_block_chars": len(task_goal_block),
@@ -1312,6 +1384,7 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
                 ensure_ascii=False,
             )
             return {
+                "repeat_rejected": False,
                 "messages": state_messages,
                 "step_count": step_count + 1,
                 "screenshot_b64": None,
@@ -1359,6 +1432,7 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
                 **context_metrics,
             }
         return {
+            "repeat_rejected": False,
             "messages": state_messages,
             "step_count": step_count + 1,
             "screenshot_b64": None,
@@ -1406,6 +1480,7 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
         }
 
     return {
+        "repeat_rejected": False,
         "messages": state_messages,
         "step_count": step_count + 1,
         "screenshot_b64": None,
@@ -1435,6 +1510,7 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
         "selected_grounding_candidate_id": selected_grounding_candidate_id,
         "expected_outcome": expected_outcome,
         "expected_transition": expected_transition,
+        "progress_note": progress_note_safe,
         "action_receipt": None,
         "action_succeeded": False,
         **error_fields,

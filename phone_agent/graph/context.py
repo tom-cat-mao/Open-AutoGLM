@@ -6,7 +6,7 @@ import json
 import hashlib
 import re
 from dataclasses import asdict, dataclass
-from typing import Any
+from typing import Any, Literal
 
 from phone_agent.config.policy import DEFAULT_VERIFICATION_POLICY
 
@@ -19,7 +19,10 @@ NOVELTY_EXHAUSTION_STEPS = int(
 CONTEXT_MODES = {"off", "observe", "inject"}
 DEFAULT_CONTEXT_MODE = "inject"
 DEFAULT_CONTEXT_BUDGET: dict[str, int] = {
-    "goal_agenda_chars": 400,
+    # Raised from 400 (P2 milestone latch): the plan agenda now carries the
+    # latched "曾观察" markers for every done milestone, and a 400-char cap let
+    # those lines get squeezed out by pending-acceptance rows.
+    "goal_agenda_chars": 800,
     "screen_belief_summary_chars": 300,
     "summarized_history_chars": 800,
     "failure_memory_items": 3,
@@ -41,17 +44,13 @@ DEFAULT_CONTEXT_BUDGET: dict[str, int] = {
     "visited_screen_items": 6,
 }
 _SECTION_BUDGETS = {
-    "goal_agenda": 400,
+    "goal_agenda": 800,
 }
 DEFAULT_PROMPT_VERSION = "context_harness_v1"
 CONTEXT_SECTION_IDS = (
     "goal_agenda",
-    "screen_belief",
     "last_action_outcome",
     "failure_memory",
-    "summarized_history",
-    "short_term_memory",
-    "action_ledger",
     "avoid_repeating",
     "gui_memory.visited_screens",
     "gui_memory.tried_actions",
@@ -466,6 +465,38 @@ def is_failed_outcome(outcome: dict[str, Any]) -> bool:
     return outcome.get("execution_success") is False
 
 
+FailureMemoryMode = Literal["skip", "verified", "unverified"]
+
+
+def failure_memory_write_mode(
+    *,
+    verifier_status: str | None,
+    verdict: str | None,
+    hard_failure: bool = False,
+    disputed: bool = False,
+) -> FailureMemoryMode:
+    """P3 #2: classify whether a reflect step may write failure memory.
+
+    - ``skip``: disputed (verifier success w/ matched postconditions vs model
+      failed, or a wrong_page claim contradicted by observed activity
+      migration) and non-failure steps never enter failure memory;
+    - ``verified``: consensus failure (hard_failure, or verifier failure + model
+      failure) — the deterministic side agrees, memory is trusted;
+    - ``unverified``: model-alone failure (verifier unknown / blocked / success
+      without matched evidence) — memory is kept, but each item is flagged so
+      downstream repeat detection and plan rendering know it was not
+      corroborated.
+    """
+
+    if verdict not in {"failed", "partial"}:
+        return "skip"
+    if disputed:
+        return "skip"
+    if hard_failure or verifier_status == "failure":
+        return "verified"
+    return "unverified"
+
+
 def detect_repeated_failure(
     failure_memory: list[dict[str, Any]], outcome: dict[str, Any]
 ) -> bool:
@@ -487,8 +518,18 @@ def update_failure_memory(
     existing: list[dict[str, Any]],
     outcome: dict[str, Any],
     budget: dict[str, int] | None = None,
+    *,
+    unverified: bool = False,
 ) -> list[dict[str, Any]]:
-    """Append failed outcome and keep the recent bounded window."""
+    """Append failed outcome and keep the recent bounded window.
+
+    P3 #2: writes are gated by :func:`failure_memory_write_mode` in the reflect
+    node — only consensus failures and hard failures are ``verified``; a
+    model-alone failure with an unknown verifier is stored with
+    ``unverified=True`` so repeated-failure semantics and plan rendering can
+    tell corroborated failures apart. Disputed steps never reach this function.
+    """
+
     if not is_failed_outcome(outcome):
         return list(existing or [])
     active_budget = budget or DEFAULT_CONTEXT_BUDGET
@@ -503,6 +544,8 @@ def update_failure_memory(
         "failure_cause": outcome.get("failure_cause") or "unknown",
         "suggested_strategy": outcome.get("suggested_strategy"),
     }
+    if unverified:
+        item["unverified"] = True
     return (list(existing or []) + [item])[-active_budget["failure_memory_items"] :]
 
 
@@ -566,6 +609,21 @@ def action_target_center(
         return None
     try:
         return [round(float(raw[0]), 1), round(float(raw[1]), 1)]
+    except (TypeError, ValueError):
+        return None
+
+
+def action_point(value: Any) -> list[float] | None:
+    """Return a rounded ``[x, y]`` point or None when not a 2-tuple of numbers.
+
+    Used for Swipe ``start``/``end`` geometry in tried-action records so the
+    repeat guard (P3 #3) can build a swipe repeat key without a target center.
+    """
+
+    if not isinstance(value, (list, tuple)) or len(value) != 2:
+        return None
+    try:
+        return [round(float(value[0]), 1), round(float(value[1]), 1)]
     except (TypeError, ValueError):
         return None
 
@@ -680,17 +738,42 @@ def _criterion_moved_toward_satisfaction(history: list[dict]) -> bool:
 def repeated_action_key(item: dict[str, Any]) -> tuple[Any, ...] | None:
     if not isinstance(item, dict):
         return None
-    center = item.get("target_center")
-    if not isinstance(center, (list, tuple)) or len(center) != 2:
-        return None
     action = item.get("action")
     surface = item.get("surface")
     if not action or surface is None:
+        return None
+    center = item.get("target_center")
+    if str(action) == "Swipe" and not (
+        isinstance(center, (list, tuple)) and len(center) == 2
+    ):
+        # P3 #3: a Swipe has no target center, so geometry identity comes from
+        # its start/end grid plus direction. Before this branch the guard's key
+        # was always None for Swipe — the execute repeat guard had a blind spot.
+        return _swipe_repeat_key(item, surface)
+    if not isinstance(center, (list, tuple)) or len(center) != 2:
         return None
     text_identity = item.get("text_identity")
     if text_identity is None and str(action) in {"Type", "Type_Name"}:
         text_identity = action_text_identity(item.get("text"))
     return (str(action), tuple(center), surface, text_identity)
+
+
+def _swipe_repeat_key(
+    item: dict[str, Any], surface: str
+) -> tuple[Any, ...] | None:
+    start = action_point(item.get("start"))
+    end = action_point(item.get("end"))
+    if start is None or end is None:
+        return None
+    start_grid = (round(start[0] / 50.0), round(start[1] / 50.0))
+    end_grid = (round(end[0] / 50.0), round(end[1] / 50.0))
+    return (
+        str(item.get("action")),
+        surface,
+        _swipe_direction(item),
+        start_grid,
+        end_grid,
+    )
 
 
 def action_text_identity(value: Any) -> str | None:
@@ -763,6 +846,10 @@ def update_gui_memory(
                 # screen_id is content-derived, so it changes when a feed reorders
                 # while the same card stays in the same place.
                 "target_center": action_target_center(state, action),
+                # Swipe geometry (P3 #3): Swipe has no target center, so the repeat
+                # guard keys on start/end instead. Both are rounded relative coords.
+                "start": action_point(action.get("start")),
+                "end": action_point(action.get("end")),
                 "surface": state_surface_identity(state),
                 "text_identity": action_text_identity(action.get("text")),
                 "result_success": (
@@ -823,12 +910,15 @@ def build_plan_context_block(
 ) -> tuple[str, dict[str, Any]]:
     """Build a bounded, regex-redacted context block for plan injection.
 
-    Reads raw state fields directly (``reflection``, ``action_parsed``,
-    ``action_result``, ``screen_belief``, ``failure_memory``,
-    ``summarized_history``, ``gui_memory``, ``grounding_observation``) and
+    Reads raw state fields directly (``action_parsed``,
+    ``action_result``, ``failure_memory``,
+    ``gui_memory``, ``grounding_observation``) and
     applies :func:`sanitize_context_text_regex` to every string.  No
     key-level stub is applied; stub policy is reserved for the checkpoint
     consumer (``RedactingSerializer``).
+
+    ``summarized_history`` is deliberately **not** injected (P2): it stays in
+    state as trace-only memory written by :func:`update_summarized_history`.
 
     ``consumer`` selects the policy from ``CONSUMER_POLICY`` (today all
     policies resolve to regex-only; the argument is kept so that a future
@@ -841,31 +931,9 @@ def build_plan_context_block(
     if lang != "en":
         title = "** 短期上下文（仅为信念，不代表授权） **"
 
-    reflection = state.get("reflection") or ""
     current_app = state.get("current_app") or "unknown"
-    screen_belief = state.get("screen_belief") or {}
-    summary_source = reflection or screen_belief.get("summary") or "unknown"
-    summary_source_str = str(summary_source)
-    if len(summary_source_str) > budget["screen_belief_summary_chars"]:
-        component_truncated = True
-    summary_text, summary_truncated = trim_text(
-        summary_source_str, budget["screen_belief_summary_chars"]
-    )
-    if summary_truncated:
-        component_truncated = True
 
     task_context = state.get("task") if isinstance(state.get("task"), str) else None
-    belief = {
-        "current_app": sanitize_context_payload(
-            current_app, "current_app", consumer=consumer, task_context=task_context
-        ),
-        "summary": sanitize_context_payload(
-            summary_text, "summary", consumer=consumer, task_context=task_context
-        ),
-        "loading_or_blocked": bool(screen_belief.get("loading_or_blocked")),
-        "unsafe_or_sensitive": bool(screen_belief.get("unsafe_or_sensitive")),
-        "confidence": str(screen_belief.get("confidence") or "unknown"),
-    }
 
     action_parsed = state.get("action_parsed") or {}
     action_result = state.get("action_result") or {}
@@ -914,7 +982,20 @@ def build_plan_context_block(
         "failure_cause": state.get("failure_cause"),
         "suggested_strategy": plan_safe_strategy,
     }
+    raw_advisory = (state.get("action_outcome_summary") or {}).get(
+        "verifier_advisory"
+    )
+    if isinstance(raw_advisory, dict) and raw_advisory:
+        outcome["verifier_advisory"] = sanitize_context_payload(
+            raw_advisory,
+            "verifier_advisory",
+            consumer=consumer,
+            task_context=task_context,
+        )
 
+    failure_memory_budget = max(
+        1, int(budget.get("failure_memory_items", 3) or 3)
+    )
     failure_memory = [
         {
             "step_count": item.get("step_count"),
@@ -932,23 +1013,15 @@ def build_plan_context_block(
             "failure_cause": item.get("failure_cause"),
             "suggested_strategy": item.get("suggested_strategy"),
         }
-        for item in (state.get("failure_memory") or [])[-1:]
+        for item in (state.get("failure_memory") or [])[-failure_memory_budget:]
     ]
-
-    raw_summarized_history = str(state.get("summarized_history") or "")
-    if len(raw_summarized_history) > budget["summarized_history_chars"]:
-        component_truncated = True
-    summarized_history = sanitize_context_payload(
-        raw_summarized_history,
-        "summarized_history",
-        consumer=consumer,
-        task_context=task_context,
-    )
-    if len(summarized_history) > budget["summarized_history_chars"]:
-        summarized_history, _ = trim_text(
-            summarized_history, budget["summarized_history_chars"]
-        )
-        component_truncated = True
+    repeated_failure_count = int(state.get("repeated_failure_count") or 0)
+    failure_memory_block: dict[str, Any] = {}
+    if failure_memory:
+        failure_memory_block = {
+            "items": failure_memory,
+            "repeated_failure_count": repeated_failure_count,
+        }
 
     goal_agenda = _render_goal_agenda(
         state.get("goal_agenda"), lang=lang, consumer=consumer, task_context=task_context
@@ -965,6 +1038,7 @@ def build_plan_context_block(
         consumer=consumer,
     )
     avoid_repeating = _build_avoid_repeating(state)
+    liveness_note = _build_liveness_note(state)
 
     parts = []
     # Each section is trimmed against its own allowance. Trimming the concatenated
@@ -976,11 +1050,10 @@ def build_plan_context_block(
             goal_agenda,
             budget.get("goal_agenda_chars", _SECTION_BUDGETS["goal_agenda"]),
         ),
-        ("screen_belief", belief, None),
+        ("liveness_note", liveness_note, None),
         ("last_action_outcome", outcome, None),
-        ("latest_failure_memory", failure_memory, None),
+        ("failure_memory", failure_memory_block, None),
         ("avoid_repeating", avoid_repeating, budget.get("avoid_repeating_chars")),
-        ("summarized_history", summarized_history, None),
         ("gui_memory", gui_memory, budget.get("gui_memory_chars")),
         ("grounding_observation", grounding_obs, None),
     ):
@@ -995,13 +1068,106 @@ def build_plan_context_block(
     if not parts:
         return "", {"context_block_chars": 0, "context_truncated": False}
 
-    block, truncated = trim_text(
-        title + "\n" + "\n".join(parts), budget["context_block_chars"]
+    block, truncated = _trim_plan_block_preserving_agenda(
+        title, parts, int(budget["context_block_chars"])
     )
     return block, {
         "context_block_chars": len(block),
         "context_truncated": truncated or component_truncated,
     }
+
+
+def _trim_plan_block_preserving_agenda(
+    title: str, parts: list[str], block_budget: int
+) -> tuple[str, bool]:
+    """Trim the plan block from the tail, never cutting into the milestone agenda.
+
+    ``goal_agenda`` is the pinned milestone section (P2): the block-level tail
+    trim must not drop it, otherwise a large trajectory starves exactly the
+    section that says which done subgoals must not be re-done. The agenda is
+    the first rendered section, so tail-truncating everything after it is safe;
+    only in the pathological case where the agenda alone exceeds the whole
+    block budget is the agenda itself trimmed (keeping its head).
+    """
+
+    block = title + "\n" + "\n".join(parts)
+    if len(block) <= block_budget:
+        return block, False
+    agenda_index = next(
+        (index for index, part in enumerate(parts) if part.startswith("goal_agenda:")),
+        None,
+    )
+    if agenda_index is None:
+        return trim_text(block, block_budget)
+    head = title + "\n" + "\n".join(parts[: agenda_index + 1])
+    if len(head) > block_budget:
+        return trim_text(head, block_budget), True
+    tail = "\n".join(parts[agenda_index + 1 :])
+    remaining = block_budget - len(head) - 1
+    if remaining <= 0 or not tail:
+        return head, True
+    trimmed_tail, tail_truncated = trim_text(tail, remaining)
+    return head + "\n" + trimmed_tail, tail_truncated
+
+
+def _build_liveness_note(state: dict[str, Any]) -> str:
+    """Render one natural-language trajectory-liveness sentence for the plan block.
+
+    Liveness no longer routes (model-delegation refactor 2.2): it is telemetry
+    plus a hint. The sentence carries the machine state, the novelty streak,
+    and the repeat count of the latest target so the model can judge whether
+    the trajectory is advancing, exploring, or circling.
+    """
+
+    gui_memory = state.get("gui_memory")
+    progress = (
+        gui_memory.get("task_progress") if isinstance(gui_memory, dict) else {}
+    )
+    if not isinstance(progress, dict):
+        return ""
+    liveness = str(progress.get("trajectory_liveness") or "")
+    if not liveness:
+        return ""
+    lang = str(state.get("lang") or "cn")
+    novelty = int(progress.get("novelty_streak") or 0)
+    stuck_rounds = int(progress.get("stuck_rounds") or 0)
+    repeat_count = 0
+    tried = gui_memory.get("tried_actions") if isinstance(gui_memory, dict) else []
+    if isinstance(tried, list) and tried and isinstance(tried[-1], dict):
+        key = repeated_action_key(tried[-1])
+        if key is not None:
+            repeat_count = sum(
+                1
+                for item in tried
+                if isinstance(item, dict) and repeated_action_key(item) == key
+            )
+    if lang == "en":
+        label = {"advancing": "advancing", "stuck": "stuck", "exploring": "exploring"}.get(
+            liveness, liveness
+        )
+        note = f"Trajectory note: {label}"
+        if novelty:
+            note += f" (novelty_streak={novelty})"
+        if stuck_rounds:
+            note += f" (stuck_rounds={stuck_rounds})"
+        if repeat_count >= REPEATED_ACTION_THRESHOLD:
+            note += f" (latest target repeated {repeat_count}x)"
+        note += " -- hint only, judge for yourself."
+    else:
+        label = {
+            "advancing": "推进中",
+            "stuck": "陷入循环",
+            "exploring": "探索中",
+        }.get(liveness, liveness)
+        note = f"轨迹提示：当前状态{label}"
+        if novelty:
+            note += f"（novelty_streak={novelty}）"
+        if stuck_rounds:
+            note += f"（stuck_rounds={stuck_rounds}）"
+        if repeat_count >= REPEATED_ACTION_THRESHOLD:
+            note += f"（最近目标已重复 {repeat_count} 次）"
+        note += "；仅为提示，请自行判断。"
+    return note
 
 
 def _render_goal_agenda(
@@ -1031,6 +1197,23 @@ def _render_goal_agenda(
         suffix = predicate
         if item.get("verification") == "vlm_judge" and status != "satisfied":
             suffix += ", pending acceptance" if lang == "en" else ", 待验收"
+        if status == "satisfied" and item.get("latched") is True:
+            # P2 milestone latch: satisfied at an earlier trusted observation.
+            # The marker keeps the milestone visibly pinned across transient
+            # current-observation staleness (keyboard popup, partial overlays).
+            epoch = item.get("latched_epoch")
+            if epoch is not None:
+                suffix += (
+                    f", observed at epoch {epoch}"
+                    if lang == "en"
+                    else f", 曾观察于 epoch {epoch}"
+                )
+            else:
+                suffix += (
+                    ", observed earlier"
+                    if lang == "en"
+                    else ", 曾观察"
+                )
         rendered = f"{description}({suffix})"
         if status == "satisfied":
             satisfied.append(rendered)
@@ -1096,8 +1279,6 @@ def _build_avoid_repeating(state: dict[str, Any]) -> dict[str, Any]:
 def _context_block_value_is_informative(label: str, value: Any) -> bool:
     if not value:
         return False
-    if label == "screen_belief" and isinstance(value, dict):
-        return _is_informative_belief(value)
     if label == "last_action_outcome" and isinstance(value, dict):
         return _is_informative_outcome(value)
     if label == "gui_memory" and isinstance(value, dict):
@@ -1319,7 +1500,6 @@ REFLECT_CONTEXT_SECTION_IDS = (
     "screen_belief",
     "last_action_outcome",
     "failure_memory",
-    "summarized_history",
     "gui_memory.task_progress",
 )
 
@@ -1378,9 +1558,10 @@ def build_reflect_context_block(
     """Build a bounded context block for the reflect prompt.
 
     Includes screen_belief + last_action_outcome + latest failure_memory +
-    summarized_history + gui_memory.task_progress + last K=3 action_outcome
+    gui_memory.task_progress + last K=3 action_outcome
     summaries from ``action_ledger`` (trajectory memory, which the current
-    single-shot reflect lacks).
+    single-shot reflect lacks). ``summarized_history`` is excluded (P2):
+    it stays a trace-only write target via ``update_summarized_history``.
     """
     task_context = state.get("task") if isinstance(state.get("task"), str) else None
     budget = state.get("context_budget") or DEFAULT_CONTEXT_BUDGET
@@ -1436,19 +1617,6 @@ def build_reflect_context_block(
             parts.append(
                 f"latest_failure_memory: {json.dumps(sanitize_context_payload(last, consumer=consumer, task_context=task_context), ensure_ascii=False)}"
             )
-
-    # summarized_history
-    raw_history = str(state.get("summarized_history") or "")
-    if raw_history:
-        safe_history = sanitize_context_payload(
-            raw_history, consumer=consumer, task_context=task_context
-        )
-        trimmed_history, hist_truncated = trim_text(
-            safe_history, budget["summarized_history_chars"]
-        )
-        if hist_truncated:
-            component_truncated = True
-        parts.append(f"summarized_history: {trimmed_history}")
 
     # gui_memory.task_progress
     gui_memory = state.get("gui_memory") or {}
@@ -1587,12 +1755,6 @@ def _section_has_value(state: dict[str, Any], section: str) -> bool:
         )
     if section == "failure_memory":
         return bool(state.get("failure_memory"))
-    if section == "summarized_history":
-        return bool(state.get("summarized_history"))
-    if section == "short_term_memory":
-        return bool(state.get("short_term_memory"))
-    if section == "action_ledger":
-        return bool(state.get("action_ledger"))
     if section.startswith("gui_memory."):
         key = section.split(".", 1)[1]
         return bool((state.get("gui_memory") or {}).get(key))
