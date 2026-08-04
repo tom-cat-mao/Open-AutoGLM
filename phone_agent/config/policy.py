@@ -19,6 +19,16 @@ SafetyRoute = Literal["confirm", "takeover"]
 LOCATE_MAX_PER_RUN = 3
 LOCATE_MAX_MARKS_PER_SCREEN = 5
 
+# D2: relaxed locate-inheritance gate. A locate_N mark bound to a previous
+# screen_id may be inherited (re-bound to the new screen_id) only when the
+# semantic screen matches AND (the ax structure digest matches OR the 8x8 mean
+# perceptual hash hamming distance is at most this many bits). The in-repo
+# 8x8 mean hash is degenerate on light large-block pages (all-zero/all-one
+# bitmasks), so the threshold stays at the same conservative value as
+# ``perceptual_hash_max_distance`` (8): it is a tie-breaker for tiny ax-tree
+# jitter, never an independent screen-identity oracle.
+LOCATE_INHERIT_PHASH_MAX_DISTANCE = 8
+
 # F2: window-budget continuation constants. `max_steps` is the current window
 # size; a rejected budget-forced acceptance may earn one more window of
 # CONTINUATION_GRANT_STEPS steps (up to CONTINUATION_MAX_GRANTS times).

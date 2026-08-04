@@ -5,12 +5,15 @@ from __future__ import annotations
 import hashlib
 import base64
 import re
+from dataclasses import asdict, dataclass, field, replace
 from io import BytesIO
-from dataclasses import asdict, dataclass, field
 from typing import Any
 
 from phone_agent.graph.context import sanitize_context_payload
-from phone_agent.config.policy import DEFAULT_VERIFICATION_POLICY
+from phone_agent.config.policy import (
+    DEFAULT_VERIFICATION_POLICY,
+    LOCATE_INHERIT_PHASH_MAX_DISTANCE,
+)
 
 
 SAFE_MARK_ID_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,64}$")
@@ -20,6 +23,11 @@ PERCEPTUAL_HASH_THRESHOLD = int(
     DEFAULT_VERIFICATION_POLICY.value("perceptual_hash_max_distance")
 )
 MARK_CONFIDENCE_THRESHOLD = DEFAULT_VERIFICATION_POLICY.value("mark_min_confidence")
+
+# D1: accessibility-origin mark sources form the stable screen-structure
+# projection. Only these sources may feed the screen_id topology component;
+# provider/locate marks (la_*, locate_N) never enter screen identity.
+ACCESSIBILITY_MARK_SOURCES = ("uiautomator", "accessibility_tree")
 
 
 @dataclass(frozen=True)
@@ -170,6 +178,72 @@ class MarkRegistry:
             raw_screenshot_hash=self.raw_screenshot_hash,
         )
 
+    def with_inherited_locate_marks(
+        self, extra: list[dict[str, Any] | Mark], *, previous: "MarkRegistry"
+    ) -> "MarkRegistry":
+        """F-A/D2: merge locate_N marks inherited from the previous observation.
+
+        Same-screen marks (exact ``screen_id`` match, the common case after D1
+        made screen_id stable) merge exactly like ``with_extra_marks``. When the
+        screen_id differs but the previous screen is still the same physical
+        page (an accessibility-tree jitter of one node still flips the D1
+        topology digest), a mark survives only when the relaxed same-page gate
+        passes:
+
+        ``semantic_screen_id`` equal AND (ax structure digest equal OR
+        perceptual-hash hamming distance <= LOCATE_INHERIT_PHASH_MAX_DISTANCE).
+
+        The ax structure digest compares the mark-topology digest over
+        accessibility-origin marks only (never la_*/provider marks); an
+        empty-vs-empty digest never counts as equal, so the gate stays
+        fail-closed on screens with no ax marks. Surviving marks are re-bound to
+        THIS registry's screen_id and ``mark_set_version`` is recomputed once.
+        Marks from any other screen are still dropped fail-closed.
+        """
+
+        if not extra:
+            return self
+        relaxed_ok = False
+        if self.screen_id != previous.screen_id:
+            semantic_ok = bool(
+                self.semantic_screen_id
+                and previous.semantic_screen_id
+                and self.semantic_screen_id == previous.semantic_screen_id
+            )
+            if semantic_ok:
+                prev_ax = build_ax_mark_digest(previous.marks)
+                new_ax = build_ax_mark_digest(self.marks)
+                ax_equal = prev_ax is not None and prev_ax == new_ax
+                distance = hash_hamming_distance(
+                    self.perceptual_hash, previous.perceptual_hash
+                )
+                p_hash_ok = (
+                    distance is not None
+                    and distance <= LOCATE_INHERIT_PHASH_MAX_DISTANCE
+                )
+                relaxed_ok = ax_equal or p_hash_ok
+        merged = dict(self.marks)
+        for index, item in enumerate(extra, start=1):
+            try:
+                mark = item if isinstance(item, Mark) else _coerce_mark(
+                    self.screen_id, item, index
+                )
+            except (TypeError, ValueError):
+                continue
+            if mark.screen_id == self.screen_id:
+                merged[mark.mark_id] = mark
+            elif relaxed_ok and mark.screen_id == previous.screen_id:
+                merged[mark.mark_id] = replace(mark, screen_id=self.screen_id)
+        return MarkRegistry(
+            screen_id=self.screen_id,
+            marks=merged,
+            semantic_screen_id=self.semantic_screen_id,
+            observation_epoch=self.observation_epoch,
+            mark_set_version=build_mark_set_version(merged),
+            perceptual_hash=self.perceptual_hash,
+            raw_screenshot_hash=self.raw_screenshot_hash,
+        )
+
     def trace_summary(self) -> dict[str, Any]:
         return {
             "screen_id": self.screen_id,
@@ -277,6 +351,34 @@ def build_mark_topology_digest(
                 f"{item.get('mark_id') or item.get('id') or ''}:{bbox}:{item.get('role') or ''}:{item.get('source') or ''}"
             )
     return hashlib.sha256("|".join(sorted(rows)).encode("utf-8")).hexdigest()[:16]
+
+
+def build_ax_mark_digest(
+    marks: dict[str, Mark] | list[dict[str, Any] | Mark] | None,
+) -> str | None:
+    """Return the D1 screen-structure digest over accessibility-origin marks.
+
+    Only marks whose ``source`` is an accessibility source (uiautomator /
+    accessibility_tree) are folded in; provider/locate marks (la_*, locate_N,
+    fake, ...) are excluded. Returns None when no ax mark is present so an
+    empty-vs-empty comparison can never authorize a merge (fail-closed).
+    """
+
+    iterable = list(marks.values()) if isinstance(marks, dict) else list(marks or [])
+    ax = [
+        item
+        for item in iterable
+        if (_mark_source(item) or "") in ACCESSIBILITY_MARK_SOURCES
+    ]
+    if not ax:
+        return None
+    return build_mark_topology_digest(ax)
+
+
+def _mark_source(item: Mark | dict[str, Any]) -> str | None:
+    if isinstance(item, Mark):
+        return item.source
+    return item.get("source") if isinstance(item, dict) else None
 
 
 def build_mark_set_version(marks: dict[str, Mark]) -> str:

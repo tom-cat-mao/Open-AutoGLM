@@ -80,7 +80,7 @@ def result_with_mark(
 
 
 class FakeLocateAnythingProvider:
-    """Mirrors LocateAnything mark shape: text_summary carries the hint text."""
+    """Mirrors the D3 LocateAnything mark shape: neutral source label only."""
 
     name = "locateanything_mlx"
     version = "test"
@@ -98,7 +98,7 @@ class FakeLocateAnythingProvider:
             center=[425, 325],
             source=self.name,
             role=hint.role,
-            text_summary=hint.text,
+            text_summary="visual-match",
         )
         return MarkProviderResult(
             success=True,
@@ -366,7 +366,9 @@ def test_calendar_chain_invokes_locateanything_and_merges_marks() -> None:
     chain = result.metadata["fallback_chain"]
     assert [row["usable"] for row in chain] == [False, True]
     assert chain[0]["usable_reason"] == "significant_miss"
-    assert chain[1]["usable_reason"] == "significant_hit"
+    # D3: the query-conditioned visual provider is usable by construction — the
+    # hint text no longer echoes back into its mark labels.
+    assert chain[1]["usable_reason"] == "provider_query_matched"
 
 
 def test_calendar_chain_without_visual_provider_fails_closed() -> None:

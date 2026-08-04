@@ -87,6 +87,27 @@ def _build_progress_note_line(
     return f"上轮意图：{safe_note[:max_chars]}"
 
 
+def _previous_step_was_successful_locate(state: "AgentState") -> bool:
+    """Return whether the previous step was a successful internal Locate.
+
+    A successful Locate (action_parsed ``Locate`` intent with a success
+    action_result, set by execute's in-process locate dispatch) means the
+    visual provider already answered the exact hint against the current screen.
+    A-lite skips the automatic observation-time LocateAnything provider on the
+    very next plan round; any other step (including a failed locate, which
+    routes to reobserve) keeps the provider.
+    """
+
+    action = state.get("action_parsed")
+    result = state.get("action_result")
+    if not isinstance(action, dict) or not isinstance(result, dict):
+        return False
+    return (
+        str(action.get("action") or "").casefold() == "locate"
+        and result.get("success") is True
+    )
+
+
 def _validate_with_limited_repair(
     action: dict,
     *,
@@ -806,6 +827,22 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
                 },
             )
     provider_configurable = dict(configurable)
+    # A-lite: a successful Locate on the previous step means the visual provider
+    # already answered the exact hint this round — skip the automatic
+    # LocateAnything provider for THIS observation only (churn + poisoned-text
+    # echo both disappear; the explicit locate tool stays available).
+    if _previous_step_was_successful_locate(state):
+        provider_configurable = {
+            **provider_configurable,
+            "skip_locateanything": True,
+        }
+        emit_trace(
+            config,
+            state,
+            "plan",
+            "observation_locate_skip",
+            {"skip_reason": "previous_locate_succeeded"},
+        )
     if (
         provider_configurable.get("accessibility_tree_dump") is None
         and not provider_configurable.get("skip_accessibility_provider")

@@ -1207,7 +1207,9 @@ def test_locateanything_target_structure_mode_returns_visual_sidecar(
     assert len(result.marks) == 1
     assert result.screen_structures[0]["structure_kind"] == "visual"
     node = result.screen_structures[0]["nodes"]["visual_1"]
-    assert node["text_summary"] == "visual_target"
+    # D3: la_* marks and their visual sidecar carry the neutral source label,
+    # never the query text.
+    assert node["text_summary"] == "visual-match"
     assert "13800138000" not in str(result.to_dict())
 
 

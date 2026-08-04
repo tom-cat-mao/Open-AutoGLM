@@ -65,6 +65,8 @@ def build_mark_provider(config: dict[str, Any] | None = None) -> MarkProvider | 
         )
         return AccessibilityTreeProvider(dump_tree=dump_tree, max_marks=max_marks)
     if name in {"locateanything", "locateanything_mlx", "mlx"}:
+        if cfg.get("skip_locateanything"):
+            return None
         return _build_locateanything_provider(cfg)
     return None
 
@@ -77,6 +79,8 @@ def build_locate_provider(config: dict[str, Any] | None = None) -> MarkProvider 
     because the registry had no executable mark for the hint). Callers may
     inject a test double via ``config["locate_provider"]``; otherwise the
     provider is derived from the same grounding config as observation capture.
+    ``skip_locateanything`` is deliberately ignored here: A-lite skips only the
+    automatic observation-time provider, never the explicit locate tool.
     """
 
     cfg = config or {}
@@ -126,7 +130,11 @@ def build_mark_providers(config: dict[str, Any] | None = None) -> list[MarkProvi
                     ),
                 )
             )
-        built.append(_build_locateanything_provider(cfg))
+        # A-lite: after a successful Locate, the next observation skips the
+        # automatic LocateAnything provider (churn + poisoned-text source both
+        # disappear for that round; the explicit locate tool still works).
+        if not cfg.get("skip_locateanything"):
+            built.append(_build_locateanything_provider(cfg))
         provider_order = [provider.name for provider in built]
         return [
             FallbackMarkProvider(

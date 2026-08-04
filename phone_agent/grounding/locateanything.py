@@ -20,6 +20,12 @@ DEFAULT_LOCATEANYTHING_MAX_SIZE = 960
 LOCATEANYTHING_STRUCTURE_MODES = {"off", "target", "screen"}
 DEFAULT_VISUAL_CATEGORIES = ("button", "text", "input", "card", "image")
 
+# D3: la_* marks carry a fixed neutral source label instead of echoing the
+# model's query description back into the marks block. Echoing the query made
+# la_* marks look like confirmed screen content ("model sees its own words"),
+# so the neutral label keeps marks_block honest without leaking the hint.
+LOCATEANYTHING_NEUTRAL_MARK_LABEL = "visual-match"
+
 
 class LocateAnythingMLXProvider:
     """Lazy MLX wrapper for LocateAnything hint-to-mark generation."""
@@ -103,7 +109,7 @@ class LocateAnythingMLXProvider:
                         valid=box.valid,
                         reason=box.reason,
                         role=(hints or [None])[hint_index - 1].role if hints and len(hints) >= hint_index else None,
-                        text_summary=description,
+                        text_summary=LOCATEANYTHING_NEUTRAL_MARK_LABEL,
                     )
                     for index, box in enumerate(parsed_set.candidates, start=1)
                 ]
@@ -379,7 +385,17 @@ class LocateAnythingMLXProvider:
 
 def _safe_visual_text(value: str | None, fallback: str) -> str:
     text = str(value or "").strip()
-    safe_terms = {"button", "text", "input", "card", "image", "search", "搜索", "visual_target"}
+    safe_terms = {
+        "button",
+        "text",
+        "input",
+        "card",
+        "image",
+        "search",
+        "搜索",
+        "visual_target",
+        LOCATEANYTHING_NEUTRAL_MARK_LABEL,
+    }
     if text.casefold() in safe_terms:
         return text
     return fallback if fallback.casefold() in safe_terms else "visual_target"

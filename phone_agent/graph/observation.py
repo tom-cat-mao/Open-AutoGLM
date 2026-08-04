@@ -8,6 +8,7 @@ from typing import Any
 from phone_agent.config.app_registry import ForegroundAppObservation
 from phone_agent.config.policy import DEFAULT_SAFETY_POLICY
 from phone_agent.graph.marks import (
+    ACCESSIBILITY_MARK_SOURCES,
     MarkRegistry,
     build_mark_topology_digest,
     build_screen_id,
@@ -544,14 +545,17 @@ def _inherit_locate_marks(
     registry: MarkRegistry,
     previous_registry: dict[str, Any] | MarkRegistry | None,
 ) -> MarkRegistry:
-    """F-A: inherit locate_N marks registered by the previous plan round.
+    """F-A/D2: inherit locate_N marks registered by the previous plan round.
 
-    Only ``locate_*`` marks from the previous registry are merged, and only
-    when they are bound to the same screen: ``with_extra_marks`` drops
-    foreign-screen marks fail-closed and recomputes ``mark_set_version``, so
-    the merged registry version stays consistent with the object_registry /
-    snapshot built from it below (no object_stale). Marks bound to a different
-    screen are never resurrected.
+    Only ``locate_*`` marks from the previous registry are merged. The D2
+    relaxed same-page gate (``with_inherited_locate_marks``) keeps the strict
+    exact-screen merge and additionally lets a mark survive an ax-tree jitter
+    that flipped the D1 screen_id: semantic screen equal AND (ax structure
+    digest equal OR perceptual hash within threshold), with the mark re-bound
+    to the new screen_id. Marks bound to a genuinely different screen are
+    never resurrected (fail-closed). ``mark_set_version`` is recomputed once so
+    the merged registry stays consistent with the object_registry / snapshot
+    built from it below (no object_stale).
     """
 
     if previous_registry is None:
@@ -570,7 +574,7 @@ def _inherit_locate_marks(
     ]
     if not locate_marks:
         return registry
-    return registry.with_extra_marks(locate_marks)
+    return registry.with_inherited_locate_marks(locate_marks, previous=previous)
 
 
 def build_observation(
@@ -670,12 +674,26 @@ def build_observation(
     all_marks = [
         _sanitize_mark_for_memory(mark) for mark in base_marks + provider_marks
     ]
+    # D1: provider/locate marks never enter screen identity. The final
+    # screen_id topology component is computed over accessibility-origin marks
+    # only (ACCESSIBILITY_MARK_SOURCES), regardless of which list they arrived
+    # in: in hybrid mode base_marks is empty and the ax tree enters all_marks
+    # through the accessibility_tree provider, so filtering the merged list by
+    # source keeps the topology alive while la_*/locate_* stay excluded. The
+    # provisional id (above) is still base-only — it is a bootstrap binding
+    # that providers echo back for validation, and every mark is re-bound to
+    # this final id below, so the final!=provisional case stays self-consistent.
+    ax_topology_marks = [
+        mark
+        for mark in all_marks
+        if (mark.get("source") or "") in ACCESSIBILITY_MARK_SOURCES
+    ]
     screen_id = build_screen_id(
         current_app=current_app,
         screenshot_b64=screenshot_b64,
         width=width,
         height=height,
-        marks=all_marks,
+        marks=ax_topology_marks,
     )
     all_marks = [
         {**mark, "screen_id": mark.get("screen_id") or screen_id} for mark in all_marks

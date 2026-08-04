@@ -62,7 +62,14 @@ class FallbackMarkProvider:
             provider_hints = hints if getattr(provider, "allow_raw_hints", False) else _redact_hints(hints or [])
             result = provider.provide_marks(screenshot, screen_binding, hints=provider_hints, timeout=timeout)
             last_result = result
-            usable, usable_reason = _result_usability(result, hints or [])
+            usable, usable_reason = _result_usability(
+                result,
+                hints or [],
+                # D3: query-conditioned providers (LocateAnything) located the
+                # region FROM the hint, so their marks are usable by
+                # construction; the hint text no longer appears in the marks.
+                hint_conditioned=getattr(provider, "allow_raw_hints", False),
+            )
             summaries.append(_fallback_row(result, usable=usable, usable_reason=usable_reason))
             supplemental_screen = usable_result is not None and getattr(provider, "structure_mode", None) == "screen"
             if result.success and result.marks:
@@ -273,23 +280,37 @@ def _result_is_usable(result: MarkProviderResult, hints: list[MarkProviderHint])
     return usable
 
 
-def _result_usability(result: MarkProviderResult, hints: list[MarkProviderHint]) -> tuple[bool, str]:
+def _result_usability(
+    result: MarkProviderResult,
+    hints: list[MarkProviderHint],
+    *,
+    hint_conditioned: bool = False,
+) -> tuple[bool, str]:
     """R2/R3/R4: decide whether a provider result is usable for this hint set.
 
-    Matching is tiered but unioned: a significant-term hit on a target-like
-    mark makes the result usable, otherwise the purified fallback tokens
-    (2-char CJK windows, short words) get the same chance.  Every hit must
-    land on a target-like mark (R3), so a calendar page whose marks are only
-    full-width row containers and a month-title label stays unusable and the
-    chain proceeds to the visual provider.
+    A ``hint_conditioned`` result (the provider consumed the raw hint as its
+    query — LocateAnything, Fake) is usable by construction whenever it returns
+    marks: the region was located FROM the hint, so no text echo is needed to
+    prove the match. D3 removed that echo (marks carry a neutral label), so the
+    text-token check would otherwise wrongly reject the visual provider.
+
+    Matching is tiered but unioned for non-conditioned results: a
+    significant-term hit on a target-like mark makes the result usable,
+    otherwise the purified fallback tokens (2-char CJK windows, short words)
+    get the same chance.  Every hit must land on a target-like mark (R3), so a
+    calendar page whose marks are only full-width row containers and a
+    month-title label stays unusable and the chain proceeds to the visual
+    provider.
 
     Returns ``(usable, reason)`` where reason is a short trace label:
-    ``no_marks`` / ``no_hint_words`` / ``significant_hit`` /
-    ``fallback_token_hit`` / ``significant_miss`` / ``fallback_token_miss`` /
-    ``all_tokens_purged``.
+    ``provider_query_matched`` / ``no_marks`` / ``no_hint_words`` /
+    ``significant_hit`` / ``fallback_token_hit`` / ``significant_miss`` /
+    ``fallback_token_miss`` / ``all_tokens_purged``.
     """
     if not result.success or not result.marks:
         return False, "no_marks"
+    if hint_conditioned:
+        return True, "provider_query_matched"
     if not _hint_has_words(hints):
         # R4: hint with no words at all keeps the legacy behavior (any marks usable).
         return True, "no_hint_words"
