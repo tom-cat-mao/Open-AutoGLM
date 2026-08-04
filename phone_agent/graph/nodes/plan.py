@@ -1,6 +1,7 @@
 """Plan node: screenshot → build messages → model inference → parse action."""
 
 import json
+import re
 from typing import TYPE_CHECKING, Any
 
 from langchain_core.runnables import RunnableConfig
@@ -175,6 +176,55 @@ def _build_parse_retry_messages(messages: list[dict], parse_error: str) -> list[
         "Previous response failed format/schema parsing. Retry once and only fix the "
         "output format. Do not invent coordinates, marks, private text, or new action semantics. "
         f"Error class: {parse_error.split(':', 1)[0]}"
+    )
+    return list(messages) + [MessageBuilder.create_user_message(text=retry_text)]
+
+
+_MISSING_MARK_ID_RE = re.compile(r"unknown mark[: ]+([A-Za-z0-9_.:-]{1,64})")
+
+
+def _missing_mark_id_from_error(parse_error: str) -> str | None:
+    """Extract the missing mark id from a GroundingError-derived message."""
+
+    match = _MISSING_MARK_ID_RE.search(parse_error or "")
+    return match.group(1) if match else None
+
+
+def _marks_summary(mark_registry: Any) -> str:
+    """Trace-safe one-line summary of the current registry marks (F-B)."""
+
+    marks = getattr(mark_registry, "marks", None) or {}
+    if not marks:
+        return "(none)"
+    parts = []
+    for mark in marks.values():
+        prompt = mark.to_prompt_dict()
+        parts.append(
+            f"{mark.mark_id}(role={prompt.get('role') or 'unknown'},"
+            f"source={prompt.get('source')},text={prompt.get('text_summary')})"
+        )
+    return ", ".join(parts)
+
+
+def _build_grounding_retry_messages(
+    messages: list[dict], parse_error: str, mark_registry: Any
+) -> list[dict]:
+    """Append a grounding-retry instruction naming the missing mark and the
+    currently available marks (F-B: feedback must carry the missing mark_id
+    plus the current marks summary)."""
+
+    missing_mark_id = _missing_mark_id_from_error(parse_error)
+    retry_text = (
+        "Grounding failed: the referenced mark id does not exist in the current "
+        "screen marks. "
+    )
+    if missing_mark_id:
+        retry_text += f'Missing mark id: "{missing_mark_id}". '
+    retry_text += (
+        f"Available marks: {_marks_summary(mark_registry)}. "
+        "Retry once and fix the output: reference an existing mark id, or emit "
+        "locate to register a new mark. Do not invent coordinates, marks, private "
+        "text, or new action semantics."
     )
     return list(messages) + [MessageBuilder.create_user_message(text=retry_text)]
 
@@ -783,6 +833,7 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
         provider_timeout=float(configurable.get("grounding_timeout", 10.0) or 10.0),
         foreground=device_capture.foreground,
         observation_epoch=device_capture.observation_epoch,
+        previous_registry=state.get("mark_registry"),
     )
     screen_binding = ScreenBinding(
         screen_id=observation.snapshot.screen_id,
@@ -1198,22 +1249,30 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
     )
     if (
         parse_error
-        and current_error_layer in {"parse", "adapter"}
+        and current_error_layer in {"parse", "adapter", "grounding"}
         and retry_count < parse_retry_limit
     ):
         retry_count += 1
+        retry_kind = (
+            "grounding_retry" if current_error_layer == "grounding" else "parse_retry"
+        )
         emit_trace(
             config,
             state,
             "plan",
-            "parse_retry",
+            retry_kind,
             {
                 "parse_retry_count": retry_count,
                 "parse_error_code": parse_metadata.get("parse_error_code"),
                 "grounding_error_code": parse_metadata.get("grounding_error_code"),
             },
         )
-        retry_messages = _build_parse_retry_messages(request_messages, parse_error)
+        if current_error_layer == "grounding":
+            retry_messages = _build_grounding_retry_messages(
+                request_messages, parse_error, mark_registry
+            )
+        else:
+            retry_messages = _build_parse_retry_messages(request_messages, parse_error)
         try:
             retry_response = _safe_request(
                 model_client, retry_messages, output_mode=configured_output_mode

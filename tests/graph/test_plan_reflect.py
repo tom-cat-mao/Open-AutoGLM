@@ -4420,3 +4420,164 @@ def test_reflect_wrong_page_with_activity_migration_is_disputed(
     assert result["reflection_verdict"] == "partial"
     assert result["failure_cause"] == "unknown"
     assert result["failure_memory"] == []
+
+
+def test_plan_node_grounding_retry_recovers_with_missing_mark_feedback(
+    base_state, fake_device
+) -> None:
+    """F-B: unknown_mark triggers a real model retry whose feedback names the
+    missing mark id and the current marks summary; the fixed reference grounds."""
+    class GroundingRetryModel:
+        def __init__(self) -> None:
+            self.calls = 0
+            self.messages = None
+
+        def request(self, messages, **kwargs):
+            self.calls += 1
+            self.messages = messages
+            if self.calls == 1:
+                return FakeModelResponse(
+                    "",
+                    '{"_metadata":"intent","action":"tap","target_mark_id":"locate_9"}',
+                )
+            return FakeModelResponse(
+                "",
+                '{"_metadata":"intent","action":"tap","target_mark_id":"m1"}',
+            )
+
+    model = GroundingRetryModel()
+    result = plan_node(
+        base_state,
+        {
+            "configurable": {
+                "model_client": model,
+                "device_factory": fake_device,
+                "output_mode": "json_schema",
+                "screen_marks": [
+                    {
+                        "mark_id": "m1",
+                        "bbox": [100, 200, 300, 400],
+                        "role": "button",
+                        "text_summary": "张三",
+                    }
+                ],
+                "verbose": False,
+            }
+        },
+    )
+
+    assert model.calls == 2
+    assert result["action_parsed"] == {
+        "_metadata": "do",
+        "action": "Tap",
+        "element": [200.0, 300.0],
+    }
+    assert result["grounding_error"] is None
+    retry_text = model.messages[-1]["content"][-1]["text"]
+    assert '"locate_9"' in retry_text
+    assert "m1" in retry_text
+    assert "Available marks" in retry_text
+
+
+def test_plan_node_grounding_retry_exhausted_terminates(
+    base_state, fake_device
+) -> None:
+    """F-B: when the model keeps referencing a missing mark, retry budget
+    exhaustion falls through to the existing terminal failure path."""
+    model = FakeModelClient(
+        FakeModelResponse(
+            "", '{"_metadata":"intent","action":"tap","target_mark_id":"locate_9"}'
+        )
+    )
+
+    result = plan_node(
+        base_state,
+        {
+            "configurable": {
+                "model_client": model,
+                "device_factory": fake_device,
+                "output_mode": "json_schema",
+                "screen_marks": [{"mark_id": "m1", "bbox": [100, 200, 300, 400]}],
+                "verbose": False,
+            }
+        },
+    )
+
+    assert model.calls == 2
+    assert result["finished"] is True
+    assert result["action_parsed"] is None
+    assert result["grounding_error"] == "unknown_mark"
+    assert result["failure_cause"] == "unknown_mark"
+    assert result["parse_metadata"]["grounding_error_code"] == "unknown_mark"
+
+
+def test_plan_node_inherits_locate_mark_across_rounds(
+    base_state, fake_device
+) -> None:
+    """F-A+F-B: a locate_N registered on a previous round survives the next
+    plan rebuild and referencing it no longer triggers unknown_mark."""
+    from phone_agent.graph.marks import MarkRegistry
+
+    screen_marks = [
+        {"mark_id": "m1", "bbox": [100, 200, 300, 400], "role": "button"}
+    ]
+    config = {
+        "configurable": {
+            "model_client": FakeModelClient(
+                FakeModelResponse(
+                    "",
+                    '{"_metadata":"intent","action":"tap","target_mark_id":"m1"}',
+                )
+            ),
+            "device_factory": fake_device,
+            "output_mode": "json_schema",
+            "screen_marks": screen_marks,
+            "verbose": False,
+        }
+    }
+    first = plan_node(base_state, config)
+    assert first["action_parsed"]["action"] == "Tap"
+
+    previous_registry = MarkRegistry.from_dict(first["mark_registry"]).with_extra_marks(
+        [
+            {
+                "mark_id": "locate_1",
+                "screen_id": first["screen_id"],
+                "bbox": [200, 300, 400, 500],
+                "center": [300, 400],
+                "source": "locate",
+                "confidence": 1.0,
+            }
+        ]
+    )
+    second_state = copy.deepcopy(base_state)
+    second_state["mark_registry"] = previous_registry.to_dict()
+    second = plan_node(
+        second_state,
+        {
+            "configurable": {
+                "model_client": FakeModelClient(
+                    FakeModelResponse(
+                        "",
+                        '{"_metadata":"intent","action":"tap","target_mark_id":"locate_1"}',
+                    )
+                ),
+                "device_factory": fake_device,
+                "output_mode": "json_schema",
+                "screen_marks": screen_marks,
+                "verbose": False,
+            }
+        },
+    )
+
+    assert second["grounding_error"] is None
+    assert second["action_parsed"] == {
+        "_metadata": "do",
+        "action": "Tap",
+        "element": [300.0, 400.0],
+    }
+    assert "locate_1" in second["mark_registry"]["marks"]
+    assert (
+        second["object_registry_binding"]["mark_set_version"]
+        == second["mark_registry"]["mark_set_version"]
+    )

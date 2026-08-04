@@ -105,3 +105,145 @@ def test_observation_propagates_foreground_facts_and_epoch() -> None:
     assert observation.snapshot.foreground_package == "com.example.unknown"
     assert observation.snapshot.foreground_activity == ".MainActivity"
     assert observation.snapshot.foreground_known is False
+
+
+def _screenshot() -> FakeScreenshot:
+    return FakeScreenshot()
+
+
+def _base_marks() -> list[dict]:
+    return [{"mark_id": "m1", "bbox": [100, 200, 300, 400]}]
+
+
+def _locate_mark_dict(screen_id: str, mark_id: str = "locate_1") -> dict:
+    return {
+        "mark_id": mark_id,
+        "screen_id": screen_id,
+        "bbox": [200, 300, 400, 500],
+        "center": [300, 400],
+        "source": "locate",
+        "confidence": 1.0,
+    }
+
+
+def test_build_observation_inherits_locate_marks_across_rebuild() -> None:
+    """F-A: a locate_N registered by execute survives a plan-side rebuild on
+    the same screen and stays groundable; versions stay consistent."""
+    from phone_agent.actions.grounding import ground_intent_to_action
+    from phone_agent.graph.marks import MarkRegistry
+
+    first = build_observation(
+        screenshot=_screenshot(),
+        current_app="FakeApp",
+        marks=_base_marks(),
+    )
+    previous_registry = first.mark_registry.with_extra_marks(
+        [_locate_mark_dict(first.snapshot.screen_id)]
+    )
+
+    rebuilt = build_observation(
+        screenshot=_screenshot(),
+        current_app="FakeApp",
+        marks=_base_marks(),
+        previous_registry=previous_registry,
+    )
+
+    assert rebuilt.snapshot.screen_id == first.snapshot.screen_id
+    assert "locate_1" in rebuilt.mark_registry.marks
+    assert "m1" in rebuilt.mark_registry.marks
+    locate_mark = rebuilt.mark_registry.marks["locate_1"]
+    assert locate_mark.screen_id == rebuilt.snapshot.screen_id
+    # mark_set_version is recomputed once (not mutated after structure binding).
+    assert rebuilt.snapshot.mark_set_version == rebuilt.mark_registry.mark_set_version
+    assert (
+        rebuilt.object_registry.mark_set_version
+        == rebuilt.mark_registry.mark_set_version
+    )
+    assert rebuilt.object_registry.mark_set_version == rebuilt.mark_registry.mark_set_version
+    # The inherited locate mark is executable (grounds to a real ActionIR).
+    grounded = ground_intent_to_action(
+        {
+            "_metadata": "intent",
+            "action": "tap",
+            "target_mark_id": "locate_1",
+        },
+        mark_registry=rebuilt.mark_registry,
+        screen_id=rebuilt.snapshot.screen_id,
+    )
+    assert grounded["_metadata"] == "do"
+    assert grounded["action"] == "Tap"
+    assert grounded["element"] == [300.0, 400.0]
+
+
+def test_build_observation_inheritance_accepts_dict_registry() -> None:
+    """F-A: previous_registry may be the raw state dict (MarkRegistry.to_dict)."""
+    first = build_observation(
+        screenshot=_screenshot(),
+        current_app="FakeApp",
+        marks=_base_marks(),
+    )
+    previous_dict = first.mark_registry.with_extra_marks(
+        [_locate_mark_dict(first.snapshot.screen_id)]
+    ).to_dict()
+
+    rebuilt = build_observation(
+        screenshot=_screenshot(),
+        current_app="FakeApp",
+        marks=_base_marks(),
+        previous_registry=previous_dict,
+    )
+
+    assert "locate_1" in rebuilt.mark_registry.marks
+    assert (
+        rebuilt.object_registry.mark_set_version
+        == rebuilt.mark_registry.mark_set_version
+    )
+
+
+def test_build_observation_drops_foreign_screen_locate_marks() -> None:
+    """F-A: locate marks bound to a different screen are dropped fail-closed."""
+    first = build_observation(
+        screenshot=_screenshot(),
+        current_app="FakeApp",
+        marks=_base_marks(),
+    )
+    foreign = build_observation(
+        screenshot=FakeScreenshot(base64_data="other-screen", width=360, height=640),
+        current_app="FakeApp",
+        marks=_base_marks(),
+    )
+    previous_registry = foreign.mark_registry.with_extra_marks(
+        [_locate_mark_dict(foreign.snapshot.screen_id)]
+    )
+
+    rebuilt = build_observation(
+        screenshot=_screenshot(),
+        current_app="FakeApp",
+        marks=_base_marks(),
+        previous_registry=previous_registry,
+    )
+
+    assert rebuilt.snapshot.screen_id == first.snapshot.screen_id
+    assert "locate_1" not in rebuilt.mark_registry.marks
+    assert "m1" in rebuilt.mark_registry.marks
+    assert rebuilt.mark_registry.mark_set_version == first.mark_registry.mark_set_version
+
+
+def test_build_observation_ignores_missing_previous_registry() -> None:
+    """F-A: None previous_registry (first round) is a no-op."""
+    plain = build_observation(
+        screenshot=_screenshot(),
+        current_app="FakeApp",
+        marks=_base_marks(),
+    )
+    with_previous = build_observation(
+        screenshot=_screenshot(),
+        current_app="FakeApp",
+        marks=_base_marks(),
+        previous_registry=None,
+    )
+    assert with_previous.mark_registry.marks == plain.mark_registry.marks
+    assert (
+        with_previous.mark_registry.mark_set_version
+        == plain.mark_registry.mark_set_version
+    )

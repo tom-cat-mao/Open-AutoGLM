@@ -540,6 +540,39 @@ def _validate_provider_result(
     return None
 
 
+def _inherit_locate_marks(
+    registry: MarkRegistry,
+    previous_registry: dict[str, Any] | MarkRegistry | None,
+) -> MarkRegistry:
+    """F-A: inherit locate_N marks registered by the previous plan round.
+
+    Only ``locate_*`` marks from the previous registry are merged, and only
+    when they are bound to the same screen: ``with_extra_marks`` drops
+    foreign-screen marks fail-closed and recomputes ``mark_set_version``, so
+    the merged registry version stays consistent with the object_registry /
+    snapshot built from it below (no object_stale). Marks bound to a different
+    screen are never resurrected.
+    """
+
+    if previous_registry is None:
+        return registry
+    previous = (
+        previous_registry
+        if isinstance(previous_registry, MarkRegistry)
+        else MarkRegistry.from_dict(previous_registry)
+    )
+    if previous is None:
+        return registry
+    locate_marks = [
+        mark
+        for mark in previous.marks.values()
+        if str(mark.mark_id).startswith("locate_")
+    ]
+    if not locate_marks:
+        return registry
+    return registry.with_extra_marks(locate_marks)
+
+
 def build_observation(
     *,
     screenshot: Any,
@@ -550,6 +583,7 @@ def build_observation(
     provider_timeout: float | None = None,
     foreground: ForegroundAppObservation | None = None,
     observation_epoch: int = 0,
+    previous_registry: dict[str, Any] | MarkRegistry | None = None,
 ) -> Observation:
     """Build a screen observation with optional mock/provider marks.
 
@@ -657,6 +691,10 @@ def build_observation(
         perceptual_hash=perceptual_hash,
         raw_screenshot_hash=raw_screenshot_hash,
     )
+    # F-A: inherit locate_N marks from the previous round before any structure
+    # binding so mark_set_version (registry / snapshot / object_registry) stays
+    # a single recomputed value — never merge after build_object_registry.
+    registry = _inherit_locate_marks(registry, previous_registry)
     snapshot = ScreenSnapshot(
         screen_id=screen_id,
         screen_hash=raw_screenshot_hash,
