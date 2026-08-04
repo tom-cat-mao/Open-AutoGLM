@@ -55,7 +55,7 @@ class AgentState(TypedDict):
     task_requirement_set: Optional[dict]  # privacy-safe independent raw-task requirements
     contract_adequacy_status: Optional[str]  # adequate / inadequate / needs_clarification
     contract_adequacy_reasons: list[str]  # stable reason codes only
-    needs_recompile: bool  # reserved: reflect may request goal recompilation (no writer currently sets True; recompile only via task_goal_contract_override)
+    needs_recompile: bool  # True only when reflect flags stage stall (W2 T6); goal_node recompiles and clears it
     step_count: int  # 当前步数
     max_steps: int  # 最大步数
     lang: str  # 语言
@@ -69,6 +69,9 @@ class AgentState(TypedDict):
     # === F2 窗口预算（earned continuation） ===
     continuation_count: int  # 已授予的续命窗口次数（上限 CONTINUATION_MAX_GRANTS）
     continuation_last_latch_count: int  # 上一窗口边界时锁存（ever_matched）标准数
+    continuation_last_stage_index: Optional[
+        int
+    ]  # W2 T4: 上一窗口边界时 task_plan 当前阶段序号（无 plan 时 None）
     absolute_max_steps: int  # 本 run 硬性步数上限（初始窗口 * 3）
 
     # === 屏幕 ===
@@ -147,6 +150,10 @@ class AgentState(TypedDict):
     finish_validation_evidence: Optional[dict]  # trace-safe final goal evidence
     goal_evidence_ledger: list[dict]  # bounded privacy-safe criterion evidence; Reflect-owned
     goal_agenda: list[dict]  # criterion descriptions and folded statuses; no evidence text
+    task_plan_status: Optional[
+        dict
+    ]  # W2 T3: reflect 推导的阶段状态（current_stage_index + per_stage）；无 plan 时 None；永不当门槛
+    stage_stall_windows: int  # W2 T6: 连续 stuck 且阶段未推进的 reflect 窗口数
 
     # === Reflect 节点输出 ===
     reflection: Optional[str]  # 反思结论

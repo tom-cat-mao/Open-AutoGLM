@@ -281,3 +281,54 @@ def criterion_history_from_ledger(
             item.get("status") or "unknown"
         )
     return list(snapshots.values())
+
+
+def stage_status_from_ledger(
+    ledger: list[dict[str, Any]],
+    task_plan: tuple[Any, ...] | None,
+    *,
+    contract_id: str,
+) -> dict[str, Any] | None:
+    """Fold the evidence ledger into per-stage status (W2 T3).
+
+    Pure ledger fold, zero model calls. A stage is ``satisfied`` when every
+    done-criterion is pinned by the ever-matched latch (which is monotonic:
+    a matched observation stays latched across transient staleness, and only
+    a positive ``contradicted`` counter-observation unlocks). The current
+    stage is the first non-satisfied stage in plan order; when every stage is
+    satisfied ``current_stage_index`` is None. Returns None when there is no
+    plan.
+
+    Status is belief/telemetry only — it never gates execution or finish.
+    """
+
+    if not task_plan:
+        return None
+    per_stage: list[dict[str, Any]] = []
+    current_index: int | None = None
+    for stage in task_plan:
+        satisfied: list[str] = []
+        pending: list[str] = []
+        for name in stage.done_criteria:
+            latch = ever_matched(
+                ledger,
+                criterion_id=name,
+                contract_id=contract_id,
+            )
+            (satisfied if latch.latched else pending).append(name)
+        status = "satisfied" if not pending else "pending"
+        per_stage.append(
+            {
+                "stage_id": getattr(stage, "stage_id", ""),
+                "index": getattr(stage, "index", len(per_stage)),
+                "status": status,
+                "satisfied_criteria": satisfied,
+                "pending_criteria": pending,
+            }
+        )
+        if current_index is None and status != "satisfied":
+            current_index = getattr(stage, "index", len(per_stage) - 1)
+    return {
+        "current_stage_index": current_index,
+        "per_stage": per_stage,
+    }

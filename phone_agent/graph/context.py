@@ -49,6 +49,7 @@ DEFAULT_CONTEXT_BUDGET: dict[str, int] = {
     "avoid_repeating_chars": 300,
     "tried_action_items": 6,
     "visited_screen_items": 6,
+    "task_plan_status_chars": 500,
 }
 _SECTION_BUDGETS = {
     "goal_agenda": 800,
@@ -64,6 +65,7 @@ CONTEXT_SECTION_IDS = (
     "gui_memory.scroll_memory",
     "gui_memory.task_progress",
     "grounding_observation",
+    "task_plan_status",
 )
 FAILURE_TAXONOMY = {
     "none",
@@ -965,6 +967,30 @@ def _novelty_streak(state: dict[str, Any]) -> int:
         return 0
 
 
+def _stage_advanced(state: dict[str, Any]) -> bool:
+    """Branch 4 (W2 T4): the current stage advanced past the window snapshot.
+
+    Compares ``task_plan_status.current_stage_index`` against the snapshot
+    taken at the last window boundary (``continuation_last_stage_index``,
+    written by the acceptance node). With no task plan (status missing) the
+    branch is always False; a ``None`` current index (every stage satisfied)
+    counts as having advanced past the last stage.
+    """
+
+    plan_status = state.get("task_plan_status")
+    if not isinstance(plan_status, dict):
+        return False
+    previous = state.get("continuation_last_stage_index")
+    if not isinstance(previous, int):
+        return False
+    current = plan_status.get("current_stage_index")
+    if current is None:
+        return True
+    if not isinstance(current, int):
+        return False
+    return current > previous
+
+
 def continuation_credential(state: dict[str, Any]) -> ContinuationCredential:
     """Decide whether a rejected budget-forced acceptance earns another window.
 
@@ -979,9 +1005,13 @@ def continuation_credential(state: dict[str, Any]) -> ContinuationCredential:
        are excluded;
     3. judge near-miss — the forced acceptance produced judge-type named
        evidence or at least one hard confirm (H5: auto-standard evidence does
-       not count).
+       not count);
+    4. stage_advance (W2 T4) — the task_plan's current stage advanced past the
+       window-boundary snapshot; with no task plan this branch is always False
+       and is also exempt from novelty negation (typed plan progress is strong
+       movement evidence).
     Negation: with no branch 1/3, a novelty streak >= the negation threshold
-    (revisiting the same states) denies; branch 2 is never negated.
+    (revisiting the same states) denies; branches 2 and 4 are never negated.
     """
 
     contract_id, _ = _goal_contract_view(state)
@@ -996,6 +1026,8 @@ def continuation_credential(state: dict[str, Any]) -> ContinuationCredential:
         branches.append("new_latch")
     if _judge_near_miss(state):
         branches.append("judge_near_miss")
+    if _stage_advanced(state):
+        branches.append("stage_advance")
 
     if branches:
         return ContinuationCredential(
@@ -1014,6 +1046,50 @@ def continuation_credential(state: dict[str, Any]) -> ContinuationCredential:
         branches=(),
         reason="no_progress_evidence",
     )
+
+
+def stage_stall_recompile(
+    *,
+    previous_status: dict[str, Any] | None,
+    current_status: dict[str, Any] | None,
+    liveness_state: str | None,
+    stall_windows: int,
+    threshold: int,
+) -> tuple[int, bool]:
+    """Count consecutive stuck non-advancing reflect windows (W2 T6).
+
+    Pure function: each reflect round feeds (previous window's status, this
+    round's status, liveness). A window counts toward the stall streak only
+    when the current stage did NOT advance AND the trajectory is ``stuck``;
+    any other round resets the streak. When the streak reaches ``threshold``
+    (``STAGE_STALL_RECOMPILE_WINDOWS``), the caller sets
+    ``needs_recompile=True`` so the existing replan→goal route recompiles the
+    plan. With no plan (``current_status`` None) the streak is always reset.
+
+    Returns ``(new_stall_windows, needs_recompile)``.
+    """
+
+    if not isinstance(current_status, dict) or not isinstance(
+        previous_status, dict
+    ):
+        return 0, False
+    previous_index = previous_status.get("current_stage_index")
+    current_index = current_status.get("current_stage_index")
+    advanced = _stage_index_advanced(previous_index, current_index)
+    if advanced or str(liveness_state or "") != "stuck":
+        return 0, False
+    new_count = int(stall_windows or 0) + 1
+    return new_count, new_count >= max(1, int(threshold))
+
+
+def _stage_index_advanced(previous: Any, current: Any) -> bool:
+    """Whether the plan's current stage moved forward between two windows."""
+
+    if current is None:
+        return previous is not None
+    if not isinstance(previous, int) or not isinstance(current, int):
+        return False
+    return current > previous
 
 
 def build_budget_section(state: dict[str, Any], lang: str = "cn") -> str:
@@ -1409,6 +1485,7 @@ def build_plan_context_block(
     )
     avoid_repeating = _build_avoid_repeating(state)
     liveness_note = _build_liveness_note(state)
+    task_plan_status_section = _render_task_plan_status(state, lang, consumer=consumer)
 
     parts = []
     # Each section is trimmed against its own allowance. Trimming the concatenated
@@ -1420,6 +1497,11 @@ def build_plan_context_block(
             "goal_agenda",
             goal_agenda,
             budget.get("goal_agenda_chars", _SECTION_BUDGETS["goal_agenda"]),
+        ),
+        (
+            "task_plan_status",
+            task_plan_status_section,
+            budget.get("task_plan_status_chars"),
         ),
         ("budget", budget_section, None),
         ("liveness_note", liveness_note, None),
@@ -1480,6 +1562,93 @@ def _trim_plan_block_preserving_agenda(
         return head, True
     trimmed_tail, tail_truncated = trim_text(tail, remaining)
     return head + "\n" + trimmed_tail, tail_truncated
+
+
+def _task_plan_stages(state: dict[str, Any]) -> list[dict[str, Any]]:
+    """Extract ordered task_plan metadata from state's goal_contract.
+
+    Handles both the state payload dict (``task_plan`` list of metadata dicts)
+    and a raw GoalContract object (``task_plan`` tuple of TaskStage) so the
+    dynamic context block works in every test/legacy layout.
+    """
+
+    contract = state.get("goal_contract")
+    if isinstance(contract, dict):
+        plan = contract.get("task_plan")
+        if isinstance(plan, list):
+            return [item for item in plan if isinstance(item, dict)]
+        return []
+    if contract is not None:
+        plan = getattr(contract, "task_plan", None) or ()
+        return [
+            {
+                "stage_id": getattr(stage, "stage_id", ""),
+                "objective": getattr(stage, "objective", ""),
+                "done_criteria": list(getattr(stage, "done_criteria", ())),
+                "index": getattr(stage, "index", index),
+            }
+            for index, stage in enumerate(plan)
+        ]
+    return []
+
+
+def _render_task_plan_status(
+    state: dict[str, Any],
+    lang: str,
+    *,
+    consumer: ContextConsumer = "inject",
+) -> dict[str, Any] | str:
+    """Render the dynamic task_plan_status section for the plan block (W2 T5).
+
+    Returns the sanitized body dict (the block loop serializes it under the
+    ``task_plan_status`` label), or "" when there is no plan/status. Shows only
+    the CURRENT stage focus — ordinal, page-level objective summary and which
+    done signals are satisfied/pending — never the whole plan. The full plan
+    lives in the static goal-contract block; dynamic stage info never enters
+    that block.
+    """
+
+    plan_status = state.get("task_plan_status")
+    stages = _task_plan_stages(state)
+    if not isinstance(plan_status, dict) or not stages:
+        return ""
+    total = len(stages)
+    current_index = plan_status.get("current_stage_index")
+    per_stage = plan_status.get("per_stage") or []
+    by_index: dict[int, dict[str, Any]] = {}
+    for row in per_stage:
+        if isinstance(row, dict) and isinstance(row.get("index"), int):
+            by_index[int(row["index"])] = row
+    current_row = (
+        by_index.get(int(current_index)) if isinstance(current_index, int) else None
+    )
+    if current_index is None:
+        body: dict[str, Any] = {
+            "current_stage": "all",
+            "status": "all_satisfied",
+        }
+    else:
+        stage = next(
+            (item for item in stages if item.get("index") == int(current_index)),
+            None,
+        )
+        body = {
+            "current_stage": f"{int(current_index) + 1}/{total}",
+            "objective": (stage or {}).get("objective") or "",
+            "satisfied_criteria": list(
+                current_row.get("satisfied_criteria") or []
+            )
+            if current_row
+            else [],
+            "pending_criteria": list(current_row.get("pending_criteria") or [])
+            if current_row
+            else [],
+        }
+    task_context = state.get("task") if isinstance(state.get("task"), str) else None
+    safe_body = sanitize_context_payload(
+        body, "task_plan_status", consumer=consumer, task_context=task_context
+    )
+    return safe_body
 
 
 def _build_liveness_note(state: dict[str, Any]) -> str:
@@ -2132,6 +2301,11 @@ def _section_has_value(state: dict[str, Any], section: str) -> bool:
         return bool((state.get("gui_memory") or {}).get(key))
     if section == "grounding_observation":
         return bool(state.get("grounding_observation"))
+    if section == "task_plan_status":
+        return bool(
+            isinstance(state.get("task_plan_status"), dict)
+            and _task_plan_stages(state)
+        )
     return False
 
 

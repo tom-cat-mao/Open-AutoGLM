@@ -109,6 +109,9 @@ def base_state() -> dict[str, Any]:
         "contract_adequacy_status": None,
         "contract_adequacy_reasons": [],
         "needs_recompile": False,
+        "task_plan_status": None,
+        "stage_stall_windows": 0,
+        "continuation_last_stage_index": None,
         "messages": [
             {
                 "role": "user",
@@ -160,6 +163,7 @@ def base_state() -> dict[str, Any]:
         "finish_validation_status": None,
         "finish_validation_evidence": None,
         "goal_evidence_ledger": [],
+        "goal_agenda": [],
         "reflection": None,
         "action_succeeded": False,
         "reflection_verdict": None,

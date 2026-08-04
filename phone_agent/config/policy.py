@@ -50,6 +50,13 @@ CONTINUATION_WINDOW_STEPS = 6
 CONTINUATION_ABSOLUTE_MULTIPLIER = 3
 CONTINUATION_NOVELTY_NEGATION_STREAK = 4
 
+# W2 T6: consecutive reflect windows in which the task_plan's current stage
+# does not advance AND the trajectory is stuck, before reflect sets
+# needs_recompile=True so the existing replan->goal route rebuilds the plan.
+# A "window" is one reflect observation round. The plan is a belief, not a
+# gate: recompiling it never blocks or finishes a task by itself.
+STAGE_STALL_RECOMPILE_WINDOWS = 2
+
 
 def absolute_max_steps(max_steps: int) -> int:
     """Return the hard step ceiling for one run (initial window * 3)."""

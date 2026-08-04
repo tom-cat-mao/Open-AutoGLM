@@ -16,9 +16,11 @@ from phone_agent.graph.goal import (
     LEGACY_SHA256_STUB_PATTERN,
     GoalContract,
     SuccessCriterion,
+    TaskStage,
     VALID_VERIFICATIONS,
     compute_task_hash,
     redact_objective,
+    task_plan_validation_errors,
 )
 from phone_agent.graph.goal_requirements import (
     ContractAdequacyValidator,
@@ -213,6 +215,10 @@ class HeuristicGoalCompiler:
             compile_status="compiled",
             compile_source="heuristic",
             compile_attempts=0,
+            # W2 T2: the heuristic fallback has no task plan — the whole
+            # contract IS the path. ``None`` is the legal degraded state that
+            # keeps every existing behavior unchanged.
+            task_plan=None,
         )
 
 
@@ -232,10 +238,25 @@ class ExternalGoalCompiler:
     ) -> GoalContract:
         from dataclasses import replace
 
+        task_plan = self._contract.task_plan
+        if task_plan is not None:
+            errors = task_plan_validation_errors(
+                task_plan,
+                criterion_names=[item.name for item in self._contract.success_criteria],
+                criteria={
+                    item.name: item for item in self._contract.success_criteria
+                },
+            )
+            if errors:
+                # W2 T2: an external plan is adopted only when it validates;
+                # otherwise it degrades to ``None`` (plan is belief-only and
+                # must never fail an otherwise usable contract).
+                task_plan = None
         return replace(
             self._contract,
             compile_status="user_override",
             compile_source="external",
+            task_plan=task_plan,
         )
 
 
@@ -244,7 +265,7 @@ class ExternalGoalCompiler:
 # ----------------------------------------------------------------------
 
 
-GOAL_COMPILER_SYSTEM_PROMPT_CN = """你是一个任务目标编译器。你的职责是把用户的自然语言任务编译成一个声明式目标契约（JSON），包含可验证的成功标准、约束和非目标。
+GOAL_COMPILER_SYSTEM_PROMPT_CN = """你是一个任务目标编译器。你的职责是把用户的自然语言任务编译成一个声明式目标契约（JSON），包含可验证的成功标准、约束、非目标和一个任务阶段规划（task_plan）。
 
 你必须只输出一个 JSON 对象，不要 Markdown 或多余文本：
 {
@@ -255,7 +276,10 @@ GOAL_COMPILER_SYSTEM_PROMPT_CN = """你是一个任务目标编译器。你的�
   "constraints": ["约束1", "约束2"],
   "non_goals": ["非目标1"],
   "target_app_hint": "canonical AppRegistry identity or null",
-  "ordinal": null
+  "ordinal": null,
+  "task_plan": [
+    {"objective": "页面级目标（一句话）", "done_criteria": ["契约中 success_criteria 的名字"], "fallback": "该阶段卡住时的兜底策略（一句话）"}
+  ]
 }
 
 verification 枚举说明：
@@ -279,9 +303,16 @@ verification 枚举说明：
 - vlm_judge 标准的 description 必须描述**屏幕上可观察的具体内容**，不能只写抽象状态（如“任务完成”“目标已达成”）。
   写法示例：“出现含‘银石’字样的卡片”“设置页显示‘已开启’开关”。描述中给出具体的屏幕文本或元素，
   验收模型才能据实点名该标准并引用屏幕证据
+task_plan 规则：
+- 产出 3-6 个阶段，按执行顺序排列；阶段目标必须是**页面级**表述（如“进入某 UP 主主页”“找到目标视频并打开”），
+  禁止控件/坐标级描述（一屏就碎）
+- done_criteria 里的每个名字必须逐字等于本契约 success_criteria 中某条 criterion 的 name，禁止新造名字
+- 每阶段至少包含一条**非恒真**的完成信号：不能只用 app_or_activity_match / app 前台类标准构成全部 done_criteria
+  （否则阶段会在任务毫无进展时虚推进）；vlm_judge、accessibility_text_match 等真实观察类标准都可以
+- fallback 写该阶段卡住时的一句兜底策略（如“返回上一页重试”“先滚动寻找目标”）；不写则留空字符串
 """
 
-GOAL_COMPILER_SYSTEM_PROMPT_EN = """You are a task goal compiler. Convert the user's natural-language task into a declarative goal contract (JSON) with verifiable success criteria, constraints, and non-goals.
+GOAL_COMPILER_SYSTEM_PROMPT_EN = """You are a task goal compiler. Convert the user's natural-language task into a declarative goal contract (JSON) with verifiable success criteria, constraints, non-goals, and a task-stage plan (task_plan).
 
 Output exactly one JSON object, no Markdown:
 {
@@ -292,7 +323,10 @@ Output exactly one JSON object, no Markdown:
   "constraints": ["constraint1"],
   "non_goals": ["non_goal1"],
   "target_app_hint": "canonical AppRegistry identity or null",
-  "ordinal": null
+  "ordinal": null,
+  "task_plan": [
+    {"objective": "page-level goal (one sentence)", "done_criteria": ["a success_criteria name from this contract"], "fallback": "one-sentence recovery strategy if this stage stalls"}
+  ]
 }
 
 Rules:
@@ -308,6 +342,18 @@ Rules:
   containing the text 'Silverstone' appears", "the settings page shows an 'Enabled'
   toggle". Name the specific screen text or element so the acceptance model can
   cite real screen evidence for it
+task_plan rules:
+- Produce 3-6 stages in execution order; each objective MUST be page-level
+  (e.g. "reach the UP's home page", "find and open the target video") — never
+  control- or coordinate-level descriptions
+- Every name in done_criteria MUST equal, verbatim, the name of one criterion in
+  this contract's success_criteria; never invent names
+- Each stage needs at least one NON-always-true done signal: never build a stage
+  whose done_criteria are only app_or_activity_match / app-foreground checks
+  (that would let the stage advance with zero task progress); vlm_judge,
+  accessibility_text_match and other real-observation criteria are fine
+- fallback is a one-sentence recovery strategy for when this stage stalls
+  (e.g. "go back and retry", "scroll to find the target"); empty string if none
 """
 
 
@@ -489,6 +535,12 @@ class LLMGoalCompiler:
             toggle_state=toggle_state,
         )
 
+        task_plan = _parse_task_plan(
+            data.get("task_plan"),
+            criterion_names=[item.name for item in criteria],
+            criteria={item.name: item for item in criteria},
+        )
+
         return GoalContract(
             task_hash=compute_task_hash(task),
             redacted_objective=redact_objective(str(data.get("objective") or task)),
@@ -509,7 +561,55 @@ class LLMGoalCompiler:
             compile_status="compiled",
             compile_source="llm",
             compile_attempts=0,
+            task_plan=task_plan,
         )
+
+
+def _parse_task_plan(
+    value: Any,
+    *,
+    criterion_names: list[str],
+    criteria: dict[str, SuccessCriterion],
+) -> tuple[TaskStage, ...] | None:
+    """Parse + validate the LLM's ``task_plan`` section (W2 T2).
+
+    A missing or empty section is legal (plan is optional; ``None`` degrades
+    gracefully). An ill-formed section raises ``ValueError`` so the compile
+    fails and the chain falls back to Heuristic (``task_plan=None``): unknown
+    criterion names, duplicate ids/indices, or a stage whose done criteria are
+    all always-true auto standards (trivial-only) are all rejected.
+    """
+
+    if value is None:
+        return None
+    if not isinstance(value, list):
+        raise ValueError("task_plan must be a list")
+    if not value:
+        return None
+    if len(value) < 3 or len(value) > 6:
+        raise ValueError(f"task_plan stage count out of range: {len(value)}")
+    stages: list[TaskStage] = []
+    for index, item in enumerate(value):
+        if not isinstance(item, dict):
+            raise ValueError(f"task_plan stage {index} is not an object")
+        stage = TaskStage(
+            stage_id=str(item.get("stage_id") or f"stage_{index + 1}"),
+            objective=str(item.get("objective") or ""),
+            done_criteria=tuple(
+                str(name) for name in (item.get("done_criteria") or []) if name
+            ),
+            fallback=str(item.get("fallback") or ""),
+            index=index,
+        )
+        stages.append(stage)
+    errors = task_plan_validation_errors(
+        tuple(stages),
+        criterion_names=criterion_names,
+        criteria=criteria,
+    )
+    if errors:
+        raise ValueError(f"invalid task_plan: {','.join(errors)}")
+    return tuple(stages)
 
 
 def _with_compile_meta(

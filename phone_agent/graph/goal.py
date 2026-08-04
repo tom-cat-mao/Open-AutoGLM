@@ -102,6 +102,139 @@ SuccessCriterion = CriterionSpec
 
 
 @dataclass(frozen=True)
+class TaskStage:
+    """One page-level execution stage of a task plan (W2).
+
+    Belief only — never a gate. ``objective``/``fallback`` are free-text and
+    are regex-redacted by ``GoalContract.__post_init__`` before they can reach
+    any prompt/state/trace payload. ``done_criteria`` reference names of the
+    contract's own ``success_criteria``; unknown names are rejected at compile
+    time (see ``task_plan_validation_errors``) and dropped by ``from_dict``.
+    """
+
+    stage_id: str
+    objective: str
+    done_criteria: tuple[str, ...]
+    fallback: str
+    index: int
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "stage_id": self.stage_id,
+            "objective": self.objective,
+            "done_criteria": list(self.done_criteria),
+            "fallback": self.fallback,
+            "index": self.index,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "TaskStage":
+        return cls(
+            stage_id=str(data.get("stage_id") or ""),
+            objective=str(data.get("objective") or ""),
+            done_criteria=tuple(
+                str(value) for value in (data.get("done_criteria") or [])
+            ),
+            fallback=str(data.get("fallback") or ""),
+            index=int(data.get("index") or 0),
+        )
+
+
+# Verification kinds whose criteria are trivially satisfied once the target app
+# is in the foreground — they may not be the ONLY done-criterion of a stage
+# (W2 T2: prevents phantom stage advancement). ``app.foreground_identity`` is
+# the canonical always-true auto standard.
+STAGE_TRIVIAL_VERIFICATION_KINDS = frozenset({"app_or_activity_match"})
+
+
+def _criterion_is_stage_substantive(criterion: CriterionSpec | None) -> bool:
+    """Whether a done criterion can actually gate stage advancement.
+
+    A criterion is ``substantive`` unless it is an app-foreground check (the
+    canonical always-true auto standard): ``app_or_activity_match`` verification
+    or a predicate whose id starts with ``app.foreground``. A stage whose done
+    criteria are ALL substantive-less is rejected at compile time so a plan
+    cannot pretend to progress while only the target app is visible.
+    """
+
+    if criterion is None:
+        return False
+    if criterion.verification == "vlm_judge":
+        return True
+    if criterion.verification in STAGE_TRIVIAL_VERIFICATION_KINDS:
+        return False
+    predicate = criterion.predicate
+    if predicate is not None and predicate.predicate_id.startswith("app.foreground"):
+        return False
+    return True
+
+
+def task_plan_validation_errors(
+    task_plan: tuple[TaskStage, ...] | None,
+    *,
+    criterion_names: list[str],
+    criteria: dict[str, CriterionSpec] | None = None,
+) -> list[str]:
+    """Return stable validation errors for a task plan, or [] when valid.
+
+    Rules (W2 T1/T2): stage ids and indices are unique; every done criterion
+    name must exist in the contract's success_criteria; every stage must carry
+    at least one substantive (non always-true-auto) done criterion. ``None``
+    plan is always valid (no plan is a legal degraded state).
+    """
+
+    if not task_plan:
+        return []
+    names = set(criterion_names)
+    criteria_map = criteria or {}
+    errors: list[str] = []
+    seen_ids: set[str] = set()
+    seen_indices: set[int] = set()
+    for stage in task_plan:
+        if not isinstance(stage, TaskStage):
+            errors.append("stage_not_typed")
+            continue
+        if not stage.stage_id:
+            errors.append(f"stage_{stage.index}:empty_stage_id")
+        elif stage.stage_id in seen_ids:
+            errors.append(f"stage_{stage.index}:duplicate_stage_id:{stage.stage_id}")
+        else:
+            seen_ids.add(stage.stage_id)
+        if stage.index in seen_indices:
+            errors.append(f"stage_{stage.index}:duplicate_index")
+        else:
+            seen_indices.add(stage.index)
+        if not stage.done_criteria:
+            errors.append(f"stage_{stage.index}:empty_done_criteria")
+            continue
+        unknown = [name for name in stage.done_criteria if name not in names]
+        if unknown:
+            errors.append(
+                f"stage_{stage.index}:unknown_done_criteria:{','.join(sorted(unknown))}"
+            )
+        substantive = any(
+            _criterion_is_stage_substantive(criteria_map.get(name))
+            for name in stage.done_criteria
+        )
+        if not substantive:
+            errors.append(f"stage_{stage.index}:trivial_only_done_criteria")
+    return errors
+
+
+def validate_task_plan(
+    task_plan: tuple[TaskStage, ...] | None,
+    *,
+    criterion_names: list[str],
+    criteria: dict[str, CriterionSpec] | None = None,
+) -> bool:
+    """Boolean form of :func:`task_plan_validation_errors` (compile gate)."""
+
+    return not task_plan_validation_errors(
+        task_plan, criterion_names=criterion_names, criteria=criteria
+    )
+
+
+@dataclass(frozen=True)
 class GoalContract:
     """Durable, trace-safe task goal contract.
 
@@ -125,6 +258,7 @@ class GoalContract:
     compile_status: CompileStatus = "pending"
     compile_source: str = "heuristic"
     compile_attempts: int = 0
+    task_plan: tuple[TaskStage, ...] | None = None
 
     def __post_init__(self) -> None:
         """Normalize all prompt/state text through the privacy redactor."""
@@ -132,6 +266,19 @@ class GoalContract:
         object.__setattr__(
             self, "redacted_objective", redact_context_text(self.redacted_objective)
         )
+        if self.task_plan is not None:
+            object.__setattr__(
+                self,
+                "task_plan",
+                tuple(
+                    replace(
+                        stage,
+                        objective=redact_context_text(stage.objective)[:200],
+                        fallback=redact_context_text(stage.fallback)[:200],
+                    )
+                    for stage in self.task_plan
+                ),
+            )
         object.__setattr__(
             self,
             "success_criteria",
@@ -172,7 +319,33 @@ class GoalContract:
             "compile_status": self.compile_status,
             "compile_source": self.compile_source,
             "compile_attempts": self.compile_attempts,
+            "task_plan": (
+                [stage.to_dict() for stage in self.task_plan]
+                if self.task_plan is not None
+                else None
+            ),
         }
+
+    def _task_plan_metadata(self) -> list[dict[str, Any]] | None:
+        """Privacy-safe task_plan projection shared by state and trace payloads.
+
+        Only denatured metadata leaves the runtime reference: the objective is
+        regex-redacted (done in ``__post_init__``), done_criteria are criterion
+        names only, and the fallback sentence is not carried. The full plan
+        (including fallback) lives exclusively in the runtime Goal reference.
+        """
+
+        if self.task_plan is None:
+            return None
+        return [
+            {
+                "stage_id": stage.stage_id,
+                "objective": stage.objective,
+                "done_criteria": list(stage.done_criteria),
+                "index": stage.index,
+            }
+            for stage in self.task_plan
+        ]
 
     def to_state_payload(self, *, runtime_reference: str | None) -> dict[str, Any]:
         """Return metadata and public predicate values safe for AgentState."""
@@ -197,6 +370,7 @@ class GoalContract:
             "compile_status": self.compile_status,
             "compile_source": self.compile_source,
             "compile_attempts": self.compile_attempts,
+            "task_plan": self._task_plan_metadata(),
         }
 
     def to_trace_payload(self) -> dict[str, Any]:
@@ -229,6 +403,7 @@ class GoalContract:
             "compile_status": self.compile_status,
             "compile_source": self.compile_source,
             "compile_attempts": self.compile_attempts,
+            "task_plan": self._task_plan_metadata(),
         }
 
     def to_prompt_block(self, *, lang: str = "cn") -> str:
@@ -267,6 +442,7 @@ class GoalContract:
             if self.non_goals
             else "  (none)"
         )
+        task_plan_block = _render_task_plan_block(self.task_plan, lang=lang)
         if lang == "en":
             return "\n".join(
                 [
@@ -280,6 +456,7 @@ class GoalContract:
                     constraints_block,
                     "non_goals:",
                     non_goals_block,
+                    task_plan_block,
                     "[auto] criteria are verified from device state — do not cite them.",
                     (
                         "Finish is only valid when you name the [judge] criteria you can "
@@ -300,6 +477,7 @@ class GoalContract:
                 constraints_block,
                 "非目标:",
                 non_goals_block,
+                task_plan_block,
                 "[auto] 标准由系统读取设备状态自行核验，不需要你点名或回报。",
                 (
                     "只有在 matched_terminal_evidence 中点名你确实看到已满足的 [judge] "
@@ -377,6 +555,10 @@ class GoalContract:
             compile_status=str(data.get("compile_status") or "pending"),  # type: ignore[arg-type]
             compile_source=str(data.get("compile_source") or "heuristic"),
             compile_attempts=int(data.get("compile_attempts") or 0),
+            task_plan=_task_plan_from_dict(
+                data.get("task_plan"),
+                criterion_names=[item.name for item in criteria],
+            ),
         )
 
 
@@ -490,6 +672,79 @@ def finish_claim_summary(value: str | None) -> dict[str, Any]:
 # Aliases for backward-compat with code that imported from task_goal
 task_goal_prompt_block = build_goal_prompt_block
 task_goal_trace_payload = goal_trace_payload
+
+
+def _task_plan_from_dict(
+    value: Any, *, criterion_names: list[str]
+) -> tuple[TaskStage, ...] | None:
+    """Reconstruct a task plan from a stored dict, dropping invalid stages.
+
+    ``from_dict`` is lossy-tolerant (resume/legacy path): stages referencing
+    unknown criterion names are dropped rather than raising, so a stale plan
+    degrades to fewer stages / None instead of failing the run. Compile-time
+    strictness lives in the compilers (``task_plan_validation_errors``).
+    """
+
+    if value is None:
+        return None
+    if not isinstance(value, list) or not value:
+        return None
+    names = set(criterion_names)
+    stages: list[TaskStage] = []
+    seen_indices: set[int] = set()
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        stage = TaskStage.from_dict(item)
+        if not stage.stage_id or stage.index in seen_indices:
+            continue
+        if not stage.done_criteria or any(
+            name not in names for name in stage.done_criteria
+        ):
+            continue
+        seen_indices.add(stage.index)
+        stages.append(stage)
+    return tuple(stages) if stages else None
+
+
+def _render_task_plan_block(
+    task_plan: tuple[TaskStage, ...] | None, *, lang: str
+) -> str:
+    """Render the full task plan for the static goal-contract prompt block.
+
+    Static, task-scoped and cacheable: it carries the whole reference path
+    (stage ordinal + page-level objective + done-signal names + fallback) with
+    the explicit belief-not-authority annotation. The current-stage focus is
+    deliberately NEVER rendered here — that is the dynamic context block's job
+    (W2 T5: dynamic stage info never enters the static block).
+    """
+
+    if not task_plan:
+        return ""
+    total = len(task_plan)
+    if lang == "en":
+        lines = ["task_plan (reference path only; the screenshot prevails):"]
+        for stage in task_plan:
+            signals = ", ".join(stage.done_criteria) or "none"
+            line = (
+                f"  stage {stage.index + 1}/{total}: {stage.objective} "
+                f"-> done when: {signals}"
+            )
+            if stage.fallback:
+                line += f" | if stuck: {stage.fallback}"
+            lines.append(line)
+        return "\n".join(lines)
+    lines = ["任务阶段规划（参考路径，以截图为准）："]
+    for stage in task_plan:
+        signals = ", ".join(stage.done_criteria) or "无"
+        line = (
+            f"  阶段 {stage.index + 1}/{total}：{stage.objective} "
+            f"-> 完成信号：{signals}"
+        )
+        if stage.fallback:
+            line += f" | 卡住时：{stage.fallback}"
+        lines.append(line)
+    return "\n".join(lines)
 
 
 def _predicate_from_dict(value: Any) -> PredicateSpec | None:

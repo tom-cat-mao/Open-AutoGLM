@@ -7,7 +7,10 @@ from typing import TYPE_CHECKING, Any
 from langchain_core.runnables import RunnableConfig
 
 from phone_agent.device_factory import ObservationCaptureError
-from phone_agent.config.policy import DEFAULT_VERIFICATION_POLICY
+from phone_agent.config.policy import (
+    DEFAULT_VERIFICATION_POLICY,
+    STAGE_STALL_RECOMPILE_WINDOWS,
+)
 from phone_agent.graph.context import (
     FAILURE_TAXONOMY,
     build_action_outcome_summary,
@@ -21,6 +24,7 @@ from phone_agent.graph.context import (
     sanitize_context_payload,
     repeated_action_key,
     select_reflect_context,
+    stage_stall_recompile,
     trajectory_liveness,
     _redacted_private_text,
     update_gui_memory,
@@ -718,6 +722,16 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
                     item["latched"] = True
                     item["latched_epoch"] = latch.matched_epoch
             goal_agenda.append(item)
+    # W2 T3: fold the same ledger into per-stage task-plan status. Pure ledger
+    # fold — zero additional model calls; reflect's verdict semantics are
+    # untouched (stages are belief/telemetry, never a gate).
+    task_plan_status = None
+    if goal_contract is not None and goal_contract.task_plan:
+        task_plan_status = goal_evidence.stage_status_from_ledger(
+            ledger,
+            goal_contract.task_plan,
+            contract_id=runtime_contract_id,
+        )
     if configurable.get("enable_legacy_page_signal_adapter", False):
         observe_legacy_page_signals(
             expected=state.get("expected_outcome"),
@@ -794,6 +808,33 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
             configurable.get("skip_reflect_on_high_confidence", True)
         ),
     )
+    # W2 T6: single needs_recompile write point — stage stall. When the
+    # current stage has not advanced for K consecutive reflect windows AND the
+    # trajectory is stuck, the plan is a bad belief; flag recompilation so the
+    # existing replan→goal route rebuilds it. Nothing else in this node touches
+    # needs_recompile (the flag is only ever set True here).
+    stage_stall_windows, stage_recompile = stage_stall_recompile(
+        previous_status=state.get("task_plan_status"),
+        current_status=task_plan_status,
+        liveness_state=current_liveness["state"],
+        stall_windows=int(state.get("stage_stall_windows") or 0),
+        threshold=STAGE_STALL_RECOMPILE_WINDOWS,
+    )
+    if stage_recompile:
+        emit_trace(
+            config,
+            state,
+            "reflect",
+            "stage_stall_recompile",
+            {
+                "stage_stall_windows": stage_stall_windows,
+                "threshold": STAGE_STALL_RECOMPILE_WINDOWS,
+                "trajectory_liveness": current_liveness["state"],
+                "current_stage_index": task_plan_status.get("current_stage_index")
+                if task_plan_status
+                else None,
+            },
+        )
     model_skipped = deterministic_reflection is not None
     model_skip_reason = (
         deterministic_reflection.model_skip_reason
@@ -1236,6 +1277,9 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
         "verifier_evidence": verifier_evidence,
         "goal_evidence_ledger": ledger,
         "goal_agenda": goal_agenda,
+        "task_plan_status": task_plan_status,
+        "stage_stall_windows": stage_stall_windows,
+        **({"needs_recompile": True} if stage_recompile else {}),
         "observation_retry_count": 0,
         "invalidated_mark_ids": invalidated_mark_ids,
         # Reflect judges a single action and never completes the task; only the

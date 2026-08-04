@@ -646,7 +646,14 @@ def _continuation_decision(
         {**state, "finish_validation_evidence": evaluation.to_dict()}
     )
     current_latch = latched_criterion_count(state)
-    update = {"continuation_last_latch_count": current_latch}
+    update = {
+        "continuation_last_latch_count": current_latch,
+        # W2 T4: window-boundary snapshot of the plan's current stage, consumed
+        # by continuation_credential branch 4 (stage_advance).
+        "continuation_last_stage_index": (state.get("task_plan_status") or {}).get(
+            "current_stage_index"
+        ),
+    }
     absolute_cap = int(
         state.get("absolute_max_steps") or absolute_max_steps(state.get("max_steps"))
     )
