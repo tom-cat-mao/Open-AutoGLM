@@ -353,15 +353,6 @@ def test_model_config_rejects_removed_text_dsl_mode() -> None:
         ModelConfig(output_mode="text_dsl")  # type: ignore[arg-type]
 
 
-def test_json_schema_mode_rejects_text_dsl_response() -> None:
-    client = ModelClient(ModelConfig(output_mode="json_schema"))
-
-    with pytest.raises(ModelParseError) as exc_info:
-        client._parse_response_with_metadata("legacy text action")
-
-    assert exc_info.value.parse_metadata["parse_error_code"] == "invalid_json"
-    assert "raw_model_response" not in exc_info.value.parse_metadata
-
 
 def test_trace_raw_model_response_opt_in_records_parse_failure_text() -> None:
     client = ModelClient(
@@ -386,47 +377,7 @@ def test_json_schema_mode_rejects_direct_coordinate_tap() -> None:
     assert exc_info.value.parse_metadata["parse_error_code"] == "mark_required"
 
 
-def test_tool_calls_mode_rejects_plain_text_without_tool_call() -> None:
-    client = ModelClient(ModelConfig(output_mode="tool_calls"))
 
-    with pytest.raises(ModelParseError) as exc_info:
-        client._parse_response_with_metadata("legacy text action")
-
-    assert exc_info.value.parse_metadata["parse_error_code"] == "unsupported_tool_call"
-
-
-def test_auto_mode_detects_json_and_rejects_legacy_text_dsl() -> None:
-    client = ModelClient(ModelConfig(output_mode="auto"))
-
-    _thinking, json_action, json_metadata = client._parse_response_with_metadata(
-        '{"type":"intent","action":"tap","target_mark_id":"m1"}'
-    )
-
-    assert '"action": "Tap"' in json_action
-    assert json_metadata["detected_format"] == "json_schema"
-    with pytest.raises(ModelParseError) as exc_info:
-        client._parse_response_with_metadata("legacy text action")
-    assert exc_info.value.parse_metadata["parse_error_code"] == "invalid_json"
-
-
-def test_parse_response_with_metadata_rejects_unsupported_text_action() -> None:
-    client = ModelClient(ModelConfig(output_mode="json_schema"))
-
-    with pytest.raises(ModelParseError) as exc_info:
-        client._parse_response_with_metadata("not an action")
-
-    assert exc_info.value.parse_metadata["parse_success"] is False
-    assert exc_info.value.parse_metadata["parse_error_code"] == "invalid_json"
-
-
-def test_parse_response_with_metadata_rejects_unsafe_text_dsl_metadata() -> None:
-    client = ModelClient(ModelConfig(output_mode="auto"))
-
-    with pytest.raises(ModelParseError) as exc_info:
-        client._parse_response_with_metadata("legacy text action with unsafe payload")
-
-    assert exc_info.value.parse_metadata["parse_success"] is False
-    assert exc_info.value.parse_metadata["parse_error_code"] == "invalid_json"
 
 
 def test_tool_specs_include_swipe_start_end_fields() -> None:

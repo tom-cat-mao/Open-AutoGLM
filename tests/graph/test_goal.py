@@ -338,53 +338,56 @@ def test_compile_chain_uses_heuristic_when_no_model_client() -> None:
 # ----------------------------------------------------------------------
 
 
-def test_to_prompt_block_lists_criteria_in_cn() -> None:
-    contract = GoalContract(
-        task_hash="abc",
-        redacted_objective="test objective",
-        objective_length=14,
-        success_criteria=[
-            SuccessCriterion(
-                name="player_visible",
-                description="播放器可见",
-                verification="accessibility_text_match",
+@pytest.mark.parametrize(
+    ("lang", "criteria", "headers"),
+    [
+        (
+            "cn",
+            [
+                SuccessCriterion(
+                    name="player_visible",
+                    description="播放器可见",
+                    verification="accessibility_text_match",
+                ),
+                SuccessCriterion(
+                    name="rank_2",
+                    description="第2个视频",
+                    verification="object_rank_match",
+                ),
+            ],
+            (
+                "任务目标契约",
+                "player_visible",
+                "accessibility_text_match",
+                "object_rank_match",
+                "matched_terminal_evidence",
             ),
-            SuccessCriterion(
-                name="rank_2", description="第2个视频", verification="object_rank_match"
-            ),
-        ],
-        target_app_hint="bilibili",
-        ordinal=2,
-        verification_strategy="hybrid",
-        compile_status="compiled",
-        compile_source="external",
-    )
-    block = contract.to_prompt_block(lang="cn")
-
-    assert "任务目标契约" in block
-    assert "player_visible" in block
-    assert "accessibility_text_match" in block
-    assert "object_rank_match" in block
-    assert "matched_terminal_evidence" in block
-
-
-def test_to_prompt_block_lists_criteria_in_en() -> None:
+        ),
+        (
+            "en",
+            [SuccessCriterion(name="c1", description="desc", verification="vlm_judge")],
+            ("Task Goal Contract", "c1", "vlm_judge"),
+        ),
+    ],
+)
+def test_to_prompt_block_lists_criteria_in_lang(
+    lang: str,
+    criteria: list[SuccessCriterion],
+    headers: tuple[str, ...],
+) -> None:
     contract = GoalContract(
         task_hash="abc",
         redacted_objective="test",
         objective_length=4,
-        success_criteria=[
-            SuccessCriterion(name="c1", description="desc", verification="vlm_judge"),
-        ],
+        success_criteria=criteria,
         verification_strategy="vlm_judge_at_finish",
         compile_status="compiled",
         compile_source="external",
     )
-    block = contract.to_prompt_block(lang="en")
+    block = contract.to_prompt_block(lang=lang)
 
-    assert "Task Goal Contract" in block
-    assert "c1" in block
-    assert "vlm_judge" in block
+    for header in headers:
+        assert header in block
 
 
 def test_from_dict_round_trips() -> None:

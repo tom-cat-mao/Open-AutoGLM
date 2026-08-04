@@ -7,6 +7,8 @@ Covers:
   real <think>...</think> wrapper; no-reasoning providers keep the historical
   <think...>...</think...> placeholder byte-for-byte
 - messages_reducer append/replace semantics unchanged by the new formats
+  (direct semantics live in test_state.py; the plan-level e2e lives in
+  test_plan_reflect.py — this file only keeps the flow-level think test)
 """
 
 import copy
@@ -22,8 +24,7 @@ from phone_agent.graph.expected_outcome import (
 )
 from phone_agent.graph.nodes.execute import _strip_and_append
 from phone_agent.graph.nodes.plan import plan_node
-from phone_agent.graph.state import messages_reducer
-from phone_agent.model.client import ModelClient, ModelConfig
+from phone_agent.model.client import MessageBuilder, ModelClient, ModelConfig
 
 
 @dataclass
@@ -221,42 +222,8 @@ def test_progress_note_envelope_same_level_survives_plan_parse(
 
 
 # --------------------------------------------------------------------------
-# think recovery: history wrapper + zero change without reasoning
+# think recovery: history wrapper flow (e2e)
 # --------------------------------------------------------------------------
-
-
-def test_strip_and_append_wraps_real_think_in_tags() -> None:
-    messages = [
-        {
-            "role": "user",
-            "content": [
-                {"type": "text", "text": "old"},
-                {"type": "image_url", "image_url": {"url": "data"}},
-            ],
-        }
-    ]
-
-    out = _strip_and_append(messages, "先思考再行动", '{"type":"do","action":"back"}')
-
-    assert out[-1]["role"] == "assistant"
-    assert (
-        out[-1]["content"]
-        == "<think>先思考再行动</think>\n<answer>{\"type\":\"do\",\"action\":\"back\"}</answer>"
-    )
-    assert out[0]["content"] == [{"type": "text", "text": "old"}]
-
-
-def test_strip_and_append_empty_thinking_keeps_placeholder_byte_identical() -> None:
-    messages = [
-        {"role": "user", "content": [{"type": "text", "text": "old"}]}
-    ]
-
-    out = _strip_and_append(messages, "", '{"type":"do","action":"back"}')
-
-    assert (
-        out[-1]["content"]
-        == "<think...></think...>\n<answer>{\"type\":\"do\",\"action\":\"back\"}</answer>"
-    )
 
 
 def test_think_flows_plan_to_assistant_history(base_state, fake_device) -> None:
@@ -289,73 +256,75 @@ def test_think_flows_plan_to_assistant_history(base_state, fake_device) -> None:
 
 
 # --------------------------------------------------------------------------
-# messages_reducer compatibility with the new formats (P0 #6)
+# image stripping edge cases (P0 #3: only the current screenshot is kept)
 # --------------------------------------------------------------------------
 
 
-def test_messages_reducer_replace_survives_real_think_wrapper() -> None:
-    existing = [
-        {"role": "system", "content": "sys"},
-        {"role": "user", "content": "old"},
+def _user_message(*items: tuple[str, str]) -> dict:
+    return {"role": "user", "content": [dict(type=kind, **payload) for kind, payload in items]}
+
+
+def test_remove_images_strips_every_historical_image_and_keeps_text() -> None:
+    message = _user_message(
+        ("text", {"text": "before"}),
+        ("image_url", {"image_url": {"url": "data:image/png;base64,old-1"}}),
+        ("text", {"text": "middle"}),
+        ("image_url", {"image_url": {"url": "data:image/png;base64,old-2"}}),
+        ("image_url", {"image_url": {"url": "data:image/png;base64,old-3"}}),
+        ("text", {"text": "after"}),
+    )
+
+    stripped = MessageBuilder.remove_images_from_message(dict(message))
+
+    assert stripped["content"] == [
+        {"type": "text", "text": "before"},
+        {"type": "text", "text": "middle"},
+        {"type": "text", "text": "after"},
     ]
-    rebuilt = [
-        {"role": "system", "content": "sys"},
-        {"role": "user", "content": "old stripped"},
-        {
-            "role": "assistant",
-            "content": "<think>真实思考</think>\n<answer>{\"type\":\"do\",\"action\":\"back\"}</answer>",
-        },
-    ]
-
-    assert messages_reducer(existing, rebuilt) == rebuilt
-    assert messages_reducer(existing, rebuilt) is rebuilt
+    # the caller (plan node) strips dict copies; state is untouched
+    assert message["content"][1]["type"] == "image_url"
 
 
-def test_messages_reducer_replace_survives_empty_think_placeholder() -> None:
-    existing = [
-        {"role": "system", "content": "sys"},
-        {"role": "user", "content": "old"},
-    ]
-    rebuilt = [
-        {"role": "system", "content": "sys"},
-        {"role": "user", "content": "old stripped"},
-        {
-            "role": "assistant",
-            "content": "<think...></think...>\n<answer>{\"type\":\"do\",\"action\":\"back\"}</answer>",
-        },
-    ]
+def test_remove_images_strips_image_in_middle_of_content_list() -> None:
+    message = _user_message(
+        ("text", {"text": "first"}),
+        ("image_url", {"image_url": {"url": "data"}}),
+        ("text", {"text": "last"}),
+    )
 
-    assert messages_reducer(existing, rebuilt) == rebuilt
+    stripped = MessageBuilder.remove_images_from_message(dict(message))
+
+    assert [item["text"] for item in stripped["content"]] == ["first", "last"]
+    assert all(item["type"] == "text" for item in stripped["content"])
 
 
-def test_messages_reducer_append_survives_progress_note_user_line() -> None:
-    existing = [
-        {"role": "system", "content": "sys"},
-        {"role": "user", "content": "old"},
-    ]
-    new_plan_messages = [
-        {
-            "role": "user",
-            "content": [{"type": "text", "text": "任务：x\n\n上轮意图：已完成上一步"}],
-        }
-    ]
+def test_remove_images_keeps_current_image_when_not_requested() -> None:
+    """The current screenshot message is never passed to the stripper.
 
-    assert messages_reducer(existing, new_plan_messages) == existing + new_plan_messages
+    plan_node strips historical messages only (P0 #3); the latest user message
+    keeps its image_url. Direct stripper input must preserve the message role
+    and any non-image parts untouched.
+    """
+    current = _user_message(
+        ("image_url", {"image_url": {"url": "data:image/png;base64,current"}}),
+        ("text", {"text": "当前屏幕"}),
+    )
+
+    kept = MessageBuilder.remove_images_from_message(dict(current))
+
+    assert kept["role"] == "user"
+    # stripping is applied only to historical messages in plan; a plain-text
+    # assistant message (no content list) passes through unchanged
+    assert kept["content"] == [{"type": "text", "text": "当前屏幕"}]
 
 
-def test_messages_reducer_append_survives_image_content_list() -> None:
-    existing = [{"role": "user", "content": [{"type": "text", "text": "old"}]}]
-    new = [
-        {
-            "role": "user",
-            "content": [
-                {"type": "image_url", "image_url": {"url": "data"}},
-                {"type": "text", "text": "任务：x\n\n上轮意图：y"},
-            ],
-        }
-    ]
+def test_remove_images_passes_through_plain_string_content() -> None:
+    message = {"role": "assistant", "content": "<think>t</think>\n<answer>a</answer>"}
 
-    assert messages_reducer(existing, new) == existing + new
+    stripped = MessageBuilder.remove_images_from_message(message)
+
+    assert stripped == message
+    assert stripped["content"] == "<think>t</think>\n<answer>a</answer>"
 
 
 # --------------------------------------------------------------------------

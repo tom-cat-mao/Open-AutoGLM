@@ -1683,24 +1683,51 @@ def test_parse_reflection_action_structured_json_only() -> None:
     assert malformed.directive_filtered is False
 
 
-def test_parse_reflection_action_filters_directive_messages_cn() -> None:
-    for directive in (
-        "可以输入",
-        "请点击",
-        "请搜索",
-        "请进入",
-        "建议你",
-        "你可以",
-        "应该输入",
-        "应该点击",
-    ):
+@pytest.mark.parametrize(
+    ("lang", "directives"),
+    [
+        (
+            "cn",
+            (
+                "可以输入",
+                "请点击",
+                "请搜索",
+                "请进入",
+                "建议你",
+                "你可以",
+                "应该输入",
+                "应该点击",
+            ),
+        ),
+        (
+            "en",
+            (
+                "should type",
+                "should tap",
+                "should search",
+                "please type",
+                "please tap",
+                "you can type",
+            ),
+        ),
+    ],
+)
+def test_parse_reflection_action_filters_directive_messages(
+    lang: str, directives: tuple[str, ...]
+) -> None:
+    for directive in directives:
+        message = (
+            f"{directive}搜索按钮继续"
+            if lang == "cn"
+            else f"Next, {directive} the search box."
+        )
         parsed = parse_reflection_action(
             json.dumps(
                 {
                     "verdict": "partial",
                     "failure_cause": "unknown",
                     "suggested_strategy": "continue",
-                    "message": f"{directive}搜索按钮继续",
+                    "message": message,
                 },
                 ensure_ascii=False,
             )
@@ -1709,30 +1736,6 @@ def test_parse_reflection_action_filters_directive_messages_cn() -> None:
         assert parsed.directive_filtered is True, directive
         assert parsed.verdict == "partial"
         assert parsed.suggested_strategy == "continue"
-
-
-def test_parse_reflection_action_filters_directive_messages_en() -> None:
-    for directive in (
-        "should type",
-        "should tap",
-        "should search",
-        "please type",
-        "please tap",
-        "you can type",
-    ):
-        parsed = parse_reflection_action(
-            json.dumps(
-                {
-                    "verdict": "partial",
-                    "failure_cause": "unknown",
-                    "suggested_strategy": "continue",
-                    "message": f"Next, {directive} the search box.",
-                }
-            )
-        )
-        assert parsed.message == "", directive
-        assert parsed.directive_filtered is True, directive
-        assert parsed.verdict == "partial"
 
 
 def test_parse_reflection_action_keeps_observation_messages() -> None:
@@ -3627,23 +3630,22 @@ def test_context_selector_does_not_mutate_action_or_hitl_fields(
     assert result["action_confirmed"] is False
 
 
-def test_system_prompt_contains_failure_recovery_map_cn() -> None:
+@pytest.mark.parametrize(
+    ("lang", "markers"),
+    [
+        (
+            "cn",
+            ("失败恢复策略", "failure_cause", "element_not_found", "suggested_strategy"),
+        ),
+        ("en", ("Failure recovery", "failure_cause", "element_not_found")),
+    ],
+)
+def test_system_prompt_contains_failure_recovery_map(lang: str, markers: tuple[str, ...]) -> None:
     from phone_agent.config import get_system_prompt
 
-    prompt = get_system_prompt(lang="cn", output_mode="json_schema")
-    assert "失败恢复策略" in prompt
-    assert "failure_cause" in prompt
-    assert "element_not_found" in prompt
-    assert "suggested_strategy" in prompt
-
-
-def test_system_prompt_contains_failure_recovery_map_en() -> None:
-    from phone_agent.config import get_system_prompt
-
-    prompt = get_system_prompt(lang="en", output_mode="json_schema")
-    assert "Failure recovery" in prompt
-    assert "failure_cause" in prompt
-    assert "element_not_found" in prompt
+    prompt = get_system_prompt(lang=lang, output_mode="json_schema")
+    for marker in markers:
+        assert marker in prompt
 
 
 def test_step_zero_injects_app_registry_into_system_prompt(

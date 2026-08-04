@@ -17,6 +17,7 @@ from __future__ import annotations
 import base64
 from dataclasses import replace
 from io import BytesIO
+from types import SimpleNamespace
 
 from PIL import Image
 
@@ -574,7 +575,9 @@ def test_d3_locateanything_marks_carry_neutral_label(monkeypatch) -> None:
     monkeypatch.setattr(
         "phone_agent.grounding.locateanything.platform.machine", lambda: "arm64"
     )
-    monkeypatch.setattr("pathlib.Path.exists", lambda self: True)
+    monkeypatch.setattr(
+        provider, "model_path", SimpleNamespace(exists=lambda: True)
+    )
     monkeypatch.setattr(provider, "_prepare_image", lambda screenshot: (object(), "input-hash"))
     monkeypatch.setattr(
         provider,
@@ -606,7 +609,9 @@ def test_d3_observation_marks_block_renders_neutral_label(monkeypatch) -> None:
     monkeypatch.setattr(
         "phone_agent.grounding.locateanything.platform.machine", lambda: "arm64"
     )
-    monkeypatch.setattr("pathlib.Path.exists", lambda self: True)
+    monkeypatch.setattr(
+        provider, "model_path", SimpleNamespace(exists=lambda: True)
+    )
     monkeypatch.setattr(provider, "_prepare_image", lambda screenshot: (object(), "input-hash"))
     monkeypatch.setattr(
         provider,
