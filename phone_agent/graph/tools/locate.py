@@ -10,9 +10,12 @@ plan round can act on a real ``target_mark_id``.
 Fail-closed contract (P0 #9 / P0 #8):
 - single hint, single query, ``structure_mode=off`` semantics: one valid box is
   required; zero boxes → ``no_candidate``, multiple boxes → ``ambiguous``.
-- the screenshot is re-captured and its raw hash must equal the registry hash;
-  a changed screen (hash mismatch) is rejected so marks are never bound to a
-  stale snapshot.
+- atomic observe+query: the screenshot F is captured at execute time and the
+  provider query runs against F. The binding is constructed FROM F
+  (``hash_F``), so any merged mark is bound to the frame the provider actually
+  saw — P0 #9 holds by construction, not by two-frame hash comparison.
+  Screen drift between the plan observation and F never rejects locate; it is
+  recorded as ``observation_drifted`` for diagnostics.
 """
 
 from __future__ import annotations
@@ -55,23 +58,29 @@ class LocateOutcome:
     candidate_count: int = 0
     screen_id: str | None = None
     raw_screenshot_hash: str | None = None
+    observation_drifted: bool = False
 
 
-def _current_binding(state: dict[str, Any]) -> ScreenBinding | None:
-    """Rebuild the screen binding from the CURRENT mark registry.
+def _binding_for_screenshot(
+    state: dict[str, Any],
+    registry: MarkRegistry,
+    screenshot: Any,
+    captured_hash: str,
+) -> ScreenBinding:
+    """Build the atomic locate binding FROM the freshly captured frame F.
 
-    The registry owns the authoritative screen identity; the re-captured
-    screenshot must hash to the same raw bytes (P0 #9) or locate fails closed.
+    The binding carries F's own raw hash (``hash_F``): the provider is queried
+    against F and the merged mark is therefore bound to the frame the provider
+    actually saw. The registry's screen identity (``screen_id`` / semantic id /
+    epoch) is preserved; drift between the plan observation and F is recorded
+    by the caller (``observation_drifted``), never rejected.
     """
 
-    registry = MarkRegistry.from_dict(state.get("mark_registry"))
-    if registry is None or not registry.screen_id:
-        return None
     return ScreenBinding(
         screen_id=registry.screen_id,
-        raw_screenshot_hash=registry.raw_screenshot_hash or "",
-        width=int(state.get("screen_width") or 0),
-        height=int(state.get("screen_height") or 0),
+        raw_screenshot_hash=captured_hash,
+        width=int(getattr(screenshot, "width", 0) or state.get("screen_width") or 0),
+        height=int(getattr(screenshot, "height", 0) or state.get("screen_height") or 0),
         current_app=state.get("current_app"),
         semantic_screen_id=registry.semantic_screen_id,
         observation_epoch=registry.observation_epoch,
@@ -187,25 +196,21 @@ def locate_target(
         )
 
     registry = MarkRegistry.from_dict(state.get("mark_registry"))
-    binding = _current_binding(state)
-    if binding is None:
+    if registry is None:
         return LocateOutcome(
             success=False,
             failure_code="registry_missing",
             message="no mark registry binding for the current screen",
         )
     captured_hash = compute_raw_screenshot_hash(screenshot_b64)
-    if captured_hash != binding.raw_screenshot_hash:
-        # P0 #9: the snapshot changed since the last observation. Registering a
-        # mark against a stale screen would break the hash binding, so locate
-        # fails closed and asks for a re-observation instead.
-        return LocateOutcome(
-            success=False,
-            failure_code="screen_changed",
-            message="screen changed since last observation; re-observe before locate",
-            screen_id=binding.screen_id,
-            raw_screenshot_hash=captured_hash,
-        )
+    # Atomic observe+query (H1): the binding is constructed from F itself, so
+    # screen drift between the plan observation and F is recorded for
+    # diagnostics (observation_drifted), never a rejection. P0 #9 is satisfied
+    # by construction: the mark binds the frame the provider actually saw.
+    binding = _binding_for_screenshot(state, registry, screenshot, captured_hash)
+    observation_drifted = bool(registry.raw_screenshot_hash) and (
+        captured_hash != registry.raw_screenshot_hash
+    )
 
     if _locate_mark_count(registry) >= LOCATE_MAX_MARKS_PER_SCREEN:
         return LocateOutcome(
@@ -217,6 +222,7 @@ def locate_target(
             ),
             screen_id=binding.screen_id,
             raw_screenshot_hash=binding.raw_screenshot_hash,
+            observation_drifted=observation_drifted,
         )
 
     provider = build_locate_provider(configurable)
@@ -227,6 +233,7 @@ def locate_target(
             message="no visual locate provider available",
             screen_id=binding.screen_id,
             raw_screenshot_hash=binding.raw_screenshot_hash,
+            observation_drifted=observation_drifted,
         )
 
     try:
@@ -245,6 +252,7 @@ def locate_target(
             latency_ms=_elapsed_ms(started),
             screen_id=binding.screen_id,
             raw_screenshot_hash=binding.raw_screenshot_hash,
+            observation_drifted=observation_drifted,
         )
 
     latency_ms = _elapsed_ms(started)
@@ -263,6 +271,7 @@ def locate_target(
             candidate_count=candidate_count,
             screen_id=result.screen_id or binding.screen_id,
             raw_screenshot_hash=result.raw_screenshot_hash or binding.raw_screenshot_hash,
+            observation_drifted=observation_drifted,
         )
     if len(marks) != 1:
         # structure_mode=off semantics: exactly one executable box is required.
@@ -281,6 +290,7 @@ def locate_target(
             candidate_count=candidate_count,
             screen_id=result.screen_id or binding.screen_id,
             raw_screenshot_hash=result.raw_screenshot_hash or binding.raw_screenshot_hash,
+            observation_drifted=observation_drifted,
         )
 
     next_index = locate_count + 1
@@ -300,6 +310,7 @@ def locate_target(
             latency_ms=latency_ms,
             screen_id=binding.screen_id,
             raw_screenshot_hash=binding.raw_screenshot_hash,
+            observation_drifted=observation_drifted,
         )
     return LocateOutcome(
         success=True,
@@ -310,6 +321,7 @@ def locate_target(
         candidate_count=candidate_count,
         screen_id=binding.screen_id,
         raw_screenshot_hash=binding.raw_screenshot_hash,
+        observation_drifted=observation_drifted,
     )
 
 
@@ -329,6 +341,7 @@ def trace_safe_payload(outcome: LocateOutcome, *, hint_length: int) -> dict[str,
         "candidate_count": outcome.candidate_count,
         "screen_id": outcome.screen_id,
         "raw_screenshot_hash": outcome.raw_screenshot_hash,
+        "observation_drifted": outcome.observation_drifted,
         "hint_length": hint_length,
         "mark_id": outcome.mark.mark_id if outcome.mark is not None else None,
         "bbox": (

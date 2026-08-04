@@ -14,6 +14,7 @@ from phone_agent.config.policy import (
     CONTINUATION_NOVELTY_NEGATION_STREAK,
     CONTINUATION_WINDOW_STEPS,
     DEFAULT_VERIFICATION_POLICY,
+    LOCATE_MAX_PER_RUN,
 )
 
 REPEATED_ACTION_THRESHOLD = int(
@@ -423,6 +424,11 @@ def build_action_outcome_summary(state: dict[str, Any]) -> dict[str, Any]:
     Free-text fields (``result_message_summary``) are regex-redacted.  No
     key-level stub is applied at write time; stub policy is reserved for the
     checkpoint consumer (``RedactingSerializer``).
+
+    ``failure_code`` and ``locate_count`` give the next plan round's
+    ``last_action_outcome`` an explicit failure reason (H3): locate failures
+    skip reflect, so the execute-side write is the only channel that carries
+    ``grounding_failure_code`` / the attempt count to the plan context.
     """
     action = state.get("action_parsed") or {}
     result = state.get("action_result") or {}
@@ -458,6 +464,8 @@ def build_action_outcome_summary(state: dict[str, Any]) -> dict[str, Any]:
         ),
         "reflection_verdict": state.get("reflection_verdict"),
         "failure_cause": state.get("failure_cause"),
+        "failure_code": state.get("grounding_failure_code") or state.get("failure_cause"),
+        "locate_count": int(state.get("locate_count") or 0),
         "suggested_strategy": state.get("suggested_strategy"),
     }
 
@@ -841,38 +849,80 @@ def _ever_matched_latch(
     return latched
 
 
-def _goal_contract_view(state: dict[str, Any]) -> tuple[str, list[str]]:
-    """Return (contract_id, criterion names) from dict or dataclass contracts."""
+# Auto-verification kinds are satisfiable by deterministic/恒真 checks (e.g.
+# app foreground) regardless of real task progress. H5: continuation branches 2
+# and 3 may only count judge-type criteria (vlm_judge / non-auto, incl.
+# external_probe) so an always-true auto standard cannot self-grant a window.
+AUTO_VERIFICATION_KINDS = frozenset(
+    {
+        "accessibility_text_match",
+        "object_hash_match",
+        "object_rank_match",
+        "app_or_activity_match",
+        "focus_or_keyboard",
+        "toggle_state_match",
+    }
+)
+
+
+def _criterion_verification_kind(criterion: Any) -> str:
+    if isinstance(criterion, dict):
+        return str(criterion.get("verification") or "vlm_judge")
+    return str(getattr(criterion, "verification", None) or "vlm_judge")
+
+
+def _criterion_is_judge_kind(verification: str) -> bool:
+    """Return whether a contract criterion is judge-type (H5).
+
+    Judge-type = verification is not an auto kind (``vlm_judge`` and
+    ``external_probe`` qualify; ``app_or_activity_match`` and the other
+    deterministic checks do not).
+    """
+
+    return str(verification) not in AUTO_VERIFICATION_KINDS
+
+
+def _goal_contract_view(state: dict[str, Any]) -> tuple[str, list[tuple[str, str]]]:
+    """Return (contract_id, [(criterion_name, verification_kind)])."""
 
     contract = state.get("goal_contract")
     if isinstance(contract, dict):
         contract_id = str(contract.get("runtime_reference") or "")
-        names = [
-            str(item.get("name") or "")
+        rows = [
+            (str(item.get("name") or ""), _criterion_verification_kind(item))
             for item in (contract.get("success_criteria") or [])
             if isinstance(item, dict) and item.get("name")
         ]
-        return contract_id, names
+        return contract_id, rows
     if contract is not None:
         contract_id = str(getattr(contract, "task_hash", "") or "")
-        names = [
-            str(item.name)
+        rows = [
+            (str(item.name), _criterion_verification_kind(item))
             for item in getattr(contract, "success_criteria", []) or []
             if getattr(item, "name", None)
         ]
-        return contract_id, names
+        return contract_id, rows
     return "", []
 
 
 def _latched_criterion_count(state: dict[str, Any]) -> int:
-    """Count goal criteria currently pinned by the ever-matched latch."""
+    """Count goal criteria currently pinned by the ever-matched latch.
+
+    H5: only judge-type criteria count toward a continuation latch — an auto
+    standard (e.g. app foreground) that matches regardless of task progress
+    must not grant a new window on its own.
+    """
 
     contract_id, criteria = _goal_contract_view(state)
     ledger = list(state.get("goal_evidence_ledger") or [])
     return sum(
         1
-        for name in criteria
-        if name and _ever_matched_latch(ledger, contract_id=contract_id, criterion_id=name)
+        for name, verification in criteria
+        if name
+        and _criterion_is_judge_kind(verification)
+        and _ever_matched_latch(
+            ledger, contract_id=contract_id, criterion_id=name
+        )
     )
 
 
@@ -883,13 +933,26 @@ def latched_criterion_count(state: dict[str, Any]) -> int:
 
 
 def _judge_near_miss(state: dict[str, Any]) -> bool:
-    """Branch 3: the last acceptance's judge named evidence or hard-confirmed ≥1."""
+    """Branch 3: the last acceptance's judge named judge-type evidence ≥ 1.
+
+    H5: only matched evidence whose criterion is judge-type in the contract
+    counts — auto standards (app_or_activity_match etc.) are excluded, so a
+    window cannot be earned by an always-true app-foreground standard.
+    """
 
     evidence = state.get("finish_validation_evidence")
     if not isinstance(evidence, dict):
         return False
     matched = evidence.get("matched") or evidence.get("matched_terminal_evidence")
-    return isinstance(matched, list) and any(matched)
+    if not isinstance(matched, list) or not matched:
+        return False
+    _, criteria = _goal_contract_view(state)
+    judge_names = {
+        name for name, verification in criteria if _criterion_is_judge_kind(verification)
+    }
+    if not judge_names:
+        return False
+    return any(str(name) in judge_names for name in matched)
 
 
 def _novelty_streak(state: dict[str, Any]) -> int:
@@ -911,9 +974,12 @@ def continuation_credential(state: dict[str, Any]) -> ContinuationCredential:
        ``CONTINUATION_WINDOW_STEPS`` observations (net, so oscillation does not
        grant);
     2. new latch — the ever-matched milestone count grew since the previous
-       window boundary (Goal facts; exempt from novelty negation);
-    3. judge near-miss — the forced acceptance produced non-empty named
-       evidence or at least one hard confirm.
+       window boundary (Goal facts; exempt from novelty negation); H5: only
+       judge-type criteria count — auto standards (app_or_activity_match etc.)
+       are excluded;
+    3. judge near-miss — the forced acceptance produced judge-type named
+       evidence or at least one hard confirm (H5: auto-standard evidence does
+       not count).
     Negation: with no branch 1/3, a novelty streak >= the negation threshold
     (revisiting the same states) denies; branch 2 is never negated.
     """
@@ -955,7 +1021,8 @@ def build_budget_section(state: dict[str, Any], lang: str = "cn") -> str:
 
     Dynamic context only — never system/goal blocks (P5 prefix-cache). Carries
     the three-piece message: remaining steps in this window, continuations
-    granted, and "exhaustion != failure".
+    granted, and "exhaustion != failure". H2: also carries the per-run locate
+    budget so the model sees the remaining locate queries.
     """
 
     max_steps = int(state.get("max_steps") or 0)
@@ -964,11 +1031,14 @@ def build_budget_section(state: dict[str, Any], lang: str = "cn") -> str:
         return ""
     remaining = max(0, max_steps - step_count)
     grants = int(state.get("continuation_count") or 0)
+    locate_count = int(state.get("locate_count") or 0)
+    locate_remaining = max(0, LOCATE_MAX_PER_RUN - locate_count)
     if lang == "en":
         lines = [
             f"Budget: {remaining}/{max_steps} steps left in this window; "
             f"continuations granted {grants}/{CONTINUATION_MAX_GRANTS}."
         ]
+        lines.append(f"locate {locate_remaining}/{LOCATE_MAX_PER_RUN} left")
         lines.append(
             "Budget exhaustion is NOT failure — it only triggers a system "
             "acceptance check. If the goal is actually done, finish now and "
@@ -985,6 +1055,7 @@ def build_budget_section(state: dict[str, Any], lang: str = "cn") -> str:
             f"预算：本窗口剩余 {remaining}/{max_steps} 步；"
             f"已续命 {grants}/{CONTINUATION_MAX_GRANTS} 次。"
         ]
+        lines.append(f"locate 剩余 {locate_remaining}/{LOCATE_MAX_PER_RUN}")
         lines.append(
             "预算耗尽≠失败：它只是触发系统验收；若目标已实际完成请立即 "
             "finish 并点名满足的成功标准；若结构性无法完成请 take_over 说明。"
@@ -994,6 +1065,20 @@ def build_budget_section(state: dict[str, Any], lang: str = "cn") -> str:
     return " ".join(lines)
 
 
+def locate_hint_digest(value: Any) -> str | None:
+    """Return a privacy-safe short digest of a locate hint (H4).
+
+    The raw hint is regex-redacted first (P0 #10: sanitize at write), then
+    sha256-truncated to 8 hex chars, so ``tried_actions`` and repeat keys never
+    carry the query text.
+    """
+
+    if not isinstance(value, str) or not value.strip():
+        return None
+    sanitized = sanitize_context_text_regex(value.strip())
+    return hashlib.sha256(sanitized.encode("utf-8")).hexdigest()[:8]
+
+
 def repeated_action_key(item: dict[str, Any]) -> tuple[Any, ...] | None:
     if not isinstance(item, dict):
         return None
@@ -1001,6 +1086,10 @@ def repeated_action_key(item: dict[str, Any]) -> tuple[Any, ...] | None:
     surface = item.get("surface")
     if not action or surface is None:
         return None
+    if str(action) == "Locate":
+        # H4: Locate has no target center; repeat identity comes from the
+        # (sanitized, digested) query hint on the same surface.
+        return _locate_repeat_key(item, surface)
     center = item.get("target_center")
     if str(action) == "Swipe" and not (
         isinstance(center, (list, tuple)) and len(center) == 2
@@ -1015,6 +1104,15 @@ def repeated_action_key(item: dict[str, Any]) -> tuple[Any, ...] | None:
     if text_identity is None and str(action) in {"Type", "Type_Name"}:
         text_identity = action_text_identity(item.get("text"))
     return (str(action), tuple(center), surface, text_identity)
+
+
+def _locate_repeat_key(
+    item: dict[str, Any], surface: str
+) -> tuple[Any, ...] | None:
+    digest = item.get("hint_digest")
+    if not isinstance(digest, str) or not digest:
+        return None
+    return (str(item.get("action")), surface, digest)
 
 
 def _swipe_repeat_key(
@@ -1088,7 +1186,13 @@ def update_gui_memory(
         memory["screen_transition_stream"] = stream[-10:]
 
     action = state.get("action_parsed") or {}
-    if isinstance(action, dict) and action.get("_metadata") == "do":
+    if isinstance(action, dict) and (
+        action.get("_metadata") == "do" or action.get("action") == "Locate"
+    ):
+        # H4: Locate must enter tried_actions even though it is an internal
+        # intent (its _metadata is not guaranteed "do") — the repeat guard's
+        # counting source needs the entry or repeated locate queries would
+        # never escalate (same treatment as the P3 Swipe fix).
         tried = list(memory.get("tried_actions") or [])
         raw_failure_cause = state.get("failure_cause")
         tried.append(
@@ -1111,6 +1215,9 @@ def update_gui_memory(
                 "end": action_point(action.get("end")),
                 "surface": state_surface_identity(state),
                 "text_identity": action_text_identity(action.get("text")),
+                # H4: locate repeat identity (sanitized hint digest), never the
+                # raw query text.
+                "hint_digest": locate_hint_digest(action.get("target_text_hint")),
                 "result_success": (
                     (state.get("action_result") or {}).get("success")
                     if isinstance(state.get("action_result"), dict)
@@ -1239,6 +1346,10 @@ def build_plan_context_block(
         ),
         "reflection_verdict": state.get("reflection_verdict"),
         "failure_cause": state.get("failure_cause"),
+        # H3: explicit failure code + locate attempt count so a locate failure
+        # (which skips reflect) still renders its reason in the next plan block.
+        "failure_code": state.get("grounding_failure_code") or state.get("failure_cause"),
+        "locate_count": int(state.get("locate_count") or 0),
         "suggested_strategy": plan_safe_strategy,
     }
     raw_advisory = (state.get("action_outcome_summary") or {}).get(

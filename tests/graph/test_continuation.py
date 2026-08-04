@@ -36,6 +36,17 @@ def _contract(runtime_reference: str = "r1", names=("c1", "c2")) -> dict:
     }
 
 
+def _contract_with_verification(verifications: dict[str, str]) -> dict:
+    """Contract whose criteria carry explicit verification metadata (H5)."""
+    return {
+        "runtime_reference": "r1",
+        "success_criteria": [
+            {"name": name, "verification": kind}
+            for name, kind in verifications.items()
+        ],
+    }
+
+
 def _entry(epoch, criterion, status, *, target_app_entered=None) -> dict:
     return {
         "contract_id": "r1",
@@ -194,6 +205,137 @@ def test_credential_rejects_empty_judge_evidence() -> None:
 
 
 # ----------------------------------------------------------------------
+# H5: branches 2/3 count only judge-type criteria (auto standards excluded)
+# ----------------------------------------------------------------------
+
+
+def test_credential_auto_only_latch_does_not_grant() -> None:
+    """H5: an ever-matched auto standard (app_or_activity_match) is 恒真 and
+    must not earn a continuation latch on its own."""
+    ledger = [_entry(1, "c1", "matched", target_app_entered=True)]
+    credential = continuation_credential(
+        _state(
+            goal_contract=_contract_with_verification({"c1": "app_or_activity_match"}),
+            goal_evidence_ledger=ledger,
+            continuation_last_latch_count=0,
+            gui_memory={"task_progress": {"novelty_streak": 0}},
+        )
+    )
+
+    assert credential.granted is False
+    assert "new_latch" not in credential.branches
+    assert credential.reason == "no_progress_evidence"
+
+
+def test_credential_judge_latch_grants() -> None:
+    """H5: an ever-matched judge criterion (vlm_judge) earns the latch."""
+    ledger = [_entry(1, "c1", "matched", target_app_entered=True)]
+    credential = continuation_credential(
+        _state(
+            goal_contract=_contract_with_verification({"c1": "vlm_judge"}),
+            goal_evidence_ledger=ledger,
+            continuation_last_latch_count=0,
+            gui_memory={"task_progress": {"novelty_streak": 0}},
+        )
+    )
+
+    assert credential.granted is True
+    assert "new_latch" in credential.branches
+
+
+def test_credential_mixed_contract_counts_only_judge_latches() -> None:
+    """H5: with an auto + judge contract, only the judge latch counts toward
+    the new_latch comparison."""
+    contract = _contract_with_verification(
+        {"c1": "vlm_judge", "c2": "app_or_activity_match"}
+    )
+    # Only the auto standard latched: no new latch.
+    auto_only = continuation_credential(
+        _state(
+            goal_contract=contract,
+            goal_evidence_ledger=[
+                _entry(1, "c2", "matched", target_app_entered=True)
+            ],
+            continuation_last_latch_count=0,
+        )
+    )
+    assert auto_only.granted is False
+
+    # Both latched: the judge criterion supplies the new latch.
+    both = continuation_credential(
+        _state(
+            goal_contract=contract,
+            goal_evidence_ledger=[
+                _entry(1, "c1", "matched", target_app_entered=True),
+                _entry(1, "c2", "matched", target_app_entered=True),
+            ],
+            continuation_last_latch_count=0,
+        )
+    )
+    assert both.granted is True
+    assert "new_latch" in both.branches
+
+
+def test_credential_judge_near_miss_excludes_auto_evidence() -> None:
+    """H5: near-miss evidence naming only auto-standard criteria is not a
+    judge near-miss."""
+    credential = continuation_credential(
+        _state(
+            goal_contract=_contract_with_verification({"c1": "app_or_activity_match"}),
+            finish_validation_evidence={
+                "matched": ["c1"],
+                "matched_terminal_evidence": ["c1"],
+            },
+        )
+    )
+
+    assert credential.granted is False
+    assert "judge_near_miss" not in credential.branches
+
+
+def test_credential_judge_near_miss_grants_on_judge_evidence() -> None:
+    """H5: near-miss evidence naming a judge-type criterion earns the window."""
+    credential = continuation_credential(
+        _state(
+            goal_contract=_contract_with_verification({"c1": "vlm_judge"}),
+            finish_validation_evidence={
+                "matched": ["c1"],
+                "matched_terminal_evidence": ["c1"],
+            },
+        )
+    )
+
+    assert credential.granted is True
+    assert "judge_near_miss" in credential.branches
+
+
+def test_credential_judge_near_miss_mixed_evidence_needs_one_judge() -> None:
+    """H5: auto evidence alone never grants; adding one judge match does."""
+    contract = _contract_with_verification(
+        {"c1": "vlm_judge", "c2": "app_or_activity_match"}
+    )
+    auto_only = continuation_credential(
+        _state(
+            goal_contract=contract,
+            finish_validation_evidence={"matched": ["c2"], "matched_terminal_evidence": ["c2"]},
+        )
+    )
+    assert auto_only.granted is False
+
+    mixed = continuation_credential(
+        _state(
+            goal_contract=contract,
+            finish_validation_evidence={
+                "matched": ["c1", "c2"],
+                "matched_terminal_evidence": ["c1", "c2"],
+            },
+        )
+    )
+    assert mixed.granted is True
+    assert "judge_near_miss" in mixed.branches
+
+
+# ----------------------------------------------------------------------
 # Negation
 # ----------------------------------------------------------------------
 
@@ -242,6 +384,28 @@ def test_budget_section_marks_impending_exhaustion_at_75_percent() -> None:
 
 def test_budget_section_empty_without_max_steps() -> None:
     assert build_budget_section({"max_steps": 0, "step_count": 0}, lang="cn") == ""
+
+
+def test_budget_section_reports_remaining_locate_budget() -> None:
+    """H2: the budget section carries the per-run locate budget so the model
+    can see how many locate queries remain."""
+    block = build_budget_section(
+        {"max_steps": 20, "step_count": 5, "continuation_count": 1, "locate_count": 1},
+        lang="cn",
+    )
+
+    assert "locate 剩余 2/3" in block
+
+    block_en = build_budget_section(
+        {"max_steps": 20, "step_count": 5, "continuation_count": 1, "locate_count": 3},
+        lang="en",
+    )
+
+    assert "locate 0/3 left" in block_en
+
+
+def test_budget_section_locate_line_absent_without_max_steps() -> None:
+    assert build_budget_section({"max_steps": 0, "locate_count": 0}, lang="cn") == ""
 
 
 # ----------------------------------------------------------------------

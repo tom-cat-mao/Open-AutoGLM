@@ -7,6 +7,10 @@ from phone_agent.config.policy import (
     LOCATE_MAX_MARKS_PER_SCREEN,
     LOCATE_MAX_PER_RUN,
 )
+from phone_agent.graph.context import (
+    build_plan_context_block,
+    locate_hint_digest,
+)
 from phone_agent.graph.edges import after_execute
 from phone_agent.graph.marks import Mark, MarkRegistry, compute_raw_screenshot_hash
 from phone_agent.graph.nodes.execute import execute_node
@@ -15,6 +19,11 @@ from phone_agent.grounding.fake import FakeGroundingProvider
 _SCREEN = "screen-1"
 _RAW = "fake-image"
 _RAW_HASH = compute_raw_screenshot_hash(_RAW)
+_SURFACE = "com.example/.MainActivity"
+
+
+def _observation(surface: str = _SURFACE) -> dict:
+    return {"snapshot": {"foreground_activity": surface}}
 
 
 def _mark_registry(locate_marks: int = 0) -> MarkRegistry:
@@ -128,7 +137,8 @@ def test_execute_locate_no_candidate_fails_closed(base_state, fake_device) -> No
     assert result["grounding_failure_code"] == "grounding_no_candidate"
     assert result["action_receipt"]["dispatch_status"] == "rejected"
     assert "locate_1" not in (result.get("mark_registry") or {}).get("marks", {})
-    assert result.get("locate_count") is None  # never incremented
+    # H2: failed attempts consume the per-run locate budget too.
+    assert result["locate_count"] == 1
     assert fake_device.calls == [("get_screenshot", ("device-1",), {})]
 
 
@@ -179,8 +189,12 @@ def test_execute_locate_per_screen_mark_limit_rejects(base_state, fake_device) -
     assert provider.requests == []
 
 
-def test_execute_locate_screen_changed_fails_closed(base_state, fake_device) -> None:
-    """P0 #9: the re-captured screenshot must hash to the registry snapshot."""
+def test_execute_locate_drifted_screen_registers_mark_atomically(
+    base_state, fake_device
+) -> None:
+    """H1: a drifted frame (F differs from the registry observation) is NOT
+    rejected. The query runs against F, the mark merges onto the same screen_id
+    (with_extra_marks semantics) and the registry is rebound to hash_F."""
     provider = FakeGroundingProvider(bbox=[400, 400, 600, 600])
     state = _state_with_locate(base_state)
     registry = _mark_registry()
@@ -197,9 +211,79 @@ def test_execute_locate_screen_changed_fails_closed(base_state, fake_device) -> 
     result = execute_node(state, _config(provider, fake_device))
 
     assert result["finished"] is False
-    assert result["failure_cause"] == "screen_changed"
-    assert provider.requests == []
-    assert fake_device.calls == [("get_screenshot", ("device-1",), {})]
+    assert result["action_result"]["success"] is True
+    assert result["locate_count"] == 1
+    # Drift is recorded, never a rejection.
+    assert result["observation_drifted"] is True
+    new_registry = MarkRegistry.from_dict(result["mark_registry"])
+    assert new_registry is not None
+    # with_extra_marks semantics: same screen_id, mark merged, version recomputed.
+    assert new_registry.screen_id == _SCREEN
+    assert "locate_1" in new_registry.marks
+    assert new_registry.mark_set_version != registry.mark_set_version
+    # The mark is bound to the frame LA actually saw (hash_F), not the old one.
+    assert new_registry.raw_screenshot_hash == _RAW_HASH
+    assert new_registry.raw_screenshot_hash != registry.raw_screenshot_hash
+    # LA received the F-bound binding.
+    assert provider.requests[0]["screen_binding"]["raw_screenshot_hash"] == _RAW_HASH
+    assert provider.requests[0]["screen_binding"]["screen_id"] == _SCREEN
+
+
+def test_execute_locate_same_frame_stays_bound_and_not_drifted(
+    base_state, fake_device
+) -> None:
+    """H1: when F matches the registry snapshot there is no drift marker and the
+    registry hash is unchanged (rebind is a no-op)."""
+    provider = FakeGroundingProvider(bbox=[400, 400, 600, 600])
+    result = execute_node(_state_with_locate(base_state), _config(provider, fake_device))
+
+    assert result["action_result"]["success"] is True
+    assert result["observation_drifted"] is False
+    new_registry = MarkRegistry.from_dict(result["mark_registry"])
+    assert new_registry is not None
+    assert new_registry.raw_screenshot_hash == _RAW_HASH
+
+
+def test_locate_outcome_reports_drift_for_diagnostics(base_state) -> None:
+    """H1: locate_target itself reports observation_drifted for the drifted
+    frame and keeps it False for a matching frame."""
+    from phone_agent.graph.tools.locate import locate_target
+
+    class _Device:
+        def __init__(self, payload: str) -> None:
+            self.payload = payload
+
+        def get_screenshot(self, device_id=None):
+            return type("Shot", (), {"base64_data": self.payload, "width": 1000, "height": 2000})()
+
+    provider = FakeGroundingProvider(bbox=[400, 400, 600, 600])
+    drifted_state = _state_with_locate(base_state)
+    registry = _mark_registry()
+    registry = MarkRegistry(
+        screen_id=registry.screen_id,
+        marks=registry.marks,
+        semantic_screen_id=registry.semantic_screen_id,
+        observation_epoch=registry.observation_epoch,
+        mark_set_version=registry.mark_set_version,
+        perceptual_hash=registry.perceptual_hash,
+        raw_screenshot_hash=compute_raw_screenshot_hash("old-image"),
+    )
+    drifted_state["mark_registry"] = registry.to_dict()
+    drifted = locate_target(
+        drifted_state,
+        {"configurable": {"device_factory": _Device("fake-image"), "locate_provider": provider}},
+    )
+    assert drifted.success is True
+    assert drifted.observation_drifted is True
+    assert drifted.raw_screenshot_hash == _RAW_HASH
+
+    same_state = _state_with_locate(base_state)
+    same = locate_target(
+        same_state,
+        {"configurable": {"device_factory": _Device("fake-image"), "locate_provider": provider}},
+    )
+    assert same.success is True
+    assert same.observation_drifted is False
 
 
 def test_execute_locate_missing_registry_fails_closed(base_state, fake_device) -> None:
@@ -226,6 +310,118 @@ def test_execute_locate_failure_message_reaches_next_plan_context(
     outcome = result["action_outcome_summary"]
     assert outcome["failure_cause"] == "grounding_no_candidate"
     assert outcome["dispatch_status"] == "rejected"
+
+
+def test_execute_locate_failure_renders_failure_code_in_next_plan_block(
+    base_state, fake_device
+) -> None:
+    """H3: the locate failure branch writes failure_code + attempt count into
+    action_outcome_summary so the next plan round's last_action_outcome renders
+    the failure reason (locate skips reflect)."""
+    provider = FakeGroundingProvider(failure_code="grounding_no_candidate")
+    state = _state_with_locate(base_state)
+    state["observation"] = _observation()
+    state["locate_count"] = 1
+    result = execute_node(state, _config(provider, fake_device))
+
+    assert result["action_outcome_summary"]["failure_code"] == "grounding_no_candidate"
+    assert result["action_outcome_summary"]["locate_count"] == 2
+    # Next round's plan context is the pre-execute state merged with the
+    # execute updates (the real graph reducer flow), so the failure code and
+    # the attempt count both render in last_action_outcome.
+    block, _metrics = build_plan_context_block({**state, **result})
+    assert "grounding_no_candidate" in block
+    assert "Locate" in block
+    assert '"locate_count": 2' in block
+
+
+def test_execute_locate_repeat_guard_rejects_same_query_on_same_surface(
+    base_state, fake_device
+) -> None:
+    """H4: identical locate query on one surface repeats are rejected by the
+    execute repeat guard before any provider call."""
+    provider = FakeGroundingProvider(bbox=[400, 400, 600, 600])
+    state = _state_with_locate(base_state)
+    state["observation"] = _observation()
+    digest = locate_hint_digest("10月1日")
+    assert digest is not None
+    state["gui_memory"] = {
+        "tried_actions": [
+            {"action": "Locate", "surface": _SURFACE, "hint_digest": digest},
+            {"action": "Locate", "surface": _SURFACE, "hint_digest": digest},
+        ]
+    }
+    result = execute_node(state, _config(provider, fake_device))
+
+    assert result["finished"] is False
+    assert result["action_result"]["success"] is False
+    assert result["failure_cause"] == "repeated_action"
+    assert result["repeat_rejected"] is True
+    # The guard fires before the Locate branch: no screenshot, no provider call.
+    assert fake_device.calls == []
+    assert provider.requests == []
+
+
+def test_execute_locate_different_hint_on_same_surface_is_not_a_repeat(
+    base_state, fake_device
+) -> None:
+    """H4: a different query on the same surface has a different digest, so the
+    repeat guard does not fire."""
+    provider = FakeGroundingProvider(bbox=[400, 400, 600, 600])
+    state = _state_with_locate(base_state)
+    state["observation"] = _observation()
+    other_digest = locate_hint_digest("另一个目标")
+    state["gui_memory"] = {
+        "tried_actions": [
+            {"action": "Locate", "surface": _SURFACE, "hint_digest": other_digest},
+            {"action": "Locate", "surface": _SURFACE, "hint_digest": other_digest},
+        ]
+    }
+    result = execute_node(state, _config(provider, fake_device))
+
+    assert result["action_result"]["success"] is True
+    assert result["locate_count"] == 1
+
+
+def test_update_gui_memory_records_locate_with_hint_digest(base_state) -> None:
+    """H4: Locate enters tried_actions (the _metadata == "do" gate is opened for
+    Locate) carrying a sanitized hint digest, never the raw query text."""
+    from phone_agent.graph.context import update_gui_memory
+
+    state = dict(base_state)
+    state["observation"] = _observation()
+    state["action_parsed"] = {
+        "_metadata": "do",
+        "action": "Locate",
+        "target_text_hint": "10月1日",
+    }
+    state["action_result"] = {"success": False, "message": "Locate failed: grounding_no_candidate"}
+    state["failure_cause"] = "grounding_no_candidate"
+    state["step_count"] = 3
+    memory = update_gui_memory(
+        state,
+        current_app="FakeApp",
+        screen_id=_SCREEN,
+        reached_surface=_SURFACE,
+    )
+
+    tried = memory["tried_actions"]
+    assert tried and tried[-1]["action"] == "Locate"
+    assert tried[-1]["surface"] == _SURFACE
+    assert tried[-1]["hint_digest"] == locate_hint_digest("10月1日")
+    assert "10月1日" not in str(tried[-1])
+
+
+def test_locate_repeat_key_is_surface_and_digest_scoped(base_state) -> None:
+    """H4: the Locate repeat key is (Locate, surface, hint_digest): same query on
+    a different surface is not the same key."""
+    from phone_agent.graph.context import repeated_action_key
+
+    digest = locate_hint_digest("10月1日")
+    entry = {"action": "Locate", "surface": _SURFACE, "hint_digest": digest}
+    other_surface = {"action": "Locate", "surface": "com.other/.Activity", "hint_digest": digest}
+    assert repeated_action_key(entry) == ("Locate", _SURFACE, digest)
+    assert repeated_action_key(entry) != repeated_action_key(other_surface)
 
 
 # ----------------------------------------------------------------------

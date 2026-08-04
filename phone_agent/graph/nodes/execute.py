@@ -19,6 +19,7 @@ from phone_agent.graph.context import (
     build_action_outcome_summary,
     context_enabled,
     get_context_mode,
+    locate_hint_digest,
     sanitize_context_payload,
     repeated_action_key,
     state_surface_identity,
@@ -251,6 +252,10 @@ def execute_node(state: "AgentState", config: RunnableConfig) -> dict:
         "target_center": action_target_center(state, action_parsed),
         "surface": state_surface_identity(state),
         "text_identity": action_text_identity(action_parsed.get("text")),
+        # H4: Locate has no target center; the repeat identity comes from the
+        # sanitized hint digest, so repeated locate queries on one surface are
+        # counted by the same guard.
+        "hint_digest": locate_hint_digest(action_parsed.get("target_text_hint")),
         # Swipe geometry (P3 #3): Swipe has no target center, so the repeat
         # guard keys on start/end instead of center.
         "start": action_point(action_parsed.get("start")),
@@ -419,6 +424,15 @@ def execute_node(state: "AgentState", config: RunnableConfig) -> dict:
             "locate_result",
             trace_safe_payload(outcome, hint_length=len(hint)),
         )
+        # H2: the budget counter advances on every attempted locate (success or
+        # failure). Only the hard budget gate itself (locate_budget_exhausted)
+        # does not advance — it is the refusal of further attempts, not one.
+        locate_count = int(state.get("locate_count") or 0)
+        next_locate_count = (
+            locate_count
+            if outcome.failure_code == "locate_budget_exhausted"
+            else locate_count + 1
+        )
         if not outcome.success:
             failure_code = outcome.failure_code or "locate_failed"
             result = ActionResult(
@@ -453,6 +467,10 @@ def execute_node(state: "AgentState", config: RunnableConfig) -> dict:
                 "grounding_error": failure_code,
                 "grounding_failure_code": failure_code,
                 "suggested_strategy": "reobserve",
+                # H2: failures count against the per-run locate budget.
+                "locate_count": next_locate_count,
+                # H1: drift is diagnostics only; never a rejection.
+                "observation_drifted": outcome.observation_drifted,
                 "context_mode": context_mode,
                 **_context_update(
                     result.__dict__,
@@ -460,6 +478,7 @@ def execute_node(state: "AgentState", config: RunnableConfig) -> dict:
                         "action_receipt": receipt.to_dict(),
                         "failure_cause": failure_code,
                         "grounding_failure_code": failure_code,
+                        "locate_count": next_locate_count,
                     },
                 ),
             }
@@ -489,17 +508,32 @@ def execute_node(state: "AgentState", config: RunnableConfig) -> dict:
                 "failure_cause": "registry_missing",
                 "grounding_error": "registry_missing",
                 "grounding_failure_code": "registry_missing",
+                "locate_count": next_locate_count,
+                "observation_drifted": outcome.observation_drifted,
                 "context_mode": context_mode,
                 **_context_update(
                     result.__dict__,
                     {
                         "action_receipt": receipt.to_dict(),
                         "failure_cause": "registry_missing",
+                        "locate_count": next_locate_count,
                     },
                 ),
             }
-        new_registry = registry.with_extra_marks([outcome.mark])
-        locate_count = int(state.get("locate_count") or 0) + 1
+        # H1 atomic merge: with_extra_marks keeps the screen identity and
+        # recomputes mark_set_version; the registry hash is rebound to hash_F
+        # (the frame LA actually saw) so the merged mark is never bound to a
+        # stale snapshot — drift is carried by observation_drifted instead.
+        merged = registry.with_extra_marks([outcome.mark])
+        new_registry = MarkRegistry(
+            screen_id=merged.screen_id,
+            marks=merged.marks,
+            semantic_screen_id=merged.semantic_screen_id,
+            observation_epoch=merged.observation_epoch,
+            mark_set_version=merged.mark_set_version,
+            perceptual_hash=merged.perceptual_hash,
+            raw_screenshot_hash=outcome.raw_screenshot_hash or merged.raw_screenshot_hash,
+        )
         result = ActionResult(
             success=True,
             should_finish=False,
@@ -524,7 +558,8 @@ def execute_node(state: "AgentState", config: RunnableConfig) -> dict:
             "messages": messages,
             "finished": False,
             "mark_registry": new_registry.to_dict(),
-            "locate_count": locate_count,
+            "locate_count": next_locate_count,
+            "observation_drifted": outcome.observation_drifted,
             "failure_cause": None,
             "grounding_error": None,
             "grounding_failure_code": None,
@@ -536,7 +571,8 @@ def execute_node(state: "AgentState", config: RunnableConfig) -> dict:
             },
             "context_mode": context_mode,
             **_context_update(
-                result.__dict__, {"action_receipt": receipt.to_dict()}
+                result.__dict__,
+                {"action_receipt": receipt.to_dict(), "locate_count": next_locate_count},
             ),
         }
 
