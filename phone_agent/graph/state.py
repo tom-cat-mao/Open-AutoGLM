@@ -62,6 +62,9 @@ class AgentState(TypedDict):
 
     # === F1 locate tool 预算 ===
     locate_count: int  # 本 run 已执行 locate 次数（上限 LOCATE_MAX_PER_RUN）
+    invalidated_mark_ids: list[
+        str
+    ]  # S4: locate_* marks invalidated after a failed tap; filtered from marks_block and rejected by grounding
 
     # === F2 窗口预算（earned continuation） ===
     continuation_count: int  # 已授予的续命窗口次数（上限 CONTINUATION_MAX_GRANTS）

@@ -2,7 +2,7 @@
 
 import json
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from langchain_core.runnables import RunnableConfig
 
@@ -143,6 +143,44 @@ def _message_contains_directive(message: str) -> bool:
     return any(marker in message for marker in _DIRECTIVE_CN_MARKERS) or any(
         marker in lowered for marker in _DIRECTIVE_EN_MARKERS
     )
+
+
+def _newly_invalidated_locate_marks(
+    state: dict[str, Any],
+    *,
+    verdict: str,
+    failure_cause: str | None,
+) -> list[str]:
+    """S4: invalidate a tapped ``locate_*`` mark whose tap clearly did not land.
+
+    The empirical failure mode is one wrong LA box tapped repeatedly (burning
+    the locate budget). Only ``locate_*`` marks are invalidated — LA boxes may
+    be wrong; accessibility-origin marks are structural and never invalidated.
+
+    Rules (deliberately narrow; ``partial`` alone is not enough):
+    - verdict ``failed`` → the action did not take effect; the box is suspect.
+    - verdict ``partial`` with ``coordinate_or_tap_offset`` → the page changed
+      but the tap clearly landed at the wrong place; the box is suspect.
+    - anything else (including disputed partial / succeeded) → keep the mark.
+    """
+
+    action = state.get("action_parsed") or {}
+    if str(action.get("action") or "") not in {"Tap", "Double Tap", "Long Press"}:
+        return []
+    grounding_observation = state.get("grounding_observation") or {}
+    if not isinstance(grounding_observation, dict):
+        return []
+    target = grounding_observation.get("target") or {}
+    if not isinstance(target, dict):
+        return []
+    mark_id = str(target.get("mark_id") or "")
+    if not mark_id.startswith("locate_"):
+        return []
+    if verdict == "failed":
+        return [mark_id]
+    if verdict == "partial" and failure_cause == "coordinate_or_tap_offset":
+        return [mark_id]
+    return []
 
 
 @dataclass
@@ -953,6 +991,31 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
     action_succeeded = bool(reflection_fields["action_succeeded"])
     final_verdict = reflection_fields["reflection_verdict"]
     final_failure_cause = reflection_fields.get("failure_cause")
+    # S4: a locate_* mark that was tapped and clearly did not take effect is
+    # invalidated (state + trace) so the same wrong box cannot be re-rendered
+    # into marks_block or re-tapped. The marks stay in the registry (D2
+    # inheritance/versioning untouched); render and grounding filter them.
+    newly_invalidated = _newly_invalidated_locate_marks(
+        state,
+        verdict=str(final_verdict or ""),
+        failure_cause=final_failure_cause,
+    )
+    invalidated_mark_ids = sorted(
+        {str(mark_id) for mark_id in (state.get("invalidated_mark_ids") or [])}
+        | set(newly_invalidated)
+    )
+    if newly_invalidated:
+        emit_trace(
+            config,
+            state,
+            "reflect",
+            "mark_invalidated",
+            {
+                "mark_ids": newly_invalidated,
+                "verdict": final_verdict,
+                "failure_cause": final_failure_cause,
+            },
+        )
     # Reflect judges one action and can never finish the task: only a finish
     # claim routed to the acceptance node can do that. A model that suggests
     # "finish" here is asking to emit a finish action next, not declaring
@@ -1174,6 +1237,7 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
         "goal_evidence_ledger": ledger,
         "goal_agenda": goal_agenda,
         "observation_retry_count": 0,
+        "invalidated_mark_ids": invalidated_mark_ids,
         # Reflect judges a single action and never completes the task; only the
         # acceptance node can set this True, after the goal gate passes.
         "finished": False,

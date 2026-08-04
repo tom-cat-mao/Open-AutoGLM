@@ -12,6 +12,7 @@ from typing import Any
 from phone_agent.actions.constants import BASE_DANGEROUS_FIELDS
 from phone_agent.actions.capability import get_tool_capability
 from phone_agent.actions.ir import ActionIR, to_action_dict
+from phone_agent.graph.marks import SAFE_MARK_ID_RE
 
 
 class ActionValidationError(ValueError):
@@ -38,7 +39,7 @@ ALLOWED_FIELDS_BY_ACTION: dict[str, set[str]] = {
     "Note": {"_metadata", "action", "message"},
     "Call_API": {"_metadata", "action", "message"},
     "Interact": {"_metadata", "action", "message"},
-    "Locate": {"_metadata", "action", "target_text_hint"},
+    "Locate": {"_metadata", "action", "target_text_hint", "scope_mark_id"},
     "Take_over": {"_metadata", "action", "message"},
 }
 CANONICAL_ACTIONS = set(ALLOWED_FIELDS_BY_ACTION)
@@ -98,6 +99,16 @@ def validate_action(action: dict[str, Any] | ActionIR) -> dict[str, Any]:
             raise ActionValidationError("missing_field", "Locate target_text_hint must be non-empty")
         if len(hint) > 240:
             raise ActionValidationError("unsafe_value", "Locate target_text_hint must be <= 240 characters")
+        scope_mark_id = action_dict.get("scope_mark_id")
+        if scope_mark_id is not None:
+            if not isinstance(scope_mark_id, str):
+                raise ActionValidationError("unsafe_value", "Locate scope_mark_id must be a string")
+            scope_mark_id = scope_mark_id.strip()
+            if not scope_mark_id:
+                raise ActionValidationError("missing_field", "Locate scope_mark_id must be non-empty")
+            if not SAFE_MARK_ID_RE.fullmatch(scope_mark_id):
+                raise ActionValidationError("unsafe_value", "Locate scope_mark_id contains unsafe characters")
+            action_dict["scope_mark_id"] = scope_mark_id
     elif action_name == "Launch":
         _require_str(action_dict, "app")
         from phone_agent.config.apps import normalize_app_name

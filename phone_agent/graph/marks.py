@@ -255,7 +255,16 @@ class MarkRegistry:
             "marks": [m.to_trace_dict() for m in self.marks.values()],
         }
 
-    def prompt_block(self, lang: str = "cn") -> str:
+    def prompt_block(self, lang: str = "cn", excluded_mark_ids=None) -> str:
+        """Render the marks block, optionally excluding invalidated mark ids.
+
+        S4: ``excluded_mark_ids`` drops invalidated ``locate_*`` marks from the
+        block the model sees, so a wrong box is never offered as a target
+        again. Rendering only — the registry (and its D2 inheritance/version
+        semantics) is untouched.
+        """
+
+        excluded = {str(mark_id) for mark_id in (excluded_mark_ids or [])}
         if not self.marks:
             return ""
         title = "** Screen Marks (use target_mark_id; do not guess coordinates) **"
@@ -263,6 +272,8 @@ class MarkRegistry:
             title = "** 屏幕标记（使用 target_mark_id，不要猜坐标） **"
         rows = []
         for mark in self.marks.values():
+            if str(mark.mark_id) in excluded:
+                continue
             summary = mark.to_prompt_dict()
             rows.append(
                 f"- {mark.mark_id}: role={summary.get('role') or 'unknown'} "
@@ -271,6 +282,8 @@ class MarkRegistry:
                 f"position={_mark_position_label(mark)} "
                 f"text_summary={summary.get('text_summary')}"
             )
+        if not rows:
+            return ""
         return title + "\n" + "\n".join(rows)
 
 

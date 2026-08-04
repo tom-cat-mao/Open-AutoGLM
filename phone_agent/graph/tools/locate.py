@@ -7,6 +7,17 @@ current screenshot; the grid-level box is merged into the mark registry as a
 ``locate_N`` mark (same screen binding, new ``mark_set_version``) so the next
 plan round can act on a real ``target_mark_id``.
 
+Scoped locate (S2): the action may carry an optional ``scope_mark_id``
+referencing an existing Screen mark (an accessibility container, typically).
+The current screenshot F is then cropped to that mark's bbox (0-1000 -> device
+pixels, expanded by ``LOCATE_SCOPE_PADDING_RATIO`` on each side, clamped to the
+frame) at ORIGINAL resolution, and the provider query runs against the crop
+instead of the downscaled full frame — small/dense targets get both higher
+resolution and a reduced ambiguity set. The provider's crop-local 0-1000 box
+is affinely mapped back to full-screen 0-1000 coordinates before mark
+registration, and the mark still binds F's hash (P0 #9: the binding describes
+the full frame the model will act on, not the internal crop).
+
 Fail-closed contract (P0 #9 / P0 #8):
 - single hint, single query, ``structure_mode=off`` semantics: one valid box is
   required; zero boxes → ``no_candidate``, multiple boxes → ``ambiguous``.
@@ -16,19 +27,25 @@ Fail-closed contract (P0 #9 / P0 #8):
   saw — P0 #9 holds by construction, not by two-frame hash comparison.
   Screen drift between the plan observation and F never rejects locate; it is
   recorded as ``observation_drifted`` for diagnostics.
+- scoped failures (scope mark unknown/invalidated, undecodable crop, degenerate
+  crop region) fail closed: never a silent fallback to a full-frame query.
 """
 
 from __future__ import annotations
 
+import base64
 import time
 from dataclasses import dataclass
-from typing import Any
+from io import BytesIO
+from typing import Any, Sequence
 
 from langchain_core.runnables import RunnableConfig
+from PIL import Image
 
 from phone_agent.config.policy import (
     LOCATE_MAX_MARKS_PER_SCREEN,
     LOCATE_MAX_PER_RUN,
+    LOCATE_SCOPE_PADDING_RATIO,
 )
 from phone_agent.graph.marks import (
     Mark,
@@ -59,6 +76,133 @@ class LocateOutcome:
     screen_id: str | None = None
     raw_screenshot_hash: str | None = None
     observation_drifted: bool = False
+    # S2: scoped-locate diagnostics (trace-safe; mark ids and coordinates only).
+    scope_mark_id: str | None = None
+    # Padded crop region expressed in full-frame 0-1000 space.
+    scope_bbox_1000: tuple[float, float, float, float] | None = None
+    # Crop size in device pixels (the provider input resolution).
+    scope_crop_size_px: tuple[int, int] | None = None
+    # Full-frame size in device pixels the crop was derived from.
+    scope_frame_size_px: tuple[int, int] | None = None
+
+
+@dataclass(frozen=True)
+class ScopedImage:
+    """A cropped region of F, re-encoded, ready for a provider request.
+
+    ``width``/``height`` are the crop's own pixel dimensions; the provider's
+    ``_prepare_image`` thumbnail runs on the crop at original resolution, so a
+    small scope region keeps far more detail than the downscaled full frame.
+    """
+
+    base64_data: str
+    width: int
+    height: int
+    mime_type: str = "image/png"
+
+
+@dataclass(frozen=True)
+class ScopeCrop:
+    """Geometry of a scoped locate crop, for affine back-mapping (S2).
+
+    LA emits boxes normalized to the image it processed (the crop). Because
+    both the crop-local space and the full-frame 0-1000 space are linear
+    scalings of the same device-pixel geometry (and PIL ``thumbnail`` is
+    aspect-preserving), the back-map is an exact affine transform:
+
+    ``full = origin_1000 + box * size_1000 / 1000`` per edge.
+    """
+
+    origin_1000: tuple[float, float]
+    size_1000: tuple[float, float]
+    crop: ScopedImage
+
+    def map_box_to_full(self, box: Sequence[float]) -> tuple[float, float, float, float]:
+        ox, oy = self.origin_1000
+        sx, sy = self.size_1000
+        bx1, by1, bx2, by2 = (float(value) for value in box)
+        return (
+            ox + bx1 * sx / 1000.0,
+            oy + by1 * sy / 1000.0,
+            ox + bx2 * sx / 1000.0,
+            oy + by2 * sy / 1000.0,
+        )
+
+
+def _build_scope_crop(
+    screenshot: Any,
+    *,
+    scope_mark: Mark,
+    width_px: int,
+    height_px: int,
+    padding_ratio: float = LOCATE_SCOPE_PADDING_RATIO,
+) -> ScopeCrop | None:
+    """Crop F to the scope mark's padded, clamped bbox at original resolution.
+
+    Coordinate chain: mark bbox (0-1000) → device pixels via the canonical
+    frame size (state ``screen_width``/``screen_height``, the same dims the tap
+    chain uses for ``convert_relative_to_absolute``) → pad each side by
+    ``padding_ratio * box extent`` → clamp into ``[0, image]`` → crop. Returns
+    ``None`` (fail-closed) when F cannot be decoded as an image or the padded
+    region is degenerate; the caller must never fall back to a full-frame query.
+    """
+
+    raw = getattr(screenshot, "base64_data", None)
+    if not raw or width_px <= 0 or height_px <= 0:
+        return None
+    try:
+        image = Image.open(BytesIO(base64.b64decode(raw))).convert("RGB")
+    except Exception:
+        return None
+    image_w, image_h = image.size
+    if image_w <= 0 or image_h <= 0:
+        return None
+    sx1, sy1, sx2, sy2 = (float(value) for value in scope_mark.bbox)
+    px1, py1 = sx1 * width_px / 1000.0, sy1 * height_px / 1000.0
+    px2, py2 = sx2 * width_px / 1000.0, sy2 * height_px / 1000.0
+    pad_x = max(0.0, (px2 - px1) * padding_ratio)
+    pad_y = max(0.0, (py2 - py1) * padding_ratio)
+    cx1 = int(max(0.0, min(px1 - pad_x, image_w - 1)))
+    cy1 = int(max(0.0, min(py1 - pad_y, image_h - 1)))
+    cx2 = int(min(image_w, max(px2 + pad_x, cx1 + 1)))
+    cy2 = int(min(image_h, max(py2 + pad_y, cy1 + 1)))
+    if cx2 <= cx1 or cy2 <= cy1:
+        return None
+    region = image.crop((cx1, cy1, cx2, cy2))
+    buffered = BytesIO()
+    region.save(buffered, format="PNG")
+    return ScopeCrop(
+        origin_1000=(cx1 / width_px * 1000.0, cy1 / height_px * 1000.0),
+        size_1000=(
+            (cx2 - cx1) / width_px * 1000.0,
+            (cy2 - cy1) / height_px * 1000.0,
+        ),
+        crop=ScopedImage(
+            base64_data=base64.b64encode(buffered.getvalue()).decode("ascii"),
+            width=cx2 - cx1,
+            height=cy2 - cy1,
+        ),
+    )
+
+
+def _scope_failure(
+    failure_code: str,
+    message: str,
+    *,
+    scope_mark_id: str | None,
+    screen_id: str | None,
+    raw_screenshot_hash: str | None,
+    observation_drifted: bool,
+) -> LocateOutcome:
+    return LocateOutcome(
+        success=False,
+        failure_code=failure_code,
+        message=message,
+        scope_mark_id=scope_mark_id,
+        screen_id=screen_id,
+        raw_screenshot_hash=raw_screenshot_hash,
+        observation_drifted=observation_drifted,
+    )
 
 
 def _binding_for_screenshot(
@@ -106,8 +250,16 @@ def _coerce_candidate_mark(
     mark_id: str,
     provider: str,
     text_summary: str | None,
+    bbox_override: Sequence[float] | None = None,
+    center_override: Sequence[float] | None = None,
 ) -> Mark | None:
-    """Convert one provider candidate into a trace-safe registry Mark."""
+    """Convert one provider candidate into a trace-safe registry Mark.
+
+    ``bbox_override``/``center_override`` carry the S2 affine back-mapping for
+    scoped locate: the provider's crop-local box is mapped to full-frame
+    0-1000 before the Mark is constructed, so the coercion path (and its
+    fail-closed validation) stays single.
+    """
 
     if candidate is None:
         return None
@@ -119,6 +271,10 @@ def _coerce_candidate_mark(
         bbox = candidate.bbox
         center = candidate.center
         confidence = candidate.confidence
+    if bbox_override is not None:
+        bbox = list(bbox_override)
+    if center_override is not None:
+        center = list(center_override)
     if not isinstance(bbox, (list, tuple)) or len(bbox) != 4:
         return None
     if not isinstance(center, (list, tuple)) or len(center) != 2:
@@ -161,6 +317,7 @@ def locate_target(
             failure_code="missing_field",
             message="Locate requires a non-empty target_text_hint",
         )
+    scope_mark_id = str(action.get("scope_mark_id") or "").strip() or None
 
     locate_count = int(state.get("locate_count") or 0)
     if locate_count >= LOCATE_MAX_PER_RUN:
@@ -201,7 +358,34 @@ def locate_target(
             success=False,
             failure_code="registry_missing",
             message="no mark registry binding for the current screen",
+            scope_mark_id=scope_mark_id,
         )
+    # S1: the scope mark must exist in the CURRENT registry (P0 #8: only
+    # existing marks may be referenced) and must not be an invalidated
+    # locate_* mark (S4). Both fail closed before any screenshot/provider work.
+    scope_mark: Mark | None = None
+    if scope_mark_id is not None:
+        scope_mark = registry.get(scope_mark_id)
+        if scope_mark is None:
+            return _scope_failure(
+                "scope_mark_unknown",
+                f"scope mark not in registry: {scope_mark_id}",
+                scope_mark_id=scope_mark_id,
+                screen_id=registry.screen_id,
+                raw_screenshot_hash=None,
+                observation_drifted=False,
+            )
+        if scope_mark_id in {
+            str(mark_id) for mark_id in (state.get("invalidated_mark_ids") or [])
+        }:
+            return _scope_failure(
+                "scope_mark_invalidated",
+                f"scope mark has been invalidated: {scope_mark_id}",
+                scope_mark_id=scope_mark_id,
+                screen_id=registry.screen_id,
+                raw_screenshot_hash=None,
+                observation_drifted=False,
+            )
     captured_hash = compute_raw_screenshot_hash(screenshot_b64)
     # Atomic observe+query (H1): the binding is constructed from F itself, so
     # screen drift between the plan observation and F is recorded for
@@ -231,14 +415,50 @@ def locate_target(
             success=False,
             failure_code="provider_unavailable",
             message="no visual locate provider available",
+            scope_mark_id=scope_mark_id,
             screen_id=binding.screen_id,
             raw_screenshot_hash=binding.raw_screenshot_hash,
             observation_drifted=observation_drifted,
         )
 
+    # S2: with a scope, the provider query runs against the high-resolution
+    # crop of F instead of the (internally downscaled) full frame. The crop is
+    # built from the freshly captured F and the binding stays full-frame
+    # (mark still binds hash_F); a failed crop is fail-closed, never a silent
+    # full-frame fallback.
+    provider_screenshot: Any = screenshot
+    scope: ScopeCrop | None = None
+    if scope_mark is not None:
+        width_px = int(
+            state.get("screen_width")
+            or getattr(screenshot, "width", 0)
+            or 0
+        )
+        height_px = int(
+            state.get("screen_height")
+            or getattr(screenshot, "height", 0)
+            or 0
+        )
+        scope = _build_scope_crop(
+            screenshot,
+            scope_mark=scope_mark,
+            width_px=width_px,
+            height_px=height_px,
+        )
+        if scope is None:
+            return _scope_failure(
+                "scope_crop_failed",
+                "scope crop failed: screenshot undecodable or degenerate region",
+                scope_mark_id=scope_mark_id,
+                screen_id=binding.screen_id,
+                raw_screenshot_hash=binding.raw_screenshot_hash,
+                observation_drifted=observation_drifted,
+            )
+        provider_screenshot = scope.crop
+
     try:
         result = provider.provide_marks(
-            screenshot,
+            provider_screenshot,
             binding,
             hints=[MarkProviderHint(text=hint, source="locate")],
             timeout=float(configurable.get("grounding_timeout", 10.0) or 10.0),
@@ -250,6 +470,7 @@ def locate_target(
             message=f"locate provider error: {type(exc).__name__}",
             provider=getattr(provider, "name", None),
             latency_ms=_elapsed_ms(started),
+            scope_mark_id=scope_mark_id,
             screen_id=binding.screen_id,
             raw_screenshot_hash=binding.raw_screenshot_hash,
             observation_drifted=observation_drifted,
@@ -269,6 +490,7 @@ def locate_target(
             provider_input_hash=result.provider_input_hash,
             latency_ms=latency_ms,
             candidate_count=candidate_count,
+            scope_mark_id=scope_mark_id,
             screen_id=result.screen_id or binding.screen_id,
             raw_screenshot_hash=result.raw_screenshot_hash or binding.raw_screenshot_hash,
             observation_drifted=observation_drifted,
@@ -288,18 +510,34 @@ def locate_target(
             provider_input_hash=result.provider_input_hash,
             latency_ms=latency_ms,
             candidate_count=candidate_count,
+            scope_mark_id=scope_mark_id,
             screen_id=result.screen_id or binding.screen_id,
             raw_screenshot_hash=result.raw_screenshot_hash or binding.raw_screenshot_hash,
             observation_drifted=observation_drifted,
         )
 
+    # S2 back-mapping: the provider's single box is normalized to the image it
+    # processed. With a scope that image is the crop R; the box is affinely
+    # mapped back to full-frame 0-1000 (``full = origin_1000 + box * size_1000
+    # / 1000`` per edge) before mark registration. Without a scope the box is
+    # already full-frame and passes through unchanged.
     next_index = locate_count + 1
+    bbox_override: tuple[float, float, float, float] | None = None
+    center_override: tuple[float, float] | None = None
+    if scope is not None:
+        bbox_override = scope.map_box_to_full(marks[0].bbox)
+        center_override = (
+            (bbox_override[0] + bbox_override[2]) / 2.0,
+            (bbox_override[1] + bbox_override[3]) / 2.0,
+        )
     mark = _coerce_candidate_mark(
         marks[0],
         screen_id=binding.screen_id,
         mark_id=f"locate_{next_index}",
         provider=provider_name,
         text_summary=hint,
+        bbox_override=bbox_override,
+        center_override=center_override,
     )
     if mark is None:
         return LocateOutcome(
@@ -308,6 +546,7 @@ def locate_target(
             message="locate candidate could not be coerced into a mark",
             provider=provider_name,
             latency_ms=latency_ms,
+            scope_mark_id=scope_mark_id,
             screen_id=binding.screen_id,
             raw_screenshot_hash=binding.raw_screenshot_hash,
             observation_drifted=observation_drifted,
@@ -319,6 +558,20 @@ def locate_target(
         provider_input_hash=result.provider_input_hash,
         latency_ms=latency_ms,
         candidate_count=candidate_count,
+        scope_mark_id=scope_mark_id,
+        scope_bbox_1000=(
+            scope.map_box_to_full((0.0, 0.0, 1000.0, 1000.0))
+            if scope is not None
+            else None
+        ),
+        scope_crop_size_px=(
+            (scope.crop.width, scope.crop.height) if scope is not None else None
+        ),
+        scope_frame_size_px=(
+            (int(state.get("screen_width") or 0), int(state.get("screen_height") or 0))
+            if scope is not None
+            else None
+        ),
         screen_id=binding.screen_id,
         raw_screenshot_hash=binding.raw_screenshot_hash,
         observation_drifted=observation_drifted,
@@ -332,7 +585,7 @@ def _elapsed_ms(started: float) -> int:
 def trace_safe_payload(outcome: LocateOutcome, *, hint_length: int) -> dict[str, Any]:
     """Build a trace-safe payload for a locate outcome (no hint text)."""
 
-    return {
+    payload = {
         "success": outcome.success,
         "failure_code": outcome.failure_code,
         "provider": outcome.provider,
@@ -355,3 +608,13 @@ def trace_safe_payload(outcome: LocateOutcome, *, hint_length: int) -> dict[str,
             else None
         ),
     }
+    if outcome.scope_mark_id is not None:
+        payload["scope_mark_id"] = outcome.scope_mark_id
+        payload["scope_bbox_1000"] = (
+            [round(v, 2) for v in outcome.scope_bbox_1000]
+            if outcome.scope_bbox_1000 is not None
+            else None
+        )
+        payload["scope_crop_size_px"] = list(outcome.scope_crop_size_px)
+        payload["scope_frame_size_px"] = list(outcome.scope_frame_size_px)
+    return payload

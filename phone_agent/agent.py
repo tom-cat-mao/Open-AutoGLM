@@ -321,6 +321,7 @@ class PhoneAgent:
             "max_steps": self.agent_config.max_steps,
             "lang": self.agent_config.lang,
             "locate_count": 0,
+            "invalidated_mark_ids": [],
             "continuation_count": 0,
             "continuation_last_latch_count": 0,
             "absolute_max_steps": absolute_max_steps(self.agent_config.max_steps),

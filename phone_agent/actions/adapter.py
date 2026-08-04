@@ -61,6 +61,7 @@ INTENT_FIELDS = {
     "object_filter",
     "target_role",
     "target_text_hint",
+    "scope_mark_id",
     "target_text",
     "requires_grounding",
     "text",
@@ -82,7 +83,7 @@ ALLOWED_PROVIDER_FIELDS_BY_ACTION: dict[str, set[str]] = {
     "Note": COMMON_DO_FIELDS | {"text"},
     "Call_API": COMMON_DO_FIELDS | {"text"},
     "Interact": COMMON_DO_FIELDS | {"text"},
-    "Locate": COMMON_DO_FIELDS | {"target_text_hint"},
+    "Locate": COMMON_DO_FIELDS | {"target_text_hint", "scope_mark_id"},
     "Take_over": COMMON_DO_FIELDS | {"text"},
 }
 
@@ -121,6 +122,7 @@ def adapt_json_action(payload: str | dict[str, Any]) -> dict[str, Any]:
                     "object_role",
                     "target_role",
                     "target_text_hint",
+                    "scope_mark_id",
                     "text",
                     "message",
                     "app",

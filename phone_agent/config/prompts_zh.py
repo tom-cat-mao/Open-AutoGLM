@@ -30,7 +30,7 @@ ACTION_SCHEMA = """# Action Schema（唯一动作契约）
 - Back / Home: `{"type":"do","action":"back"}` / `{"type":"do","action":"home"}`。
 - Wait: `{"type":"do","action":"wait","duration":"1 seconds"}`，等待应尽量短，单次不超过 60 seconds。
 - Note / Call_API / Interact: `{"type":"do","action":"note|call_api|interact","message":"..."}`。
-- Locate（内部工具）：`{"type":"intent","action":"locate","target_text_hint":"可见元素的聚焦短描述"}`。传入目标的视觉描述，返回一个可执行 mark（注册进 Screen marks，下一步即可用）。成本：约 2s 延迟；全程限 3 次（预算段显示 "locate 剩余 x/3"）；同一屏幕同一描述重复调用会被拒绝。失败语义：0 框或多框会失败且不产生 mark，失败原因会出现在上一步结果里。`target_text_hint` 只写可见元素的聚焦短描述（建议 ≤64 字符），禁止整句任务、禁止隐私原文（手机号/邮箱/订单号/验证码等）；locate 不会直接执行点击。当 Screen marks 不能覆盖你的目标时可以考虑它。
+- Locate（内部工具）：`{"type":"intent","action":"locate","target_text_hint":"可见元素的聚焦短描述"}`。传入目标的视觉描述，返回一个可执行 mark（注册进 Screen marks，下一步即可用）。成本：约 2s 延迟；全程限 3 次（预算段显示 "locate 剩余 x/3"）；同一屏幕同一描述重复调用会被拒绝。失败语义：0 框或多框会失败且不产生 mark，失败原因会出现在上一步结果里。`target_text_hint` 只写可见元素的聚焦短描述（建议 ≤64 字符），禁止整句任务、禁止隐私原文（手机号/邮箱/订单号/验证码等）；locate 不会直接执行点击。当 Screen marks 不能覆盖你的目标时可以考虑它。可选 `scope_mark_id`：传入一个包含目标的已有 Screen mark（如容器区块），可把搜索范围缩小到该 mark 区域内——目标小或密集时能提高定位准确度。scope 必须引用当前屏幕存在的 mark；裁剪只影响检测范围，返回的 mark 仍是全屏坐标。
 - Take_over: `{"type":"do","action":"take_over","message":"需要用户接管的原因"}`。
 - Finish: `{"type":"finish","message":"任务完成或无法继续的原因","matched_terminal_evidence":["成功标准名1","成功标准名2"]}`。仅在任务目标契约列出了成功标准时才包含 matched_terminal_evidence，点名每个满足的标准。
 """

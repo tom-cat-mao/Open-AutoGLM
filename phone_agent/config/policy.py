@@ -19,6 +19,15 @@ SafetyRoute = Literal["confirm", "takeover"]
 LOCATE_MAX_PER_RUN = 3
 LOCATE_MAX_MARKS_PER_SCREEN = 5
 
+# F1/S2: when a locate query carries an optional ``scope_mark_id``, the current
+# screenshot F is cropped to the scope mark's bbox (0-1000 -> device pixels)
+# expanded by this ratio on EACH of the two sides (5% of the box width per
+# side, 5% of the box height per side -> 110% box total), clamped to the frame,
+# and the visual provider runs on the high-resolution crop instead of the
+# downscaled full frame. Cropping only affects the detection region; the
+# returned mark is mapped back to full-screen 0-1000 coordinates.
+LOCATE_SCOPE_PADDING_RATIO = 0.05
+
 # D2: relaxed locate-inheritance gate. A locate_N mark bound to a previous
 # screen_id may be inherited (re-bound to the new screen_id) only when the
 # semantic screen matches AND (the ax structure digest matches OR the 8x8 mean

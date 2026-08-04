@@ -211,24 +211,31 @@ def _missing_mark_id_from_error(parse_error: str) -> str | None:
     return match.group(1) if match else None
 
 
-def _marks_summary(mark_registry: Any) -> str:
-    """Trace-safe one-line summary of the current registry marks (F-B)."""
+def _marks_summary(mark_registry: Any, excluded_mark_ids=None) -> str:
+    """Trace-safe one-line summary of the current registry marks (F-B).
 
+    S4: invalidated locate marks are excluded so a grounding-retry message
+    never re-offers a box that was already proven wrong.
+    """
+
+    excluded = {str(mark_id) for mark_id in (excluded_mark_ids or [])}
     marks = getattr(mark_registry, "marks", None) or {}
     if not marks:
         return "(none)"
     parts = []
     for mark in marks.values():
+        if str(mark.mark_id) in excluded:
+            continue
         prompt = mark.to_prompt_dict()
         parts.append(
             f"{mark.mark_id}(role={prompt.get('role') or 'unknown'},"
             f"source={prompt.get('source')},text={prompt.get('text_summary')})"
         )
-    return ", ".join(parts)
+    return ", ".join(parts) or "(none)"
 
 
 def _build_grounding_retry_messages(
-    messages: list[dict], parse_error: str, mark_registry: Any
+    messages: list[dict], parse_error: str, mark_registry: Any, excluded_mark_ids=None
 ) -> list[dict]:
     """Append a grounding-retry instruction naming the missing mark and the
     currently available marks (F-B: feedback must carry the missing mark_id
@@ -242,7 +249,7 @@ def _build_grounding_retry_messages(
     if missing_mark_id:
         retry_text += f'Missing mark id: "{missing_mark_id}". '
     retry_text += (
-        f"Available marks: {_marks_summary(mark_registry)}. "
+        f"Available marks: {_marks_summary(mark_registry, excluded_mark_ids=excluded_mark_ids)}. "
         "Retry once and fix the output: reference an existing mark id, or emit "
         "locate to register a new mark. Do not invent coordinates, marks, private "
         "text, or new action semantics."
@@ -404,6 +411,7 @@ def _parse_and_ground_response(
     mark_registry,
     screen_binding: ScreenBinding,
     object_registry=None,
+    invalidated_mark_ids=None,
 ):
     """Parse provider response, optionally ground IntentIR, then validate canonical ActionIR."""
 
@@ -466,6 +474,7 @@ def _parse_and_ground_response(
                 timeout=float(configurable.get("grounding_timeout", 10.0) or 10.0),
                 grounding_metadata=grounding_observation,
                 object_registry=object_registry,
+                invalidated_mark_ids=invalidated_mark_ids,
             )
             parse_metadata = {
                 **parse_metadata,
@@ -965,7 +974,9 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
         )
         if objects_block:
             text_content = f"{text_content}\n\n{objects_block}"
-        marks_block = mark_registry.prompt_block(lang)
+        marks_block = mark_registry.prompt_block(
+            lang, excluded_mark_ids=state.get("invalidated_mark_ids")
+        )
         if marks_block:
             text_content = f"{text_content}\n\n{marks_block}"
         if context_block:
@@ -1005,7 +1016,9 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
         )
         if objects_block:
             text_content = f"{text_content}\n\n{objects_block}"
-        marks_block = mark_registry.prompt_block(lang)
+        marks_block = mark_registry.prompt_block(
+            lang, excluded_mark_ids=state.get("invalidated_mark_ids")
+        )
         if marks_block:
             text_content = f"{text_content}\n\n{marks_block}"
         if context_block:
@@ -1279,6 +1292,7 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
         mark_registry,
         screen_binding,
         object_registry=observation.object_registry,
+        invalidated_mark_ids=state.get("invalidated_mark_ids"),
     )
     retry_count = request_retry_count
     current_error_layer = _layer_for_error(
@@ -1306,7 +1320,8 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
         )
         if current_error_layer == "grounding":
             retry_messages = _build_grounding_retry_messages(
-                request_messages, parse_error, mark_registry
+                request_messages, parse_error, mark_registry,
+                excluded_mark_ids=state.get("invalidated_mark_ids"),
             )
         else:
             retry_messages = _build_parse_retry_messages(request_messages, parse_error)
@@ -1330,6 +1345,7 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
                 mark_registry,
                 screen_binding,
                 object_registry=observation.object_registry,
+                invalidated_mark_ids=state.get("invalidated_mark_ids"),
             )
             parse_metadata = {
                 **retry_metadata,

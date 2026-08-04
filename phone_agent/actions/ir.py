@@ -36,6 +36,7 @@ class IntentDict(TypedDict, total=False):
     _metadata: Literal["intent"]
     action: str
     target_mark_id: str
+    scope_mark_id: str
     target_role: str
     target_text_hint: str
     text: str

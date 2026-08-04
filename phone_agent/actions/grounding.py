@@ -43,6 +43,7 @@ INTENT_ALLOWED_FIELDS = {
     "object_filter",
     "target_role",
     "target_text_hint",
+    "scope_mark_id",
     "requires_grounding",
     "text",
     "message",
@@ -64,6 +65,13 @@ def validate_intent(intent: dict[str, Any]) -> dict[str, Any]:
             raise GroundingError("unsafe_value", "target_mark_id must be a string")
         if not SAFE_MARK_ID_RE.fullmatch(intent["target_mark_id"]):
             raise GroundingError("unsafe_value", "target_mark_id contains unsafe characters")
+    if "scope_mark_id" in intent:
+        if not isinstance(intent["scope_mark_id"], str):
+            raise GroundingError("unsafe_value", "scope_mark_id must be a string")
+        if not intent["scope_mark_id"].strip():
+            raise GroundingError("missing_field", "scope_mark_id must be non-empty")
+        if not SAFE_MARK_ID_RE.fullmatch(intent["scope_mark_id"]):
+            raise GroundingError("unsafe_value", "scope_mark_id contains unsafe characters")
     if "target_object_id" in intent:
         if not isinstance(intent["target_object_id"], str) or not intent["target_object_id"].strip():
             raise GroundingError("unsafe_value", "target_object_id must be a non-empty string")
@@ -99,11 +107,13 @@ def ground_intent_to_action(
     screen_binding: ScreenBinding | None = None, timeout: float | None = None,
     grounding_metadata: dict[str, Any] | None = None,
     object_registry: ObjectRegistry | dict[str, Any] | None = None,
+    invalidated_mark_ids: list[str] | tuple[str, ...] | set[str] | None = None,
 ) -> dict[str, Any]:
     """Compile a validated IntentIR dict into canonical ActionIR dict."""
 
     intent = validate_intent(dict(intent))
     registry = mark_registry if isinstance(mark_registry, MarkRegistry) else MarkRegistry.from_dict(mark_registry)
+    invalidated = {str(mark_id) for mark_id in (invalidated_mark_ids or [])}
     action_name = intent.get("action")
     if not action_name:
         raise GroundingError("missing_field", "intent requires action")
@@ -118,10 +128,32 @@ def ground_intent_to_action(
         hint = intent.get("target_text_hint")
         if not isinstance(hint, str) or not hint.strip():
             raise GroundingError("missing_field", "Locate requires target_text_hint")
+        locate_action: dict[str, Any] = {
+            "_metadata": "do",
+            "action": "Locate",
+            "target_text_hint": hint,
+        }
+        # S1/S4: an optional scope mark must exist in the CURRENT registry and
+        # must not be invalidated (a locate_* mark invalidated after a failed
+        # tap cannot act as a trusted container region either). The format is
+        # enforced by validate_intent; existence is enforced here where the
+        # registry is available — both fail closed through the standard
+        # grounding error path (replan), never a silent full-frame fallback.
+        scope_mark_id = intent.get("scope_mark_id")
+        if scope_mark_id is not None:
+            if registry is None or registry.get(scope_mark_id) is None:
+                raise GroundingError(
+                    "scope_mark_unknown",
+                    f"Locate scope mark not in registry: {scope_mark_id}",
+                )
+            if str(scope_mark_id) in invalidated:
+                raise GroundingError(
+                    "mark_invalidated",
+                    f"Locate scope mark has been invalidated: {scope_mark_id}",
+                )
+            locate_action["scope_mark_id"] = scope_mark_id
         try:
-            return validate_action(
-                {"_metadata": "do", "action": "Locate", "target_text_hint": hint}
-            )
+            return validate_action(locate_action)
         except ActionValidationError as exc:
             raise GroundingError(exc.code, str(exc)) from exc
 
@@ -160,6 +192,11 @@ def ground_intent_to_action(
         mark = registry.get(mark_id)
         if mark is None:
             raise GroundingError("unknown_mark", f"unknown mark: {mark_id}")
+        if str(mark_id) in invalidated:
+            raise GroundingError(
+                "mark_invalidated",
+                f"mark has been invalidated after a failed tap: {mark_id}",
+            )
         if screen_id and mark.screen_id != registry.screen_id:
             raise GroundingError("stale_mark", "mark belongs to another screen")
         if mark.confidence < MARK_CONFIDENCE_THRESHOLD:
