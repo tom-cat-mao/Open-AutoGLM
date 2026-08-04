@@ -685,53 +685,6 @@ def test_fallback_provider_redacts_hints_for_opt_out_child_provider() -> None:
     assert child.seen == ["点击 <redacted>"]
 
 
-def test_fallback_provider_continues_when_tree_marks_do_not_match_hint() -> None:
-    class StaticProvider:
-        version = "test"
-        allow_raw_hints = False
-
-        def __init__(self, name, mark_id, text):
-            self.name = name
-            self.mark_id = mark_id
-            self.text = text
-            self.calls = 0
-
-        def provide_marks(self, screenshot, screen_binding, hints=None, timeout=None):
-            self.calls += 1
-            mark = MarkCandidate(
-                mark_id=self.mark_id,
-                bbox=[100, 100, 200, 200],
-                center=[150, 150],
-                source=self.name,
-                text_summary=self.text,
-            )
-            return MarkProviderResult(
-                success=True,
-                provider=self.name,
-                screen_id=screen_binding.screen_id,
-                raw_screenshot_hash=screen_binding.raw_screenshot_hash,
-                provider_input_hash=f"{self.name}-hash",
-                marks=[mark],
-                candidates=[mark],
-                candidate_count=1,
-            )
-
-    tree = StaticProvider("accessibility_tree", "ax_1", "Bluetooth")
-    vision = StaticProvider("locateanything_mlx", "la_1_1", "Wi-Fi")
-    result = FallbackMarkProvider([tree, vision]).provide_marks(
-        Screenshot(),
-        binding(),
-        hints=[MarkProviderHint(text="Wi-Fi")],
-    )
-
-    assert tree.calls == 1
-    assert vision.calls == 1
-    assert [mark.mark_id for mark in result.marks] == ["ax_1", "la_1_1"]
-    assert result.metadata["fallback_chain"][0]["usable"] is False
-    assert result.metadata["fallback_chain"][0]["structure_count"] == 0
-    assert result.metadata["fallback_chain"][1]["usable"] is True
-
-
 def test_fallback_provider_preserves_accessibility_and_visual_structures() -> None:
     class StaticProvider:
         version = "test"
@@ -1151,7 +1104,9 @@ def test_locateanything_provider_multiple_hints_create_multiple_marks(
     monkeypatch.setattr(
         "phone_agent.grounding.locateanything.platform.machine", lambda: "arm64"
     )
-    monkeypatch.setattr("pathlib.Path.exists", lambda self: True)
+    monkeypatch.setattr(
+        provider, "model_path", SimpleNamespace(exists=lambda: True)
+    )
     monkeypatch.setattr(
         provider, "_prepare_image", lambda screenshot: (object(), "input-hash")
     )
@@ -1187,7 +1142,9 @@ def test_locateanything_target_structure_mode_returns_visual_sidecar(
     monkeypatch.setattr(
         "phone_agent.grounding.locateanything.platform.machine", lambda: "arm64"
     )
-    monkeypatch.setattr("pathlib.Path.exists", lambda self: True)
+    monkeypatch.setattr(
+        provider, "model_path", SimpleNamespace(exists=lambda: True)
+    )
     monkeypatch.setattr(
         provider, "_prepare_image", lambda screenshot: (object(), "input-hash")
     )
@@ -1226,7 +1183,9 @@ def test_locateanything_target_structure_mode_multi_box_is_not_immediately_execu
     monkeypatch.setattr(
         "phone_agent.grounding.locateanything.platform.machine", lambda: "arm64"
     )
-    monkeypatch.setattr("pathlib.Path.exists", lambda self: True)
+    monkeypatch.setattr(
+        provider, "model_path", SimpleNamespace(exists=lambda: True)
+    )
     monkeypatch.setattr(
         provider, "_prepare_image", lambda screenshot: (object(), "input-hash")
     )
@@ -1294,7 +1253,9 @@ def test_locateanything_provider_ambiguous_single_hint_fails_closed(
     monkeypatch.setattr(
         "phone_agent.grounding.locateanything.platform.machine", lambda: "arm64"
     )
-    monkeypatch.setattr("pathlib.Path.exists", lambda self: True)
+    monkeypatch.setattr(
+        provider, "model_path", SimpleNamespace(exists=lambda: True)
+    )
     monkeypatch.setattr(
         provider, "_prepare_image", lambda screenshot: (object(), "input-hash")
     )

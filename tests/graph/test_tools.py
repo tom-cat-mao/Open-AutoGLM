@@ -3,6 +3,8 @@ from __future__ import annotations
 import importlib
 import subprocess
 
+import pytest
+
 from phone_agent.graph.tools import dispatch_tool, get_all_tools
 
 
@@ -66,6 +68,34 @@ def test_dispatch_tool_converts_relative_coordinates_in_tool_layer(fake_device) 
     )
 
     assert fake_device.calls[-1] == ("tap", (540, 600, "device-1"), {})
+
+
+@pytest.mark.parametrize(
+    ("relative", "width", "height", "expected"),
+    [
+        # exact origin
+        ([0, 0], 1080, 2400, (0, 0)),
+        # exact max boundary maps to full pixels
+        ([1000, 1000], 1080, 2400, (1080, 2400)),
+        # mid-range square mapping
+        ([500, 500], 1080, 2400, (540, 1200)),
+        ([500, 250], 1080, 2400, (540, 600)),
+        # int truncation, not rounding: 333/1000*1080 = 359.64
+        ([333, 667], 1080, 2400, (359, 1600)),
+        # out-of-range inputs map proportionally (no clamp): the validator
+        # rejects >1000/<0 upstream, so convert is only reached with 0-1000
+        ([1500, -100], 1080, 2400, (1620, -240)),
+        # non-square aspect: x scales by width, y scales by height
+        ([100, 900], 720, 1280, (72, 1152)),
+        ([333, 667], 720, 1280, (239, 853)),
+    ],
+)
+def test_convert_relative_to_absolute_boundaries(
+    relative: list[int], width: int, height: int, expected: tuple[int, int]
+) -> None:
+    from phone_agent.graph.tools.coords import convert_relative_to_absolute
+
+    assert convert_relative_to_absolute(relative, width, height) == expected
 
 
 def test_gesture_compiler_keeps_relative_coordinates() -> None:

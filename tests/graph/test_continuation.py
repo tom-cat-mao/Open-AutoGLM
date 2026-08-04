@@ -2,6 +2,8 @@
 
 from dataclasses import dataclass, replace
 
+import pytest
+
 from phone_agent.config.policy import (
     CONTINUATION_GRANT_STEPS,
     CONTINUATION_MAX_GRANTS,
@@ -361,25 +363,35 @@ def test_credential_denied_without_any_evidence() -> None:
 # ----------------------------------------------------------------------
 
 
-def test_budget_section_reports_remaining_steps_and_grants() -> None:
-    block = build_budget_section(
-        {"max_steps": 20, "step_count": 5, "continuation_count": 1}, lang="cn"
-    )
+@pytest.mark.parametrize(
+    ("lang", "budget_state", "present", "absent"),
+    [
+        (
+            "cn",
+            {"max_steps": 20, "step_count": 5, "continuation_count": 1},
+            ("剩余 15/20 步", "已续命 1/2 次", "预算耗尽≠失败"),
+            ("将尽",),
+        ),
+        (
+            "en",
+            {"max_steps": 20, "step_count": 15, "continuation_count": 0},
+            ("5/20 steps left", "Budget exhaustion is NOT failure", "nearly exhausted"),
+            (),
+        ),
+    ],
+)
+def test_budget_section_reports_remaining_steps_and_grants(
+    lang: str,
+    budget_state: dict,
+    present: tuple[str, ...],
+    absent: tuple[str, ...],
+) -> None:
+    block = build_budget_section(budget_state, lang=lang)
 
-    assert "剩余 15/20 步" in block
-    assert "已续命 1/2 次" in block
-    assert "预算耗尽≠失败" in block
-    assert "将尽" not in block
-
-
-def test_budget_section_marks_impending_exhaustion_at_75_percent() -> None:
-    block = build_budget_section(
-        {"max_steps": 20, "step_count": 15, "continuation_count": 0}, lang="en"
-    )
-
-    assert "5/20 steps left" in block
-    assert "Budget exhaustion is NOT failure" in block
-    assert "nearly exhausted" in block
+    for marker in present:
+        assert marker in block
+    for marker in absent:
+        assert marker not in block
 
 
 def test_budget_section_empty_without_max_steps() -> None:
