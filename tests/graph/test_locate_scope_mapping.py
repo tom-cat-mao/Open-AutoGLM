@@ -24,6 +24,7 @@ from phone_agent.graph.tools.coords import convert_relative_to_absolute
 from phone_agent.graph.tools.locate import (
     _build_scope_crop,
     locate_target,
+    trace_safe_payload,
 )
 from phone_agent.grounding.fake import FakeGroundingProvider
 
@@ -247,21 +248,24 @@ def test_scoped_locate_queries_crop_and_maps_mark_back(base_state) -> None:
     ) == (frame_w, frame_h)
 
 
-def test_scoped_locate_unscoped_behavior_unchanged(base_state) -> None:
+def test_full_frame_scope_maps_box_identically(base_state) -> None:
+    """P1: scope is mandatory. A full-frame container mark (bbox = the whole
+    screen) produces a clamped full-frame crop, so the provider sees the full
+    frame and the box passes through unchanged (identity mapping)."""
     frame_w, frame_h = 2000, 2000
     png = _png_b64(frame_w, frame_h)
     provider = _RecordingProvider(bbox=[400, 400, 600, 600])
     device = _PNGDevice(png, frame_w, frame_h)
     state = _locate_state(
         base_state, png_b64=png, width=frame_w, height=frame_h,
-        scope_bbox=(200, 200, 400, 400), scope_mark_id=None,
+        scope_bbox=(0, 0, 1000, 1000), scope_mark_id="ax_1",
     )
     outcome = locate_target(state, _config(provider, device))
 
     assert outcome.success is True
-    assert outcome.scope_mark_id is None
-    assert outcome.scope_bbox_1000 is None
-    # Without a scope the provider sees the full frame and the box passes through.
+    assert outcome.scope_mark_id == "ax_1"
+    assert outcome.scope_bbox_1000 == pytest.approx((0.0, 0.0, 1000.0, 1000.0))
+    # Full-frame scope: the provider sees the full frame and the box is identity.
     assert provider.received_size == (frame_w, frame_h)
     assert outcome.mark is not None
     assert outcome.mark.bbox == (400.0, 400.0, 600.0, 600.0)
@@ -383,3 +387,317 @@ def test_locate_scope_then_grounded_tap_lands_on_mapped_coordinates(
     # 456 rel → x=456px; 456 rel over 2000px → y=912px.
     assert convert_relative_to_absolute([456, 456], frame_w, frame_h) == (456, 912)
     assert device.calls[-1] == ("tap", (456, 912, "device-1"), {})
+
+
+# ----------------------------------------------------------------------
+# P1: mandatory scope — form B interval geometry ([start.top, end.top) x
+# container-width | full-width; no end → down to start's container bottom)
+# ----------------------------------------------------------------------
+
+
+def _interval_registry() -> MarkRegistry:
+    """Month-title anchors (TextView, narrow) + a ListView container."""
+
+    return MarkRegistry(
+        screen_id=_SCREEN,
+        marks={
+            "ax_list": Mark(
+                mark_id="ax_list",
+                screen_id=_SCREEN,
+                bbox=(0, 60, 1000, 900),
+                center=(500, 480),
+                source="accessibility",
+                role="ListView",
+                text_summary="日历列表",
+            ),
+            "ax_9": Mark(
+                mark_id="ax_9",
+                screen_id=_SCREEN,
+                bbox=(0, 100, 180, 130),
+                center=(90, 115),
+                source="accessibility",
+                role="TextView",
+                text_summary="2026年10月",
+            ),
+            "ax_23": Mark(
+                mark_id="ax_23",
+                screen_id=_SCREEN,
+                bbox=(0, 700, 200, 730),
+                center=(100, 715),
+                source="accessibility",
+                role="TextView",
+                text_summary="2026年11月",
+            ),
+        },
+        semantic_screen_id="semantic-1",
+        observation_epoch=1,
+        raw_screenshot_hash=compute_raw_screenshot_hash(_png_b64(2000, 2000)),
+    )
+
+
+def _locate_state_form_b(
+    base_state,
+    *,
+    png_b64: str,
+    width: int,
+    height: int,
+    start_mark_id: str,
+    end_mark_id: str | None,
+    registry: MarkRegistry | None = None,
+    lang: str = "cn",
+) -> dict:
+    state = dict(base_state)
+    state["screen_width"] = width
+    state["screen_height"] = height
+    state["lang"] = lang
+    state["mark_registry"] = (registry or _interval_registry()).to_dict()
+    state["locate_count"] = 0
+    action: dict = {
+        "_metadata": "do",
+        "action": "Locate",
+        "target_text_hint": "10月1日",
+        "scope_start_mark_id": start_mark_id,
+    }
+    if end_mark_id is not None:
+        action["scope_end_mark_id"] = end_mark_id
+    state["action_parsed"] = action
+    state["action_raw"] = '{"type":"intent","action":"locate","scope_start_mark_id":"ax_9"}'
+    return state
+
+
+def test_interval_text_anchors_span_full_width_and_vertical_band(base_state) -> None:
+    """Form B with text anchors: region = [start.top, end.top) x full width."""
+    frame_w, frame_h = 2000, 2000
+    png = _png_b64(frame_w, frame_h)
+    provider = _RecordingProvider(bbox=[100, 100, 200, 200])
+    device = _PNGDevice(png, frame_w, frame_h)
+    state = _locate_state_form_b(
+        base_state, png_b64=png, width=frame_w, height=frame_h,
+        start_mark_id="ax_9", end_mark_id="ax_23",
+    )
+    outcome = locate_target(state, _config(provider, device))
+
+    assert outcome.success is True
+    assert outcome.scope_start_mark_id == "ax_9"
+    assert outcome.scope_end_mark_id == "ax_23"
+    # region = [100, 700) x [0, 1000] in 0-1000 space; the reported
+    # scope_bbox_1000 is the PADDED crop region (5% per side): [70, 730].
+    assert outcome.scope_bbox_1000 == pytest.approx((0.0, 70.0, 1000.0, 730.0))
+    # crop px: band 200..1400 (600 units x 2px/unit) + 60px pad per side.
+    assert outcome.scope_crop_size_px == (2000, 1320)
+    # crop-local box [100,100,200,200] mapped back to full-frame 0-1000:
+    # x: 0 + 100*1000/1000 = 100; y: 70 + 100*660/1000 = 136; y2 = 202.
+    assert outcome.mark is not None
+    assert outcome.mark.bbox == pytest.approx((100.0, 136.0, 200.0, 202.0))
+
+
+def test_interval_container_start_uses_container_width(base_state) -> None:
+    """Form B with a container start mark: x-extent = the container bbox."""
+    frame_w, frame_h = 2000, 2000
+    png = _png_b64(frame_w, frame_h)
+    provider = _RecordingProvider(bbox=[500, 500, 600, 600])
+    device = _PNGDevice(png, frame_w, frame_h)
+    state = _locate_state_form_b(
+        base_state, png_b64=png, width=frame_w, height=frame_h,
+        start_mark_id="ax_list", end_mark_id="ax_23",
+    )
+    outcome = locate_target(state, _config(provider, device))
+
+    assert outcome.success is True
+    # region = [60, 700) x [0, 1000] (ax_list spans the full width anyway);
+    # padded y: 60-32=28 .. 700+32=732 (5% of 640).
+    assert outcome.scope_bbox_1000 == pytest.approx((0.0, 28.0, 1000.0, 732.0))
+    assert outcome.scope_crop_size_px == (2000, 1408)
+
+
+def test_interval_without_end_extends_to_start_bottom(base_state) -> None:
+    """Form B without end: region ends at start's own bbox bottom."""
+    frame_w, frame_h = 2000, 2000
+    png = _png_b64(frame_w, frame_h)
+    provider = _RecordingProvider(bbox=[100, 100, 200, 200])
+    device = _PNGDevice(png, frame_w, frame_h)
+    state = _locate_state_form_b(
+        base_state, png_b64=png, width=frame_w, height=frame_h,
+        start_mark_id="ax_9", end_mark_id=None,
+    )
+    outcome = locate_target(state, _config(provider, device))
+
+    assert outcome.success is True
+    assert outcome.scope_start_mark_id == "ax_9"
+    assert outcome.scope_end_mark_id is None
+    # region = [100, 130) x full width (start anchor bottom); padded y:
+    # 98.5 .. 131.5 (5% of 30 = 1.5 each side).
+    assert outcome.scope_bbox_1000 == pytest.approx((0.0, 98.5, 1000.0, 131.5))
+
+
+def test_interval_end_above_start_fails_closed(base_state) -> None:
+    frame_w, frame_h = 2000, 2000
+    png = _png_b64(frame_w, frame_h)
+    provider = _RecordingProvider(bbox=[100, 100, 200, 200])
+    device = _PNGDevice(png, frame_w, frame_h)
+    state = _locate_state_form_b(
+        base_state, png_b64=png, width=frame_w, height=frame_h,
+        start_mark_id="ax_23", end_mark_id="ax_9",  # end above start
+    )
+    outcome = locate_target(state, _config(provider, device))
+    assert outcome.success is False
+    assert outcome.failure_code == "scope_crop_failed"
+    assert provider.requests == []
+
+
+def test_interval_missing_start_fails_closed_without_provider_call(
+    base_state,
+) -> None:
+    frame_w, frame_h = 2000, 2000
+    png = _png_b64(frame_w, frame_h)
+    provider = _RecordingProvider(bbox=[100, 100, 200, 200])
+    device = _PNGDevice(png, frame_w, frame_h)
+    state = _locate_state_form_b(
+        base_state, png_b64=png, width=frame_w, height=frame_h,
+        start_mark_id="ax_missing", end_mark_id="ax_23",
+    )
+    outcome = locate_target(state, _config(provider, device))
+    assert outcome.success is False
+    assert outcome.failure_code == "scope_mark_unknown"
+    assert outcome.scope_start_mark_id == "ax_missing"
+    assert provider.requests == []
+
+
+def test_interval_missing_end_fails_closed_without_provider_call(base_state) -> None:
+    frame_w, frame_h = 2000, 2000
+    png = _png_b64(frame_w, frame_h)
+    provider = _RecordingProvider(bbox=[100, 100, 200, 200])
+    device = _PNGDevice(png, frame_w, frame_h)
+    state = _locate_state_form_b(
+        base_state, png_b64=png, width=frame_w, height=frame_h,
+        start_mark_id="ax_9", end_mark_id="ax_missing",
+    )
+    outcome = locate_target(state, _config(provider, device))
+    assert outcome.success is False
+    assert outcome.failure_code == "scope_mark_unknown"
+    assert outcome.scope_end_mark_id == "ax_missing"
+    assert provider.requests == []
+
+
+def test_interval_cross_screen_end_fails_closed(base_state) -> None:
+    frame_w, frame_h = 2000, 2000
+    png = _png_b64(frame_w, frame_h)
+    provider = _RecordingProvider(bbox=[100, 100, 200, 200])
+    device = _PNGDevice(png, frame_w, frame_h)
+    registry = _interval_registry()
+    other = registry.marks["ax_23"]
+    registry = MarkRegistry(
+        screen_id=_SCREEN,
+        marks={
+            key: (other if key == "ax_23" else mark)
+            for key, mark in registry.marks.items()
+        },
+        semantic_screen_id=registry.semantic_screen_id,
+        observation_epoch=registry.observation_epoch,
+        raw_screenshot_hash=registry.raw_screenshot_hash,
+    )
+    # Rebuild with the end mark bound to another screen.
+    from dataclasses import replace
+
+    other_screen = replace(other, screen_id="screen-other")
+    registry = MarkRegistry(
+        screen_id=_SCREEN,
+        marks={**registry.marks, "ax_23": other_screen},
+        semantic_screen_id=registry.semantic_screen_id,
+        observation_epoch=registry.observation_epoch,
+        raw_screenshot_hash=registry.raw_screenshot_hash,
+    )
+    state = _locate_state_form_b(
+        base_state, png_b64=png, width=frame_w, height=frame_h,
+        start_mark_id="ax_9", end_mark_id="ax_23", registry=registry,
+    )
+    outcome = locate_target(state, _config(provider, device))
+    assert outcome.success is False
+    assert outcome.failure_code == "scope_mark_unknown"
+    assert provider.requests == []
+
+
+def test_interval_no_candidate_message_includes_hint_cn(base_state) -> None:
+    frame_w, frame_h = 2000, 2000
+    png = _png_b64(frame_w, frame_h)
+    provider = _RecordingProvider(failure_code="grounding_no_candidate")
+    device = _PNGDevice(png, frame_w, frame_h)
+    state = _locate_state_form_b(
+        base_state, png_b64=png, width=frame_w, height=frame_h,
+        start_mark_id="ax_9", end_mark_id="ax_23", lang="cn",
+    )
+    outcome = locate_target(state, _config(provider, device))
+    assert outcome.success is False
+    assert outcome.failure_code == "grounding_no_candidate"
+    assert "可调整/扩大 scope 区域后重试" in outcome.message
+
+
+def test_interval_no_candidate_message_includes_hint_en(base_state) -> None:
+    frame_w, frame_h = 2000, 2000
+    png = _png_b64(frame_w, frame_h)
+    provider = _RecordingProvider(failure_code="grounding_no_candidate")
+    device = _PNGDevice(png, frame_w, frame_h)
+    state = _locate_state_form_b(
+        base_state, png_b64=png, width=frame_w, height=frame_h,
+        start_mark_id="ax_9", end_mark_id="ax_23", lang="en",
+    )
+    outcome = locate_target(state, _config(provider, device))
+    assert outcome.success is False
+    assert outcome.failure_code == "grounding_no_candidate"
+    assert "adjust or expand the scope region and retry" in outcome.message
+
+
+def test_interval_ambiguous_message_includes_hint_cn(base_state) -> None:
+    frame_w, frame_h = 2000, 2000
+    png = _png_b64(frame_w, frame_h)
+    provider = _RecordingProvider(
+        bboxes=[[100, 100, 300, 300], [500, 500, 700, 700]]
+    )
+    device = _PNGDevice(png, frame_w, frame_h)
+    state = _locate_state_form_b(
+        base_state, png_b64=png, width=frame_w, height=frame_h,
+        start_mark_id="ax_9", end_mark_id="ax_23", lang="cn",
+    )
+    outcome = locate_target(state, _config(provider, device))
+    assert outcome.success is False
+    assert outcome.failure_code == "grounding_ambiguous"
+    assert "可调整/扩大 scope 区域后重试" in outcome.message
+
+
+def test_interval_missing_scope_fails_closed(base_state) -> None:
+    """P1: a direct locate call without any scope form is rejected."""
+    frame_w, frame_h = 2000, 2000
+    png = _png_b64(frame_w, frame_h)
+    provider = _RecordingProvider(bbox=[100, 100, 200, 200])
+    device = _PNGDevice(png, frame_w, frame_h)
+    state = dict(base_state)
+    state["screen_width"] = frame_w
+    state["screen_height"] = frame_h
+    state["mark_registry"] = _interval_registry().to_dict()
+    state["locate_count"] = 0
+    state["action_parsed"] = {
+        "_metadata": "do",
+        "action": "Locate",
+        "target_text_hint": "10月1日",
+    }
+    outcome = locate_target(state, _config(provider, device))
+    assert outcome.success is False
+    assert outcome.failure_code == "missing_field"
+    assert provider.requests == []
+
+
+def test_interval_trace_payload_carries_scope_ids(base_state) -> None:
+    frame_w, frame_h = 2000, 2000
+    png = _png_b64(frame_w, frame_h)
+    provider = _RecordingProvider(bbox=[100, 100, 200, 200])
+    device = _PNGDevice(png, frame_w, frame_h)
+    state = _locate_state_form_b(
+        base_state, png_b64=png, width=frame_w, height=frame_h,
+        start_mark_id="ax_9", end_mark_id="ax_23",
+    )
+    outcome = locate_target(state, _config(provider, device))
+    payload = trace_safe_payload(outcome, hint_length=len("10月1日"))
+    assert payload["scope_start_mark_id"] == "ax_9"
+    assert payload["scope_end_mark_id"] == "ax_23"
+    assert payload["scope_bbox_1000"] is not None
+    assert payload["scope_crop_size_px"] is not None

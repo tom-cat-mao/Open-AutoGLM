@@ -16,6 +16,7 @@ from phone_agent.graph.goal_requirements import (
     TaskRequirementExtractor,
 )
 from phone_agent.graph.trace import emit_trace
+from phone_agent.config.policy import STAGE_STALL_RECOMPILE_WINDOWS
 
 if TYPE_CHECKING:
     from phone_agent.graph.state import AgentState
@@ -266,6 +267,18 @@ def goal_node(state: "AgentState", config: RunnableConfig) -> dict:
         "contract_adequacy_status": adequacy.status,
         "contract_adequacy_reasons": list(adequacy.reason_codes),
         "needs_recompile": False,
+        # P3: when this compile was a recompile (needs_recompile came in True),
+        # the stall counter restarts from zero and the next K reflect windows
+        # are immune to stage-stall recompiles (debounce). The initial compile
+        # never arms the grace period.
+        **(
+            {
+                "stage_stall_windows": 0,
+                "stage_stall_grace_windows": STAGE_STALL_RECOMPILE_WINDOWS,
+            }
+            if needs_recompile
+            else {}
+        ),
     }
 
 

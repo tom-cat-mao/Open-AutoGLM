@@ -49,3 +49,15 @@ def test_check_model_api_redacts_base_url_on_error(monkeypatch, capsys) -> None:
     assert "user:pass" not in output
     assert "api_key=secret" not in output
     assert "sk-secret" not in output
+
+
+def test_main_unloads_models_after_run_in_finally() -> None:
+    """P2: main.py releases the loaded MLX model when a run ends, on both the
+    single-task path and the interactive loop, inside ``finally`` so exception
+    paths release too."""
+    main = _load_main_module()
+    source = Path(main.__file__).read_text(encoding="utf-8")
+
+    assert "finally:" in source
+    assert source.count("agent.unload_models()") >= 2
+    assert "agent.unload_models()" in source.split("finally:")[1]

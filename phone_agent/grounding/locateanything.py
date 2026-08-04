@@ -69,6 +69,27 @@ class LocateAnythingMLXProvider:
         self._model = None
         self._processor = None
 
+    def unload(self) -> None:
+        """Release the loaded MLX model and clear the MLX cache (RAM fix).
+
+        Lazy loading stays untouched: the next ``provide_marks`` reloads the
+        model from disk, so a singleton provider may be unloaded between runs
+        and reused afterwards. The ``mlx`` import is deferred so non-MLX
+        installs are unaffected (same lazy-import pattern as ``_run_model``).
+        """
+
+        self._model = None
+        self._processor = None
+        try:
+            import mlx.core as mx  # type: ignore
+
+            mx.clear_cache()
+        except Exception:
+            pass
+        import gc
+
+        gc.collect()
+
     def provide_marks(
         self,
         screenshot: Any,

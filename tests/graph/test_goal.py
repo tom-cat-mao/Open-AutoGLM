@@ -666,3 +666,57 @@ def test_validator_rejects_non_list_matched_terminal_evidence() -> None:
                 "matched_terminal_evidence": "not a list",
             }
         )
+
+
+def test_goal_node_recompile_resets_stall_and_arms_grace() -> None:
+    """P3: when goal_node performs a REcompile (needs_recompile came in True),
+    the stage-stall counter restarts from zero and the next K reflect windows
+    are immune (grace armed = STAGE_STALL_RECOMPILE_WINDOWS)."""
+    from phone_agent.config.policy import STAGE_STALL_RECOMPILE_WINDOWS
+
+    runtime_goal = RuntimeGoalContext()
+    initial_state = {
+        "task": "打开设置",
+        "step_count": 0,
+        "lang": "cn",
+        "goal_contract_status": "pending",
+        "needs_recompile": False,
+    }
+    config = {"configurable": {"runtime_goal_context": runtime_goal}}
+    compiled = goal_node(initial_state, config)
+
+    # Recompile round: contract already compiled but reflect flagged stall.
+    recompile_state = {
+        **initial_state,
+        **compiled,
+        "goal_contract_status": "compiled",
+        "needs_recompile": True,
+        "stage_stall_windows": 2,
+        "stage_stall_grace_windows": 0,
+    }
+    result = goal_node(recompile_state, config)
+
+    assert result["needs_recompile"] is False
+    assert result["stage_stall_windows"] == 0
+    assert result["stage_stall_grace_windows"] == STAGE_STALL_RECOMPILE_WINDOWS
+
+
+def test_goal_node_initial_compile_never_arms_grace() -> None:
+    """P3: the INITIAL compile (status pending, needs_recompile False) is not a
+    recompile — no stall reset and no grace period are armed."""
+    state = {
+        "task": "打开设置",
+        "step_count": 0,
+        "lang": "cn",
+        "goal_contract_status": "pending",
+        "needs_recompile": False,
+        "stage_stall_windows": 0,
+        "stage_stall_grace_windows": 0,
+    }
+    config = {"configurable": {"runtime_goal_context": RuntimeGoalContext()}}
+
+    result = goal_node(state, config)
+
+    assert result["needs_recompile"] is False
+    assert "stage_stall_grace_windows" not in result
+    assert "stage_stall_windows" not in result

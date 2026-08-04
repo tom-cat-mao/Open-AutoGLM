@@ -1055,8 +1055,9 @@ def stage_stall_recompile(
     liveness_state: str | None,
     stall_windows: int,
     threshold: int,
-) -> tuple[int, bool]:
-    """Count consecutive stuck non-advancing reflect windows (W2 T6).
+    grace_windows: int = 0,
+) -> tuple[int, bool, int]:
+    """Count consecutive stuck non-advancing reflect windows (W2 T6 + P3).
 
     Pure function: each reflect round feeds (previous window's status, this
     round's status, liveness). A window counts toward the stall streak only
@@ -1066,20 +1067,28 @@ def stage_stall_recompile(
     ``needs_recompile=True`` so the existing replan→goal route recompiles the
     plan. With no plan (``current_status`` None) the streak is always reset.
 
-    Returns ``(new_stall_windows, needs_recompile)``.
+    P3 debounce: the first ``grace_windows`` reflect windows right after a
+    recompile are immune — they never count toward the streak (``stall_windows``
+    stays 0) and cannot trigger another recompile. The grace counter is armed
+    by goal_node when a recompile actually completes and is decremented here;
+    stall counting restarts from zero once it expires.
+
+    Returns ``(new_stall_windows, needs_recompile, new_grace_windows)``.
     """
 
+    if int(grace_windows or 0) > 0:
+        return 0, False, max(0, int(grace_windows) - 1)
     if not isinstance(current_status, dict) or not isinstance(
         previous_status, dict
     ):
-        return 0, False
+        return 0, False, 0
     previous_index = previous_status.get("current_stage_index")
     current_index = current_status.get("current_stage_index")
     advanced = _stage_index_advanced(previous_index, current_index)
     if advanced or str(liveness_state or "") != "stuck":
-        return 0, False
+        return 0, False, 0
     new_count = int(stall_windows or 0) + 1
-    return new_count, new_count >= max(1, int(threshold))
+    return new_count, new_count >= max(1, int(threshold)), 0
 
 
 def _stage_index_advanced(previous: Any, current: Any) -> bool:

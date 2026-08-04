@@ -19,10 +19,27 @@ from pathlib import Path
 from typing import Any
 
 
-ROOT = Path(__file__).resolve().parents[4]
 SKILL_DIR = Path(__file__).resolve().parents[1]
+
+
+def resolve_repo_root() -> Path:
+    """Resolve the Open-AutoGLM repo root.
+
+    The skill ships under ``<repo>/.agents/skills/phone-agent-live-diagnosis/scripts``
+    so ``parents[4]`` is the repo root. ``PHONE_AGENT_REPO_ROOT`` overrides this for
+    callers that invoke the script through symlinks or from a copied tree.
+    """
+
+    override = os.getenv("PHONE_AGENT_REPO_ROOT")
+    if override:
+        path = Path(override).expanduser().resolve()
+        if path.is_dir():
+            return path
+    return Path(__file__).resolve().parents[4]
+
+
+ROOT = resolve_repo_root()
 DEFAULT_OUTPUT_DIR = ROOT / "outputs" / "live-diagnosis"
-ADB_KEYBOARD_SERVICE = "com.android.adbkeyboard/.AdbIME"
 
 
 SOURCE_RULES = [
@@ -47,28 +64,17 @@ SOURCE_RULES = [
         "verify": "在安全页、黑屏页和普通页各运行一次 diagnosis，检查 plan 阶段是否停止且未把占位图继续送入模型。",
     },
     {
-        "signals": {
-            "invalid_json",
-            "parse_error",
-            "unsupported_tool_call",
-            "model_request_failed",
-            "403",
-            "cloudflare",
-            "waf_blocked",
-            "cf_access_partial",
-        },
+        "signals": {"invalid_json", "parse_error", "unsupported_tool_call", "model_request_failed"},
         "layer": "parse",
         "severity": "P1",
         "title": "模型输出或结构化解析失败",
         "files": [
-            "main.py",
-            "evals/run_eval.py",
             "phone_agent/model/client.py",
             "phone_agent/actions/adapter.py",
             "phone_agent/graph/nodes/plan.py",
         ],
-        "suggestion": "核对 output_mode、response_format/tool_calls 聚合、adapter 白名单，以及 PHONE_AGENT_HTTP_HEADERS/USER_AGENT/CF Access 网关配置；失败时只允许格式重试，不应伪装为 finish。",
-        "verify": "用 json_schema/tool_calls/auto 分别运行同一目标，并用同一 base-url/model/header 配置比较 parse_metadata、parse_retry_success 与 HTTP 错误。",
+        "suggestion": "核对 output_mode、response_format/tool_calls 聚合与 adapter 白名单；失败时只允许格式重试，不应伪装为 finish。",
+        "verify": "用 json_schema/tool_calls/auto 分别运行同一目标，比较 parse_metadata 与 parse_retry_success。",
     },
     {
         "signals": {
@@ -85,11 +91,6 @@ SOURCE_RULES = [
             "bad_bbox",
             "provider_unavailable",
             "missing_provider_hash",
-            "visual_object_ambiguous",
-            "visual_object_not_executable",
-            "visual_structure_missing",
-            "visual_structure_partial",
-            "structure_mode_unexpected",
         },
         "layer": "grounding",
         "severity": "P0",
@@ -102,10 +103,9 @@ SOURCE_RULES = [
             "phone_agent/grounding/factory.py",
             "phone_agent/graph/observation.py",
             "phone_agent/graph/marks.py",
-            "phone_agent/graph/objects.py",
         ],
-        "suggestion": "检查 hybrid provider 是否记录 fallback_chain、LocateAnything visual sidecar 参数是否生效、visual selector 是否 eligible；失败不得回退到主 VLM 坐标。",
-        "verify": "分别跑 native 设置页和 WebView/自绘页，并用 --locateanything-structure-mode off/target/screen 对比 accessibility、LocateAnything fallback 与 object_registry_summary。",
+        "suggestion": "检查 hybrid provider 是否记录 fallback_chain、是否只在 hint 可用时停止 fallback；失败不得回退到主 VLM 坐标。",
+        "verify": "分别跑 native 设置页和 WebView/自绘页，确认 accessibility 与 LocateAnything fallback 行为符合预期。",
     },
     {
         "signals": {"unknown_app", "unknown_action", "missing_field", "unsafe_value", "invalid_metadata"},
@@ -127,12 +127,13 @@ SOURCE_RULES = [
         "title": "Safety/HITL 路由异常或需要人工确认",
         "files": [
             "phone_agent/actions/safety.py",
+            "phone_agent/config/policy.py",
             "phone_agent/graph/edges.py",
             "phone_agent/graph/nodes/confirm.py",
             "phone_agent/graph/nodes/takeover.py",
             "phone_agent/graph/nodes/execute.py",
         ],
-        "suggestion": "检查 terminal guard、pending_execute、action_confirmed 和 confirm/takeover 路由顺序，避免 stale interrupt 把终止状态误路由。",
+        "suggestion": "检查 terminal guard、pending_execute、action_confirmed 和 confirm/takeover 路由顺序，避免 stale interrupt 把终止状态误路由；HITL 误触发/漏触发时核对 config/policy.py 的 SafetyPolicyRegistry 分类（policy_match / uncertain_fail_closed）。",
         "verify": "运行敏感 Tap、登录/验证码和用户取消确认 case，确认路由和 hitl_count 准确。",
     },
     {
@@ -142,6 +143,7 @@ SOURCE_RULES = [
         "title": "设备动作执行失败",
         "files": [
             "phone_agent/graph/nodes/execute.py",
+            "phone_agent/actions/receipt.py",
             "phone_agent/graph/tools/coords.py",
             "phone_agent/graph/tools/tap.py",
             "phone_agent/graph/tools/swipe.py",
@@ -150,7 +152,7 @@ SOURCE_RULES = [
             "phone_agent/adb/device.py",
             "phone_agent/adb/input.py",
         ],
-        "suggestion": "检查 0-1000 坐标到像素转换、ADB returncode/stderr、输入法切换和 launch component 解析。",
+        "suggestion": "检查 0-1000 坐标到像素转换、ADB returncode/stderr、输入法切换和 launch component 解析；ActionReceipt 只描述 dispatch，不代表 UI 已跳转，别把 receipt 当作成功证据。",
         "verify": "在不同分辨率设备上运行 Tap/Swipe/Type/Launch case，并记录 ADB stderr。",
     },
     {
@@ -158,6 +160,8 @@ SOURCE_RULES = [
             "model_reflection_failed",
             "repeated_action",
             "network_or_loading",
+            # Emitted from the shared observation capture used by
+            # plan/reflect/acceptance, so it is not acceptance-specific.
             "context_lost",
             "postcondition_unverified",
             "after_observation_unavailable",
@@ -166,41 +170,163 @@ SOURCE_RULES = [
             "verifier_unknown",
             "verifier_failure",
             "focused_editable_or_keyboard_visible",
-            "goal_not_satisfied",
-            "finish_validation_unknown",
-            "finish_validation_failure",
-            "not_named_in_finish_claim",
-            "no_named_evidence_from_reflect",
-            "goal_contract_unavailable",
-            "programmatic_contradiction",
         },
         "layer": "reflection",
         "severity": "P2",
-        "title": "反思、后置条件或最终目标验证不稳定",
+        "title": "单步反思或后置条件校验不稳定",
         "files": [
-            "phone_agent/graph/goal.py",
-            "phone_agent/graph/goal_compiler.py",
-            "phone_agent/graph/goal_evaluator.py",
-            "phone_agent/graph/nodes/goal_node.py",
-            "phone_agent/graph/expected_outcome.py",
             "phone_agent/graph/nodes/reflect.py",
+            "phone_agent/graph/nodes/observation_capture.py",
             "phone_agent/graph/verifier.py",
-            "phone_agent/graph/context.py",
+            "phone_agent/graph/expected_outcome.py",
+            "phone_agent/graph/fact_providers.py",
+            "phone_agent/graph/predicates.py",
         ],
-        "suggestion": "检查 GoalContract、SuccessCriterion、finish.matched_terminal_evidence、GoalEvaluator、ExpectedOutcome 与模型反思 named_evidence 的合并优先级；动态区域变化不能单独证明成功。",
-        "verify": "运行搜索框点击、输入、视频打开和动态首页变化 case，对比 goal_contract、finish_validation、expected_outcome、verifier_evidence 与 reflection_verdict。",
+        "suggestion": "reflect 只回答“这一步动作生效了吗”，不再决定任务是否完成（finish gate 已移入 acceptance 节点）。检查 ExpectedOutcome、matched/missing postconditions、weak_signals 与模型反思的合并优先级；动态区域变化不能单独证明成功。after-observation 由 nodes/observation_capture.py 统一采集并被 reflect/acceptance 共享——若两者对“当前屏幕”判断不一致，先查这里而不是各自节点。",
+        "verify": "运行搜索框点击、输入、视频打开和动态首页变化 case，对比 expected_outcome、verifier_evidence 与 reflection_verdict。",
+    },
+    {
+        "signals": {
+            "goal_not_satisfied",
+            "finish_validation_unknown",
+            "finish_validation_failure",
+            "needs_recompile",
+            # matched_terminal_evidence is intentionally NOT a trigger: it fires
+            # on a clean pass too, and would make every success a P1 finding.
+            "missing_terminal_evidence",
+            "soft_match_accepted",
+            "soft_matched_criteria",
+            "programmatic_contradiction_override",
+            "acceptance_no_contract",
+            "acceptance_hard_veto",
+            "acceptance_error",
+            "pure_evaluation_degraded",
+            "typed_fact_not_yet_collected",
+        },
+        "layer": "acceptance",
+        "severity": "P1",
+        "title": "Finish gate（验收）拒绝或判定不稳定",
+        "files": [
+            "phone_agent/graph/nodes/acceptance.py",
+            "phone_agent/graph/goal_evaluator.py",
+            "phone_agent/graph/goal.py",
+            "phone_agent/graph/verifier.py",
+            "phone_agent/graph/goal_evidence.py",
+            "phone_agent/graph/fact_providers.py",
+            "phone_agent/graph/predicates.py",
+            "phone_agent/graph/nodes/observation_capture.py",
+            "phone_agent/graph/compatibility_adapters.py",
+            "phone_agent/graph/runtime_goal.py",
+        ],
+        "suggestion": "finish gate 住在 nodes/acceptance.py（不是 reflect.py），只在模型声明完成时触发，权威顺序固定为 hard veto > hard confirm > semantic judgement，全程 fail-closed。vlm_judge 标准未在 matched_terminal_evidence 点名即视为 missing（硬门）。acceptance_no_contract 表示没有已编译契约就想验收，属 fail-closed 拒绝，查 goal 层而非此处。acceptance_hard_veto 表示程序信号直接否决完成声明，应信程序侧。needs_recompile 当前无 writer，mid-task 合约切换仅通过 configurable[\"task_goal_contract_override\"]。若 per_criterion 长期停在 typed_fact_not_yet_collected，检查 fact_providers/predicates 的 typed predicate 与 evidence 对齐，并确认 predicate 的 value_domain 与 provider 实际产出同域（编译端曾发过 sha256 而比较端拿 raw text，导致条件恒不可满足）。soft_match_accepted 表示依赖 detail-only 软匹配，需人工确认打开的是正确详情页。",
+        "verify": "跑一个会声明完成的任务（如“打开设置并进入 Wi-Fi 页面”），确认 trace 出现 acceptance 节点的 acceptance_result 事件，且 finish_validation.evidence.per_criterion 中每条 required 标准都有 matched/missing 判定与具体 reason。",
+    },
+    {
+        "signals": {
+            "capability_missing",
+            "capability_unavailable",
+            "capability_rejected",
+        },
+        "layer": "capability",
+        "severity": "P0",
+        "title": "Capability 闸门拒绝动作分发",
+        "files": [
+            "phone_agent/actions/capability.py",
+            "phone_agent/actions/receipt.py",
+            "phone_agent/graph/nodes/execute.py",
+        ],
+        "suggestion": "capability_missing 表示动作没有 ToolCapability 声明（新动作类型未注册）；capability_unavailable 表示声明存在但 implementation_status=unavailable（stub 动作不再报假成功，fail-closed）。检查 CAPABILITY_REGISTRY 是否覆盖该动作名，以及 ActionReceipt 的 dispatch_status；不要为绕过闸门把 stub 标成 implemented。",
+        "verify": "用同一会话分别触发已注册动作和未注册动作名，确认 trace 出现 capability_rejected 事件且 receipt.side_effect_receipt.reason_code 正确。",
+    },
+    {
+        "signals": {
+            "unsupported_semantics",
+            "needs_goal_clarification",
+            "goal_contract_invalid",
+            "goal_approval_replacement_inadequate",
+            "runtime_goal_binding_invalid",
+            "runtime_goal_binding_unavailable",
+            "runtime_goal_context_missing",
+            "task_binding_mismatch",
+            "required_criteria_missing",
+            "predicate_unobservable",
+            "predicate_domain_mismatch",
+            "contract_adequacy_inadequate",
+            "contract_adequacy_needs_clarification",
+            "contract_adequacy_degraded",
+        },
+        "layer": "goal",
+        "severity": "P1",
+        "title": "Goal 契约编译或 adequacy 校验失败",
+        "files": [
+            "phone_agent/graph/nodes/goal_node.py",
+            "phone_agent/graph/goal_requirements.py",
+            "phone_agent/graph/goal_compiler.py",
+            "phone_agent/graph/goal.py",
+            "phone_agent/graph/predicates.py",
+            "phone_agent/graph/fact_providers.py",
+            "phone_agent/graph/goal_binding.py",
+        ],
+        "suggestion": "先分清 adequacy 的三档严重度：structural（inadequate → takeover）、semantic（degraded → 继续跑但验证更弱）、ambiguous（needs_clarification）。STRUCTURAL_REASON_CODES = {task_binding_mismatch, required_criteria_missing, predicate_unobservable, predicate_domain_mismatch}（见 goal_requirements.py）。predicate_unobservable 表示该 predicate 没有任何 fact provider 能产出，predicate_domain_mismatch 表示 predicate 声明的 value_domain（raw_text/digest/identifier/scalar/structured）与 provider 实际产出不同域——这两条是把“契约永不可满足”从运行时潜伏提前到编译期暴露的机制，不要通过放宽 gate 绕过，应修 predicate 绑定或 provider。另一常见根因：任务动词不在 TaskRequirementExtractor._OPERATIONS 关键词表（中英双语有限集合），导致 operation_kind=unknown。先核对 trace 中 task_requirement_set.safe_projection 的 operation_kind/ambiguities；unsupported_semantics 走 takeover，不要降级为静默通过。",
+        "verify": "分别用含表中动词（打开/搜索/播放）和表外动词的任务跑 diagnosis，比较 trace 中 goal_compile_result 的 contract_adequacy status/reason_codes 与 state 的 contract_adequacy_status（注意 result.json 不含该字段，只能从 trace 取）。",
+    },
+    {
+        "signals": {
+            "goal_resume_hmac_mismatch",
+            "goal_resume_rehydration_failed",
+            "goal_resume_untrusted",
+            "trusted_goal_resume_invalid",
+        },
+        "layer": "checkpoint",
+        "severity": "P1",
+        "title": "可信 Goal 恢复（HMAC 绑定）失败",
+        "files": [
+            "phone_agent/checkpoint/goal_resume.py",
+            "phone_agent/checkpoint/serde.py",
+        ],
+        "suggestion": "checkpoint 恢复采用 HMAC 绑定 + fail-closed 重水合；goal_evidence_ledger 在 checkpoint 出口被清空，进度只能从 trusted_goal_resume 投影恢复。若恢复后目标状态丢失，优先核对 HMAC key 是否一致、serde 塌缩是否误删了必要投影。",
+        "verify": "在有 checkpointer 的配置下中断后恢复同一任务，确认 goal_resume 投影可重水合且 evidence ledger 不依赖 checkpoint 内容。",
     },
 ]
 
+# Keyed by rule["layer"] so inserting or reordering SOURCE_RULES cannot silently
+# repoint a layer fallback at the wrong rule (positional indices used to do this).
+_RULES_BY_LAYER = {rule["layer"]: rule for rule in SOURCE_RULES}
+
+DECISION_LOOP_RULE = {
+    "signals": {
+        "repeated_action_detected",
+        "avoid_repeating_ignored",
+        "budget_exhausted_no_finish",
+        "absolute_budget_exhausted",
+        "liveness_stuck",
+        "repeated_failure_count",
+    },
+    "layer": "decision",
+    "severity": "P1",
+    "title": "决策层重复循环：agent 在同一目标/页面上反复动作直至预算耗尽",
+    "files": [
+        "phone_agent/graph/context.py",
+        "phone_agent/graph/edges.py",
+        "phone_agent/graph/nodes/execute.py",
+        "phone_agent/graph/nodes/plan.py",
+    ],
+    "suggestion": "优先核对 execute 层重复目标守卫（repeated_target_loop）是否生效、trajectory_liveness 是否把语义振荡判为 stuck、avoid_repeating 提示是否被模型持续无视；此类失败不是 grounding/执行层故障，不要归因为 reflection。",
+    "verify": "用触发 repeated_action_detected / liveness_stuck 的 trace 重跑诊断，确认 decision finding 取代 reflection 误归因，且 signal_steps 覆盖率达到 confirmed。",
+}
+
 LAYER_FALLBACKS = {
-    "parse": SOURCE_RULES[1],
-    "adapter": SOURCE_RULES[1],
-    "validation": SOURCE_RULES[3],
-    "grounding": SOURCE_RULES[2],
-    "safety": SOURCE_RULES[4],
-    "execution": SOURCE_RULES[5],
-    "reflection": SOURCE_RULES[6],
-    "goal": SOURCE_RULES[6],
+    "parse": _RULES_BY_LAYER["parse"],
+    "adapter": _RULES_BY_LAYER["parse"],
+    "validation": _RULES_BY_LAYER["validation"],
+    "grounding": _RULES_BY_LAYER["grounding"],
+    "safety": _RULES_BY_LAYER["safety"],
+    "execution": _RULES_BY_LAYER["execution"],
+    "reflection": _RULES_BY_LAYER["reflection"],
+    "acceptance": _RULES_BY_LAYER["acceptance"],
+    "capability": _RULES_BY_LAYER["capability"],
+    "goal": _RULES_BY_LAYER["goal"],
+    "checkpoint": _RULES_BY_LAYER["checkpoint"],
     "context": {
         "layer": "context",
         "severity": "P2",
@@ -246,6 +372,7 @@ def main() -> int:
     write_json(task_path, [task_record])
 
     preflight = collect_preflight(args)
+    preflight["reset_app"] = reset_app_on_device(args)
     write_json(run_dir / "preflight.json", preflight)
 
     cmd = build_eval_command(args, task_path, trace_dir)
@@ -261,9 +388,6 @@ def main() -> int:
         shutil.copy2(trace_path, run_dir / "trace.jsonl")
 
     trace_summary = summarize_trace(trace_events)
-    trace_summary["model_gateway"] = preflight.get("model_gateway", {})
-    trace_summary["deprecated_env_warnings"] = preflight.get("deprecated_env_warnings", [])
-    trace_summary["locateanything_structure_mode"] = preflight.get("locateanything_structure_mode", "off")
     write_json(run_dir / "trace_summary.json", trace_summary)
 
     code_findings = build_code_findings(record, trace_summary)
@@ -310,7 +434,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--base-url", default=os.getenv("PHONE_AGENT_BASE_URL", "http://localhost:8000/v1"))
     parser.add_argument("--model", default=os.getenv("PHONE_AGENT_MODEL", "autoglm-phone-9b"))
     parser.add_argument("--apikey", default=os.getenv("PHONE_AGENT_API_KEY", "EMPTY"))
-    parser.add_argument("--user-agent", default=os.getenv("PHONE_AGENT_USER_AGENT"))
     parser.add_argument("--output-mode", choices=["json_schema", "tool_calls", "auto"], default=os.getenv("PHONE_AGENT_OUTPUT_MODE", "json_schema"))
     parser.add_argument("--model-timeout", type=float, default=float(os.getenv("PHONE_AGENT_MODEL_TIMEOUT", "60")))
     parser.add_argument("--model-max-retries", type=int, default=int(os.getenv("PHONE_AGENT_MODEL_MAX_RETRIES", "2")))
@@ -323,21 +446,29 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--accessibility-timeout", type=float, default=float(os.getenv("PHONE_AGENT_ACCESSIBILITY_TIMEOUT", "3.0")))
     parser.add_argument("--accessibility-max-marks", type=int, default=int(os.getenv("PHONE_AGENT_ACCESSIBILITY_MAX_MARKS", "80")))
     parser.add_argument("--locateanything-context-max-chars", type=int, default=int(os.getenv("PHONE_AGENT_LOCATEANYTHING_CONTEXT_MAX_CHARS", "0")))
-    parser.add_argument("--locateanything-structure-mode", choices=["off", "target", "screen"], default=None)
+    parser.add_argument(
+        "--locateanything-structure-mode",
+        choices=["off", "target", "screen"],
+        default=os.getenv("PHONE_AGENT_LOCATEANYTHING_STRUCTURE_MODE", "off"),
+        help="Optional LocateAnything visual structure mode (off | target | screen)",
+    )
     parser.add_argument(
         "--locateanything-max-visual-candidates",
         type=int,
-        default=int(os.getenv("PHONE_AGENT_LOCATEANYTHING_MAX_VISUAL_CANDIDATES", "30")),
+        default=int(os.getenv("PHONE_AGENT_LOCATEANYTHING_MAX_VISUAL_CANDIDATES", "20")),
+        help="Maximum visual sidecar candidates emitted by LocateAnything structure mode",
     )
     parser.add_argument(
         "--locateanything-visual-category-budget",
         type=int,
-        default=int(os.getenv("PHONE_AGENT_LOCATEANYTHING_VISUAL_CATEGORY_BUDGET", "5")),
+        default=int(os.getenv("PHONE_AGENT_LOCATEANYTHING_VISUAL_CATEGORY_BUDGET", "8")),
+        help="Maximum bounded visual categories queried in screen structure mode",
     )
     parser.add_argument(
         "--locateanything-max-structure-calls",
         type=int,
-        default=int(os.getenv("PHONE_AGENT_LOCATEANYTHING_MAX_STRUCTURE_CALLS", "5")),
+        default=int(os.getenv("PHONE_AGENT_LOCATEANYTHING_MAX_STRUCTURE_CALLS", "3")),
+        help="Maximum LocateAnything calls used for screen structure sidecar generation",
     )
     parser.add_argument(
         "--trace-raw-model-response",
@@ -366,6 +497,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--lang", choices=["cn", "en"], default=os.getenv("PHONE_AGENT_LANG", "cn"))
     parser.add_argument("--output-dir", default=str(DEFAULT_OUTPUT_DIR))
     parser.add_argument("--quiet", action="store_true")
+    parser.add_argument(
+        "--reset-app",
+        default=None,
+        help=(
+            "Optional package to clear before the run (adb shell pm clear). "
+            "Defaults to ctrip.android.view for Ctrip/携程 tasks to remove "
+            "recent-search residue."
+        ),
+    )
     args = parser.parse_args()
     if not args.status and not args.target:
         parser.error("target is required unless --status is used")
@@ -387,6 +527,50 @@ def read_status(path: Path) -> dict[str, Any]:
         "state": "status_missing",
         "path": str(target),
         "latest_trace": latest_trace_status(traces) if traces.exists() else {},
+    }
+
+
+def resolve_reset_app(args: argparse.Namespace) -> str | None:
+    """Pick the package to ``pm clear`` before the run (P5 e2e isolation).
+
+    Explicit ``--reset-app`` wins; otherwise Ctrip/携程 tasks default to
+    ``ctrip.android.view`` so a previous run's recent-search residue cannot
+    poison the fresh task. Returns None when no reset applies.
+    """
+
+    if getattr(args, "reset_app", None):
+        return str(args.reset_app).strip() or None
+    target = str(args.target or "")
+    if "携程" in target or "ctrip" in target.casefold():
+        return "ctrip.android.view"
+    return None
+
+
+def reset_app_on_device(args: argparse.Namespace) -> dict[str, Any]:
+    """Run ``adb shell pm clear <package>`` before the eval command.
+
+    Best-effort: a failed clear (adb missing, package missing) is recorded in
+    the preflight diagnostics but never aborts the run — the reset is an
+    isolation aid, not a gate.
+    """
+
+    package = resolve_reset_app(args)
+    if not package:
+        return {"reset_app": None, "performed": False}
+    adb_path = shutil.which("adb")
+    if not adb_path:
+        return {"reset_app": package, "performed": False, "error": "adb_not_found"}
+    cmd = [adb_path]
+    if args.device_id:
+        cmd += ["-s", args.device_id]
+    cmd += ["shell", "pm", "clear", package]
+    result = safe_cmd(cmd, timeout=30)
+    return {
+        "reset_app": package,
+        "performed": result.get("returncode") == 0,
+        "returncode": result.get("returncode"),
+        "stdout": trim(str(result.get("stdout") or ""), 500),
+        "stderr": trim(str(result.get("stderr") or ""), 500),
     }
 
 
@@ -434,90 +618,6 @@ def load_project_env() -> None:
         os.environ[key] = value
 
 
-def model_gateway_summary(args: argparse.Namespace) -> dict[str, Any]:
-    """Return trace-safe model gateway configuration presence."""
-
-    return {
-        "base_url": args.base_url,
-        "model": args.model,
-        "api_key_configured": bool(args.apikey and args.apikey != "EMPTY"),
-        "user_agent_configured": bool(args.user_agent or os.getenv("PHONE_AGENT_USER_AGENT")),
-        "http_headers_configured": bool(os.getenv("PHONE_AGENT_HTTP_HEADERS")),
-        "cf_access_configured": bool(
-            os.getenv("PHONE_AGENT_CF_ACCESS_CLIENT_ID")
-            and os.getenv("PHONE_AGENT_CF_ACCESS_CLIENT_SECRET")
-        ),
-        "cf_access_partial": bool(os.getenv("PHONE_AGENT_CF_ACCESS_CLIENT_ID"))
-        != bool(os.getenv("PHONE_AGENT_CF_ACCESS_CLIENT_SECRET")),
-    }
-
-
-def deprecated_env_warnings() -> list[dict[str, str]]:
-    """Report old environment variables that the current local runtime ignores."""
-
-    warnings = []
-    for key in (
-        "PHONE_AGENT_REMOTE_GROUNDING_BASE_URL",
-        "PHONE_AGENT_REMOTE_GROUNDING_API_KEY",
-        "PHONE_AGENT_REMOTE_GROUNDING_MODEL",
-        "PHONE_AGENT_REMOTE_GROUNDING_PROFILE",
-    ):
-        if os.getenv(key):
-            warnings.append({
-                "key": key,
-                "status": "deprecated_for_current_local_grounding",
-                "replacement": "PHONE_AGENT_GROUNDING_PROVIDER=hybrid with local PHONE_AGENT_LOCATEANYTHING_*",
-            })
-    return warnings
-
-
-def adb_device_selection_check(adb_devices: dict[str, Any], device_id: str | None) -> dict[str, Any]:
-    """Summarize connected ADB device selection without shelling out again."""
-
-    stdout = str(adb_devices.get("stdout") or "")
-    rows = [
-        line.strip()
-        for line in stdout.splitlines()
-        if line.strip() and not line.lower().startswith("list of devices")
-    ]
-    device_rows = [line for line in rows if "\tdevice" in line or " device " in f" {line} "]
-    ids = [line.split()[0] for line in device_rows if line.split()]
-    selected_present = device_id in ids if device_id else None
-    return {
-        "connected_device_count": len(ids),
-        "connected_device_ids": ids[:8],
-        "device_id": device_id,
-        "selected_present": selected_present,
-        "warning": device_selection_warning(ids, device_id),
-    }
-
-
-def device_selection_warning(ids: list[str], device_id: str | None) -> str | None:
-    if device_id and device_id not in ids:
-        return "configured_device_not_found"
-    if not device_id and len(ids) > 1:
-        return "multiple_devices_without_explicit_device_id"
-    if not ids:
-        return "no_adb_device"
-    return None
-
-
-def adb_keyboard_check(default_ime: dict[str, Any], ime_services: dict[str, Any]) -> dict[str, Any]:
-    """Summarize ADB Keyboard installation and activation state."""
-
-    default_value = str(default_ime.get("stdout") or "").strip()
-    services_text = f"{ime_services.get('stdout') or ''}\n{ime_services.get('stderr') or ''}"
-    installed = ADB_KEYBOARD_SERVICE in services_text or "com.android.adbkeyboard" in services_text
-    active = default_value == ADB_KEYBOARD_SERVICE
-    return {
-        "service": ADB_KEYBOARD_SERVICE,
-        "installed_or_visible": installed,
-        "active": active,
-        "default_input_method": default_value,
-        "warning": None if active else ("adb_keyboard_not_installed_or_not_visible" if not installed else "adb_keyboard_not_active"),
-    }
-
-
 def collect_preflight(args: argparse.Namespace) -> dict[str, Any]:
     adb_path = shutil.which("adb")
     python_path = str(ROOT / ".venv" / "bin" / "python") if (ROOT / ".venv" / "bin" / "python").exists() else sys.executable
@@ -530,11 +630,6 @@ def collect_preflight(args: argparse.Namespace) -> dict[str, Any]:
         "output_mode": args.output_mode,
         "context_mode": args.context_mode,
         "grounding_provider": args.grounding_provider,
-        "locateanything_structure_mode": args.locateanything_structure_mode
-        or os.getenv("PHONE_AGENT_LOCATEANYTHING_STRUCTURE_MODE")
-        or "off",
-        "model_gateway": model_gateway_summary(args),
-        "deprecated_env_warnings": deprecated_env_warnings(),
         "checks": {},
     }
     data["checks"]["python_version"] = safe_cmd([python_path, "--version"])
@@ -550,22 +645,12 @@ def collect_preflight(args: argparse.Namespace) -> dict[str, Any]:
     if adb_path:
         data["checks"]["adb_version"] = safe_cmd([adb_path, "version"])
         data["checks"]["adb_devices"] = safe_cmd([adb_path, "devices", "-l"])
-        data["checks"]["device_selection"] = adb_device_selection_check(
-            data["checks"]["adb_devices"],
-            args.device_id,
-        )
         if args.device_id:
             prefix = [adb_path, "-s", args.device_id]
         else:
             prefix = [adb_path]
         data["checks"]["wm_size"] = safe_cmd(prefix + ["shell", "wm", "size"])
         data["checks"]["current_focus"] = safe_cmd(prefix + ["shell", "dumpsys", "window"])
-        data["checks"]["default_input_method"] = safe_cmd(prefix + ["shell", "settings", "get", "secure", "default_input_method"])
-        data["checks"]["ime_services"] = safe_cmd(prefix + ["shell", "dumpsys", "input_method"])
-        data["checks"]["adb_keyboard"] = adb_keyboard_check(
-            data["checks"]["default_input_method"],
-            data["checks"]["ime_services"],
-        )
     return data
 
 
@@ -641,6 +726,14 @@ def build_eval_command(args: argparse.Namespace, task_path: Path, trace_dir: Pat
         str(args.accessibility_max_marks),
         "--locateanything-context-max-chars",
         str(args.locateanything_context_max_chars),
+        "--locateanything-structure-mode",
+        args.locateanything_structure_mode,
+        "--locateanything-max-visual-candidates",
+        str(args.locateanything_max_visual_candidates),
+        "--locateanything-visual-category-budget",
+        str(args.locateanything_visual_category_budget),
+        "--locateanything-max-structure-calls",
+        str(args.locateanything_max_structure_calls),
         "--lang",
         args.lang,
         "--base-url",
@@ -658,20 +751,6 @@ def build_eval_command(args: argparse.Namespace, task_path: Path, trace_dir: Pat
         "--thinking-param",
         args.thinking_param,
     ]
-    if args.user_agent:
-        cmd.extend(["--user-agent", args.user_agent])
-    if args.locateanything_structure_mode:
-        cmd.extend(["--locateanything-structure-mode", args.locateanything_structure_mode])
-    cmd.extend(
-        [
-            "--locateanything-max-visual-candidates",
-            str(args.locateanything_max_visual_candidates),
-            "--locateanything-visual-category-budget",
-            str(args.locateanything_visual_category_budget),
-            "--locateanything-max-structure-calls",
-            str(args.locateanything_max_structure_calls),
-        ]
-    )
     if args.trace_raw_model_response:
         cmd.append("--trace-raw-model-response")
     if args.trace_request_messages:
@@ -712,10 +791,7 @@ def build_env(args: argparse.Namespace) -> dict[str, str]:
     env["PHONE_AGENT_ACCESSIBILITY_TIMEOUT"] = str(args.accessibility_timeout)
     env["PHONE_AGENT_ACCESSIBILITY_MAX_MARKS"] = str(args.accessibility_max_marks)
     env["PHONE_AGENT_LOCATEANYTHING_CONTEXT_MAX_CHARS"] = str(args.locateanything_context_max_chars)
-    if args.user_agent:
-        env["PHONE_AGENT_USER_AGENT"] = args.user_agent
-    if args.locateanything_structure_mode:
-        env["PHONE_AGENT_LOCATEANYTHING_STRUCTURE_MODE"] = args.locateanything_structure_mode
+    env["PHONE_AGENT_LOCATEANYTHING_STRUCTURE_MODE"] = args.locateanything_structure_mode
     env["PHONE_AGENT_LOCATEANYTHING_MAX_VISUAL_CANDIDATES"] = str(args.locateanything_max_visual_candidates)
     env["PHONE_AGENT_LOCATEANYTHING_VISUAL_CATEGORY_BUDGET"] = str(args.locateanything_visual_category_budget)
     env["PHONE_AGENT_LOCATEANYTHING_MAX_STRUCTURE_CALLS"] = str(args.locateanything_max_structure_calls)
@@ -909,7 +985,8 @@ def summarize_trace(events: list[dict[str, Any]]) -> dict[str, Any]:
     verifier = []
     expected_outcomes = []
     finish_validations = []
-    goal_contracts = []
+    acceptance = []
+    goal_compiles = []
     fallback_chains = []
     timeline = []
     for event in events:
@@ -928,21 +1005,37 @@ def summarize_trace(events: list[dict[str, Any]]) -> dict[str, Any]:
         }
         timeline.append(compact)
         steps.setdefault(step, []).append(compact)
-        if "error" in name or payload.get("error_code") or payload.get("failure_cause"):
+        # Routine per-step reflection failures are outcomes, not errors: every
+        # reflect_result carries failure_cause, so including them here makes
+        # every run look error-full. Only real error events and execution /
+        # infrastructure failure codes belong in the errors bucket.
+        if "error" in name or payload.get("error_code") or payload.get("grounding_error_code"):
+            errors.append(compact)
+        elif payload.get("failure_cause") and name != "reflect_result":
             errors.append(compact)
         if payload.get("grounding_error_code") or payload.get("grounding_observation") or payload.get("mark_provider_observation"):
             grounding.append(compact)
             fallback_chains.extend(extract_fallback_chains(payload))
         if payload.get("expected_outcome") or payload.get("parse_metadata", {}).get("expected_outcome_present"):
             expected_outcomes.append(compact)
-        if payload.get("goal_contract") or payload.get("task_goal_contract"):
-            goal_contracts.append(compact)
         if payload.get("finish_validation") or payload.get("finish_validation_status"):
             finish_validations.append(compact)
+        # The finish gate lives in its own `acceptance` node (not reflect), and
+        # some of its fail-closed events carry no error_code/failure_cause at
+        # all (acceptance_no_contract, acceptance_hard_veto). Collect them by
+        # node/event name so a rejected finish is never invisible.
+        if node == "acceptance" or name.startswith("acceptance_"):
+            acceptance.append(compact)
+        # contract_adequacy.reason_codes (structural rejection codes such as
+        # predicate_domain_mismatch) only ever appear on this event.
+        if payload.get("contract_adequacy") or payload.get("requirement_set"):
+            goal_compiles.append(compact)
         if (
             payload.get("verifier_result")
             or payload.get("verifier_status")
             or payload.get("verifier_evidence")
+            or payload.get("finish_validation")
+            or payload.get("finish_validation_evidence")
         ):
             verifier.append(compact)
     return {
@@ -954,8 +1047,9 @@ def summarize_trace(events: list[dict[str, Any]]) -> dict[str, Any]:
         "grounding": grounding[:50],
         "fallback_chains": fallback_chains[:50],
         "expected_outcomes": expected_outcomes[:50],
-        "goal_contracts": goal_contracts[:50],
         "finish_validations": finish_validations[:50],
+        "acceptance": acceptance[:50],
+        "goal_compiles": goal_compiles[:50],
         "verifier": verifier[:50],
         "timeline": timeline[:200],
     }
@@ -983,14 +1077,32 @@ def extract_fallback_chains(payload: dict[str, Any]) -> list[dict[str, Any]]:
 
 def build_code_findings(record: dict[str, Any], trace_summary: dict[str, Any]) -> list[dict[str, Any]]:
     signals = collect_signals(record, trace_summary)
+    step_count = int(trace_summary.get("step_count") or 0)
+    signal_steps = collect_signal_steps(trace_summary)
     findings = []
     matched_titles = set()
     for rule in SOURCE_RULES:
         matched = sorted(rule["signals"] & signals)
         if not matched:
             continue
-        findings.append(finding_from_rule(rule, matched, "confirmed"))
+        confidence = grade_confidence(matched, signal_steps, step_count)
+        finding = finding_from_rule(rule, matched, confidence)
+        finding["signal_steps"] = {
+            signal: signal_steps[signal] for signal in matched if signal in signal_steps
+        }
+        findings.append(finding)
         matched_titles.add(rule["title"])
+    loop_signals = decision_loop_signals(record, signal_steps)
+    loop_matched = sorted(DECISION_LOOP_RULE["signals"] & loop_signals)
+    if loop_matched:
+        confidence = grade_confidence(loop_matched, signal_steps, step_count)
+        finding = finding_from_rule(DECISION_LOOP_RULE, loop_matched, confidence)
+        finding["signal_steps"] = {
+            signal: signal_steps[signal] for signal in loop_matched if signal in signal_steps
+        }
+        findings.insert(0, finding)
+        matched_titles.add(DECISION_LOOP_RULE["title"])
+    _cap_weak_verifier_confidence(findings)
     layer = str(record.get("error_layer") or "")
     if layer and layer in LAYER_FALLBACKS:
         fallback = LAYER_FALLBACKS[layer]
@@ -1063,6 +1175,55 @@ def find_anchors(path: Path) -> list[dict[str, Any]]:
     return anchors
 
 
+def _collect_finish_validation_signals(
+    finish_validation: Any, signals: set[str]
+) -> None:
+    """Extract signals from a GoalEvaluation dict (record- or trace-level).
+
+    Beyond status/matched/missing, this inspects per-criterion reasons so a
+    finish accepted via the detail-only soft-match fallback (evidence-strength
+    relaxation from the mark-based tap fix) is visible to the report instead
+    of being indistinguishable from a fully-evidenced finish.
+    """
+    if not isinstance(finish_validation, dict):
+        return
+    status = finish_validation.get("status")
+    if status:
+        signals.add(f"finish_validation_{status}")
+    if finish_validation.get("needs_recompile"):
+        signals.add("needs_recompile")
+    for item_value in finish_validation.get("missing_terminal_evidence") or []:
+        signals.add(str(item_value))
+    matched = finish_validation.get("matched_terminal_evidence")
+    if isinstance(matched, list) and matched:
+        signals.add("matched_terminal_evidence")
+    missing = finish_validation.get("missing_terminal_evidence")
+    if isinstance(missing, list) and missing:
+        signals.add("missing_terminal_evidence")
+    soft_matched = finish_validation.get("soft_matched")
+    if isinstance(soft_matched, list) and soft_matched:
+        signals.add("soft_matched_criteria")
+    evidence = finish_validation.get("evidence")
+    if not isinstance(evidence, dict):
+        return
+    per_criterion = evidence.get("per_criterion")
+    if not isinstance(per_criterion, dict):
+        return
+    for criterion_result in per_criterion.values():
+        if not isinstance(criterion_result, dict):
+            continue
+        reason = str(criterion_result.get("reason") or "")
+        if "soft_match" in reason:
+            signals.add("soft_match_accepted")
+        # A criterion parked on typed_fact_not_yet_collected forever usually
+        # means the predicate and the fact provider disagree (unobservable
+        # predicate, or the same fact in two different value domains).
+        if reason == "typed_fact_not_yet_collected":
+            signals.add("typed_fact_not_yet_collected")
+        if criterion_result.get("override_reason") == "programmatic_contradiction":
+            signals.add("programmatic_contradiction_override")
+
+
 def collect_signals(record: dict[str, Any], trace_summary: dict[str, Any]) -> set[str]:
     signals = set()
     for key in ("error_layer", "error_code", "failure_cause", "grounding_failure_code", "verifier_failure_cause"):
@@ -1072,7 +1233,6 @@ def collect_signals(record: dict[str, Any], trace_summary: dict[str, Any]) -> se
     finish_status = record.get("finish_validation_status")
     if finish_status:
         signals.add(f"finish_validation_{finish_status}")
-    collect_finish_validation_signals(signals, record.get("finish_validation_evidence"))
     verifier_status = record.get("verifier_status")
     if verifier_status:
         signals.add(f"verifier_{verifier_status}")
@@ -1084,26 +1244,13 @@ def collect_signals(record: dict[str, Any], trace_summary: dict[str, Any]) -> se
                 signals.add(str(item))
         if evidence.get("dynamic_change_only"):
             signals.add("dynamic_change_only")
-    if record.get("error"):
-        collect_text_error_signals(signals, str(record.get("error")))
-    if record.get("final_message"):
-        collect_text_error_signals(signals, str(record.get("final_message")))
-    gateway = trace_summary.get("model_gateway")
-    if isinstance(gateway, dict) and gateway.get("cf_access_partial"):
-        signals.add("cf_access_partial")
-    expected_visual_structure = str(trace_summary.get("locateanything_structure_mode") or "").lower() in {
-        "target",
-        "screen",
-    }
+    _collect_finish_validation_signals(record.get("finish_validation_evidence"), signals)
     for item in trace_summary.get("errors", []):
         payload = item.get("payload") or {}
         for key in ("error_layer", "error_code", "failure_cause", "grounding_error_code", "parse_error_code", "validation_error_code"):
             value = payload.get(key)
             if value:
                 signals.add(str(value))
-        for key in ("error", "message", "final_message"):
-            if payload.get(key):
-                collect_text_error_signals(signals, str(payload.get(key)))
     for item in trace_summary.get("verifier", []):
         payload = item.get("payload") or {}
         status = payload.get("verifier_status")
@@ -1131,22 +1278,41 @@ def collect_signals(record: dict[str, Any], trace_summary: dict[str, Any]) -> se
             if evidence.get("dynamic_change_only"):
                 signals.add("dynamic_change_only")
         finish_validation = payload.get("finish_validation") or payload.get("finish_validation_evidence")
-        if isinstance(finish_validation, dict):
-            status = finish_validation.get("status")
-            if status:
-                signals.add(f"finish_validation_{status}")
-            for item_value in finish_validation.get("missing_terminal_evidence") or []:
-                signals.add(str(item_value))
-            collect_finish_validation_signals(signals, finish_validation)
-    for item in trace_summary.get("finish_validations", []):
+        _collect_finish_validation_signals(finish_validation, signals)
+    # Acceptance-node events are the finish gate's own record. Several of them
+    # (acceptance_no_contract, acceptance_hard_veto, pure_evaluation_degraded)
+    # are fail-closed rejections that carry no error_code, so signal on the
+    # event name itself rather than waiting for an error field.
+    for item in trace_summary.get("acceptance", []):
+        name = str(item.get("event") or "")
+        # acceptance_result fires on every acceptance run including a clean pass,
+        # so it is not a problem signal — only the fail-closed variants are.
+        if name in {
+            "acceptance_no_contract",
+            "acceptance_hard_veto",
+            "acceptance_error",
+            "pure_evaluation_degraded",
+        }:
+            signals.add(name)
         payload = item.get("payload") or {}
-        status = payload.get("finish_validation_status")
-        if status:
-            signals.add(f"finish_validation_{status}")
-        collect_finish_validation_signals(
-            signals,
-            payload.get("finish_validation") or payload.get("finish_validation_evidence"),
-        )
+        if payload.get("contradicted_criteria"):
+            signals.add("acceptance_hard_veto")
+            for item_value in payload.get("contradicted_criteria") or []:
+                signals.add(str(item_value))
+        _collect_finish_validation_signals(payload.get("finish_validation"), signals)
+    # Adequacy reason codes are compile-time proof that a contract could never
+    # be satisfied (e.g. predicate_domain_mismatch). They exist only on the
+    # goal_compile_result event, never on result.json.
+    for item in trace_summary.get("goal_compiles", []):
+        payload = item.get("payload") or {}
+        adequacy = payload.get("contract_adequacy")
+        if not isinstance(adequacy, dict):
+            continue
+        status = adequacy.get("status")
+        if status and status != "adequate":
+            signals.add(f"contract_adequacy_{status}")
+        for code in adequacy.get("reason_codes") or []:
+            signals.add(str(code))
     for item in trace_summary.get("grounding", []):
         payload = item.get("payload") or {}
         obs = payload.get("grounding_observation")
@@ -1157,85 +1323,98 @@ def collect_signals(record: dict[str, Any], trace_summary: dict[str, Any]) -> se
                     signals.add(str(value))
             metadata = obs.get("metadata")
             if isinstance(metadata, dict):
-                collect_visual_structure_signals(signals, metadata)
                 chain = metadata.get("fallback_chain")
                 if isinstance(chain, list):
                     for row in chain:
                         if isinstance(row, dict) and row.get("failure_code"):
                             signals.add(str(row["failure_code"]))
-        collect_visual_structure_signals(
-            signals,
-            payload.get("screen_structure_summary"),
-            expected_visual_structure=expected_visual_structure,
-        )
-        collect_visual_structure_signals(
-            signals,
-            payload.get("object_registry_summary"),
-            expected_visual_structure=expected_visual_structure,
-        )
     return signals
 
 
-def collect_text_error_signals(signals: set[str], text: str) -> None:
-    lowered = text.lower()
-    if "403" in lowered:
-        signals.add("403")
-    if "cloudflare" in lowered:
-        signals.add("cloudflare")
-    if "waf" in lowered or "1020" in lowered:
-        signals.add("waf_blocked")
+def collect_signal_steps(trace_summary: dict[str, Any]) -> dict[str, list[str]]:
+    """Map each decision-loop signal to the step ids where it was observed."""
+
+    mapping: dict[str, set[str]] = {}
+    total_steps = max(int(trace_summary.get("step_count") or 0), 1)
+
+    def _add(signal: str, step: Any) -> None:
+        mapping.setdefault(signal, set()).add(str(step if step is not None else "none"))
+
+    for compact in trace_summary.get("timeline", []):
+        step = compact.get("step_id")
+        payload = compact.get("payload") or {}
+        if compact.get("event") != "reflect_result":
+            continue
+        if payload.get("repeated_action_detected"):
+            _add("repeated_action_detected", step)
+        repeat_count = payload.get("repeat_count")
+        if isinstance(repeat_count, int) and repeat_count >= 3:
+            _add("avoid_repeating_ignored", step)
+        liveness = payload.get("trajectory_liveness")
+        state = liveness.get("state") if isinstance(liveness, dict) else liveness
+        if state == "stuck":
+            _add("liveness_stuck", step)
+    return {signal: sorted(steps) for signal, steps in mapping.items()} if total_steps else {}
 
 
-def collect_visual_structure_signals(
-    signals: set[str],
-    value: Any,
-    *,
-    expected_visual_structure: bool = False,
-) -> None:
-    if not isinstance(value, dict):
-        return
-    for key in ("status", "failure_code", "invalid_structure_mode"):
-        if value.get(key):
-            signals.add(str(value[key]))
-    if expected_visual_structure and value.get("status") == "missing_sidecar":
-        signals.add("visual_structure_missing")
-    if value.get("invalid_structure_mode"):
-        signals.add("structure_mode_unexpected")
-    if value.get("visual_structure_partial"):
-        signals.add("visual_structure_partial")
-    failures = value.get("visual_structure_failure_codes")
-    if isinstance(failures, list):
-        for item in failures:
-            signals.add(str(item))
+def decision_loop_signals(
+    record: dict[str, Any], signal_steps: dict[str, list[str]]
+) -> set[str]:
+    """Decision-loop signals from the run record and per-step reflect payloads."""
+
+    signals = set(signal_steps)
+    steps = record.get("steps")
+    max_steps = record.get("max_steps")
+    if (
+        isinstance(steps, int)
+        and isinstance(max_steps, int)
+        and max_steps > 0
+        and steps >= max_steps
+        and not record.get("acceptance_round_count")
+        and record.get("finish_validation_status") is None
+    ):
+        signals.add("budget_exhausted_no_finish")
+    if record.get("finish_source") == "absolute_budget_exhausted":
+        signals.add("absolute_budget_exhausted")
+    repeated_failures = record.get("repeated_failure_count")
+    if isinstance(repeated_failures, int) and repeated_failures >= 3:
+        signals.add("repeated_failure_count")
+    return signals
 
 
-def collect_finish_validation_signals(signals: set[str], value: Any) -> None:
-    if not isinstance(value, dict):
-        return
-    status = value.get("status")
-    if status:
-        signals.add(f"finish_validation_{status}")
-    for key in ("missing_terminal_evidence", "matched_terminal_evidence", "soft_matched"):
-        items = value.get(key)
-        if isinstance(items, list):
-            for item in items:
-                signals.add(str(item))
-    evidence = value.get("evidence")
-    if not isinstance(evidence, dict):
-        return
-    for item in evidence.get("finish_claim_matched") or []:
-        signals.add(str(item))
-    per_criterion = evidence.get("per_criterion")
-    if isinstance(per_criterion, dict):
-        for criterion, detail in per_criterion.items():
-            if not isinstance(detail, dict):
-                continue
-            if detail.get("status") == "missing":
-                signals.add(str(criterion))
-            for key in ("reason", "override_reason"):
-                reason = detail.get(key)
-                if reason:
-                    signals.add(str(reason))
+def grade_confidence(matched: list[str], signal_steps: dict[str, list[str]], step_count: int) -> str:
+    """Grade by how much of the run the matched signals actually cover."""
+
+    if step_count <= 0:
+        return "needs-repro"
+    covered = set()
+    for signal in matched:
+        covered.update(signal_steps.get(signal) or [])
+    if not covered:
+        # Record-level signals (budget exhaustion, counters) and reflect
+        # verifier aggregates describe the whole run rather than one step, so
+        # absence of per-step evidence is neutral, not weak.
+        return "likely"
+    coverage = len(covered) / step_count
+    if coverage >= 0.5:
+        return "confirmed"
+    if coverage >= 0.2:
+        return "likely"
+    return "needs-repro"
+
+
+_VERIFIER_WEAK_SIGNALS = {"dynamic_change_only", "missing_postconditions", "verifier_unknown"}
+
+
+def _cap_weak_verifier_confidence(findings: list[dict[str, Any]]) -> None:
+    """A reflection finding built only from sporadic weak verifier signals is
+    never 'confirmed' — those fire on ordinary dynamic screens too."""
+    for finding in findings:
+        if finding.get("layer") != "reflection":
+            continue
+        matched = set(finding.get("matched_signals") or [])
+        if matched and matched <= _VERIFIER_WEAK_SIGNALS and finding.get("confidence") == "confirmed":
+            finding["confidence"] = "likely"
 
 
 def build_recommendations(findings: list[dict[str, Any]], record: dict[str, Any]) -> list[dict[str, Any]]:
@@ -1262,6 +1441,99 @@ def build_recommendations(findings: list[dict[str, Any]], record: dict[str, Any]
     return recommendations
 
 
+LAYER_LABELS = {
+    "grounding": "视觉定位（Grounding）",
+    "parse": "模型输出解析",
+    "validation": "动作校验",
+    "safety": "安全/人工确认",
+    "capability": "能力闸门",
+    "execution": "设备执行",
+    "reflection": "单步反思",
+    "acceptance": "验收 / Finish Gate",
+    "goal": "目标契约编译",
+    "checkpoint": "检查点恢复",
+    "context": "上下文管理",
+    "decision": "决策层循环",
+    "success": "无异常",
+    "unknown": "未定位",
+}
+
+
+def _first_anchor(files: list[dict[str, Any]]) -> str:
+    """Pick a human-readable `path:line` for the first file with anchors."""
+    for file in files:
+        anchors = file.get("anchors") or []
+        if anchors:
+            return f"{file.get('path')}:{anchors[0].get('line')}"
+    for file in files:
+        if file.get("path"):
+            return str(file.get("path"))
+    return ""
+
+
+def build_root_causes(
+    verdict: str,
+    record: dict[str, Any],
+    findings: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Turn raw findings into a plain-language root-cause narrative.
+
+    Each entry answers three questions in Chinese: what happened (what),
+    why it happened (why, with source location), and what to do next
+    (action). This is the primary reading path of the report — findings
+    remain available as structured detail underneath.
+    """
+    causes = []
+    if verdict == "success":
+        causes.append({
+            "what": "任务按预期完成，运行未暴露明确失败。",
+            "why": "各层（定位、执行、反思、目标验证）均未产生错误信号。",
+            "action": "将本次 trace 保留为回归基线，继续扩大真实 App 与边界场景覆盖。",
+            "severity": "Info",
+            "layer": "success",
+            "source": "",
+        })
+        return causes
+
+    if verdict == "blocked" and record.get("hitl_count"):
+        causes.append({
+            "what": f"任务在人工确认/接管处暂停（HITL 触发 {record.get('hitl_count')} 次）。",
+            "why": "安全策略（SafetyPolicyRegistry）将某个动作分类为需要人工介入，例如支付、登录或验证码。",
+            "action": "确认是否为预期的敏感动作；若是误触发，检查 config/policy.py 的词汇表与 Safety Gate 分类。",
+            "severity": "P0",
+            "layer": "safety",
+            "source": "phone_agent/config/policy.py",
+        })
+
+    for finding in findings:
+        if finding.get("layer") in {"success", "unknown"}:
+            continue
+        layer_label = LAYER_LABELS.get(finding.get("layer", ""), finding.get("layer", ""))
+        signals = finding.get("matched_signals") or []
+        signal_text = "、".join(f"`{s}`" for s in signals[:4]) or "无"
+        source = _first_anchor(finding.get("files") or [])
+        causes.append({
+            "what": f"{layer_label}层出现异常：{finding.get('title')}。",
+            "why": f"捕获信号 {signal_text}。{finding.get('suggestion', '')}",
+            "action": finding.get("verify", ""),
+            "severity": finding.get("severity", "P2"),
+            "layer": finding.get("layer", ""),
+            "source": source,
+            "confidence": finding.get("confidence", ""),
+        })
+
+    if not causes:
+        causes.append({
+            "what": "任务失败但错误信号未匹配到任何已知模式。",
+            "why": f"error={record.get('error') or '-'}；failure_cause={record.get('failure_cause') or '-'}；可能是新故障模式或 trace 不完整。",
+            "action": "人工复核 trace.jsonl 与 run_output.log；若确认是新故障模式，应把对应信号补充进 SOURCE_RULES。",
+            "severity": "P2",
+            "layer": "unknown",
+            "source": "",
+        })
+    return causes
+
+
 def build_summary(
     *,
     args: argparse.Namespace,
@@ -1276,11 +1548,13 @@ def build_summary(
     recommendations: list[dict[str, Any]],
 ) -> dict[str, Any]:
     verdict = classify_verdict(record, command_result.returncode)
+    root_causes = build_root_causes(verdict, record, code_findings)
     return {
         "run_id": run_id,
         "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
         "target": args.target,
         "verdict": verdict,
+        "root_causes": root_causes,
         "run_dir": str(run_dir),
         "command": redact_command(command),
         "dangerous_debug": {
@@ -1334,12 +1608,6 @@ def preflight_summary(path: Path) -> dict[str, Any]:
         parsed = mlx.get("parsed") if isinstance(mlx.get("parsed"), dict) else {}
         payload["mlx_metal_ok"] = bool(parsed.get("metal_ok"))
         payload["mlx_metal_error"] = parsed.get("error")
-    device_selection = checks.get("device_selection") if isinstance(checks.get("device_selection"), dict) else {}
-    adb_keyboard = checks.get("adb_keyboard") if isinstance(checks.get("adb_keyboard"), dict) else {}
-    payload["device_selection_warning"] = device_selection.get("warning")
-    payload["connected_device_count"] = device_selection.get("connected_device_count")
-    payload["adb_keyboard_active"] = adb_keyboard.get("active")
-    payload["adb_keyboard_warning"] = adb_keyboard.get("warning")
     return payload
 
 
@@ -1352,7 +1620,7 @@ def redact_command(cmd: list[str]) -> list[str]:
             skip_next = False
             continue
         redacted.append(item)
-        if item in {"--apikey", "--model-extra-body"}:
+        if item in {"--apikey"}:
             skip_next = True
     return redacted
 
@@ -1384,16 +1652,17 @@ HTML_TEMPLATE = r"""<!doctype html>
     @import url('https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500;600;700&family=Fira+Sans:wght@300;400;500;600;700&display=swap');
     :root {
       --primary: #1E40AF;
+      --primary-soft: #DBEAFE;
       --accent: #F59E0B;
-      --bg: #F8FAFC;
+      --bg: #F1F5F9;
       --panel: #FFFFFF;
       --ink: #0F172A;
       --muted: #64748B;
-      --line: #D8E0EA;
+      --line: #E2E8F0;
       --success: #15803D;
       --failed: #B91C1C;
       --blocked: #B45309;
-      --code: #0F172A;
+      --radius: 10px;
     }
     * { box-sizing: border-box; }
     body {
@@ -1404,140 +1673,122 @@ HTML_TEMPLATE = r"""<!doctype html>
       letter-spacing: 0;
     }
     header {
-      background: #0F172A;
+      background: linear-gradient(135deg, #0F172A 0%, #1E293B 60%, #1E3A8A 100%);
       color: white;
-      padding: 20px 28px;
+      padding: 26px 32px 22px;
       border-bottom: 4px solid var(--accent);
     }
-    h1 { margin: 0 0 8px; font-size: 24px; line-height: 1.2; }
-    h2 { margin: 0 0 12px; font-size: 18px; }
-    h3 { margin: 0 0 8px; font-size: 15px; }
+    .header-row {
+      display: flex; align-items: flex-start; justify-content: space-between;
+      gap: 16px; flex-wrap: wrap; max-width: 1400px;
+    }
+    h1 { margin: 0 0 10px; font-size: 24px; line-height: 1.2; }
+    h2 { margin: 0 0 12px; font-size: 17px; display: flex; align-items: center; gap: 8px; }
+    h2::before { content: ""; width: 4px; height: 16px; border-radius: 2px; background: var(--accent); }
+    h3 { margin: 0 0 8px; font-size: 14px; }
     .mono, code, pre { font-family: "Fira Code", ui-monospace, monospace; }
     .wrap { word-break: break-all; overflow-wrap: break-word; }
-    .subtitle { color: #CBD5E1; max-width: 1200px; }
-    .shell { padding: 18px 28px 32px; }
+    .subtitle { color: #CBD5E1; max-width: 1000px; font-size: 14px; line-height: 1.5; }
+    .verdict-chip {
+      display: inline-flex; align-items: center; gap: 8px;
+      padding: 8px 16px; border-radius: 999px;
+      font: 700 14px "Fira Code"; white-space: nowrap;
+      background: rgba(255,255,255,.12); border: 1px solid rgba(255,255,255,.25);
+    }
+    .verdict-chip.success { background: rgba(21,128,61,.35); border-color: #4ADE80; color: #BBF7D0; }
+    .verdict-chip.failed { background: rgba(185,28,28,.35); border-color: #F87171; color: #FECACA; }
+    .verdict-chip.blocked { background: rgba(180,83,9,.4); border-color: #FCD34D; color: #FDE68A; }
+    .shell { padding: 20px 32px 40px; max-width: 1400px; }
     .kpis {
       display: grid;
-      grid-template-columns: repeat(6, minmax(140px, 1fr));
-      gap: 10px;
-      margin-bottom: 14px;
+      grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+      gap: 12px;
+      margin-bottom: 16px;
     }
     .card {
       background: var(--panel);
       border: 1px solid var(--line);
-      border-radius: 8px;
-      padding: 12px;
-      box-shadow: 0 1px 2px rgba(15, 23, 42, .05);
+      border-radius: var(--radius);
+      padding: 14px 16px;
+      box-shadow: 0 1px 3px rgba(15, 23, 42, .06);
     }
-    .kpi-label { color: var(--muted); font-size: 12px; margin-bottom: 6px; }
+    .kpi-label { color: var(--muted); font-size: 12px; margin-bottom: 6px; text-transform: uppercase; letter-spacing: .04em; }
     .kpi-value { font-size: 18px; font-weight: 700; }
     .badge {
-      display: inline-flex;
-      align-items: center;
-      min-height: 24px;
-      border-radius: 999px;
-      padding: 3px 8px;
+      display: inline-flex; align-items: center; min-height: 22px;
+      border-radius: 999px; padding: 2px 9px;
       font: 600 12px "Fira Code";
-      background: #E0E7FF;
-      color: var(--primary);
-      border: 1px solid #BFDBFE;
+      background: #E0E7FF; color: var(--primary); border: 1px solid #BFDBFE;
     }
     .badge.success { background: #DCFCE7; color: var(--success); border-color: #86EFAC; }
     .badge.failed { background: #FEE2E2; color: var(--failed); border-color: #FCA5A5; }
     .badge.blocked { background: #FEF3C7; color: var(--blocked); border-color: #FCD34D; }
     .alert {
-      border-radius: 8px;
-      padding: 10px 12px;
-      margin: 0 0 12px;
-      font-weight: 700;
-      word-break: break-all;
-      overflow-wrap: break-word;
+      border-radius: 8px; padding: 10px 14px; margin: 0 0 12px;
+      font-weight: 700; word-break: break-all; overflow-wrap: break-word;
     }
     .alert.danger { background: #FEE2E2; color: var(--failed); border: 1px solid #FCA5A5; }
-    .toolbar {
-      display: flex;
-      gap: 8px;
-      align-items: center;
-      flex-wrap: wrap;
-      margin: 12px 0;
-    }
+    .toolbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 14px 0; }
     button, input, select {
-      border: 1px solid var(--line);
-      background: white;
-      color: var(--ink);
-      border-radius: 6px;
-      padding: 8px 10px;
-      font: 500 13px "Fira Sans";
+      border: 1px solid var(--line); background: white; color: var(--ink);
+      border-radius: 8px; padding: 8px 12px; font: 500 13px "Fira Sans";
     }
-    button { cursor: pointer; transition: background .2s, border-color .2s; }
-    button:hover, button.active { background: #DBEAFE; border-color: var(--primary); }
+    button { cursor: pointer; transition: all .15s; }
+    button:hover { border-color: var(--primary); color: var(--primary); }
+    button.active { background: var(--primary); border-color: var(--primary); color: white; }
     input { min-width: 260px; }
     .tab { display: none; }
-    .tab.active { display: block; }
-    .grid-2 {
-      display: grid;
-      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-      gap: 12px;
+    .tab.active { display: block; animation: fadeIn .18s ease; }
+    @keyframes fadeIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+    .grid-2 { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 14px; }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th, td { border-bottom: 1px solid var(--line); padding: 9px 10px; vertical-align: top; text-align: left; }
+    th { color: #334155; background: #F8FAFC; position: sticky; top: 0; z-index: 1; font-size: 12px; text-transform: uppercase; letter-spacing: .03em; }
+    tr:last-child td { border-bottom: none; }
+    /* Root cause cards */
+    .cause-card {
+      background: var(--panel); border: 1px solid var(--line);
+      border-left: 5px solid var(--muted);
+      border-radius: var(--radius); padding: 16px 18px; margin-bottom: 12px;
+      box-shadow: 0 1px 3px rgba(15,23,42,.06);
     }
-    table {
-      width: 100%;
-      border-collapse: collapse;
-      font-size: 13px;
-    }
-    th, td {
-      border-bottom: 1px solid var(--line);
-      padding: 8px;
-      vertical-align: top;
-      text-align: left;
-    }
-    th { color: #334155; background: #F1F5F9; position: sticky; top: 0; z-index: 1; }
-    .timeline {
-      display: grid;
-      gap: 8px;
-    }
+    .cause-card.sev-P0 { border-left-color: var(--failed); }
+    .cause-card.sev-P1 { border-left-color: var(--accent); }
+    .cause-card.sev-P2 { border-left-color: var(--primary); }
+    .cause-card.sev-Info { border-left-color: var(--success); }
+    .cause-head { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 10px; }
+    .cause-what { font-size: 15px; font-weight: 700; line-height: 1.45; margin: 6px 0 10px; }
+    .cause-block { display: grid; grid-template-columns: 72px minmax(0,1fr); gap: 6px 12px; font-size: 13.5px; line-height: 1.6; }
+    .cause-label { color: var(--muted); font-weight: 600; white-space: nowrap; }
+    .cause-src { margin-top: 10px; padding: 8px 10px; background: #F8FAFC; border: 1px dashed var(--line); border-radius: 6px; font-size: 12.5px; }
+    /* Timeline */
+    .timeline { display: grid; gap: 8px; }
     .event {
-      border-left: 4px solid var(--primary);
-      padding: 10px 12px;
-      background: white;
-      border-radius: 6px;
-      border-top: 1px solid var(--line);
-      border-right: 1px solid var(--line);
-      border-bottom: 1px solid var(--line);
+      border-left: 4px solid var(--primary); padding: 10px 14px;
+      background: white; border-radius: 8px;
+      border-top: 1px solid var(--line); border-right: 1px solid var(--line); border-bottom: 1px solid var(--line);
     }
-    .event-head {
-      display: flex;
-      gap: 8px;
-      align-items: center;
-      justify-content: space-between;
-      flex-wrap: wrap;
-    }
+    .event.is-error { border-left-color: var(--failed); background: #FFF7F7; }
+    .event-head { display: flex; gap: 8px; align-items: center; justify-content: space-between; flex-wrap: wrap; }
     details { margin-top: 8px; }
     summary { cursor: pointer; color: var(--primary); font-weight: 700; }
     pre {
-      margin: 8px 0 0;
-      padding: 10px;
-      background: #0B1220;
-      color: #E2E8F0;
-      border-radius: 6px;
-      overflow: auto;
-      max-height: 360px;
-      font-size: 12px;
-      white-space: pre-wrap;
-      word-break: break-all;
+      margin: 8px 0 0; padding: 12px; background: #0B1220; color: #E2E8F0;
+      border-radius: 8px; overflow: auto; max-height: 360px; font-size: 12px;
+      white-space: pre-wrap; word-break: break-all;
     }
     .severity-P0 { color: #B91C1C; font-weight: 700; }
     .severity-P1 { color: #B45309; font-weight: 700; }
     .severity-P2 { color: #1E40AF; font-weight: 700; }
+    .severity-Info { color: #15803D; font-weight: 700; }
     .muted { color: var(--muted); }
     a { color: var(--primary); text-decoration: none; }
     a:hover { text-decoration: underline; }
     @media (max-width: 1100px) {
-      .kpis { grid-template-columns: repeat(2, minmax(140px, 1fr)); }
       .grid-2 { grid-template-columns: 1fr; }
     }
     @media (max-width: 520px) {
-      header, .shell { padding-left: 14px; padding-right: 14px; }
-      .kpis { grid-template-columns: 1fr; }
+      header, .shell { padding-left: 16px; padding-right: 16px; }
       input { min-width: 100%; }
     }
   </style>
@@ -1545,8 +1796,13 @@ HTML_TEMPLATE = r"""<!doctype html>
 <body>
 <script id="report-data" type="application/json">__REPORT_DATA__</script>
 <header>
-  <h1>Phone Agent Live Diagnosis</h1>
-  <div class="subtitle wrap" id="subtitle"></div>
+  <div class="header-row">
+    <div>
+      <h1>Phone Agent 实机诊断报告</h1>
+      <div class="subtitle wrap" id="subtitle"></div>
+    </div>
+    <div id="verdictChip"></div>
+  </div>
 </header>
 <main class="shell">
   <section class="kpis" id="kpis"></section>
@@ -1568,12 +1824,13 @@ const summary = data.summary;
 const traceEvents = data.trace_events || [];
 const state = { tab: 'overview', query: '', layer: '', severity: '' };
 const tabs = [
-  ['overview', 'Overview'],
-  ['timeline', 'Timeline'],
-  ['source', 'Source Analysis'],
-  ['recommendations', 'Recommendations'],
-  ['raw', 'Raw Evidence'],
+  ['overview', '概览与根因'],
+  ['timeline', '时间线'],
+  ['source', '源码归因'],
+  ['recommendations', '修改建议'],
+  ['raw', '原始证据'],
 ];
+const VERDICT_LABEL = { success: '成功', failed: '失败', blocked: '人工阻断', uncertain: '不确定' };
 function esc(v) {
   return String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }
@@ -1581,7 +1838,10 @@ function json(v) { return esc(JSON.stringify(v, null, 2)); }
 function badge(text, cls='') { return `<span class="badge ${cls}">${esc(text)}</span>`; }
 function verdictClass(v) { return v === 'success' ? 'success' : v === 'blocked' ? 'blocked' : v === 'failed' ? 'failed' : ''; }
 function render() {
-  document.getElementById('subtitle').innerHTML = `${esc(summary.target)}<br><span class="mono wrap">${esc(summary.run_id)}</span>`;
+  document.getElementById('subtitle').innerHTML =
+    `<strong>${esc(summary.target)}</strong><br><span class="mono wrap">${esc(summary.run_id)} · ${esc(summary.created_at || '')}</span>`;
+  document.getElementById('verdictChip').innerHTML =
+    `<span class="verdict-chip ${verdictClass(summary.verdict)}">${esc(VERDICT_LABEL[summary.verdict] || summary.verdict)}</span>`;
   renderKpis();
   renderTabs();
   renderFilters();
@@ -1595,18 +1855,20 @@ function renderKpis() {
   const r = summary.result || {};
   const rs = summary.result_summary || {};
   const items = [
-    ['Verdict', badge(summary.verdict, verdictClass(summary.verdict))],
-    ['Success Rate', esc(Math.round((rs.success_rate ?? (r.success ? 1 : 0)) * 100)) + '%'],
-    ['Steps', esc(r.steps ?? rs.avg_steps ?? '-')],
-    ['Duration', esc((r.duration ?? summary.duration_sec ?? 0).toFixed ? (r.duration ?? summary.duration_sec).toFixed(2) + 's' : '-')],
-    ['Error Layer', badge(r.error_layer || 'none')],
+    ['成功率', esc(Math.round((rs.success_rate ?? (r.success ? 1 : 0)) * 100)) + '%'],
+    ['步数', esc(r.steps ?? rs.avg_steps ?? '-')],
+    ['耗时', esc((r.duration ?? summary.duration_sec ?? 0).toFixed ? (r.duration ?? summary.duration_sec).toFixed(2) + 's' : '-')],
+    ['错误层', badge(r.error_layer || '无')],
+    ['错误码', badge(r.error_code || '无')],
     ['Grounding', badge(r.grounding_provider || 'unknown')],
     ['Verifier', badge(r.verifier_status || 'unknown')],
   ];
-  document.getElementById('kpis').innerHTML = items.map(([k, v]) => `<div class="card"><div class="kpi-label">${k}</div><div class="kpi-value wrap">${v}</div></div>`).join('');
+  document.getElementById('kpis').innerHTML = items.map(([k, v]) =>
+    `<div class="card"><div class="kpi-label">${k}</div><div class="kpi-value wrap">${v}</div></div>`).join('');
 }
 function renderTabs() {
-  document.getElementById('tabs').innerHTML = tabs.map(([id, label]) => `<button class="${state.tab === id ? 'active' : ''}" onclick="state.tab='${id}'; selectTab()">${label}</button>`).join('');
+  document.getElementById('tabs').innerHTML = tabs.map(([id, label]) =>
+    `<button class="${state.tab === id ? 'active' : ''}" onclick="state.tab='${id}'; selectTab()">${label}</button>`).join('');
 }
 function selectTab() {
   for (const [id] of tabs) document.getElementById(id).classList.toggle('active', state.tab === id);
@@ -1621,6 +1883,28 @@ function renderFilters() {
   if (severity.options.length <= 1) severity.innerHTML += severities.map(v => `<option value="${esc(v)}">${esc(v)}</option>`).join('');
 }
 function matches(text) { return !state.query || String(text).toLowerCase().includes(state.query.toLowerCase()); }
+function row(k, v) { return `<tr><td class="mono">${esc(k)}</td><td class="wrap">${esc(v ?? '-')}</td></tr>`; }
+
+function renderRootCauses() {
+  const causes = (summary.root_causes || []).filter(c =>
+    matches(JSON.stringify(c)) && (!state.layer || c.layer === state.layer) && (!state.severity || c.severity === state.severity));
+  if (!causes.length) return '<div class="card">当前筛选条件下没有根因条目。</div>';
+  return causes.map(c => `
+    <div class="cause-card sev-${esc(c.severity)}">
+      <div class="cause-head">
+        ${badge(c.severity || 'P2')}
+        ${badge(c.layer || '')}
+        ${c.confidence ? `<span class="muted mono">${esc(c.confidence)}</span>` : ''}
+      </div>
+      <div class="cause-what">${esc(c.what)}</div>
+      <div class="cause-block">
+        <span class="cause-label">为什么</span><span class="wrap">${esc(c.why)}</span>
+        <span class="cause-label">怎么办</span><span class="wrap">${esc(c.action)}</span>
+      </div>
+      ${c.source ? `<div class="cause-src mono wrap">📍 ${esc(c.source)}</div>` : ''}
+    </div>`).join('');
+}
+
 function renderOverview() {
   const r = summary.result || {};
   const artifacts = summary.artifacts || {};
@@ -1628,12 +1912,21 @@ function renderOverview() {
   const debug = summary.dangerous_debug || {};
   const latestExpected = (summary.trace_summary?.expected_outcomes || []).slice(-1)[0]?.payload?.expected_outcome || r.expected_outcome || {};
   const latestVerifier = r.verifier_evidence || (summary.trace_summary?.verifier || []).slice(-1)[0]?.payload?.verifier_evidence || {};
-  const latestGoalEvent = (summary.trace_summary?.goal_contracts || []).slice(-1)[0]?.payload || {};
-  const latestGoal = latestGoalEvent.goal_contract || latestGoalEvent.task_goal_contract || {};
-  const latestFinishEvent = (summary.trace_summary?.finish_validations || []).slice(-1)[0]?.payload || {};
-  const finishEvidence = r.finish_validation_evidence || latestFinishEvent.finish_validation_evidence || latestFinishEvent.finish_validation || {};
   const fallbackRows = summary.trace_summary?.fallback_chains || [];
+  const finishEvidence = r.finish_validation_evidence || {};
+  const softMatched = finishEvidence.soft_matched || [];
+  // The finish gate is the `acceptance` node, not reflect. Prefer its own
+  // trace event, falling back to the result record.
+  const acceptanceRows = summary.trace_summary?.acceptance || [];
+  const lastAcceptance = acceptanceRows.slice(-1)[0] || {};
+  const finishFromTrace = (acceptanceRows.map(e => (e.payload || {}).finish_validation).filter(Boolean).slice(-1)[0]) || {};
+  const finishGate = Object.keys(finishEvidence).length ? finishEvidence : finishFromTrace;
+  const perCriterion = (finishGate.evidence || {}).per_criterion || {};
+  const lastGoalCompile = (summary.trace_summary?.goal_compiles || []).slice(-1)[0] || {};
+  const adequacy = (lastGoalCompile.payload || {}).contract_adequacy || {};
   document.getElementById('overview').innerHTML = `
+    <h2 style="margin-bottom:12px">根因分析</h2>
+    <div style="margin-bottom:18px">${renderRootCauses()}</div>
     <div class="grid-2">
       <div class="card">
         <h2>运行结论</h2>
@@ -1641,18 +1934,13 @@ function renderOverview() {
         <table>
           <tr><th>字段</th><th>值</th></tr>
           ${row('目标', summary.target)}
-          ${row('结论', summary.verdict)}
+          ${row('结论', VERDICT_LABEL[summary.verdict] || summary.verdict)}
           ${row('错误', r.error)}
           ${row('失败原因', r.failure_cause)}
           ${row('错误码', r.error_code)}
-          ${row('Verifier Status', r.verifier_status)}
-          ${row('Verifier Cause', r.verifier_failure_cause)}
           ${row('Finish Validation', r.finish_validation_status)}
-          ${row('Goal Contract Status', r.goal_contract_status)}
-          ${row('Goal Compile Source', r.goal_compile_source)}
-          ${row('Prompt Debug', debug.trace_unredacted_prompt ? 'UNREDACTED TEXT ENABLED' : 'redacted/default')}
+          ${row('软匹配标准', softMatched.length ? JSON.stringify(softMatched) : '无')}
           ${row('Trace ID', r.trace_id)}
-          ${row('Trace Path', r.trace_path)}
           ${row('命令', (summary.command || []).join(' '))}
         </table>
       </div>
@@ -1666,38 +1954,40 @@ function renderOverview() {
         <h2>环境预检</h2>
         <table>
           ${row('Device ID', preflight.device_id)}
-          ${row('Connected Devices', preflight.connected_device_count)}
-          ${row('Device Selection Warning', preflight.device_selection_warning)}
           ${row('ADB', preflight.adb_path)}
-          ${row('ADB Keyboard Active', preflight.adb_keyboard_active)}
-          ${row('ADB Keyboard Warning', preflight.adb_keyboard_warning)}
           ${row('Grounding Provider', preflight.grounding_provider)}
-          ${row('LocateAnything Structure', preflight.locateanything_structure_mode)}
           ${row('MLX Metal OK', preflight.mlx_metal_ok)}
           ${row('MLX Metal Error', preflight.mlx_metal_error)}
-          ${row('Model Gateway', JSON.stringify(preflight.model_gateway || {}))}
-          ${row('Deprecated Env', JSON.stringify(preflight.deprecated_env_warnings || []))}
         </table>
       </div>
       <div class="card">
-        <h2>后置条件验证</h2>
+        <h2>后置条件验证（单步 reflect）</h2>
         <table>
           ${row('ExpectedOutcome', JSON.stringify(latestExpected))}
           ${row('Matched', JSON.stringify(latestVerifier.matched_postconditions || []))}
           ${row('Missing', JSON.stringify(latestVerifier.missing_postconditions || []))}
-          ${row('Weak Signals', JSON.stringify(latestVerifier.weak_signals || {}))}
           ${row('Dynamic Only', latestVerifier.dynamic_change_only)}
         </table>
       </div>
       <div class="card">
-        <h2>GoalContract / Finish Gate</h2>
+        <h2>Finish Gate（acceptance 节点）</h2>
+        ${adequacy.status && adequacy.status !== 'adequate' ? `<div class="alert danger">契约 adequacy = ${esc(adequacy.status)}：${esc((adequacy.reason_codes || []).join(', ') || '无 reason_code')}。structural 拒绝（predicate_unobservable / predicate_domain_mismatch / task_binding_mismatch / required_criteria_missing）意味着该契约在编译期即不可满足，应修 predicate 绑定或 fact provider，不要放宽 gate。</div>` : ''}
+        ${lastAcceptance.event === 'acceptance_no_contract' ? '<div class="alert danger">acceptance_no_contract：没有已编译契约就进入验收，已 fail-closed 拒绝——根因在 goal 层。</div>' : ''}
+        ${lastAcceptance.event === 'acceptance_hard_veto' ? '<div class="alert danger">acceptance_hard_veto：程序信号直接否决了模型的完成声明，应信程序侧。</div>' : ''}
         <table>
-          ${row('GoalContract', JSON.stringify(latestGoal))}
-          ${row('Finish Status', finishEvidence.status || r.finish_validation_status)}
-          ${row('Matched Terminal Evidence', JSON.stringify(finishEvidence.matched_terminal_evidence || []))}
-          ${row('Missing Terminal Evidence', JSON.stringify(finishEvidence.missing_terminal_evidence || []))}
-          ${row('Soft Matched', JSON.stringify(finishEvidence.soft_matched || []))}
-          ${row('Per Criterion', JSON.stringify(finishEvidence.evidence?.per_criterion || {}))}
+          ${row('验收状态', finishGate.status || r.finish_validation_status || '未触发（模型未声明完成）')}
+          ${row('最后 acceptance 事件', lastAcceptance.event)}
+          ${row('契约 adequacy', adequacy.status ? `${adequacy.status} ${JSON.stringify(adequacy.reason_codes || [])}` : '-')}
+          ${row('已满足标准', JSON.stringify(finishGate.matched_terminal_evidence || []))}
+          ${row('未满足标准', JSON.stringify(finishGate.missing_terminal_evidence || []))}
+          ${row('软匹配标准', (finishGate.soft_matched || softMatched).length ? JSON.stringify(finishGate.soft_matched || softMatched) : '无')}
+        </table>
+        <table><tr><th>标准</th><th>判定</th><th>原因</th></tr>
+          ${Object.keys(perCriterion).length ? Object.entries(perCriterion).map(([name, res]) => `<tr>
+            <td class="mono wrap">${esc(name)}</td>
+            <td class="mono">${badge(esc((res || {}).status || '-'), (res || {}).status === 'matched' ? '' : 'failed')}</td>
+            <td class="mono wrap">${esc((res || {}).override_reason ? `${(res || {}).reason} (override: ${(res || {}).override_reason})` : ((res || {}).reason || '-'))}</td>
+          </tr>`).join('') : '<tr><td colspan="3">无 per_criterion 记录（finish gate 未触发或契约未编译）</td></tr>'}
         </table>
       </div>
       <div class="card">
@@ -1713,18 +2003,18 @@ function renderOverview() {
       </div>
     </div>`;
 }
-function row(k, v) { return `<tr><td class="mono">${esc(k)}</td><td class="wrap">${esc(v ?? '-')}</td></tr>`; }
 function renderTimeline() {
-  const q = state.query;
   const rows = (summary.trace_summary?.timeline || []).filter(e => matches(`${e.step_id} ${e.node} ${e.event} ${JSON.stringify(e.payload || {})}`));
+  const isErr = e => e.event.includes('error') || (e.payload || {}).error_code || (e.payload || {}).failure_cause;
   document.getElementById('timeline').innerHTML = `<div class="timeline">${rows.map(e => `
-    <article class="event">
+    <article class="event ${isErr(e) ? 'is-error' : ''}">
       <div class="event-head">
-        <div>${badge('step ' + e.step_id)} ${badge(e.node)} ${badge(e.event)}</div>
+        <div>${badge('step ' + e.step_id)} ${badge(e.node)} ${badge(e.event, isErr(e) ? 'failed' : '')}</div>
         <span class="mono muted">${esc(e.timestamp || '')}</span>
       </div>
       <details><summary>payload</summary><pre>${json(e.payload || {})}</pre></details>
-    </article>`).join('') || '<div class="card">没有匹配的事件。</div>'}</div>`;
+    </article>`).join('') || '<div class="card">没有匹配的事件。</div>'}
+</div>`;
 }
 function renderSource() {
   const rows = filteredFindings();
@@ -1771,9 +2061,9 @@ function renderRaw() {
     <div class="card"><h2>Trace Events</h2><pre>${json(traceEvents.slice(0, 200))}</pre></div>
   </div>`;
 }
-document.getElementById('search').addEventListener('input', e => { state.query = e.target.value; renderTimeline(); renderSource(); renderRecommendations(); });
-document.getElementById('layerFilter').addEventListener('change', e => { state.layer = e.target.value; renderSource(); });
-document.getElementById('severityFilter').addEventListener('change', e => { state.severity = e.target.value; renderSource(); renderRecommendations(); });
+document.getElementById('search').addEventListener('input', e => { state.query = e.target.value; renderOverview(); renderTimeline(); renderSource(); renderRecommendations(); });
+document.getElementById('layerFilter').addEventListener('change', e => { state.layer = e.target.value; renderOverview(); renderSource(); });
+document.getElementById('severityFilter').addEventListener('change', e => { state.severity = e.target.value; renderOverview(); renderSource(); renderRecommendations(); });
 render();
 </script>
 </body>

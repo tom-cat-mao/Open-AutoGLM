@@ -26,7 +26,25 @@ def _registry() -> MarkRegistry:
                 source="accessibility",
                 role="View",
                 text_summary="日历容器",
-            )
+            ),
+            "ax_9": Mark(
+                mark_id="ax_9",
+                screen_id="screen-1",
+                bbox=(0, 100, 1000, 130),
+                center=(500, 115),
+                source="accessibility",
+                role="TextView",
+                text_summary="2026年10月",
+            ),
+            "ax_23": Mark(
+                mark_id="ax_23",
+                screen_id="screen-1",
+                bbox=(0, 700, 1000, 730),
+                center=(500, 715),
+                source="accessibility",
+                role="TextView",
+                text_summary="2026年11月",
+            ),
         },
         semantic_screen_id="semantic-1",
         observation_epoch=1,
@@ -144,6 +162,203 @@ def test_validator_rejects_non_string_scope() -> None:
             }
         )
     assert exc_info.value.code == "unsafe_value"
+
+
+# ----------------------------------------------------------------------
+# P1: scope is mandatory — form A (scope_mark_id) or form B (interval)
+# ----------------------------------------------------------------------
+
+
+def test_validator_rejects_locate_without_scope() -> None:
+    with pytest.raises(ActionValidationError) as exc_info:
+        validate_action(
+            {
+                "_metadata": "do",
+                "action": "Locate",
+                "target_text_hint": "10月2日",
+            }
+        )
+    assert exc_info.value.code == "missing_field"
+
+
+def test_validator_rejects_both_scope_forms() -> None:
+    with pytest.raises(ActionValidationError) as exc_info:
+        validate_action(
+            {
+                "_metadata": "do",
+                "action": "Locate",
+                "target_text_hint": "x",
+                "scope_mark_id": "ax_5",
+                "scope_start_mark_id": "ax_9",
+            }
+        )
+    assert exc_info.value.code == "unsafe_value"
+
+
+def test_validator_rejects_end_without_start() -> None:
+    with pytest.raises(ActionValidationError) as exc_info:
+        validate_action(
+            {
+                "_metadata": "do",
+                "action": "Locate",
+                "target_text_hint": "x",
+                "scope_end_mark_id": "ax_23",
+            }
+        )
+    assert exc_info.value.code == "missing_field"
+
+
+def test_validator_accepts_form_b_interval_with_end() -> None:
+    action = validate_action(
+        {
+            "_metadata": "do",
+            "action": "Locate",
+            "target_text_hint": "10月1日",
+            "scope_start_mark_id": "ax_9",
+            "scope_end_mark_id": "ax_23",
+        }
+    )
+    assert action["scope_start_mark_id"] == "ax_9"
+    assert action["scope_end_mark_id"] == "ax_23"
+
+
+def test_validator_accepts_form_b_interval_without_end() -> None:
+    action = validate_action(
+        {
+            "_metadata": "do",
+            "action": "Locate",
+            "target_text_hint": "10月1日",
+            "scope_start_mark_id": "ax_9",
+        }
+    )
+    assert action["scope_start_mark_id"] == "ax_9"
+    assert "scope_end_mark_id" not in action
+
+
+def test_adapter_parses_form_b_interval_scope() -> None:
+    action = adapt_json_action(
+        {
+            "type": "intent",
+            "action": "locate",
+            "target_text_hint": "10月1日",
+            "scope_start_mark_id": "ax_9",
+            "scope_end_mark_id": "ax_23",
+        }
+    )
+    assert action == {
+        "_metadata": "intent",
+        "action": "Locate",
+        "target_text_hint": "10月1日",
+        "scope_start_mark_id": "ax_9",
+        "scope_end_mark_id": "ax_23",
+    }
+
+
+def test_grounding_requires_scope() -> None:
+    with pytest.raises(GroundingError) as exc_info:
+        ground_intent_to_action(
+            {
+                "_metadata": "intent",
+                "action": "Locate",
+                "target_text_hint": "10月1日",
+            },
+            mark_registry=_registry(),
+            screen_id="screen-1",
+        )
+    assert exc_info.value.code == "missing_field"
+
+
+def test_grounding_accepts_form_b_interval_when_marks_exist() -> None:
+    action = ground_intent_to_action(
+        {
+            "_metadata": "intent",
+            "action": "Locate",
+            "target_text_hint": "10月1日",
+            "scope_start_mark_id": "ax_9",
+            "scope_end_mark_id": "ax_23",
+        },
+        mark_registry=_registry(),
+        screen_id="screen-1",
+    )
+    assert action["scope_start_mark_id"] == "ax_9"
+    assert action["scope_end_mark_id"] == "ax_23"
+
+
+def test_grounding_accepts_form_b_interval_start_only() -> None:
+    action = ground_intent_to_action(
+        {
+            "_metadata": "intent",
+            "action": "Locate",
+            "target_text_hint": "10月1日",
+            "scope_start_mark_id": "ax_9",
+        },
+        mark_registry=_registry(),
+        screen_id="screen-1",
+    )
+    assert action["scope_start_mark_id"] == "ax_9"
+    assert "scope_end_mark_id" not in action
+
+
+def test_grounding_rejects_form_b_start_missing_from_registry() -> None:
+    with pytest.raises(GroundingError) as exc_info:
+        ground_intent_to_action(
+            {
+                "_metadata": "intent",
+                "action": "Locate",
+                "target_text_hint": "10月1日",
+                "scope_start_mark_id": "ax_99",
+            },
+            mark_registry=_registry(),
+            screen_id="screen-1",
+        )
+    assert exc_info.value.code == "scope_mark_unknown"
+
+
+def test_grounding_rejects_form_b_end_missing_from_registry() -> None:
+    with pytest.raises(GroundingError) as exc_info:
+        ground_intent_to_action(
+            {
+                "_metadata": "intent",
+                "action": "Locate",
+                "target_text_hint": "10月1日",
+                "scope_start_mark_id": "ax_9",
+                "scope_end_mark_id": "ax_99",
+            },
+            mark_registry=_registry(),
+            screen_id="screen-1",
+        )
+    assert exc_info.value.code == "scope_mark_unknown"
+
+
+def test_grounding_rejects_form_b_end_without_start() -> None:
+    with pytest.raises(GroundingError) as exc_info:
+        ground_intent_to_action(
+            {
+                "_metadata": "intent",
+                "action": "Locate",
+                "target_text_hint": "10月1日",
+                "scope_end_mark_id": "ax_23",
+            },
+            mark_registry=_registry(),
+            screen_id="screen-1",
+        )
+    assert exc_info.value.code == "missing_field"
+
+
+def test_grounding_rejects_form_b_invalidated_start() -> None:
+    with pytest.raises(GroundingError) as exc_info:
+        ground_intent_to_action(
+            {
+                "_metadata": "intent",
+                "action": "Locate",
+                "target_text_hint": "10月1日",
+                "scope_start_mark_id": "ax_9",
+            },
+            mark_registry=_registry(),
+            screen_id="screen-1",
+            invalidated_mark_ids=["ax_9"],
+        )
+    assert exc_info.value.code == "mark_invalidated"
 
 
 # ----------------------------------------------------------------------

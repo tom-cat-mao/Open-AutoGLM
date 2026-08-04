@@ -39,7 +39,14 @@ ALLOWED_FIELDS_BY_ACTION: dict[str, set[str]] = {
     "Note": {"_metadata", "action", "message"},
     "Call_API": {"_metadata", "action", "message"},
     "Interact": {"_metadata", "action", "message"},
-    "Locate": {"_metadata", "action", "target_text_hint", "scope_mark_id"},
+    "Locate": {
+        "_metadata",
+        "action",
+        "target_text_hint",
+        "scope_mark_id",
+        "scope_start_mark_id",
+        "scope_end_mark_id",
+    },
     "Take_over": {"_metadata", "action", "message"},
 }
 CANONICAL_ACTIONS = set(ALLOWED_FIELDS_BY_ACTION)
@@ -100,15 +107,38 @@ def validate_action(action: dict[str, Any] | ActionIR) -> dict[str, Any]:
         if len(hint) > 240:
             raise ActionValidationError("unsafe_value", "Locate target_text_hint must be <= 240 characters")
         scope_mark_id = action_dict.get("scope_mark_id")
+        scope_start_mark_id = action_dict.get("scope_start_mark_id")
+        scope_end_mark_id = action_dict.get("scope_end_mark_id")
+        # P1: scope is mandatory. Exactly one of the two forms must be present:
+        #  form A = scope_mark_id (single container);
+        #  form B = scope_start_mark_id (+ optional scope_end_mark_id) interval.
+        if scope_mark_id is not None and scope_start_mark_id is not None:
+            raise ActionValidationError(
+                "unsafe_value",
+                "Locate accepts either scope_mark_id or scope_start_mark_id, not both",
+            )
+        if scope_mark_id is None and scope_start_mark_id is None:
+            raise ActionValidationError(
+                "missing_field",
+                "Locate requires scope_mark_id or scope_start_mark_id",
+            )
+        if scope_end_mark_id is not None and scope_start_mark_id is None:
+            raise ActionValidationError(
+                "missing_field",
+                "Locate scope_end_mark_id requires scope_start_mark_id",
+            )
         if scope_mark_id is not None:
-            if not isinstance(scope_mark_id, str):
-                raise ActionValidationError("unsafe_value", "Locate scope_mark_id must be a string")
-            scope_mark_id = scope_mark_id.strip()
-            if not scope_mark_id:
-                raise ActionValidationError("missing_field", "Locate scope_mark_id must be non-empty")
-            if not SAFE_MARK_ID_RE.fullmatch(scope_mark_id):
-                raise ActionValidationError("unsafe_value", "Locate scope_mark_id contains unsafe characters")
-            action_dict["scope_mark_id"] = scope_mark_id
+            action_dict["scope_mark_id"] = _validate_scope_mark_id(
+                scope_mark_id, "scope_mark_id"
+            )
+        else:
+            action_dict["scope_start_mark_id"] = _validate_scope_mark_id(
+                scope_start_mark_id, "scope_start_mark_id"
+            )
+            if scope_end_mark_id is not None:
+                action_dict["scope_end_mark_id"] = _validate_scope_mark_id(
+                    scope_end_mark_id, "scope_end_mark_id"
+                )
     elif action_name == "Launch":
         _require_str(action_dict, "app")
         from phone_agent.config.apps import normalize_app_name
@@ -138,6 +168,17 @@ def _validate_finish(action: dict[str, Any]) -> None:
                 raise ActionValidationError(
                     "unsafe_value", "matched_terminal_evidence items must be non-empty strings"
                 )
+
+
+def _validate_scope_mark_id(value: Any, field: str) -> str:
+    if not isinstance(value, str):
+        raise ActionValidationError("unsafe_value", f"Locate {field} must be a string")
+    value = value.strip()
+    if not value:
+        raise ActionValidationError("missing_field", f"Locate {field} must be non-empty")
+    if not SAFE_MARK_ID_RE.fullmatch(value):
+        raise ActionValidationError("unsafe_value", f"Locate {field} contains unsafe characters")
+    return value
 
 
 def _reject_dangerous_fields(action: dict[str, Any]) -> None:

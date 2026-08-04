@@ -154,6 +154,7 @@ class AgentState(TypedDict):
         dict
     ]  # W2 T3: reflect 推导的阶段状态（current_stage_index + per_stage）；无 plan 时 None；永不当门槛
     stage_stall_windows: int  # W2 T6: 连续 stuck 且阶段未推进的 reflect 窗口数
+    stage_stall_grace_windows: int  # P3: 重编译后的免疫窗口余数（期间不累计 stall）
 
     # === Reflect 节点输出 ===
     reflection: Optional[str]  # 反思结论

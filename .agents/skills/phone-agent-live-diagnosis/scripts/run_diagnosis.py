@@ -372,6 +372,7 @@ def main() -> int:
     write_json(task_path, [task_record])
 
     preflight = collect_preflight(args)
+    preflight["reset_app"] = reset_app_on_device(args)
     write_json(run_dir / "preflight.json", preflight)
 
     cmd = build_eval_command(args, task_path, trace_dir)
@@ -496,6 +497,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--lang", choices=["cn", "en"], default=os.getenv("PHONE_AGENT_LANG", "cn"))
     parser.add_argument("--output-dir", default=str(DEFAULT_OUTPUT_DIR))
     parser.add_argument("--quiet", action="store_true")
+    parser.add_argument(
+        "--reset-app",
+        default=None,
+        help=(
+            "Optional package to clear before the run (adb shell pm clear). "
+            "Defaults to ctrip.android.view for Ctrip/携程 tasks to remove "
+            "recent-search residue."
+        ),
+    )
     args = parser.parse_args()
     if not args.status and not args.target:
         parser.error("target is required unless --status is used")
@@ -517,6 +527,50 @@ def read_status(path: Path) -> dict[str, Any]:
         "state": "status_missing",
         "path": str(target),
         "latest_trace": latest_trace_status(traces) if traces.exists() else {},
+    }
+
+
+def resolve_reset_app(args: argparse.Namespace) -> str | None:
+    """Pick the package to ``pm clear`` before the run (P5 e2e isolation).
+
+    Explicit ``--reset-app`` wins; otherwise Ctrip/携程 tasks default to
+    ``ctrip.android.view`` so a previous run's recent-search residue cannot
+    poison the fresh task. Returns None when no reset applies.
+    """
+
+    if getattr(args, "reset_app", None):
+        return str(args.reset_app).strip() or None
+    target = str(args.target or "")
+    if "携程" in target or "ctrip" in target.casefold():
+        return "ctrip.android.view"
+    return None
+
+
+def reset_app_on_device(args: argparse.Namespace) -> dict[str, Any]:
+    """Run ``adb shell pm clear <package>`` before the eval command.
+
+    Best-effort: a failed clear (adb missing, package missing) is recorded in
+    the preflight diagnostics but never aborts the run — the reset is an
+    isolation aid, not a gate.
+    """
+
+    package = resolve_reset_app(args)
+    if not package:
+        return {"reset_app": None, "performed": False}
+    adb_path = shutil.which("adb")
+    if not adb_path:
+        return {"reset_app": package, "performed": False, "error": "adb_not_found"}
+    cmd = [adb_path]
+    if args.device_id:
+        cmd += ["-s", args.device_id]
+    cmd += ["shell", "pm", "clear", package]
+    result = safe_cmd(cmd, timeout=30)
+    return {
+        "reset_app": package,
+        "performed": result.get("returncode") == 0,
+        "returncode": result.get("returncode"),
+        "stdout": trim(str(result.get("stdout") or ""), 500),
+        "stderr": trim(str(result.get("stderr") or ""), 500),
     }
 
 

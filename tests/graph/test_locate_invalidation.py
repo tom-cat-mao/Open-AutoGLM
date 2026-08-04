@@ -219,3 +219,79 @@ def test_reflect_ignores_non_tap_actions() -> None:
 def test_reflect_ignores_missing_grounding_target() -> None:
     state = {"action_parsed": {"_metadata": "do", "action": "Tap", "element": [1, 1]}}
     assert _newly_invalidated_locate_marks(state, verdict="failed", failure_cause=None) == []
+
+
+# ----------------------------------------------------------------------
+# P4: partial + explicit target-state-unchanged message invalidates too
+# ----------------------------------------------------------------------
+
+
+def test_reflect_invalidates_partial_with_cn_not_selected_message() -> None:
+    assert _newly_invalidated_locate_marks(
+        _tap_state("locate_1"),
+        verdict="partial",
+        failure_cause="network_or_loading",
+        reflection_message="页面有变化但目标没有被选中",
+    ) == ["locate_1"]
+
+
+def test_reflect_invalidates_partial_with_cn_not_effective_message() -> None:
+    assert _newly_invalidated_locate_marks(
+        _tap_state("locate_1"),
+        verdict="partial",
+        failure_cause="element_not_found",
+        reflection_message="点击后未生效，日历日期没有选中",
+    ) == ["locate_1"]
+
+
+def test_reflect_invalidates_partial_with_en_not_selected_message() -> None:
+    assert _newly_invalidated_locate_marks(
+        _tap_state("locate_1"),
+        verdict="partial",
+        failure_cause="unknown",
+        reflection_message="The page changed but the target was not selected",
+    ) == ["locate_1"]
+
+
+def test_reflect_invalidates_partial_with_en_did_not_take_effect_message() -> None:
+    assert _newly_invalidated_locate_marks(
+        _tap_state("locate_1"),
+        verdict="partial",
+        failure_cause="unknown",
+        reflection_message="the tap did not take effect on the target",
+    ) == ["locate_1"]
+
+
+def test_reflect_partial_generic_message_keeps_mark() -> None:
+    """Generic \"no change\" phrasing is not an explicit target-state statement."""
+    assert _newly_invalidated_locate_marks(
+        _tap_state("locate_1"),
+        verdict="partial",
+        failure_cause="network_or_loading",
+        reflection_message="页面没有变化",
+    ) == []
+
+
+def test_reflect_failed_keeps_invalidating_without_message() -> None:
+    assert _newly_invalidated_locate_marks(
+        _tap_state("locate_1"), verdict="failed", failure_cause=None
+    ) == ["locate_1"]
+
+
+def test_reflect_succeeded_with_marker_still_keeps_mark() -> None:
+    """The marker only fires on partial verdicts; succeeded keeps the mark."""
+    assert _newly_invalidated_locate_marks(
+        _tap_state("locate_1"),
+        verdict="succeeded",
+        failure_cause=None,
+        reflection_message="目标未选中",
+    ) == []
+
+
+def test_reflect_never_invalidates_ax_mark_with_marker_message() -> None:
+    assert _newly_invalidated_locate_marks(
+        _tap_state("m1"),
+        verdict="partial",
+        failure_cause="unknown",
+        reflection_message="目标没有被选中",
+    ) == []

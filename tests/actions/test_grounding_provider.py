@@ -1437,3 +1437,142 @@ def test_locateanything_mlx_run_model_prefers_parallel_box_decoding(
     }
     assert captured["decode_tokens"] == [1, 2, 3]
     assert captured["decode_kwargs"] == {"skip_special_tokens": False}
+
+
+# ----------------------------------------------------------------------
+# P2: LA singleton — lazy load shared across inferences, unload releases
+# ----------------------------------------------------------------------
+
+
+def _fake_mlx_vlm(monkeypatch, *, output: str = "<box>100 200 300 400</box>"):
+    """Install a fake mlx_vlm module counting `load` calls.
+
+    ``_build_prompt``'s optional ``mlx_vlm.prompt_utils`` import is missing in
+    the fake module, so it falls back to the legacy image placeholder prompt
+    (the exact code path used on older mlx-vlm builds).
+    """
+    import sys
+
+    load_calls = {"count": 0}
+    fake_model = SimpleNamespace()  # no pbd_generate -> generate path
+    fake_processor = SimpleNamespace()
+
+    def fake_load(path):
+        load_calls["count"] += 1
+        return fake_model, fake_processor
+
+    def fake_generate(model, processor, **kwargs):
+        return SimpleNamespace(text=output)
+
+    mlx_vlm = ModuleType("mlx_vlm")
+    mlx_vlm.load = fake_load
+    mlx_vlm.generate = fake_generate
+    monkeypatch.setitem(sys.modules, "mlx_vlm", mlx_vlm)
+    return load_calls
+
+
+def _mlx_ready_provider(monkeypatch):
+    provider = LocateAnythingMLXProvider(model_path="models/LocateAnything-3B-4bit")
+    monkeypatch.setattr(
+        "phone_agent.grounding.locateanything.platform.system", lambda: "Darwin"
+    )
+    monkeypatch.setattr(
+        "phone_agent.grounding.locateanything.platform.machine", lambda: "arm64"
+    )
+    monkeypatch.setattr(
+        provider, "model_path", SimpleNamespace(exists=lambda: True)
+    )
+    monkeypatch.setattr(
+        provider, "_prepare_image", lambda screenshot: (object(), "input-hash")
+    )
+    return provider
+
+
+def test_locate_provider_shared_instance_loads_model_once(monkeypatch) -> None:
+    """Two inferences on ONE provider instance share the lazy model load."""
+    load_calls = _fake_mlx_vlm(monkeypatch)
+    provider = _mlx_ready_provider(monkeypatch)
+    hints = [MarkProviderHint(text="目标")]
+
+    first = provider.provide_marks(Screenshot(), binding(), hints=hints)
+    second = provider.provide_marks(Screenshot(), binding(), hints=hints)
+
+    assert first.success is True
+    assert second.success is True
+    assert load_calls["count"] == 1
+
+
+def test_locate_provider_unload_releases_and_reloads(monkeypatch) -> None:
+    """unload() empties the model; the next inference lazily reloads."""
+    load_calls = _fake_mlx_vlm(monkeypatch)
+    provider = _mlx_ready_provider(monkeypatch)
+    hints = [MarkProviderHint(text="目标")]
+
+    provider.provide_marks(Screenshot(), binding(), hints=hints)
+    assert load_calls["count"] == 1
+    assert provider._model is not None
+
+    provider.unload()
+    assert provider._model is None
+    assert provider._processor is None
+
+    provider.provide_marks(Screenshot(), binding(), hints=hints)
+    assert load_calls["count"] == 2
+
+
+def test_locate_provider_unload_clears_mlx_cache(monkeypatch) -> None:
+    """unload() calls mlx.core.clear_cache() (deferred import; skipped when
+    mlx is not installed)."""
+    try:
+        import mlx.core as mx_core
+    except Exception:
+        pytest.skip("mlx not installed")
+    calls = {"cleared": 0}
+    monkeypatch.setattr(
+        mx_core, "clear_cache", lambda: calls.__setitem__("cleared", calls["cleared"] + 1)
+    )
+
+    provider = LocateAnythingMLXProvider(model_path="models/LocateAnything-3B-4bit")
+    provider._model = object()
+    provider._processor = object()
+    provider.unload()
+
+    assert provider._model is None
+    assert provider._processor is None
+    assert calls["cleared"] == 1
+
+
+def test_mark_providers_hybrid_reuses_injected_locate_provider() -> None:
+    """P2: build_mark_providers' hybrid branch reuses the injected
+    config['locate_provider'] instance instead of building a new one."""
+    la = LocateAnythingMLXProvider(model_path="models/LocateAnything-3B-4bit")
+    providers = build_mark_providers(
+        {
+            "grounding_provider_name": "hybrid",
+            "locate_provider": la,
+            "accessibility_tree_dump": None,
+        }
+    )
+    assert len(providers) == 1
+    fallback = providers[0]
+    assert isinstance(fallback, FallbackMarkProvider)
+    assert any(
+        child is la for child in fallback.providers
+    ), "hybrid must reuse the injected LA instance"
+
+
+def test_mark_providers_hybrid_ignores_injected_provider_when_skipped() -> None:
+    """A-lite: skip_locateanything still drops the LA child even when an
+    injected singleton is present."""
+    la = LocateAnythingMLXProvider(model_path="models/LocateAnything-3B-4bit")
+    providers = build_mark_providers(
+        {
+            "grounding_provider_name": "hybrid",
+            "locate_provider": la,
+            "accessibility_tree_dump": None,
+            "skip_locateanything": True,
+        }
+    )
+    assert len(providers) == 1
+    fallback = providers[0]
+    assert [child.name for child in fallback.providers] == []

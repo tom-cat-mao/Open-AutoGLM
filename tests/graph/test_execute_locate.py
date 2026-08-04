@@ -36,7 +36,18 @@ def _mark_registry(locate_marks: int = 0) -> MarkRegistry:
             source="accessibility",
             role="TextView",
             text_summary="首页",
-        )
+        ),
+        # P1: scope is mandatory; a full-frame container mark makes the crop
+        # an identity mapping so the LA box passes through unchanged.
+        "scope_full": Mark(
+            mark_id="scope_full",
+            screen_id=_SCREEN,
+            bbox=(0, 0, 1000, 1000),
+            center=(500, 500),
+            source="accessibility",
+            role="View",
+            text_summary="全屏容器",
+        ),
     }
     for index in range(1, locate_marks + 1):
         marks[f"locate_{index}"] = Mark(
@@ -63,9 +74,11 @@ def _state_with_locate(base_state, **overrides) -> dict:
         "_metadata": "do",
         "action": "Locate",
         "target_text_hint": "10月1日",
+        "scope_mark_id": "scope_full",
     }
     state["action_raw"] = (
-        '{"type":"intent","action":"locate","target_text_hint":"10月1日"}'
+        '{"type":"intent","action":"locate","target_text_hint":"10月1日",'
+        '"scope_mark_id":"scope_full"}'
     )
     state["mark_registry"] = _mark_registry().to_dict()
     state["locate_count"] = 0

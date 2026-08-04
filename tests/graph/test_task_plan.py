@@ -776,7 +776,7 @@ def test_stage_stall_recompile_pure_trigger_and_reset() -> None:
     prev = {"current_stage_index": 0}
     stalled = {"current_stage_index": 0}
 
-    windows, recompile = stage_stall_recompile(
+    windows, recompile, grace = stage_stall_recompile(
         previous_status=prev,
         current_status=stalled,
         liveness_state="stuck",
@@ -785,10 +785,11 @@ def test_stage_stall_recompile_pure_trigger_and_reset() -> None:
     )
     assert windows == 2
     assert recompile is True
+    assert grace == 0
 
     # stage advanced -> streak resets, no recompile
     advanced = {"current_stage_index": 1}
-    windows, recompile = stage_stall_recompile(
+    windows, recompile, grace = stage_stall_recompile(
         previous_status=prev,
         current_status=advanced,
         liveness_state="stuck",
@@ -797,9 +798,10 @@ def test_stage_stall_recompile_pure_trigger_and_reset() -> None:
     )
     assert windows == 0
     assert recompile is False
+    assert grace == 0
 
     # exploring (not stuck) -> streak resets
-    windows, recompile = stage_stall_recompile(
+    windows, recompile, grace = stage_stall_recompile(
         previous_status=prev,
         current_status=stalled,
         liveness_state="exploring",
@@ -808,9 +810,10 @@ def test_stage_stall_recompile_pure_trigger_and_reset() -> None:
     )
     assert windows == 0
     assert recompile is False
+    assert grace == 0
 
     # below threshold -> count, no recompile
-    windows, recompile = stage_stall_recompile(
+    windows, recompile, grace = stage_stall_recompile(
         previous_status=prev,
         current_status=stalled,
         liveness_state="stuck",
@@ -819,10 +822,11 @@ def test_stage_stall_recompile_pure_trigger_and_reset() -> None:
     )
     assert windows == 1
     assert recompile is False
+    assert grace == 0
 
 
 def test_stage_stall_recompile_no_plan_never_triggers() -> None:
-    windows, recompile = stage_stall_recompile(
+    windows, recompile, grace = stage_stall_recompile(
         previous_status=None,
         current_status=None,
         liveness_state="stuck",
@@ -831,6 +835,92 @@ def test_stage_stall_recompile_no_plan_never_triggers() -> None:
     )
     assert windows == 0
     assert recompile is False
+    assert grace == 0
+
+
+# ----------------------------------------------------------------------
+# P3: post-recompile grace windows are immune; counting restarts after
+# ----------------------------------------------------------------------
+
+
+def _stuck_status() -> dict:
+    return {"current_stage_index": 0}
+
+
+def test_stage_stall_recompile_grace_windows_do_not_count_stall() -> None:
+    prev = _stuck_status()
+    stalled = _stuck_status()
+
+    # grace=2: the window is immune even with a maxed stall counter.
+    windows, recompile, grace = stage_stall_recompile(
+        previous_status=prev,
+        current_status=stalled,
+        liveness_state="stuck",
+        stall_windows=5,
+        threshold=STAGE_STALL_RECOMPILE_WINDOWS,
+        grace_windows=2,
+    )
+    assert windows == 0
+    assert recompile is False
+    assert grace == 1
+
+    # grace=1: still immune; the counter keeps ticking down.
+    windows, recompile, grace = stage_stall_recompile(
+        previous_status=prev,
+        current_status=stalled,
+        liveness_state="stuck",
+        stall_windows=5,
+        threshold=STAGE_STALL_RECOMPILE_WINDOWS,
+        grace_windows=grace,
+    )
+    assert windows == 0
+    assert recompile is False
+    assert grace == 0
+
+    # grace expired: the next stuck window counts from zero again.
+    windows, recompile, grace = stage_stall_recompile(
+        previous_status=prev,
+        current_status=stalled,
+        liveness_state="stuck",
+        stall_windows=0,
+        threshold=STAGE_STALL_RECOMPILE_WINDOWS,
+        grace_windows=0,
+    )
+    assert windows == 1
+    assert recompile is False
+    assert grace == 0
+
+
+def test_stage_stall_recompile_grace_cannot_trigger_recompile() -> None:
+    prev = _stuck_status()
+    stalled = _stuck_status()
+    windows, recompile, grace = stage_stall_recompile(
+        previous_status=prev,
+        current_status=stalled,
+        liveness_state="stuck",
+        stall_windows=STAGE_STALL_RECOMPILE_WINDOWS - 1,
+        threshold=STAGE_STALL_RECOMPILE_WINDOWS,
+        grace_windows=1,
+    )
+    assert windows == 0
+    assert recompile is False
+    assert grace == 0
+
+
+def test_stage_stall_recompile_zero_grace_matches_previous_behavior() -> None:
+    prev = _stuck_status()
+    stalled = _stuck_status()
+    windows, recompile, grace = stage_stall_recompile(
+        previous_status=prev,
+        current_status=stalled,
+        liveness_state="stuck",
+        stall_windows=1,
+        threshold=STAGE_STALL_RECOMPILE_WINDOWS,
+        grace_windows=0,
+    )
+    assert windows == 2
+    assert recompile is True
+    assert grace == 0
 
 
 def test_reflect_sets_needs_recompile_on_stage_stall(base_state, fake_device) -> None:

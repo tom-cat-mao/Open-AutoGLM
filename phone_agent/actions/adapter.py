@@ -62,6 +62,8 @@ INTENT_FIELDS = {
     "target_role",
     "target_text_hint",
     "scope_mark_id",
+    "scope_start_mark_id",
+    "scope_end_mark_id",
     "target_text",
     "requires_grounding",
     "text",
@@ -83,7 +85,8 @@ ALLOWED_PROVIDER_FIELDS_BY_ACTION: dict[str, set[str]] = {
     "Note": COMMON_DO_FIELDS | {"text"},
     "Call_API": COMMON_DO_FIELDS | {"text"},
     "Interact": COMMON_DO_FIELDS | {"text"},
-    "Locate": COMMON_DO_FIELDS | {"target_text_hint", "scope_mark_id"},
+    "Locate": COMMON_DO_FIELDS
+    | {"target_text_hint", "scope_mark_id", "scope_start_mark_id", "scope_end_mark_id"},
     "Take_over": COMMON_DO_FIELDS | {"text"},
 }
 
@@ -123,6 +126,8 @@ def adapt_json_action(payload: str | dict[str, Any]) -> dict[str, Any]:
                     "target_role",
                     "target_text_hint",
                     "scope_mark_id",
+                    "scope_start_mark_id",
+                    "scope_end_mark_id",
                     "text",
                     "message",
                     "app",
@@ -202,6 +207,14 @@ def adapt_json_action(payload: str | dict[str, Any]) -> dict[str, Any]:
         if not isinstance(hint, str) or not hint.strip():
             raise ActionAdapterError("missing_field", "Locate requires target_text_hint")
         action["target_text_hint"] = hint
+        # P1: scope fields pass through the intent path too; this copies them
+        # for any do-style payload that reaches the do branch (belt and braces).
+        for key in ("scope_mark_id", "scope_start_mark_id", "scope_end_mark_id"):
+            if key in data:
+                value = data[key]
+                if not isinstance(value, str):
+                    raise ActionAdapterError("unsafe_value", f"{key} must be a string")
+                action[key] = value
     elif action_name == "Launch":
         app = data.get("app") or data.get("app_name")
         if not isinstance(app, str):

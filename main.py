@@ -1148,7 +1148,12 @@ def main():
     # Run with provided task or enter interactive mode
     if args.task:
         print(f"\nTask: {args.task}\n")
-        result = agent.run(args.task)
+        try:
+            result = agent.run(args.task)
+        finally:
+            # P2: release loaded MLX weights (~2GB) when the run ends, on
+            # both success and exception paths; the next run lazily reloads.
+            agent.unload_models()
         print(f"\nResult: {result}")
     else:
         print("\nEntering interactive mode. Type 'quit' to exit.\n")
@@ -1165,7 +1170,12 @@ def main():
                     continue
 
                 print()
-                result = agent.run(task)
+                try:
+                    result = agent.run(task)
+                finally:
+                    # P2: release the MLX model between interactive tasks too;
+                    # the next inference lazily reloads the singleton.
+                    agent.unload_models()
                 print(f"\nResult: {result}\n")
                 agent.reset()
 

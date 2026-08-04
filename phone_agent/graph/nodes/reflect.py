@@ -149,13 +149,50 @@ def _message_contains_directive(message: str) -> bool:
     )
 
 
+# P4: reflection messages that explicitly state the tap target's state did
+# not change (未选中/未生效) — the trigger for invalidating a wrong locate_*
+# box when the reflection is partial but the failure_cause is NOT
+# coordinate_or_tap_offset (the empirical S4 gap: the model correctly reads
+# "not selected" without naming a coordinate offset). Conservative explicit
+# markers only; generic phrases like "no change"/"没有变化" are not enough.
+_TARGET_STATE_UNCHANGED_CN_MARKERS = (
+    "未选中",
+    "没选中",
+    "没有被选中",
+    "未生效",
+    "没有生效",
+    "未起作用",
+    "没有选中目标",
+)
+_TARGET_STATE_UNCHANGED_EN_MARKERS = (
+    "not selected",
+    "was not selected",
+    "not activated",
+    "not applied",
+    "did not take effect",
+    "didn't take effect",
+    "not effective",
+    "not toggled",
+)
+
+
+def _states_target_unchanged(message: str | None) -> bool:
+    text = str(message or "").casefold()
+    if not text:
+        return False
+    return any(marker in text for marker in _TARGET_STATE_UNCHANGED_CN_MARKERS) or any(
+        marker in text for marker in _TARGET_STATE_UNCHANGED_EN_MARKERS
+    )
+
+
 def _newly_invalidated_locate_marks(
     state: dict[str, Any],
     *,
     verdict: str,
     failure_cause: str | None,
+    reflection_message: str | None = None,
 ) -> list[str]:
-    """S4: invalidate a tapped ``locate_*`` mark whose tap clearly did not land.
+    """S4/P4: invalidate a tapped ``locate_*`` mark whose tap clearly did not land.
 
     The empirical failure mode is one wrong LA box tapped repeatedly (burning
     the locate budget). Only ``locate_*`` marks are invalidated — LA boxes may
@@ -165,6 +202,9 @@ def _newly_invalidated_locate_marks(
     - verdict ``failed`` → the action did not take effect; the box is suspect.
     - verdict ``partial`` with ``coordinate_or_tap_offset`` → the page changed
       but the tap clearly landed at the wrong place; the box is suspect.
+    - verdict ``partial`` whose reflection message explicitly states the
+      target state did not change (未选中/未生效 / not selected / not applied)
+      → the tap did not select/activate the target; the box is suspect.
     - anything else (including disputed partial / succeeded) → keep the mark.
     """
 
@@ -182,8 +222,11 @@ def _newly_invalidated_locate_marks(
         return []
     if verdict == "failed":
         return [mark_id]
-    if verdict == "partial" and failure_cause == "coordinate_or_tap_offset":
-        return [mark_id]
+    if verdict == "partial":
+        if failure_cause == "coordinate_or_tap_offset":
+            return [mark_id]
+        if _states_target_unchanged(reflection_message):
+            return [mark_id]
     return []
 
 
@@ -808,17 +851,19 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
             configurable.get("skip_reflect_on_high_confidence", True)
         ),
     )
-    # W2 T6: single needs_recompile write point — stage stall. When the
+    # W2 T6 + P3: single needs_recompile write point — stage stall. When the
     # current stage has not advanced for K consecutive reflect windows AND the
     # trajectory is stuck, the plan is a bad belief; flag recompilation so the
-    # existing replan→goal route rebuilds it. Nothing else in this node touches
-    # needs_recompile (the flag is only ever set True here).
-    stage_stall_windows, stage_recompile = stage_stall_recompile(
+    # existing replan→goal route rebuilds it. P3: the first K windows right
+    # after a recompile are immune (grace_windows); goal_node re-arms the grace
+    # counter and resets the stall counter when the recompile completes.
+    stage_stall_windows, stage_recompile, stage_stall_grace = stage_stall_recompile(
         previous_status=state.get("task_plan_status"),
         current_status=task_plan_status,
         liveness_state=current_liveness["state"],
         stall_windows=int(state.get("stage_stall_windows") or 0),
         threshold=STAGE_STALL_RECOMPILE_WINDOWS,
+        grace_windows=int(state.get("stage_stall_grace_windows") or 0),
     )
     if stage_recompile:
         emit_trace(
@@ -1040,6 +1085,7 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
         state,
         verdict=str(final_verdict or ""),
         failure_cause=final_failure_cause,
+        reflection_message=str(reflection_state_value or ""),
     )
     invalidated_mark_ids = sorted(
         {str(mark_id) for mark_id in (state.get("invalidated_mark_ids") or [])}
@@ -1279,6 +1325,7 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
         "goal_agenda": goal_agenda,
         "task_plan_status": task_plan_status,
         "stage_stall_windows": stage_stall_windows,
+        "stage_stall_grace_windows": stage_stall_grace,
         **({"needs_recompile": True} if stage_recompile else {}),
         "observation_retry_count": 0,
         "invalidated_mark_ids": invalidated_mark_ids,

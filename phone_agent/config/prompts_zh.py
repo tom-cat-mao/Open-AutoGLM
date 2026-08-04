@@ -30,7 +30,7 @@ ACTION_SCHEMA = """# Action Schema（唯一动作契约）
 - Back / Home: `{"type":"do","action":"back"}` / `{"type":"do","action":"home"}`。
 - Wait: `{"type":"do","action":"wait","duration":"1 seconds"}`，等待应尽量短，单次不超过 60 seconds。
 - Note / Call_API / Interact: `{"type":"do","action":"note|call_api|interact","message":"..."}`。
-- Locate（内部工具）：`{"type":"intent","action":"locate","target_text_hint":"可见元素的聚焦短描述"}`。传入目标的视觉描述，返回一个可执行 mark（注册进 Screen marks，下一步即可用）。成本：约 2s 延迟；全程限 3 次（预算段显示 "locate 剩余 x/3"）；同一屏幕同一描述重复调用会被拒绝。失败语义：0 框或多框会失败且不产生 mark，失败原因会出现在上一步结果里。`target_text_hint` 只写可见元素的聚焦短描述（建议 ≤64 字符），禁止整句任务、禁止隐私原文（手机号/邮箱/订单号/验证码等）；locate 不会直接执行点击。当 Screen marks 不能覆盖你的目标时可以考虑它。可选 `scope_mark_id`：传入一个包含目标的已有 Screen mark（如容器区块），可把搜索范围缩小到该 mark 区域内——目标小或密集时能提高定位准确度。scope 必须引用当前屏幕存在的 mark；裁剪只影响检测范围，返回的 mark 仍是全屏坐标。
+- Locate（内部工具）：`{"type":"intent","action":"locate","target_text_hint":"可见元素的聚焦短描述","scope_mark_id":"ax_5"}`。用法是**先指区域，再指目标**：必须同时传入 scope（二选一）——形态A：`scope_mark_id`（一个包含目标的已有 Screen mark，如容器区块）；形态B：`scope_start_mark_id`+`scope_end_mark_id`（两个锚点 mark 夹出的区间，检测区域为 [起点.top, 终点.top) 的横向条带；只给 start 时到 start 所在容器底部）。搜索区域越紧，定位准确度越高；区域选错导致 0 框/多框失败时，可调整/扩大 scope 区域后重试。传入目标的视觉描述，返回一个可执行 mark（注册进 Screen marks，下一步即可用）。成本：约 2s 延迟；全程限 3 次（预算段显示 "locate 剩余 x/3"）；同一屏幕同一描述重复调用会被拒绝。`target_text_hint` 只写可见元素的聚焦短描述（建议 ≤64 字符），禁止整句任务、禁止隐私原文（手机号/邮箱/订单号/验证码等）；locate 不会直接执行点击。当 Screen marks 不能覆盖你的目标时可以使用它。scope 必须引用当前屏幕存在的 mark；裁剪只影响检测范围，返回的 mark 仍是全屏坐标。
 - Take_over: `{"type":"do","action":"take_over","message":"需要用户接管的原因"}`。
 - Finish: `{"type":"finish","message":"任务完成或无法继续的原因","matched_terminal_evidence":["成功标准名1","成功标准名2"]}`。仅在任务目标契约列出了成功标准时才包含 matched_terminal_evidence，点名每个满足的标准。
 """
@@ -72,7 +72,7 @@ JSON_OUTPUT_CONTRACT = """# 输出格式：JSON schema
 `progress_note` 为可选字段：一句话自述本步完成内容与下一步意图，仅作连续记忆（会被脱敏、截断，不含任何可执行信息）。
 示例：
 - {"type":"intent","action":"tap","target_mark_id":"m1"}
-- {"type":"intent","action":"locate","target_text_hint":"10月1日"}
+- {"type":"intent","action":"locate","target_text_hint":"10月1日","scope_start_mark_id":"ax_9","scope_end_mark_id":"ax_23"}
 - {"type":"intent","action":"tap","target_object_id":"obj_1"}
 - {"type":"intent","action":"tap","object_role":"video","ordinal":1,"object_filter":{"object_type":"video","list_id":"list_1"}}
 - {"action":{"type":"intent","action":"tap","target_mark_id":"m1"},"expected_outcome":{"kind":"input_focused","must_observe":["搜索","取消"]}}

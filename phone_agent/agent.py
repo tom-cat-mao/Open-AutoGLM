@@ -199,6 +199,48 @@ class PhoneAgent:
 
         self.model_client = ModelClient(self.model_config)
         self._graph = create_agent_graph()
+        # P2: one LocateAnythingMLXProvider per agent, built once here and
+        # injected through configurable["locate_provider"] so the
+        # plan/observation/locate paths share the same (lazily loaded) MLX
+        # model instance instead of rebuilding a ~2GB provider every step.
+        self.locate_provider = self._build_singleton_locate_provider()
+
+    def _build_singleton_locate_provider(self) -> Any:
+        """Build the run-scoped locate/visual provider once (P2 RAM fix).
+
+        Returns None for off/fake/accessibility-only configs (the explicit
+        locate tool then derives its provider from the grounding config at
+        call time, unchanged). For hybrid/locateanything configs this is the
+        single lazily-loaded MLX instance shared across the whole run.
+        """
+
+        from phone_agent.grounding.factory import build_locate_provider
+
+        return build_locate_provider(
+            {
+                "grounding_provider_name": self.agent_config.grounding_provider_name,
+                "locateanything_context_max_chars": self.agent_config.locateanything_context_max_chars,
+                "locateanything_structure_mode": self.agent_config.locateanything_structure_mode,
+                "locateanything_max_visual_candidates": self.agent_config.locateanything_max_visual_candidates,
+                "locateanything_visual_category_budget": self.agent_config.locateanything_visual_category_budget,
+                "locateanything_max_structure_calls": self.agent_config.locateanything_max_structure_calls,
+            }
+        )
+
+    def unload_models(self) -> None:
+        """Release loaded model weights (LocateAnything MLX ~2GB) after a run.
+
+        Safe to call any time: no-op when no provider (or a provider without
+        an unload hook) is present; the next run lazily reloads.
+        """
+
+        provider = getattr(self, "locate_provider", None)
+        unload = getattr(provider, "unload", None)
+        if callable(unload):
+            try:
+                unload()
+            except Exception:
+                pass
 
     def run(self, task: str) -> str:
         """
@@ -366,6 +408,7 @@ class PhoneAgent:
             "goal_evidence_ledger": [],
             "task_plan_status": None,
             "stage_stall_windows": 0,
+            "stage_stall_grace_windows": 0,
             "reflection": None,
             "action_succeeded": False,
             "reflection_verdict": None,
@@ -432,7 +475,7 @@ class PhoneAgent:
         trace_writer: JsonlTraceWriter | None = None,
     ) -> dict[str, Any]:
         """Build LangGraph invocation config."""
-        return {
+        config = {
             "configurable": {
                 "model_client": self.model_client,
                 "device_factory": device_factory,
@@ -466,6 +509,12 @@ class PhoneAgent:
                 "runtime_goal_context": RuntimeGoalContext(),
             }
         }
+        # P2: the run-scoped LA singleton (built once in __init__) is injected
+        # here. When absent (off/fake/accessibility-only), the key is omitted so
+        # the locate tool's factory falls back to its config-derived provider.
+        if self.locate_provider is not None:
+            config["configurable"]["locate_provider"] = self.locate_provider
+        return config
 
     def _state_to_run_result(
         self,

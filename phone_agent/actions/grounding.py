@@ -44,6 +44,8 @@ INTENT_ALLOWED_FIELDS = {
     "target_role",
     "target_text_hint",
     "scope_mark_id",
+    "scope_start_mark_id",
+    "scope_end_mark_id",
     "requires_grounding",
     "text",
     "message",
@@ -66,12 +68,15 @@ def validate_intent(intent: dict[str, Any]) -> dict[str, Any]:
         if not SAFE_MARK_ID_RE.fullmatch(intent["target_mark_id"]):
             raise GroundingError("unsafe_value", "target_mark_id contains unsafe characters")
     if "scope_mark_id" in intent:
-        if not isinstance(intent["scope_mark_id"], str):
-            raise GroundingError("unsafe_value", "scope_mark_id must be a string")
-        if not intent["scope_mark_id"].strip():
-            raise GroundingError("missing_field", "scope_mark_id must be non-empty")
-        if not SAFE_MARK_ID_RE.fullmatch(intent["scope_mark_id"]):
-            raise GroundingError("unsafe_value", "scope_mark_id contains unsafe characters")
+        intent["scope_mark_id"] = _validate_scope_mark_ref(intent["scope_mark_id"], "scope_mark_id")
+    if "scope_start_mark_id" in intent:
+        intent["scope_start_mark_id"] = _validate_scope_mark_ref(
+            intent["scope_start_mark_id"], "scope_start_mark_id"
+        )
+    if "scope_end_mark_id" in intent:
+        intent["scope_end_mark_id"] = _validate_scope_mark_ref(
+            intent["scope_end_mark_id"], "scope_end_mark_id"
+        )
     if "target_object_id" in intent:
         if not isinstance(intent["target_object_id"], str) or not intent["target_object_id"].strip():
             raise GroundingError("unsafe_value", "target_object_id must be a non-empty string")
@@ -100,6 +105,16 @@ def validate_intent(intent: dict[str, Any]) -> dict[str, Any]:
         except ActionAdapterError as exc:
             raise GroundingError("unknown_action", str(exc)) from exc
     return intent
+
+
+def _validate_scope_mark_ref(value: Any, field: str) -> str:
+    if not isinstance(value, str):
+        raise GroundingError("unsafe_value", f"{field} must be a string")
+    if not value.strip():
+        raise GroundingError("missing_field", f"{field} must be non-empty")
+    if not SAFE_MARK_ID_RE.fullmatch(value):
+        raise GroundingError("unsafe_value", f"{field} contains unsafe characters")
+    return value
 
 
 def ground_intent_to_action(
@@ -133,25 +148,40 @@ def ground_intent_to_action(
             "action": "Locate",
             "target_text_hint": hint,
         }
-        # S1/S4: an optional scope mark must exist in the CURRENT registry and
-        # must not be invalidated (a locate_* mark invalidated after a failed
-        # tap cannot act as a trusted container region either). The format is
-        # enforced by validate_intent; existence is enforced here where the
-        # registry is available — both fail closed through the standard
-        # grounding error path (replan), never a silent full-frame fallback.
+        # S1/S4/P1: scope is mandatory and must reference marks that exist in
+        # the CURRENT registry and are not invalidated (a locate_* mark
+        # invalidated after a failed tap cannot act as a trusted container
+        # region either). Format is enforced by validate_intent; existence is
+        # enforced here where the registry is available — both fail closed
+        # through the standard grounding error path (replan), never a silent
+        # full-frame fallback. Form A: scope_mark_id single container. Form B:
+        # scope_start_mark_id (+ optional scope_end_mark_id) interval; both
+        # referenced marks must exist and be non-invalidated.
         scope_mark_id = intent.get("scope_mark_id")
+        scope_start_mark_id = intent.get("scope_start_mark_id")
+        scope_end_mark_id = intent.get("scope_end_mark_id")
+        if scope_mark_id is None and scope_start_mark_id is None:
+            raise GroundingError(
+                "missing_field",
+                "Locate requires scope_mark_id or scope_start_mark_id",
+            )
+        if scope_start_mark_id is None and scope_end_mark_id is not None:
+            raise GroundingError(
+                "missing_field",
+                "Locate scope_end_mark_id requires scope_start_mark_id",
+            )
         if scope_mark_id is not None:
-            if registry is None or registry.get(scope_mark_id) is None:
-                raise GroundingError(
-                    "scope_mark_unknown",
-                    f"Locate scope mark not in registry: {scope_mark_id}",
+            locate_action["scope_mark_id"] = _require_valid_scope_mark(
+                registry, scope_mark_id, invalidated
+            )
+        else:
+            locate_action["scope_start_mark_id"] = _require_valid_scope_mark(
+                registry, scope_start_mark_id, invalidated
+            )
+            if scope_end_mark_id is not None:
+                locate_action["scope_end_mark_id"] = _require_valid_scope_mark(
+                    registry, scope_end_mark_id, invalidated
                 )
-            if str(scope_mark_id) in invalidated:
-                raise GroundingError(
-                    "mark_invalidated",
-                    f"Locate scope mark has been invalidated: {scope_mark_id}",
-                )
-            locate_action["scope_mark_id"] = scope_mark_id
         try:
             return validate_action(locate_action)
         except ActionValidationError as exc:
@@ -263,6 +293,25 @@ def ground_intent_to_action(
         return _ground_non_target_intent(intent, action_name)
 
     raise GroundingError("mark_required", "tap-like intent requires target_mark_id")
+
+
+def _require_valid_scope_mark(
+    registry: MarkRegistry | None,
+    mark_id: Any,
+    invalidated: set[str],
+) -> str:
+    scope_mark_id = str(mark_id)
+    if registry is None or registry.get(scope_mark_id) is None:
+        raise GroundingError(
+            "scope_mark_unknown",
+            f"Locate scope mark not in registry: {scope_mark_id}",
+        )
+    if scope_mark_id in invalidated:
+        raise GroundingError(
+            "mark_invalidated",
+            f"Locate scope mark has been invalidated: {scope_mark_id}",
+        )
+    return scope_mark_id
 
 
 def _require_mark_registry(registry: MarkRegistry | None) -> MarkRegistry:

@@ -133,8 +133,17 @@ def build_mark_providers(config: dict[str, Any] | None = None) -> list[MarkProvi
         # A-lite: after a successful Locate, the next observation skips the
         # automatic LocateAnything provider (churn + poisoned-text source both
         # disappear for that round; the explicit locate tool still works).
+        # P2: the LA model instance is a singleton injected through
+        # config["locate_provider"] (built once in agent.py) and reused by the
+        # plan/observation/locate paths — the accessibility child provider still
+        # needs a fresh per-step lambda (dump callback), so only the LA
+        # instance is reused.
         if not cfg.get("skip_locateanything"):
-            built.append(_build_locateanything_provider(cfg))
+            injected = cfg.get("locate_provider")
+            if isinstance(injected, LocateAnythingMLXProvider):
+                built.append(injected)
+            else:
+                built.append(_build_locateanything_provider(cfg))
         provider_order = [provider.name for provider in built]
         return [
             FallbackMarkProvider(

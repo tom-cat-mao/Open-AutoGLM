@@ -74,10 +74,16 @@ def test_adapter_rejects_extra_fields_on_locate() -> None:
 
 def test_validator_accepts_locate_with_hint() -> None:
     action = validate_action(
-        {"_metadata": "do", "action": "Locate", "target_text_hint": "10月1日"}
+        {
+            "_metadata": "do",
+            "action": "Locate",
+            "target_text_hint": "10月1日",
+            "scope_mark_id": "ax_5",
+        }
     )
     assert action["action"] == "Locate"
     assert action["target_text_hint"] == "10月1日"
+    assert action["scope_mark_id"] == "ax_5"
 
 
 def test_validator_rejects_locate_without_hint() -> None:
@@ -156,14 +162,31 @@ def test_locate_budget_constant_is_positive() -> None:
 
 def test_grounding_passes_locate_intent_through_untouched() -> None:
     action = ground_intent_to_action(
-        {"_metadata": "intent", "action": "Locate", "target_text_hint": "10月1日"},
-        mark_registry=None,
+        {
+            "_metadata": "intent",
+            "action": "Locate",
+            "target_text_hint": "10月1日",
+            "scope_mark_id": "ax_5",
+        },
+        mark_registry={
+            "screen_id": "screen-1",
+            "marks": {
+                "ax_5": {
+                    "mark_id": "ax_5",
+                    "screen_id": "screen-1",
+                    "bbox": [0, 0, 500, 500],
+                    "center": [250, 250],
+                    "source": "accessibility",
+                }
+            },
+        },
         screen_id="screen-1",
     )
     assert action == {
         "_metadata": "do",
         "action": "Locate",
         "target_text_hint": "10月1日",
+        "scope_mark_id": "ax_5",
     }
 
 
@@ -180,8 +203,24 @@ def test_grounding_locate_requires_hint() -> None:
 def test_grounding_does_not_resolve_locate_to_a_mark() -> None:
     """Locate must never be grounded into a tap: it stays an internal action."""
     action = ground_intent_to_action(
-        {"_metadata": "intent", "action": "Locate", "target_text_hint": "搜索按钮"},
-        mark_registry={"screen_id": "screen-1", "marks": {}},
+        {
+            "_metadata": "intent",
+            "action": "Locate",
+            "target_text_hint": "搜索按钮",
+            "scope_mark_id": "ax_5",
+        },
+        mark_registry={
+            "screen_id": "screen-1",
+            "marks": {
+                "ax_5": {
+                    "mark_id": "ax_5",
+                    "screen_id": "screen-1",
+                    "bbox": [0, 0, 500, 500],
+                    "center": [250, 250],
+                    "source": "accessibility",
+                }
+            },
+        },
         screen_id="screen-1",
     )
     assert action["action"] == "Locate"
