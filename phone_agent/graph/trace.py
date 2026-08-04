@@ -213,6 +213,54 @@ class JsonlTraceWriter:
                 raise
 
 
+def save_debug_screenshot(
+    config: RunnableConfig,
+    state: dict[str, Any],
+    source: str,
+    screenshot_b64: str | None,
+) -> None:
+    """Debug-full mode: persist the raw screenshot next to the trace (P0#10 exempt).
+
+    Traces never embed raw screenshots (SENSITIVE_KEYS stays hard-redacted),
+    which made grounding diagnoses blind. When ``configurable["debug_full"]``
+    is set (PHONE_AGENT_DEBUG_FULL), each captured frame is written to
+    ``<trace_dir>/screenshots/step_NNN_<source>.png`` and a
+    ``debug_screenshot`` event records the on-disk path. No-op otherwise.
+    """
+
+    configurable = config.get("configurable", {}) if config else {}
+    if not configurable.get("debug_full"):
+        return
+    writer = configurable.get("trace_writer")
+    if writer is None or not getattr(writer, "enabled", False):
+        return
+    if not screenshot_b64:
+        return
+    import base64
+
+    try:
+        raw = base64.b64decode(screenshot_b64)
+    except Exception:
+        return
+    step = int(state.get("step_count") or 0)
+    try:
+        shots_dir = writer.trace_dir / "screenshots"
+        shots_dir.mkdir(parents=True, exist_ok=True)
+        path = shots_dir / f"step_{step:03d}_{source}.png"
+        path.write_bytes(raw)
+    except Exception:
+        if getattr(writer, "strict", False):
+            raise
+        return
+    emit_trace(
+        config,
+        state,
+        "trace",
+        "debug_screenshot",
+        {"path": str(path), "source": source, "bytes": len(raw)},
+    )
+
+
 def emit_trace(
     config: RunnableConfig,
     state: dict[str, Any],

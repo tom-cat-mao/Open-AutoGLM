@@ -798,6 +798,13 @@ Examples:
     )
 
     parser.add_argument(
+        "--debug-full",
+        action="store_true",
+        default=parse_env_bool("PHONE_AGENT_DEBUG_FULL", False),
+        help="Dangerous local debug mode: save every captured screenshot next to the trace",
+    )
+
+    parser.add_argument(
         "--accessibility-marks",
         action="store_true",
         default=parse_env_bool("PHONE_AGENT_ACCESSIBILITY_MARKS", False),
@@ -1105,6 +1112,7 @@ def main():
         trace_request_messages=args.trace_request_messages,
         trace_prompt_blocks=args.trace_prompt_blocks,
         trace_unredacted_prompt=args.trace_unredacted_prompt,
+        debug_full=args.debug_full,
         context_mode=args.context_mode,
         grounding_provider_name=args.grounding_provider,
         skip_reflect_on_high_confidence=args.skip_reflect_on_high_confidence,

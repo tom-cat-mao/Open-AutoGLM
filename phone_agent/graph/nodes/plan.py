@@ -39,7 +39,7 @@ from phone_agent.graph.goal import (
     build_goal_prompt_block,
     goal_trace_payload,
 )
-from phone_agent.graph.trace import emit_trace
+from phone_agent.graph.trace import emit_trace, save_debug_screenshot
 from phone_agent.grounding.factory import build_mark_providers
 from phone_agent.grounding.provider import ScreenBinding
 from phone_agent.model.client import MessageBuilder
@@ -716,6 +716,9 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
         }
     screenshot = device_capture.screenshot
     current_app = device_capture.current_app
+    save_debug_screenshot(
+        config, state, "observation", getattr(screenshot, "base64_data", None)
+    )
     screenshot_error = screenshot_failure_code(screenshot)
     if screenshot_error:
         sensitive = screenshot_is_sensitive(screenshot)

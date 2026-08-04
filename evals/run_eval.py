@@ -144,6 +144,7 @@ def run_agent_task(task: EvalTask, args: argparse.Namespace) -> RunResult:
             trace_request_messages=args.trace_request_messages,
             trace_prompt_blocks=args.trace_prompt_blocks,
             trace_unredacted_prompt=args.trace_unredacted_prompt,
+            debug_full=args.debug_full,
             context_mode=args.context_mode,
             grounding_provider_name=args.grounding_provider,
             accessibility_timeout=args.accessibility_timeout,
@@ -601,6 +602,12 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         default=parse_bool(os.getenv("PHONE_AGENT_TRACE_UNREDACTED_PROMPT"), False),
         help="Dangerous local debug mode: do not redact traced request messages or prompt blocks",
+    )
+    parser.add_argument(
+        "--debug-full",
+        action="store_true",
+        default=parse_bool(os.getenv("PHONE_AGENT_DEBUG_FULL"), False),
+        help="Dangerous local debug mode: save every captured screenshot next to the trace",
     )
     args = parser.parse_args()
     if args.output_mode not in {"json_schema", "tool_calls", "auto"}:

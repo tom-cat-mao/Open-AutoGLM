@@ -56,7 +56,7 @@ from phone_agent.graph.marks import (
     MarkRegistry,
     compute_raw_screenshot_hash,
 )
-from phone_agent.graph.trace import emit_trace
+from phone_agent.graph.trace import emit_trace, save_debug_screenshot
 from phone_agent.grounding.factory import build_locate_provider
 from phone_agent.grounding.provider import (
     MarkCandidate,
@@ -475,6 +475,7 @@ def locate_target(
             failure_code="screenshot_failed",
             message="screenshot has no base64 payload",
         )
+    save_debug_screenshot(config, state, "locate_frame", screenshot_b64)
 
     registry = MarkRegistry.from_dict(state.get("mark_registry"))
     if registry is None:

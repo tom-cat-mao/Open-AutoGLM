@@ -42,6 +42,7 @@ class AgentConfig:
     trace_request_messages: bool = False
     trace_prompt_blocks: bool = False
     trace_unredacted_prompt: bool = False
+    debug_full: bool = False
     trace_strict: bool = False
     context_mode: str = DEFAULT_CONTEXT_MODE
     prompt_version: str = PROMPT_VERSION
@@ -487,6 +488,7 @@ class PhoneAgent:
                 "trace_request_messages": self.agent_config.trace_request_messages,
                 "trace_prompt_blocks": self.agent_config.trace_prompt_blocks,
                 "trace_unredacted_prompt": self.agent_config.trace_unredacted_prompt,
+                "debug_full": self.agent_config.debug_full,
                 "context_mode": self.agent_config.context_mode,
                 "prompt_version": self.agent_config.prompt_version,
                 "grounding_provider_name": self.agent_config.grounding_provider_name,
