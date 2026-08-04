@@ -533,16 +533,14 @@ def read_status(path: Path) -> dict[str, Any]:
 def resolve_reset_app(args: argparse.Namespace) -> str | None:
     """Pick the package to ``pm clear`` before the run (P5 e2e isolation).
 
-    Explicit ``--reset-app`` wins; otherwise Ctrip/携程 tasks default to
-    ``ctrip.android.view`` so a previous run's recent-search residue cannot
-    poison the fresh task. Returns None when no reset applies.
+    Explicit ``--reset-app`` is required: ``pm clear`` also wipes login state
+    and first-launch consents, which previously trapped runs behind a login
+    wall. Residue from prior runs is tolerated by default; pass the flag only
+    when a clean slate matters more than the login session.
     """
 
     if getattr(args, "reset_app", None):
         return str(args.reset_app).strip() or None
-    target = str(args.target or "")
-    if "携程" in target or "ctrip" in target.casefold():
-        return "ctrip.android.view"
     return None
 
 

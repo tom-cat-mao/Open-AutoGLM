@@ -23,6 +23,7 @@ from phone_agent.graph.nodes.execute import execute_node
 from phone_agent.graph.tools.coords import convert_relative_to_absolute
 from phone_agent.graph.tools.locate import (
     _build_scope_crop,
+    _scoped_failure_message,
     locate_target,
     trace_safe_payload,
 )
@@ -630,6 +631,9 @@ def test_interval_no_candidate_message_includes_hint_cn(base_state) -> None:
     assert outcome.success is False
     assert outcome.failure_code == "grounding_no_candidate"
     assert "可调整/扩大 scope 区域后重试" in outcome.message
+    assert "空间包含" in outcome.message
+    assert "文字标签不是容器" in outcome.message
+    assert "start/end 区间锚定" in outcome.message
 
 
 def test_interval_no_candidate_message_includes_hint_en(base_state) -> None:
@@ -645,6 +649,9 @@ def test_interval_no_candidate_message_includes_hint_en(base_state) -> None:
     assert outcome.success is False
     assert outcome.failure_code == "grounding_no_candidate"
     assert "adjust or expand the scope region and retry" in outcome.message
+    assert "spatially contains" in outcome.message
+    assert "text labels are not containers" in outcome.message
+    assert "start/end interval anchoring" in outcome.message
 
 
 def test_interval_ambiguous_message_includes_hint_cn(base_state) -> None:
@@ -662,6 +669,108 @@ def test_interval_ambiguous_message_includes_hint_cn(base_state) -> None:
     assert outcome.success is False
     assert outcome.failure_code == "grounding_ambiguous"
     assert "可调整/扩大 scope 区域后重试" in outcome.message
+    assert "空间包含" in outcome.message
+    assert "文字标签不是容器" in outcome.message
+    assert "start/end 区间锚定" in outcome.message
+
+
+def test_interval_ambiguous_message_includes_hint_en(base_state) -> None:
+    frame_w, frame_h = 2000, 2000
+    png = _png_b64(frame_w, frame_h)
+    provider = _RecordingProvider(
+        bboxes=[[100, 100, 300, 300], [500, 500, 700, 700]]
+    )
+    device = _PNGDevice(png, frame_w, frame_h)
+    state = _locate_state_form_b(
+        base_state, png_b64=png, width=frame_w, height=frame_h,
+        start_mark_id="ax_9", end_mark_id="ax_23", lang="en",
+    )
+    outcome = locate_target(state, _config(provider, device))
+    assert outcome.success is False
+    assert outcome.failure_code == "grounding_ambiguous"
+    assert "adjust or expand the scope region and retry" in outcome.message
+    assert "spatially contains" in outcome.message
+    assert "text labels are not containers" in outcome.message
+    assert "start/end interval anchoring" in outcome.message
+
+
+def test_scope_crop_failed_message_includes_hint_cn(base_state) -> None:
+    frame_w, frame_h = 2000, 2000
+    provider = _RecordingProvider(bbox=[100, 100, 200, 200])
+    device = _PNGDevice("not-a-real-image", frame_w, frame_h)
+    state = _locate_state(
+        base_state, png_b64="not-a-real-image", width=frame_w, height=frame_h,
+        scope_bbox=(200, 200, 400, 400), scope_mark_id="ax_1",
+    )
+    state["lang"] = "cn"
+    outcome = locate_target(state, _config(provider, device))
+    assert outcome.success is False
+    assert outcome.failure_code == "scope_crop_failed"
+    assert "截图无法解码或区域退化" in outcome.message
+    assert "空间包含" in outcome.message
+    assert "文字标签不是容器" in outcome.message
+    assert "start/end 区间锚定" in outcome.message
+
+
+def test_scope_crop_failed_message_includes_hint_en(base_state) -> None:
+    frame_w, frame_h = 2000, 2000
+    provider = _RecordingProvider(bbox=[100, 100, 200, 200])
+    device = _PNGDevice("not-a-real-image", frame_w, frame_h)
+    state = _locate_state(
+        base_state, png_b64="not-a-real-image", width=frame_w, height=frame_h,
+        scope_bbox=(200, 200, 400, 400), scope_mark_id="ax_1",
+    )
+    state["lang"] = "en"
+    outcome = locate_target(state, _config(provider, device))
+    assert outcome.success is False
+    assert outcome.failure_code == "scope_crop_failed"
+    assert "undecodable or degenerate region" in outcome.message
+    assert "spatially contains" in outcome.message
+    assert "text labels are not containers" in outcome.message
+    assert "start/end interval anchoring" in outcome.message
+
+
+def test_locate_failure_message_reaches_next_plan_context(base_state) -> None:
+    """C3: the localized failure message flows into the next plan round's
+    context block via action_outcome_summary (execute-side write) →
+    build_plan_context_block (inject)."""
+    from phone_agent.graph.context import (
+        build_action_outcome_summary,
+        build_plan_context_block,
+    )
+
+    message = _scoped_failure_message("cn", "grounding_ambiguous")
+    state = dict(base_state)
+    state["step_count"] = 2
+    state["action_parsed"] = {
+        "_metadata": "do",
+        "action": "Locate",
+        "target_text_hint": "10月1日",
+    }
+    state["action_result"] = {
+        "success": False,
+        "message": f"Locate failed: grounding_ambiguous: {message}",
+    }
+    state["action_receipt"] = {
+        "dispatch_status": "rejected",
+        "reason_code": "grounding_ambiguous",
+    }
+    state["grounding_failure_code"] = "grounding_ambiguous"
+    state["locate_count"] = 1
+    state["failure_cause"] = "grounding_ambiguous"
+    state["suggested_strategy"] = "reobserve"
+
+    summary = build_action_outcome_summary(state)
+    assert summary["execution_success"] is False
+    assert summary["failure_code"] == "grounding_ambiguous"
+    assert "空间包含" in summary["result_message_summary"]
+    assert "文字标签不是容器" in summary["result_message_summary"]
+
+    state["action_outcome_summary"] = summary
+    block, _ = build_plan_context_block(state, "cn", consumer="inject")
+    assert "空间包含" in block
+    assert "文字标签不是容器" in block
+    assert "start/end 区间锚定" in block
 
 
 def test_interval_missing_scope_fails_closed(base_state) -> None:

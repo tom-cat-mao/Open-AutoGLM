@@ -641,7 +641,7 @@ def locate_target(
         if scope is None:
             return _scope_failure(
                 "scope_crop_failed",
-                "scope crop failed: screenshot undecodable or degenerate region",
+                _scoped_failure_message(str(state.get("lang") or "cn"), "scope_crop_failed"),
                 scope_mark_id=scope_mark_id,
                 scope_start_mark_id=scope_start_mark_id,
                 scope_end_mark_id=scope_end_mark_id,
@@ -785,23 +785,41 @@ def locate_target(
 
 
 def _scoped_failure_message(lang: str, code: str) -> str:
-    """Localized locate failure message; 0-box/multi-box failures append the
-    adjust/expand-scope hint (P1, information not instruction)."""
+    """Localized locate failure message; 0-box/multi-box/scope-crop failures
+    append the adjust/expand-scope hint (P1) and the scope-containment
+    semantic hint (information not instruction)."""
 
+    if lang == "cn":
+        containment_hint = (
+            "；确认 scope 是否【空间包含】目标本身——文字标签不是容器；"
+            "若目标在某两个文字锚点之间，可用 start/end 区间锚定。"
+        )
+    else:
+        containment_hint = (
+            "; check whether the scope **spatially contains** the target itself "
+            "— text labels are not containers; if the target lies between two "
+            "text anchors, use start/end interval anchoring."
+        )
     if code == "grounding_ambiguous":
         return (
             "找到多个候选框：可调整/扩大 scope 区域后重试"
             if lang == "cn"
             else "locate expected exactly one candidate box; "
             "adjust or expand the scope region and retry"
-        )
+        ) + containment_hint
     if code == "grounding_no_candidate":
         return (
             "未找到候选框：可调整/扩大 scope 区域后重试"
             if lang == "cn"
             else "locate found no candidate box; "
             "adjust or expand the scope region and retry"
-        )
+        ) + containment_hint
+    if code == "scope_crop_failed":
+        return (
+            "scope 裁剪失败：截图无法解码或区域退化"
+            if lang == "cn"
+            else "scope crop failed: screenshot undecodable or degenerate region"
+        ) + containment_hint
     return code
 
 
