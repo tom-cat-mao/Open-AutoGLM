@@ -22,6 +22,7 @@ vlm_judge self-attestation.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import re
 from typing import Any, Literal, Protocol
 
 from phone_agent.graph.goal import (
@@ -49,6 +50,23 @@ _PLACEHOLDER_SCREEN_REFERENCES = frozenset(
         "全屏",
     }
 )
+
+# Format-drift separator normalization: whitespace, hyphens, and underscores
+# all collapse to a single underscore. This is deliberately cosmetic — it maps
+# "Flight Search Parameters" / "flight-search-parameters" onto
+# "flight_search_parameters" without any synonym or substring semantics.
+_CRITERION_NAME_SEPARATOR_RE = re.compile(r"[\s\-_]+")
+
+
+def _normalize_criterion_name(value: Any) -> str:
+    """Casefold + collapse whitespace/hyphen/underscore into one underscore.
+
+    Repairs presentation drift only (case, spacing, separators). It never
+    matches by meaning: a name that does not normalize onto a contract
+    criterion stays missing (fail-closed), and empty results are dropped.
+    """
+    text = str(value or "").casefold().strip()
+    return _CRITERION_NAME_SEPARATOR_RE.sub("_", text).strip("_")
 
 
 # Only raw on-screen text needs a judgement call: whether a label *means* the
@@ -271,11 +289,24 @@ class AggregatingGoalEvaluator:
         goal_probes: dict[str, Any] | None = None,
     ) -> GoalEvaluation:
         finish_matched_set = set(finish_claim_matched or [])
-        named_evidence_map = {
-            str(item.get("criterion", "")): item
-            for item in (reflect_named_evidence or [])
-            if isinstance(item, dict)
+        contract_normalized = {
+            _normalize_criterion_name(crit.name) for crit in contract.success_criteria
         }
+        named_evidence_map: dict[str, dict[str, Any]] = {}
+        ignored_evidence_names: list[str] = []
+        for item in reflect_named_evidence or []:
+            if not isinstance(item, dict):
+                continue
+            raw_name = str(item.get("criterion", ""))
+            normalized = _normalize_criterion_name(raw_name)
+            if not normalized:
+                continue
+            if normalized not in contract_normalized:
+                # A judge name outside the contract whitelist must never
+                # satisfy a criterion — record it for trace diagnosis only.
+                ignored_evidence_names.append(raw_name)
+                continue
+            named_evidence_map.setdefault(normalized, item)
         # Distinguish "VLM not yet consulted" (None) from "VLM ran but no evidence" (empty list)
         vlm_not_run = reflect_named_evidence is None
 
@@ -354,18 +385,23 @@ class AggregatingGoalEvaluator:
             # No explicit missing but not all required matched → unknown (soft/unverified)
             status = "unknown"
 
+        evidence: dict[str, Any] = {
+            "per_criterion": per_criterion,
+            "goal_type": "declarative_contract",
+            "ordinal": contract.ordinal,
+            "verification_strategy": contract.verification_strategy,
+            "finish_claim_matched": sorted(finish_matched_set),
+        }
+        if ignored_evidence_names:
+            evidence["named_evidence_ignored"] = sorted(
+                {name for name in ignored_evidence_names if name}
+            )
         return GoalEvaluation(
             status=status,
             matched=matched,
             missing=final_missing,
             soft_matched=soft_matched,
-            evidence={
-                "per_criterion": per_criterion,
-                "goal_type": "declarative_contract",
-                "ordinal": contract.ordinal,
-                "verification_strategy": contract.verification_strategy,
-                "finish_claim_matched": sorted(finish_matched_set),
-            },
+            evidence=evidence,
         )
 
     # ------------------------------------------------------------------
@@ -500,7 +536,7 @@ class AggregatingGoalEvaluator:
             return {"status": "missing", "reason": "not_named_in_finish_claim"}
         if vlm_not_run:
             return {"status": "unknown", "reason": "typed_fact_not_yet_collected"}
-        evidence = named_evidence_map.get(crit.name)
+        evidence = named_evidence_map.get(_normalize_criterion_name(crit.name))
         if not isinstance(evidence, dict):
             return {"status": "missing", "reason": "typed_fact_missing"}
         screen_reference = str(evidence.get("screen_reference") or "").strip()
@@ -740,7 +776,7 @@ class AggregatingGoalEvaluator:
         # does NOT auto-upgrade to success.
         if vlm_not_run:
             return {"status": "unknown", "reason": "vlm_not_yet_consulted"}
-        evidence = named_evidence_map.get(crit.name)
+        evidence = named_evidence_map.get(_normalize_criterion_name(crit.name))
         if not evidence or not isinstance(evidence, dict):
             return {"status": "missing", "reason": "no_named_evidence_from_reflect"}
         screen_ref = str(evidence.get("screen_reference") or "").strip()

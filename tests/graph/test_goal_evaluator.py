@@ -166,6 +166,163 @@ def test_vlm_judge_with_grounded_evidence_is_success() -> None:
 
 
 # ----------------------------------------------------------------------
+# vlm_judge — criterion-name normalization (W1-A: format drift only)
+# ----------------------------------------------------------------------
+
+
+def test_normalize_criterion_name_collapses_only_format_drift() -> None:
+    from phone_agent.graph.goal_evaluator import _normalize_criterion_name
+
+    cases = {
+        "flight_search_parameters": "flight_search_parameters",
+        "Flight Search Parameters": "flight_search_parameters",
+        "flight-search-parameters": "flight_search_parameters",
+        "  Flight   Search___Parameters  ": "flight_search_parameters",
+        # No separator between words: this is NOT a format drift — words merge
+        # and the name must stay unmatched (no fuzzy/semantic matching).
+        "CheapestFlightResult": "cheapestflightresult",
+        "": "",
+        None: "",
+        "---": "",
+    }
+    for raw, expected in cases.items():
+        assert _normalize_criterion_name(raw) == expected
+
+
+def test_vlm_judge_case_and_space_drift_normalizes_to_match() -> None:
+    contract = _contract([
+        SuccessCriterion(name="flight_search_parameters", description="params", verification="vlm_judge"),
+    ])
+    result = evaluate_finish_claim(
+        contract=contract,
+        finish_claim_matched=["flight_search_parameters"],
+        reflect_named_evidence=[
+            {"criterion": "Flight Search Parameters", "screen_reference": "mark_id=form"}
+        ],
+    )
+    assert result.status == "success"
+    assert "flight_search_parameters" in result.matched
+
+
+def test_vlm_judge_hyphen_underscore_drift_normalizes_to_match() -> None:
+    contract = _contract([
+        SuccessCriterion(name="cheapest_flight_result", description="cheapest", verification="vlm_judge"),
+    ])
+    result = evaluate_finish_claim(
+        contract=contract,
+        finish_claim_matched=["cheapest_flight_result"],
+        reflect_named_evidence=[
+            {"criterion": "cheapest-flight-result", "screen_reference": "mark_id=row"}
+        ],
+    )
+    assert result.status == "success"
+    assert "cheapest_flight_result" in result.matched
+
+
+def test_vlm_judge_typed_predicate_accepts_drifted_criterion_name() -> None:
+    """The typed-predicate path uses the same normalized map lookup."""
+    from phone_agent.graph.predicates import CORE_PREDICATE_CATALOG
+
+    contract = _contract([
+        SuccessCriterion(
+            name="topic",
+            description="target content visible",
+            verification="vlm_judge",
+            predicate=CORE_PREDICATE_CATALOG.create_spec("semantic.entity_matches", "周杰伦"),
+        ),
+    ])
+    result = evaluate_finish_claim(
+        contract=contract,
+        finish_claim_matched=["topic"],
+        reflect_named_evidence=[
+            {
+                "criterion": "Topic",
+                "screen_reference": "mark_id=title",
+                "observed_value": "周杰伦",
+                "source": "mark",
+            }
+        ],
+    )
+    assert result.status == "success"
+    assert "topic" in result.matched
+
+
+def test_vlm_judge_out_of_whitelist_name_stays_missing_fail_closed() -> None:
+    """A judge name outside the contract whitelist is ignored for matching and
+    recorded for trace diagnosis; the criterion stays missing (fail-closed)."""
+    contract = _contract([
+        SuccessCriterion(name="flight_search_parameters", description="params", verification="vlm_judge"),
+    ])
+    result = evaluate_finish_claim(
+        contract=contract,
+        finish_claim_matched=["flight_search_parameters"],
+        reflect_named_evidence=[
+            {"criterion": "search form visible", "screen_reference": "mark_id=form"}
+        ],
+    )
+    assert result.status == "failure"
+    assert "flight_search_parameters" in result.missing
+    assert (result.evidence or {}).get("named_evidence_ignored") == [
+        "search form visible"
+    ]
+
+
+def test_vlm_judge_ignored_names_never_satisfy_other_criteria() -> None:
+    contract = _contract([
+        SuccessCriterion(name="a", description="", verification="vlm_judge"),
+        SuccessCriterion(name="b", description="", verification="vlm_judge"),
+    ])
+    result = evaluate_finish_claim(
+        contract=contract,
+        finish_claim_matched=["a", "b"],
+        reflect_named_evidence=[
+            {"criterion": "B", "screen_reference": "mark_id=1"},
+            {"criterion": "totally unrelated name", "screen_reference": "mark_id=2"},
+        ],
+    )
+    # Only "b" carries grounded evidence; "a" and the stray name stay missing.
+    assert result.status == "failure"
+    assert result.matched == ["b"]
+    assert set(result.missing) == {"a"}
+    assert (result.evidence or {}).get("named_evidence_ignored") == [
+        "totally unrelated name"
+    ]
+
+
+def test_vlm_judge_duplicate_normalized_names_keep_first_grounded_item() -> None:
+    contract = _contract([
+        SuccessCriterion(name="task_completed", description="", verification="vlm_judge"),
+    ])
+    result = evaluate_finish_claim(
+        contract=contract,
+        finish_claim_matched=["task_completed"],
+        reflect_named_evidence=[
+            {"criterion": "Task Completed", "screen_reference": "mark_id=good"},
+            {"criterion": "task completed", "screen_reference": "placeholder_screen"},
+        ],
+    )
+    assert result.status == "success"
+
+
+def test_vlm_judge_missing_any_required_criterion_fails() -> None:
+    """completed=true must cover every required [judge] criterion; a missing
+    one keeps the gate closed."""
+    contract = _contract([
+        SuccessCriterion(name="a", description="", verification="vlm_judge"),
+        SuccessCriterion(name="b", description="", verification="vlm_judge"),
+    ])
+    result = evaluate_finish_claim(
+        contract=contract,
+        finish_claim_matched=["a", "b"],
+        reflect_named_evidence=[
+            {"criterion": "a", "screen_reference": "mark_id=1"},
+        ],
+    )
+    assert result.status == "failure"
+    assert "b" in result.missing
+
+
+# ----------------------------------------------------------------------
 # Programmatic contradiction overrides vlm_judge
 # ----------------------------------------------------------------------
 

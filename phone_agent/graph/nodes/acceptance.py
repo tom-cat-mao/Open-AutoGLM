@@ -51,6 +51,7 @@ from phone_agent.graph.goal import (
 from phone_agent.graph.goal_evaluator import (
     GoalEvaluation,
     _is_self_observable,
+    _normalize_criterion_name,
     evaluate_finish_claim,
     pure_goal_evaluator,
 )
@@ -85,6 +86,8 @@ ACCEPTANCE_SYSTEM_PROMPT_CN = """你是一个手机自动化任务的终局验�
 - 每条证据给出：criterion（标准名）、screen_reference（mark_id 或屏幕上的具体元素，不要写"区域1"/"屏幕"这类占位）、observed_value（你在该处实际看到的原文）。
 - 照实回报你看到的文字，不要猜测系统内部使用的取值。observed_value 仅用于当前 node 匹配，不写入 state/trace。
 - 只有当屏幕确实显示该标准已满足时才点名它。宁可漏报，不要虚报——虚报会让任务被错误地判定为完成。
+- 标准名白名单：用户消息中的"标准名白名单"列出了本任务的合法标准名。named_evidence 中每条 evidence 的 criterion 字段必须**逐字等于**白名单中的名称之一，禁止改写、翻译、大小写变化、加前后缀或拼接其他文字。
+- 完整性：completed=true 时，白名单中每个 required 的 [judge] 标准都必须各有一条 criterion 逐字命中的 named_evidence，缺一不可；缺少任何一条即视为任务未完成，输出 completed=false。
 - 如果任务尚未完成，输出 completed=false 并把 named_evidence 留空。
 - 广告、banner、推荐流、热词或首页动态内容不能证明任务完成。
 """
@@ -99,6 +102,8 @@ Judgment criteria:
 - For each evidence item give: criterion (its name), screen_reference (a mark_id or concrete on-screen element — never a placeholder like "region-1"/"screen"), and observed_value (the text you actually see there).
 - Report what you see verbatim; do not guess values the system uses internally. observed_value is node-local and must not enter state or trace.
 - Only name a criterion when the screen genuinely shows it satisfied. Prefer under-reporting: a false claim makes the task wrongly count as finished.
+- Criterion name whitelist: the user message contains a "criterion name whitelist" listing the only legal names for this task. The criterion field of every named_evidence item MUST equal one of the whitelist names VERBATIM — no paraphrasing, translation, case changes, prefixes/suffixes, or extra text.
+- Completeness: when completed=true, every required [judge] criterion in the whitelist must have exactly one named_evidence item whose criterion matches verbatim. Missing any one means the task is not complete — output completed=false.
 - If the task is not complete, output completed=false and leave named_evidence empty.
 - Ads, banners, recommendation feeds, trending words, and home-screen churn never prove completion.
 """
@@ -175,6 +180,37 @@ def _needs_semantic_judgement(goal_contract) -> bool:
         not _is_self_observable(criterion)
         for criterion in goal_contract.success_criteria
     )
+
+
+def _judge_criterion_names(goal_contract) -> list[str]:
+    """Verbatim [judge] criterion names in contract order (the whitelist).
+
+    Only criteria the system cannot settle from device truth go to the judge;
+    [auto] criteria are excluded because the judge must not cite them.
+    """
+
+    if goal_contract is None:
+        return []
+    return [
+        criterion.name
+        for criterion in goal_contract.success_criteria
+        if not _is_self_observable(criterion)
+    ]
+
+
+def _judge_whitelist_block(names: list[str], *, lang: str) -> str:
+    """Render the verbatim criterion-name whitelist for the judge prompt."""
+
+    if not names:
+        return ""
+    names_block = "\n".join(f"    {name}" for name in names)
+    if lang == "en":
+        return (
+            "Criterion name whitelist (use these names VERBATIM — no "
+            "paraphrasing, translation, or case changes):\n" + names_block
+        )
+    return "标准名白名单（必须逐字使用，禁止改写、翻译或大小写变化）：\n" + names_block
+
 
 def acceptance_node(state: "AgentState", config: RunnableConfig) -> dict:
     """Validate a pending finish claim against the goal contract.
@@ -446,11 +482,13 @@ def acceptance_node(state: "AgentState", config: RunnableConfig) -> dict:
             ),
         )
         if named_evidence:
-            claimed = {
-                str(item.get("criterion"))
-                for item in named_evidence
-                if item.get("criterion")
-            }
+            claimed = set()
+            for item in named_evidence:
+                if not isinstance(item, dict) or not item.get("criterion"):
+                    continue
+                normalized = _normalize_criterion_name(item.get("criterion"))
+                if normalized:
+                    claimed.add(normalized)
             finish_claim_matched = sorted(set(finish_claim_matched) | claimed)
 
     evaluation = evaluate_finish_claim(
@@ -730,6 +768,9 @@ def _run_semantic_judge(
         )
     )
     goal_block = build_goal_prompt_block(state, lang=lang, config=config)
+    whitelist = _judge_whitelist_block(
+        _judge_criterion_names(ensure_goal_contract(state, config)), lang=lang
+    )
     if lang == "en":
         body = (
             f"Original task: {task_for_prompt}\n"
@@ -744,6 +785,8 @@ def _run_semantic_judge(
             f"当前屏幕摘要：{after_observation_summary}\n"
             "整个任务是否已完成？只判断 [judge] 标准。"
         )
+    if whitelist:
+        body = f"{body}\n\n{whitelist}"
 
     messages = [
         MessageBuilder.create_system_message(system_prompt),
@@ -765,7 +808,36 @@ def _run_semantic_judge(
             ):
                 raise
             response = model_client.request(messages)
-        _, message, named_evidence = parse_acceptance_response(response.action)
+        completed, message, named_evidence = parse_acceptance_response(response.action)
+        # A3: the judge's raw reply is the only attribution source when the
+        # gate fails — surface its key fields (redacted) in the trace. Only
+        # additions here; nothing pre-existing is rewritten.
+        emit_trace(
+            config,
+            state,
+            "acceptance",
+            "acceptance_judge_reply",
+            sanitize_context_payload(
+                {
+                    "completed": completed,
+                    "message": message,
+                    "named_evidence": [
+                        {
+                            "criterion": str(item.get("criterion", ""))[:128],
+                            "screen_reference": str(
+                                item.get("screen_reference", "")
+                            )[:128],
+                            "observed_value": str(
+                                item.get("observed_value", "")
+                            )[:200],
+                        }
+                        for item in (named_evidence or [])
+                    ],
+                },
+                consumer="trace_payload",
+                task_context=task,
+            ),
+        )
         return named_evidence, message
     except Exception as exc:
         message = f"Acceptance judgement failed: {type(exc).__name__}"
