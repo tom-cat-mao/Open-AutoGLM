@@ -481,3 +481,131 @@ def test_locate_then_grounded_tap_lands_on_la_coordinates(
     assert tap_result["action_result"]["success"] is True
     # 1000px width → 500 rel = 500 px; 2000px height → 500 rel = 1000 px.
     assert fake_device.calls[-1] == ("tap", (500, 1000, "device-1"), {})
+
+
+# ----------------------------------------------------------------------
+# R2: locate success/failure branches write gui_memory (repeat-guard counting)
+# ----------------------------------------------------------------------
+
+
+def test_execute_locate_success_writes_gui_memory(base_state, fake_device) -> None:
+    """R2: a SUCCESSFUL locate skips reflect, so execute itself must record the
+    attempt in gui_memory.tried_actions (Locate, surface, hint_digest) — the
+    repeat guard's counting source for the same-query loop."""
+    provider = FakeGroundingProvider(bbox=[400, 400, 600, 600])
+    state = _state_with_locate(base_state)
+    state["observation"] = _observation()
+    state["step_count"] = 4
+
+    result = execute_node(state, _config(provider, fake_device))
+
+    assert result["action_result"]["success"] is True
+    tried = result["gui_memory"]["tried_actions"]
+    assert tried and tried[-1]["action"] == "Locate"
+    assert tried[-1]["surface"] == _SURFACE
+    assert tried[-1]["hint_digest"] == locate_hint_digest("10月1日")
+    assert tried[-1]["result_success"] is True
+    assert tried[-1]["failure_cause"] is None
+    assert "10月1日" not in str(tried[-1])
+
+
+def test_execute_locate_failure_writes_gui_memory(base_state, fake_device) -> None:
+    """R2: a failed locate replans without reflect; the failure branch must
+    record the attempt too, or the same-query repeat guard would never
+    escalate on the failure path."""
+    provider = FakeGroundingProvider(failure_code="grounding_no_candidate")
+    state = _state_with_locate(base_state)
+    state["observation"] = _observation()
+    state["step_count"] = 4
+
+    result = execute_node(state, _config(provider, fake_device))
+
+    assert result["action_result"]["success"] is False
+    tried = result["gui_memory"]["tried_actions"]
+    assert tried and tried[-1]["action"] == "Locate"
+    assert tried[-1]["surface"] == _SURFACE
+    assert tried[-1]["hint_digest"] == locate_hint_digest("10月1日")
+    assert tried[-1]["result_success"] is False
+    assert tried[-1]["failure_cause"] == "grounding_no_candidate"
+
+
+def test_execute_locate_third_same_query_rejected_end_to_end(
+    base_state, fake_device
+) -> None:
+    """R2: the full loop — two successful locates on one surface each write
+    gui_memory, and the third same-query locate is rejected by the repeat
+    guard BEFORE any provider call (同屏同述第 3 次拒绝)."""
+    provider = FakeGroundingProvider(bbox=[400, 400, 600, 600])
+    state = _state_with_locate(base_state)
+    state["observation"] = _observation()
+
+    first = execute_node(state, _config(provider, fake_device))
+    assert first["action_result"]["success"] is True
+    state2 = {
+        **state,
+        "gui_memory": first["gui_memory"],
+        "locate_count": first["locate_count"],
+        "mark_registry": first["mark_registry"],
+    }
+    second = execute_node(state2, _config(provider, fake_device))
+    assert second["action_result"]["success"] is True
+    state3 = {
+        **state2,
+        "gui_memory": second["gui_memory"],
+        "locate_count": second["locate_count"],
+        "mark_registry": second["mark_registry"],
+    }
+    third = execute_node(state3, _config(provider, fake_device))
+
+    assert third["action_result"]["success"] is False
+    assert third["failure_cause"] == "repeated_action"
+    assert third["repeat_rejected"] is True
+    assert third["action_receipt"]["side_effect_receipt"]["reason_code"] == "repeated_target_loop"
+    # The guard fires before the Locate branch: no extra provider call.
+    assert len(provider.requests) == 2
+
+
+def test_execute_locate_different_query_after_repeats_is_allowed(
+    base_state, fake_device
+) -> None:
+    """R2: after two same-query locates, a DIFFERENT description on the same
+    surface has a different hint_digest, so the guard lets it through (不同描
+    述放行)."""
+    provider = FakeGroundingProvider(bbox=[400, 400, 600, 600])
+    state = _state_with_locate(base_state)
+    state["observation"] = _observation()
+
+    first = execute_node(state, _config(provider, fake_device))
+    state2 = {
+        **state,
+        "gui_memory": first["gui_memory"],
+        "locate_count": first["locate_count"],
+        "mark_registry": first["mark_registry"],
+    }
+    second = execute_node(state2, _config(provider, fake_device))
+    state3 = {
+        **state2,
+        "gui_memory": second["gui_memory"],
+        "locate_count": second["locate_count"],
+        "mark_registry": second["mark_registry"],
+    }
+    other = _state_with_locate(base_state)
+    other["action_parsed"]["target_text_hint"] = "另一个目标"
+    other["action_raw"] = (
+        '{"type":"intent","action":"locate","target_text_hint":"另一个目标",'
+        '"scope_mark_id":"scope_full"}'
+    )
+    other.update(
+        {
+            "observation": _observation(),
+            "gui_memory": state3["gui_memory"],
+            "locate_count": state3["locate_count"],
+            "mark_registry": state3["mark_registry"],
+        }
+    )
+    third = execute_node(other, _config(provider, fake_device))
+
+    assert third["action_result"]["success"] is True
+    assert third.get("repeat_rejected") is not True
+    assert len(provider.requests) == 3
+    assert provider.requests[-1]["raw_hints"] == ["另一个目标"]

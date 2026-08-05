@@ -23,6 +23,12 @@ REPEATED_ACTION_THRESHOLD = int(
 NOVELTY_EXHAUSTION_STEPS = int(
     DEFAULT_VERIFICATION_POLICY.value("novelty_exhaustion_steps")
 )
+# R4: tap-class repeat identity buckets the target center into this grid (in
+# relative 0-1000 units). Sub-bucket jitter between re-observations of the
+# same physical element (e.g. a re-grounding that shifts ax_41's center a few
+# units) no longer splits the repeat key, so swapping the mark_id (ax_41 ->
+# ax_42 at the same bbox) can no longer escape the repeated_target_loop guard.
+TAP_GEOMETRY_BUCKET_SIZE = 20
 CONTEXT_MODES = {"off", "observe", "inject"}
 DEFAULT_CONTEXT_MODE = "inject"
 DEFAULT_CONTEXT_BUDGET: dict[str, int] = {
@@ -1188,7 +1194,12 @@ def repeated_action_key(item: dict[str, Any]) -> tuple[Any, ...] | None:
     text_identity = item.get("text_identity")
     if text_identity is None and str(action) in {"Type", "Type_Name"}:
         text_identity = action_text_identity(item.get("text"))
-    return (str(action), tuple(center), surface, text_identity)
+    # R4: tap-class keys carry a geometric fingerprint — the target center
+    # rounded to a 20-unit bucket. Same physical target (within +-10 units)
+    # under a different mark_id is the same key; mark_id itself never
+    # discriminates, so id-swap escapes stay closed. Targets that genuinely
+    # move out of the bucket get a new key (different target = progress).
+    return (str(action), _geometry_bucket(center), surface, text_identity)
 
 
 def _locate_repeat_key(
@@ -1198,6 +1209,27 @@ def _locate_repeat_key(
     if not isinstance(digest, str) or not digest:
         return None
     return (str(item.get("action")), surface, digest)
+
+
+def _geometry_bucket(value: Any, *, size: float = TAP_GEOMETRY_BUCKET_SIZE) -> tuple[int, int]:
+    """Round a [x, y] center to the nearest ``size``-unit grid cell.
+
+    Relative coordinates are 0-1000 and non-negative, so half-up integer
+    division is exact and deterministic; sub-bucket jitter collapses into the
+    same cell while a genuinely moved target lands in a new one.
+    """
+
+    if not isinstance(value, (list, tuple)) or len(value) != 2:
+        raise TypeError(f"geometry bucket requires a 2-tuple, got {type(value).__name__}")
+    try:
+        x = float(value[0])
+        y = float(value[1])
+    except (TypeError, ValueError) as exc:
+        raise TypeError("geometry bucket requires numeric coordinates") from exc
+    return (
+        int(x / size + 0.5) * size,
+        int(y / size + 0.5) * size,
+    )
 
 
 def _swipe_repeat_key(

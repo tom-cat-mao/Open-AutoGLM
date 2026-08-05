@@ -496,3 +496,60 @@ def test_execute_swipe_repeat_guard_allows_different_start(
     assert result["action_result"]["success"] is True
     assert result["action_receipt"]["dispatch_status"] == "accepted"
     assert any(call[0] == "swipe" for call in fake_device.calls)
+
+
+# ----------------------------------------------------------------------
+# R4: tap-class repeat key carries a 20-unit geometric fingerprint — swapping
+# mark_id on the same physical button cannot escape the guard (pi-16)
+# ----------------------------------------------------------------------
+
+
+def test_execute_repeat_guard_rejects_same_bucket_different_mark_id(
+    base_state, fake_device
+) -> None:
+    """R4 (pi-16): the model taps ax_41, then ax_42 (same bbox, sub-bucket
+    center jitter), then ax_43 — the same physical button. The 20-unit
+    geometry bucket collapses the jitter, so the third tap is rejected without
+    dispatch."""
+    surface = "com.xingin.xhs/SearchActivity"
+    base_state["action_parsed"] = {"_metadata": "do", "action": "Tap", "element": [622, 913]}
+    base_state["grounding_observation"] = {"center": [622, 913]}
+    base_state["observation"] = {"snapshot": {"foreground_activity": surface}}
+    base_state["gui_memory"]["tried_actions"] = [
+        {"action": "Tap", "target_center": [622.0, 913.0], "surface": surface, "mark_id": "ax_41"},
+        {"action": "Tap", "target_center": [624.0, 911.0], "surface": surface, "mark_id": "ax_42"},
+    ]
+
+    result = execute_node(
+        base_state, {"configurable": {"device_factory": fake_device, "verbose": False}}
+    )
+
+    assert result["action_result"]["success"] is False
+    assert result["failure_cause"] == "repeated_action"
+    assert result["repeat_rejected"] is True
+    assert result["action_receipt"]["side_effect_receipt"]["reason_code"] == "repeated_target_loop"
+    assert result["action_receipt"]["side_effect_receipt"]["repeat_count"] == 3
+    assert fake_device.calls == []
+
+
+def test_execute_repeat_guard_allows_different_bucket_same_mark_id(
+    base_state, fake_device
+) -> None:
+    """R4: a target that genuinely moved out of the 20-unit bucket is a new
+    key — same mark_id at a different position is progress, not a repeat."""
+    surface = "com.xingin.xhs/SearchActivity"
+    base_state["action_parsed"] = {"_metadata": "do", "action": "Tap", "element": [700, 913]}
+    base_state["grounding_observation"] = {"center": [700, 913]}
+    base_state["observation"] = {"snapshot": {"foreground_activity": surface}}
+    base_state["gui_memory"]["tried_actions"] = [
+        {"action": "Tap", "target_center": [622.0, 913.0], "surface": surface, "mark_id": "ax_42"},
+        {"action": "Tap", "target_center": [622.0, 913.0], "surface": surface, "mark_id": "ax_42"},
+    ]
+
+    result = execute_node(
+        base_state, {"configurable": {"device_factory": fake_device, "verbose": False}}
+    )
+
+    assert result["action_result"]["success"] is True
+    assert result["action_receipt"]["dispatch_status"] == "accepted"
+    assert fake_device.calls[-1][0] == "tap"

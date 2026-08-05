@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any, Literal, Mapping
+import os
 import re
 import unicodedata
 
@@ -18,6 +19,41 @@ SafetyRoute = Literal["confirm", "takeover"]
 # be merged onto one screen snapshot before fail-closed rejection.
 LOCATE_MAX_PER_RUN = 3
 LOCATE_MAX_MARKS_PER_SCREEN = 5
+
+# R1: the locate TOOL path (scoped crop input) runs LocateAnything at this
+# max_size tier so scope crops keep near-native resolution instead of being
+# squeezed by the observation-fallback 960 box (1216x2066 crop -> 565x960
+# erased the resolution win of cropping; date digits ~38px -> ~17px broke the
+# 3B model's readable-text floor). The observation fallback path keeps
+# DEFAULT_LOCATEANYTHING_MAX_SIZE=960 to bound cost. Overridable at runtime
+# via env PHONE_AGENT_LOCATE_LA_MAX_SIZE (read at call time by the locate
+# tool) and per-call via configurable["locate_max_size"]. PIL thumbnail never
+# upscales, so any crop that fits the 2048 box (all real phone scope crops)
+# passes through unchanged; inputs whose short side is already <=960 are
+# untouched by both tiers.
+LOCATE_LA_MAX_SIZE = 2048
+
+
+# R1: env-aware resolution used by the locate tool path (call-time, matching
+# the factory env pattern). Invalid/empty/<=0 values fall back to the policy
+# constant so a misconfigured env can never silently drop resolution below
+# the 960 observation floor.
+def resolve_locate_la_max_size(overrides: dict[str, Any] | None = None) -> int:
+    explicit = (overrides or {}).get("locate_max_size")
+    if explicit not in {None, ""}:
+        try:
+            resolved = int(explicit)
+        except (TypeError, ValueError):
+            resolved = 0
+        return resolved if resolved > 0 else LOCATE_LA_MAX_SIZE
+    value = os.getenv("PHONE_AGENT_LOCATE_LA_MAX_SIZE")
+    if value not in {None, ""}:
+        try:
+            resolved = int(value)
+        except (TypeError, ValueError):
+            resolved = 0
+        return resolved if resolved > 0 else LOCATE_LA_MAX_SIZE
+    return LOCATE_LA_MAX_SIZE
 
 # F1/S2: when a locate query carries an optional ``scope_mark_id``, the current
 # screenshot F is cropped to the scope mark's bbox (0-1000 -> device pixels)

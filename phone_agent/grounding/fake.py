@@ -36,6 +36,7 @@ class FakeGroundingProvider:
         screen_binding: ScreenBinding,
         hints: list[MarkProviderHint] | None = None,
         timeout: float | None = None,
+        max_size: int | None = None,
     ) -> MarkProviderResult:
         started = time.perf_counter()
         input_hash = self.provider_input_hash or hashlib.sha256(
@@ -47,6 +48,7 @@ class FakeGroundingProvider:
                 "hints": [hint.redacted_summary() for hint in hints or []],
                 "screen_binding": screen_binding.to_dict(),
                 "timeout": timeout,
+                "max_size": max_size,
                 "provider_input_hash": input_hash,
             }
         )

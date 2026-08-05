@@ -38,6 +38,7 @@ Fail-closed contract (P0 #9 / P0 #8):
 from __future__ import annotations
 
 import base64
+import inspect
 import time
 from dataclasses import dataclass
 from io import BytesIO
@@ -50,6 +51,7 @@ from phone_agent.config.policy import (
     LOCATE_MAX_MARKS_PER_SCREEN,
     LOCATE_MAX_PER_RUN,
     LOCATE_SCOPE_PADDING_RATIO,
+    resolve_locate_la_max_size,
 )
 from phone_agent.graph.marks import (
     Mark,
@@ -653,11 +655,23 @@ def locate_target(
         provider_screenshot = scope.crop
 
     try:
+        # R1: the locate TOOL path always queries at the high-resolution tier
+        # (policy LOCATE_LA_MAX_SIZE=2048, env/config overridable) so the
+        # scoped crop keeps near-native resolution; the shared P2 singleton's
+        # instance tier stays at 960 for the observation fallback path — a
+        # per-call override, never an instance mutation. The kwarg is passed
+        # only to providers that support it (LA / test doubles), so injected
+        # third-party providers keep working.
+        provider_kwargs: dict[str, Any] = {
+            "timeout": float(configurable.get("grounding_timeout", 10.0) or 10.0)
+        }
+        if "max_size" in inspect.signature(provider.provide_marks).parameters:
+            provider_kwargs["max_size"] = resolve_locate_la_max_size(configurable)
         result = provider.provide_marks(
             provider_screenshot,
             binding,
             hints=[MarkProviderHint(text=hint, source="locate")],
-            timeout=float(configurable.get("grounding_timeout", 10.0) or 10.0),
+            **provider_kwargs,
         )
     except Exception as exc:
         return LocateOutcome(

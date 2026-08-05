@@ -7,6 +7,7 @@ import time
 from typing import Any
 
 from phone_agent.graph.context import sanitize_context_payload
+from phone_agent.grounding.locateanything import LocateAnythingMLXProvider
 from phone_agent.grounding.provider import MarkProvider, MarkProviderHint, MarkProviderResult, ScreenBinding
 
 
@@ -47,6 +48,7 @@ class FallbackMarkProvider:
         screen_binding: ScreenBinding,
         hints: list[MarkProviderHint] | None = None,
         timeout: float | None = None,
+        max_size: int | None = None,
     ) -> MarkProviderResult:
         started = time.perf_counter()
         summaries: list[dict[str, Any]] = []
@@ -60,7 +62,19 @@ class FallbackMarkProvider:
             if usable_result is not None and getattr(provider, "structure_mode", None) != "screen":
                 continue
             provider_hints = hints if getattr(provider, "allow_raw_hints", False) else _redact_hints(hints or [])
-            result = provider.provide_marks(screenshot, screen_binding, hints=provider_hints, timeout=timeout)
+            # R1: forward a per-call max_size tier only to providers that
+            # support it (the shared LocateAnything singleton); the observation
+            # fallback chain never overrides, so this is a no-op by default.
+            child_kwargs: dict[str, Any] = {}
+            if max_size is not None and isinstance(provider, LocateAnythingMLXProvider):
+                child_kwargs["max_size"] = max_size
+            result = provider.provide_marks(
+                screenshot,
+                screen_binding,
+                hints=provider_hints,
+                timeout=timeout,
+                **child_kwargs,
+            )
             last_result = result
             usable, usable_reason = _result_usability(
                 result,

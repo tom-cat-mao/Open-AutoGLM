@@ -1,0 +1,41 @@
+{
+  "metadata": {
+    "suite": "locate-scoped-regression",
+    "source": "outputs/live-diagnosis/20260805-001452-*/traces/screenshots/step_010_locate_frame.png",
+    "purpose": "R3 regression sample: 携程机票搜索日期格子 locate。full frame 1216x2640；scope 区裁剪后为 1216x2066（与执行文档一致）。",
+    "coordinate_space": "0-1000 relative",
+    "ground_truth": {
+      "expected_bbox": [595, 713, 680, 746],
+      "bbox_tolerance": 30,
+      "center_acceptance_box": [571, 692, 714, 773],
+      "acceptance_rule": "predicted mark bbox within +-30 per edge of expected_bbox, OR predicted center inside center_acceptance_box"
+    },
+    "run_instructions": "manual — 需要真模型（MLX LocateAnything-3B-4bit）。",
+    "run_command": ".venv/bin/python -m bench.grounding.run_locateanything --manifest bench/grounding/data/manifest.locate-date-cell.json --model models/LocateAnything-3B-4bit --output bench_output/grounding/locate-date-cell_predictions.jsonl --summary-output bench_output/grounding/locate-date-cell_summary.json --skip-thumbnail",
+    "tiers": {
+      "observation_fallback": 960,
+      "locate_tool_2048": 2048,
+      "skip_thumbnail": "original resolution (--skip-thumbnail)"
+    }
+  },
+  "cases": [
+    {
+      "id": "locate_2026_10_01_date_cell",
+      "image": "bench/grounding/data/step_010_locate_frame.png",
+      "prompt": "2026年10月1日日期格",
+      "scope": [0, 200.38, 1000, 983.33],
+      "max_size": 2048,
+      "elements": [
+        {
+          "id": "date_cell_2026_10_01",
+          "bbox": [595, 713, 680, 746],
+          "required": true,
+          "text": "2026年10月1日"
+        }
+      ],
+      "expected_text": {"target_label": "2026年10月1日"},
+      "center_acceptance_box": [571, 692, 714, 773],
+      "tags": ["android", "calendar", "date_cell", "ctrip", "locate_frame"]
+    }
+  ]
+}

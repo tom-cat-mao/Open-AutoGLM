@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import argparse
 import base64
+import dataclasses
 import hashlib
+import io
 import json
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 from PIL import Image
 
@@ -23,7 +25,7 @@ from bench.grounding.datasets import (
 from bench.grounding.reporting import build_summary, enrich_prediction, write_jsonl
 from phone_agent.grounding.locateanything import LocateAnythingMLXProvider
 from phone_agent.grounding.parser import GroundingParseError
-from phone_agent.grounding.provider import MarkProviderHint, ScreenBinding
+from phone_agent.grounding.provider import MarkCandidate, MarkProviderHint, ScreenBinding
 
 
 @dataclass(frozen=True)
@@ -44,6 +46,80 @@ def load_screenshot(path: Path) -> tuple[FileScreenshot, ScreenBinding]:
             width=width,
             height=height,
         ),
+    )
+
+
+def _valid_scope(value: Any) -> list[float] | None:
+    if not isinstance(value, (list, tuple)) or len(value) != 4:
+        return None
+    try:
+        scope = [float(v) for v in value]
+    except (TypeError, ValueError):
+        return None
+    if any(not (0.0 <= v <= 1000.0) for v in scope):
+        return None
+    if scope[2] <= scope[0] or scope[3] <= scope[1]:
+        return None
+    return scope
+
+
+def _scope_crop(
+    image: Image.Image, scope: Sequence[float]
+) -> tuple[Image.Image, tuple[float, float], tuple[float, float]]:
+    """Crop a 0-1000 scope region out of the full frame (no padding, exact
+    region) and return the crop plus its origin/size in 0-1000 space so the
+    provider box can be affinely mapped back to full-frame coordinates."""
+
+    width, height = image.size
+    sx1, sy1, sx2, sy2 = (float(v) for v in scope)
+    px1, py1 = sx1 * width / 1000.0, sy1 * height / 1000.0
+    px2, py2 = sx2 * width / 1000.0, sy2 * height / 1000.0
+    cx1 = int(max(0.0, min(px1, width - 1)))
+    cy1 = int(max(0.0, min(py1, height - 1)))
+    cx2 = int(min(width, max(px2, cx1 + 1)))
+    cy2 = int(min(height, max(py2, cy1 + 1)))
+    if cx2 <= cx1 or cy2 <= cy1:
+        raise ValueError("degenerate scope region")
+    crop = image.crop((cx1, cy1, cx2, cy2))
+    origin = (cx1 / width * 1000.0, cy1 / height * 1000.0)
+    size = ((cx2 - cx1) / width * 1000.0, (cy2 - cy1) / height * 1000.0)
+    return crop, origin, size
+
+
+def _map_box_to_full(
+    box: Sequence[float], origin: tuple[float, float], size: tuple[float, float]
+) -> list[int]:
+    ox, oy = origin
+    sx, sy = size
+    bx1, by1, bx2, by2 = (float(v) for v in box)
+    return [
+        int(round(ox + bx1 * sx / 1000.0)),
+        int(round(oy + by1 * sy / 1000.0)),
+        int(round(ox + bx2 * sx / 1000.0)),
+        int(round(oy + by2 * sy / 1000.0)),
+    ]
+
+
+def _map_point_to_full(
+    point: Sequence[float], origin: tuple[float, float], size: tuple[float, float]
+) -> list[int]:
+    ox, oy = origin
+    sx, sy = size
+    return [
+        int(round(ox + float(point[0]) * sx / 1000.0)),
+        int(round(oy + float(point[1]) * sy / 1000.0)),
+    ]
+
+
+def _remap_candidate(
+    candidate: Any, origin: tuple[float, float], size: tuple[float, float]
+) -> Any:
+    if not isinstance(candidate, MarkCandidate):
+        return candidate
+    return dataclasses.replace(
+        candidate,
+        bbox=_map_box_to_full(candidate.bbox, origin, size),
+        center=_map_point_to_full(candidate.center, origin, size),
     )
 
 
@@ -75,7 +151,25 @@ def run_case(provider: LocateAnythingMLXProvider, case: dict[str, Any], *, timeo
 
     try:
         screenshot, binding = load_screenshot(image_path)
+        # Optional per-case scope (0-1000 region): query the provider against
+        # the high-resolution crop and back-map its box to full-frame
+        # coordinates, mirroring the runtime scoped-locate path (S2).
+        scope = _valid_scope(case.get("scope"))
+        scope_origin: tuple[float, float] | None = None
+        scope_size: tuple[float, float] | None = None
+        if scope is not None:
+            with Image.open(image_path) as full:
+                crop, scope_origin, scope_size = _scope_crop(full.convert("RGB"), scope)
+            buffered = io.BytesIO()
+            crop.save(buffered, format="PNG")
+            screenshot = FileScreenshot(base64_data=base64.b64encode(buffered.getvalue()).decode("ascii"))
         result = provider.provide_marks(screenshot, binding, hints=[MarkProviderHint(text=prompt)], timeout=timeout)
+        if result.success and scope_origin is not None and scope_size is not None:
+            result = dataclasses.replace(
+                result,
+                marks=[_remap_candidate(mark, scope_origin, scope_size) for mark in result.marks],
+                candidates=[_remap_candidate(candidate, scope_origin, scope_size) for candidate in result.candidates],
+            )
     except GroundingParseError as exc:
         return {
             **prediction,
@@ -164,6 +258,10 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--trusted-types-only", action="store_true")
     parser.add_argument("--allow-duplicate-images", action="store_true")
     parser.add_argument("--max-size", type=int, default=960)
+    # R1/R3: run the provider at original resolution (no thumbnail). Phone
+    # screenshots are far below the 2048 locate-tier box, so this is the
+    # highest-fidelity bench tier; pass --max-size 2048 for an explicit tier.
+    parser.add_argument("--skip-thumbnail", action="store_true", help="disable input downscaling (original resolution)")
     parser.add_argument("--timeout", type=float)
     return parser.parse_args(argv)
 
@@ -174,7 +272,10 @@ def main(argv: list[str] | None = None) -> None:
     if not cases:
         raise SystemExit("no benchmark cases selected")
 
-    provider = LocateAnythingMLXProvider(args.model, max_size=args.max_size)
+    provider = LocateAnythingMLXProvider(
+        args.model,
+        max_size=None if args.skip_thumbnail else args.max_size,
+    )
     print(f"Running LocateAnything on {len(cases)} cases max_size={args.max_size}", flush=True)
     predictions: list[dict[str, Any]] = []
     for index, case in enumerate(cases, start=1):

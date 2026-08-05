@@ -38,7 +38,7 @@ class LocateAnythingMLXProvider:
         self,
         model_path: str | Path = "models/LocateAnything-3B-4bit",
         *,
-        max_size: int = DEFAULT_LOCATEANYTHING_MAX_SIZE,
+        max_size: int | None = DEFAULT_LOCATEANYTHING_MAX_SIZE,
         context_max_chars: int = 0,
         structure_mode: str = "off",
         max_visual_candidates: int = 30,
@@ -46,7 +46,7 @@ class LocateAnythingMLXProvider:
         max_structure_calls: int = 5,
         invalid_structure_mode: str | None = None,
     ) -> None:
-        if max_size <= 0:
+        if max_size is not None and max_size <= 0:
             raise ValueError("LocateAnything max_size must be positive")
         if context_max_chars < 0:
             raise ValueError("LocateAnything context_max_chars must be non-negative")
@@ -96,7 +96,14 @@ class LocateAnythingMLXProvider:
         screen_binding: ScreenBinding,
         hints: list[MarkProviderHint] | None = None,
         timeout: float | None = None,
+        max_size: int | None = None,
     ) -> MarkProviderResult:
+        """Run the visual provider; ``max_size`` overrides the instance tier
+        per call (R1: the locate tool passes LOCATE_LA_MAX_SIZE on the shared
+        P2 singleton while the observation fallback keeps the 960 instance
+        tier — no instance mutation needed).
+        """
+
         started = time.perf_counter()
         if platform.system() != "Darwin" or platform.machine() != "arm64":
             return self._failure("unsupported_platform", screen_binding, started)
@@ -110,7 +117,14 @@ class LocateAnythingMLXProvider:
         visual_structure_candidates: list[MarkCandidate] = []
         ambiguous_for_execution = False
         try:
-            image, provider_input_hash = self._prepare_image(screenshot)
+            # R1: the per-call tier is passed only when the caller overrides it
+            # (default None keeps the historic single-arg call shape, so
+            # monkeypatched _prepare_image doubles with a plain screenshot
+            # signature keep working on the observation path).
+            if max_size is None:
+                image, provider_input_hash = self._prepare_image(screenshot)
+            else:
+                image, provider_input_hash = self._prepare_image(screenshot, max_size=max_size)
             hint_items = hints or []
             for hint_index, description in enumerate(descriptions, start=1):
                 context = self._context_for_hint(hint_items[hint_index - 1] if len(hint_items) >= hint_index else None)
@@ -278,10 +292,23 @@ class LocateAnythingMLXProvider:
             },
         }
 
-    def _prepare_image(self, screenshot: Any) -> tuple[Image.Image, str]:
+    def _prepare_image(
+        self, screenshot: Any, max_size: int | None = None
+    ) -> tuple[Image.Image, str]:
+        """Decode and (optionally) downscale the provider input.
+
+        ``max_size=None`` falls back to the instance tier. PIL ``thumbnail``
+        never upscales and is aspect-preserving: a 1216x2066 crop at the 2048
+        tier is only height-clamped to 1205x2048 (an 18px trim, vs the 565x960
+        squeeze the 960 tier applies), so the scoped-locate resolution win is
+        preserved. Inputs that already fit the tier box pass through unchanged.
+        """
+
+        tier = self.max_size if max_size is None else max_size
         raw = base64.b64decode(getattr(screenshot, "base64_data", ""))
         image = Image.open(BytesIO(raw)).convert("RGB")
-        image.thumbnail((self.max_size, self.max_size))
+        if tier is not None:
+            image.thumbnail((tier, tier))
         buffered = BytesIO()
         image.save(buffered, format="PNG", optimize=True)
         provider_bytes = buffered.getvalue()

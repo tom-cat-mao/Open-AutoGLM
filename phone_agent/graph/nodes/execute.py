@@ -457,10 +457,24 @@ def execute_node(state: "AgentState", config: RunnableConfig) -> dict:
                 "execute_error",
                 {"message": result.message, "failure_cause": failure_code},
             )
+            # R2: failed locates still count in gui_memory.tried_actions (the
+            # repeat guard's counting source) — a failed locate that replans
+            # skips reflect, so without this write the same-query repeat guard
+            # would never escalate on the failure path either.
+            locate_memory = update_gui_memory(
+                {
+                    **state,
+                    "action_result": result.__dict__,
+                    "failure_cause": failure_code,
+                },
+                current_app=state.get("current_app") or "unknown",
+                screen_id=None,
+            )
             return {
                 "action_result": result.__dict__,
                 "action_receipt": receipt.to_dict(),
                 **_receipt_ledger_update(state, "Locate", receipt),
+                "gui_memory": locate_memory,
                 "messages": messages,
                 "finished": False,
                 "failure_cause": failure_code,
@@ -499,10 +513,20 @@ def execute_node(state: "AgentState", config: RunnableConfig) -> dict:
                 },
             )
             messages = _strip_and_append(messages, thinking, action_raw)
+            locate_memory = update_gui_memory(
+                {
+                    **state,
+                    "action_result": result.__dict__,
+                    "failure_cause": "registry_missing",
+                },
+                current_app=state.get("current_app") or "unknown",
+                screen_id=None,
+            )
             return {
                 "action_result": result.__dict__,
                 "action_receipt": receipt.to_dict(),
                 **_receipt_ledger_update(state, "Locate", receipt),
+                "gui_memory": locate_memory,
                 "messages": messages,
                 "finished": False,
                 "failure_cause": "registry_missing",
@@ -551,10 +575,25 @@ def execute_node(state: "AgentState", config: RunnableConfig) -> dict:
             },
         )
         messages = _strip_and_append(messages, thinking, action_raw)
+        # R2: a SUCCESSFUL locate skips reflect (capability routes straight
+        # back to plan), so this is the only writer that records the attempt in
+        # gui_memory.tried_actions — without it the repeat guard's prior count
+        # for the same (Locate, surface, hint_digest) key would stay 0 forever
+        # and "同屏同述重复拒绝" would never fire on the success path.
+        locate_memory = update_gui_memory(
+            {
+                **state,
+                "action_result": result.__dict__,
+                "failure_cause": None,
+            },
+            current_app=state.get("current_app") or "unknown",
+            screen_id=None,
+        )
         return {
             "action_result": result.__dict__,
             "action_receipt": receipt.to_dict(),
             **_receipt_ledger_update(state, "Locate", receipt),
+            "gui_memory": locate_memory,
             "messages": messages,
             "finished": False,
             "mark_registry": new_registry.to_dict(),

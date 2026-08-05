@@ -661,3 +661,55 @@ def test_update_failure_memory_marks_unverified_only_when_flagged() -> None:
     unverified = context_module.update_failure_memory([], outcome, unverified=True)
     assert unverified[0]["unverified"] is True
     assert unverified[0]["failure_cause"] == "element_not_found"
+
+
+def test_tap_repeat_key_buckets_center_geometry() -> None:
+    """R4: tap-class keys carry a 20-unit geometric fingerprint — sub-bucket
+    center jitter on the same physical button (mark_id swapped) is the same
+    key; a target that moves out of the bucket gets a new key."""
+    base = {
+        "action": "Tap",
+        "target_center": [622.0, 913.0],
+        "surface": FEED_SURFACE,
+        "mark_id": "ax_41",
+    }
+    same_button_other_id = {
+        "action": "Tap",
+        "target_center": [624.0, 911.0],
+        "surface": FEED_SURFACE,
+        "mark_id": "ax_42",
+    }
+    moved = {
+        "action": "Tap",
+        "target_center": [700.0, 913.0],
+        "surface": FEED_SURFACE,
+        "mark_id": "ax_42",
+    }
+    other_surface = {
+        "action": "Tap",
+        "target_center": [622.0, 913.0],
+        "surface": "com.other/.Activity",
+        "mark_id": "ax_41",
+    }
+
+    assert context_module.repeated_action_key(base) is not None
+    assert context_module.repeated_action_key(base) == context_module.repeated_action_key(
+        same_button_other_id
+    )
+    assert context_module.repeated_action_key(base) != context_module.repeated_action_key(moved)
+    assert context_module.repeated_action_key(base) != context_module.repeated_action_key(other_surface)
+
+
+def test_detect_repeated_action_counts_same_bucket_different_mark_id() -> None:
+    """R4: two taps on one physical button under different mark_ids (ax_41,
+    ax_42) plus a third candidate reach the repeat threshold; mark_id never
+    discriminates in the repeat identity."""
+    history = [
+        {"action": "Tap", "target_center": [622.0, 913.0], "surface": FEED_SURFACE, "mark_id": "ax_41"},
+        {"action": "Tap", "target_center": [624.0, 911.0], "surface": FEED_SURFACE, "mark_id": "ax_42"},
+    ]
+    candidate = {"action": "Tap", "target_center": [622.0, 913.0], "surface": FEED_SURFACE, "mark_id": "ax_43"}
+
+    assert detect_repeated_action(history, candidate) is True
+    moved = {"action": "Tap", "target_center": [700.0, 913.0], "surface": FEED_SURFACE, "mark_id": "ax_43"}
+    assert detect_repeated_action(history, moved) is False
