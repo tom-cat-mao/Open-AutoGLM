@@ -529,12 +529,14 @@ def test_execute_locate_failure_writes_gui_memory(base_state, fake_device) -> No
     assert tried[-1]["failure_cause"] == "grounding_no_candidate"
 
 
-def test_execute_locate_third_same_query_rejected_end_to_end(
+def test_execute_locate_third_same_query_is_allowed_when_previous_succeeded(
     base_state, fake_device
 ) -> None:
-    """R2: the full loop — two successful locates on one surface each write
-    gui_memory, and the third same-query locate is rejected by the repeat
-    guard BEFORE any provider call (同屏同述第 3 次拒绝)."""
+    """Effect-guards: a SUCCESSFUL locate is progress — each run registers a
+    new executable mark (had_effect=True), so repeated same-query locates no
+    longer hit the count-based repeat guard. The old behavior (success also
+    counted, 3rd query hard-rejected) was the root cause of the real-flight
+    death after 3 successful locates; only the runaway fuse (20) bounds them."""
     provider = FakeGroundingProvider(bbox=[400, 400, 600, 600])
     state = _state_with_locate(base_state)
     state["observation"] = _observation()
@@ -554,6 +556,45 @@ def test_execute_locate_third_same_query_rejected_end_to_end(
         "gui_memory": second["gui_memory"],
         "locate_count": second["locate_count"],
         "mark_registry": second["mark_registry"],
+    }
+    third = execute_node(state3, _config(provider, fake_device))
+
+    assert third["action_result"]["success"] is True
+    assert third.get("repeat_rejected") is not True
+    assert len(provider.requests) == 3
+    # Every successful locate is recorded with had_effect=True: the
+    # consecutive-no-effect streak stays 0 and the guard never fires.
+    tried = third["gui_memory"]["tried_actions"]
+    assert all(item["had_effect"] is True for item in tried)
+
+
+def test_execute_locate_failing_same_query_is_blocked_after_threshold(
+    base_state, fake_device
+) -> None:
+    """Effect-guards: repeated FAILED locates carry had_effect=False, so the
+    consecutive-no-effect guard still blocks a true same-query failure loop at
+    the threshold (2 no-effect attempts, 3rd rejected) — the runaway fuse is
+    no longer the only stop."""
+    provider = FakeGroundingProvider(failure_code="grounding_no_candidate")
+    state = _state_with_locate(base_state)
+    state["observation"] = _observation()
+
+    first = execute_node(state, _config(provider, fake_device))
+    assert first["action_result"]["success"] is False
+    assert first["failure_cause"] == "grounding_no_candidate"
+    tried = first["gui_memory"]["tried_actions"]
+    assert tried[-1]["had_effect"] is False
+    state2 = {
+        **state,
+        "gui_memory": first["gui_memory"],
+        "locate_count": first["locate_count"],
+    }
+    second = execute_node(state2, _config(provider, fake_device))
+    assert second["action_result"]["success"] is False
+    state3 = {
+        **state2,
+        "gui_memory": second["gui_memory"],
+        "locate_count": second["locate_count"],
     }
     third = execute_node(state3, _config(provider, fake_device))
 

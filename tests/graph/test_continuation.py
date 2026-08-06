@@ -398,22 +398,23 @@ def test_budget_section_empty_without_max_steps() -> None:
     assert build_budget_section({"max_steps": 0, "step_count": 0}, lang="cn") == ""
 
 
-def test_budget_section_reports_remaining_locate_budget() -> None:
-    """H2: the budget section carries the per-run locate budget so the model
-    can see how many locate queries remain."""
+def test_budget_section_omits_locate_countdown() -> None:
+    """Effect-guards: the locate budget is a runaway fuse, not a scarcity
+    budget — the "locate 剩余 x/3" countdown is gone from both languages (the
+    scarcity hint actively induced the model to abandon mid-task)."""
     block = build_budget_section(
         {"max_steps": 20, "step_count": 5, "continuation_count": 1, "locate_count": 1},
         lang="cn",
     )
 
-    assert "locate 剩余 2/3" in block
+    assert "locate" not in block
 
     block_en = build_budget_section(
         {"max_steps": 20, "step_count": 5, "continuation_count": 1, "locate_count": 3},
         lang="en",
     )
 
-    assert "locate 0/3 left" in block_en
+    assert "locate" not in block_en
 
 
 def test_budget_section_locate_line_absent_without_max_steps() -> None:

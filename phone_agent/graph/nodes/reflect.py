@@ -13,8 +13,10 @@ from phone_agent.config.policy import (
 )
 from phone_agent.graph.context import (
     FAILURE_TAXONOMY,
+    action_had_effect,
     build_action_outcome_summary,
     build_screen_belief,
+    consecutive_no_effect_count,
     context_enabled,
     detect_repeated_action,
     detect_repeated_failure,
@@ -1506,12 +1508,29 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
             "repeated_failure_count": int(state.get("repeated_failure_count") or 0)
             + (1 if repeated else 0),
         }
+        # Effect-guards: the authoritative per-step effect signal for the
+        # tried_actions entry. Reflect judges from the signals it already owns:
+        # before/after screen hash (previous observation vs this capture), the
+        # number of fresh model screen-reads appended to the ledger this step,
+        # and the verdict. A productive step resets the same-key
+        # consecutive-no-effect streak; a dead loop keeps it rising.
+        before_screen_hash = None
+        previous_observation = state.get("observation")
+        if isinstance(previous_observation, dict):
+            before_screen_hash = previous_observation.get("screen_hash")
+        had_effect = action_had_effect(
+            before_screen_hash=before_screen_hash,
+            after_screen_hash=after_observation.snapshot.screen_hash,
+            new_observation_count=len(parsed_reflection.criteria_observations or []),
+            verdict=final_verdict,
+        )
         context_updates["gui_memory"] = update_gui_memory(
             {**state, **context_updates, "action_result": action_result},
             current_app=current_app,
             screen_id=after_observation.snapshot.screen_id,
             reached_surface=after_observation.snapshot.foreground_activity,
             semantic_screen_id=after_observation.snapshot.semantic_screen_id,
+            had_effect=had_effect,
         )
         previous_progress = (state.get("gui_memory") or {}).get("task_progress") or {}
         stuck_rounds = (
@@ -1539,11 +1558,7 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
         if tried_actions:
             repeat_key = repeated_action_key(tried_actions[-1])
             if repeat_key is not None:
-                repeat_count = sum(
-                    1
-                    for item in tried_actions
-                    if repeated_action_key(item) == repeat_key
-                )
+                repeat_count = consecutive_no_effect_count(tried_actions, repeat_key)
 
     emit_trace(
         config,

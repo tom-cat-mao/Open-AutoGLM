@@ -17,6 +17,7 @@ from phone_agent.graph.context import (
     action_target_center,
     action_text_identity,
     build_action_outcome_summary,
+    consecutive_no_effect_count,
     context_enabled,
     get_context_mode,
     locate_hint_digest,
@@ -263,12 +264,15 @@ def execute_node(state: "AgentState", config: RunnableConfig) -> dict:
     }
     repeat_key = repeated_action_key(candidate_repeat)
     tried_actions = (state.get("gui_memory") or {}).get("tried_actions") or []
+    # Effect-guards: the guard counts CONSECUTIVE no-effect attempts of the
+    # same repeat key, not raw attempts. Any same-key attempt that had an
+    # effect (screen change / new criterion observation / succeeded verdict)
+    # resets the streak, so a slider dragged 08:00 -> 07:00 -> 06:00 with the
+    # panel value changing every time is never blocked; a true dead loop
+    # (same target, screen unchanged) is still caught at the threshold. Old
+    # entries without ``had_effect`` count as no-effect (legacy compat).
     prior_repeat_count = (
-        sum(
-            1
-            for item in tried_actions
-            if isinstance(item, dict) and repeated_action_key(item) == repeat_key
-        )
+        consecutive_no_effect_count(tried_actions, repeat_key)
         if repeat_key is not None
         else 0
     )
@@ -308,6 +312,7 @@ def execute_node(state: "AgentState", config: RunnableConfig) -> dict:
                 "repeated_action_detected": True,
                 "repeat_rejected": True,
                 "repeat_count": repeat_count,
+                "consecutive_no_effect": prior_repeat_count,
             },
         )
         # The rejected action is a system decision, not an action failure: it must
@@ -317,6 +322,8 @@ def execute_node(state: "AgentState", config: RunnableConfig) -> dict:
         # that keeps proposing the same target would see a constant repeat_count
         # instead of an escalating one. `update_gui_memory` is the same writer
         # reflect uses, so the recorded entry has the identical shape.
+        # Effect-guards: the rejected attempt had no effect by construction
+        # (it never dispatched), so had_effect=False keeps the streak rising.
         rejected_memory = update_gui_memory(
             {
                 **state,
@@ -325,6 +332,7 @@ def execute_node(state: "AgentState", config: RunnableConfig) -> dict:
             },
             current_app=state.get("current_app") or "unknown",
             screen_id=None,
+            had_effect=False,
         )
         return {
             "action_result": result.__dict__,
@@ -424,9 +432,14 @@ def execute_node(state: "AgentState", config: RunnableConfig) -> dict:
             "locate_result",
             trace_safe_payload(outcome, hint_length=len(hint)),
         )
-        # H2: the budget counter advances on every attempted locate (success or
-        # failure). Only the hard budget gate itself (locate_budget_exhausted)
-        # does not advance — it is the refusal of further attempts, not one.
+        # Effect-guards: the locate budget is now a pure runaway fuse
+        # (LOCATE_MAX_PER_RUN=20, normal runs never hit it). Successful locates
+        # are progress and no longer fail-closed the run after 3 queries;
+        # repeated failed/effect-less locates are handled by the
+        # consecutive-no-effect repeat guard instead. The budget counter still
+        # advances on every attempted locate (success or failure); only the
+        # hard budget gate itself (locate_budget_exhausted) does not advance —
+        # it is the refusal of further attempts, not one.
         locate_count = int(state.get("locate_count") or 0)
         next_locate_count = (
             locate_count
@@ -461,6 +474,8 @@ def execute_node(state: "AgentState", config: RunnableConfig) -> dict:
             # repeat guard's counting source) — a failed locate that replans
             # skips reflect, so without this write the same-query repeat guard
             # would never escalate on the failure path either.
+            # Effect-guards: a failed locate had no effect, so had_effect=False
+            # feeds the consecutive-no-effect streak.
             locate_memory = update_gui_memory(
                 {
                     **state,
@@ -469,6 +484,7 @@ def execute_node(state: "AgentState", config: RunnableConfig) -> dict:
                 },
                 current_app=state.get("current_app") or "unknown",
                 screen_id=None,
+                had_effect=False,
             )
             return {
                 "action_result": result.__dict__,
@@ -521,6 +537,7 @@ def execute_node(state: "AgentState", config: RunnableConfig) -> dict:
                 },
                 current_app=state.get("current_app") or "unknown",
                 screen_id=None,
+                had_effect=False,
             )
             return {
                 "action_result": result.__dict__,
@@ -580,6 +597,10 @@ def execute_node(state: "AgentState", config: RunnableConfig) -> dict:
         # gui_memory.tried_actions — without it the repeat guard's prior count
         # for the same (Locate, surface, hint_digest) key would stay 0 forever
         # and "同屏同述重复拒绝" would never fire on the success path.
+        # Effect-guards: a successful locate is progress (it registered a new
+        # executable mark), so had_effect=True — it never feeds the
+        # consecutive-no-effect streak. Repeated same-query locates only get
+        # blocked when they keep FAILING without effect.
         locate_memory = update_gui_memory(
             {
                 **state,
@@ -588,6 +609,7 @@ def execute_node(state: "AgentState", config: RunnableConfig) -> dict:
             },
             current_app=state.get("current_app") or "unknown",
             screen_id=None,
+            had_effect=True,
         )
         return {
             "action_result": result.__dict__,

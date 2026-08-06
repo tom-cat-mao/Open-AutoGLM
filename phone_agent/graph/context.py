@@ -13,7 +13,6 @@ from phone_agent.config.policy import (
     CONTINUATION_NOVELTY_NEGATION_STREAK,
     CONTINUATION_WINDOW_STEPS,
     DEFAULT_VERIFICATION_POLICY,
-    LOCATE_MAX_PER_RUN,
 )
 
 REPEATED_ACTION_THRESHOLD = int(
@@ -668,24 +667,107 @@ def state_surface_identity(state: dict[str, Any]) -> str | None:
     return None
 
 
+def action_had_effect(
+    *,
+    before_screen_hash: Any,
+    after_screen_hash: Any,
+    new_observation_count: int = 0,
+    verdict: str | None = None,
+) -> bool:
+    """Judge whether one action was productive, from effect signals only.
+
+    The repeat guard (and any consumer of ``tried_actions``) must count
+    attempts, not judge them: a person supervising the run only asks "is the
+    situation changing?". That question is answered here from the signals that
+    already exist per step:
+
+    * screen change (``screen_hash`` differs before vs after) — the surface
+      moved;
+    * new criterion observation (``model_observation`` ledger entry this step)
+      — the model screen-read produced fresh evidence;
+    * reflect verdict ``succeeded`` — the step verified.
+
+    Any one of the three is productive; ``verdict`` is deliberately strict
+    (only ``"succeeded"``, not ``"partial"``) so a stuck loop does not reset
+    its streak on a hand-wavy partial. ``None`` before/after hashes are
+    treated as *no change signal* (fail-closed: absence never resets a
+    streak), matching the P0 #13a rule that existential absence is ``unknown``,
+    never contradiction.
+
+    :func:`trajectory_liveness` answers the same "is the trajectory moving?"
+    question at trajectory level from criterion history and novel
+    ``(surface, screen_id)`` states; this function is the per-step effect
+    signal that feeds the repeat guard.
+    """
+
+    screen_changed = (
+        before_screen_hash is not None
+        and after_screen_hash is not None
+        and before_screen_hash != after_screen_hash
+    )
+    return bool(
+        screen_changed
+        or int(new_observation_count or 0) > 0
+        or verdict == "succeeded"
+    )
+
+
+def consecutive_no_effect_count(
+    tried_actions: list[dict[str, Any]] | None, key: tuple[Any, ...] | None
+) -> int:
+    """Count the trailing same-key attempts that had no effect.
+
+    Walks ``tried_actions`` from the newest entry backwards. Entries whose
+    repeat key differs are skipped (another target's attempts neither add to
+    nor reset this key's streak); the first same-key entry with
+    ``had_effect=True`` resets the streak to zero. Entries recorded before the
+    effect-guard refactor carry no ``had_effect`` field and are treated as
+    ``False`` (legacy compatibility: they keep counting toward the guard).
+    """
+
+    if key is None:
+        return 0
+    count = 0
+    for item in reversed(list(tried_actions or [])):
+        if not isinstance(item, dict):
+            continue
+        if repeated_action_key(item) != key:
+            continue
+        if bool(item.get("had_effect")):
+            break
+        count += 1
+    return count
+
+
 def detect_repeated_action(
     tried_actions: list[dict[str, Any]], outcome: dict[str, Any]
 ) -> bool:
-    """Detect a target being re-actioned on the same surface, regardless of success.
+    """Detect a target being re-actioned on the same surface with no effect.
 
-    :func:`detect_repeated_failure` answers "am I retrying something that failed?" and
-    is blind to a loop where every step verifies as successful — repeatedly opening the
-    same list item does advance the surface each time, so no per-step check objects.
-    That trajectory-level question has no other owner, so it is answered here on the
-    identity that stays stable across re-observation: action plus target geometry plus
-    surface.
+    Effect-guard semantics (replaces the old count-based guard): an action is
+    a loop when the same repeat key has *consecutively* failed to produce any
+    effect (screen change / new criterion observation / succeeded verdict)
+    enough times; any same-key attempt that did have an effect resets the
+    streak. The real-flight case that motivated the change — dragging a slider
+    value 08:00 -> 07:00 -> ... with every drag visibly changing the panel —
+    must never be blocked, while a true dead loop (same target, screen
+    unchanged) is still caught after the threshold.
+
+    :func:`detect_repeated_failure` answers "am I retrying something that
+    failed?" and stays blind to a loop where every step verifies as
+    successful; the trajectory-level question has no other owner, so it is
+    answered here on the identity that stays stable across re-observation
+    (action plus target geometry plus surface), judged by the effect signal
+    that :func:`action_had_effect` produces per step.
     """
 
     key = repeated_action_key(outcome)
     if key is None:
         return False
-    prior = sum(1 for item in tried_actions or [] if repeated_action_key(item) == key)
-    return prior >= REPEATED_ACTION_THRESHOLD
+    return (
+        consecutive_no_effect_count(tried_actions or [], key)
+        >= REPEATED_ACTION_THRESHOLD
+    )
 
 
 def trajectory_liveness(
@@ -695,7 +777,15 @@ def trajectory_liveness(
     criterion_history: list[dict],
     budget: dict[str, int],
 ) -> dict[str, Any]:
-    """Purely classify goal-relative trajectory movement from bounded history."""
+    """Purely classify goal-relative trajectory movement from bounded history.
+
+    Observation-driven (17a7e25): the "new observation / new screen" signals
+    here are the trajectory-level mirror of the per-step effect signal that
+    :func:`action_had_effect` produces — both answer "is the situation
+    changing?" from screen identity and fresh criterion observations. This
+    function classifies the whole trajectory; ``action_had_effect`` feeds the
+    per-step repeat guard. See also :func:`detect_repeated_action`.
+    """
 
     if _criterion_moved_toward_satisfaction(criterion_history):
         return {
@@ -1114,8 +1204,9 @@ def build_budget_section(state: dict[str, Any], lang: str = "cn") -> str:
 
     Dynamic context only — never system/goal blocks (P5 prefix-cache). Carries
     the three-piece message: remaining steps in this window, continuations
-    granted, and "exhaustion != failure". H2: also carries the per-run locate
-    budget so the model sees the remaining locate queries.
+    granted, and "exhaustion != failure". The locate budget line was removed:
+    it is a pure runaway fuse (20 per run) that normal runs never
+    hit, and the old per-run countdown actively induced abandonment (稀缺暗示).
     """
 
     max_steps = int(state.get("max_steps") or 0)
@@ -1124,14 +1215,11 @@ def build_budget_section(state: dict[str, Any], lang: str = "cn") -> str:
         return ""
     remaining = max(0, max_steps - step_count)
     grants = int(state.get("continuation_count") or 0)
-    locate_count = int(state.get("locate_count") or 0)
-    locate_remaining = max(0, LOCATE_MAX_PER_RUN - locate_count)
     if lang == "en":
         lines = [
             f"Budget: {remaining}/{max_steps} steps left in this window; "
             f"continuations granted {grants}/{CONTINUATION_MAX_GRANTS}."
         ]
-        lines.append(f"locate {locate_remaining}/{LOCATE_MAX_PER_RUN} left")
         lines.append(
             "Budget exhaustion is NOT failure — it only triggers a system "
             "acceptance check. If the goal is actually done, finish now and "
@@ -1148,7 +1236,6 @@ def build_budget_section(state: dict[str, Any], lang: str = "cn") -> str:
             f"预算：本窗口剩余 {remaining}/{max_steps} 步；"
             f"已续命 {grants}/{CONTINUATION_MAX_GRANTS} 次。"
         ]
-        lines.append(f"locate 剩余 {locate_remaining}/{LOCATE_MAX_PER_RUN}")
         lines.append(
             "预算耗尽≠失败：它只是触发系统验收；若目标已实际完成请立即 "
             "finish 并点名满足的成功标准；若结构性无法完成请 take_over 说明。"
@@ -1260,6 +1347,24 @@ def action_text_identity(value: Any) -> str | None:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
+def _derive_had_effect(state: dict[str, Any]) -> bool:
+    """Default per-step effect signal when the caller does not supply one.
+
+    Fail-closed default: any failure cause or a ``success=False`` result is
+    no-effect; otherwise only a reflect ``succeeded`` verdict counts as
+    productive. Used by the transient preview write inside reflect (which runs
+    before the verdict is final); the authoritative reflect write passes
+    :func:`action_had_effect` output explicitly.
+    """
+
+    if state.get("failure_cause"):
+        return False
+    action_result = state.get("action_result")
+    if isinstance(action_result, dict) and action_result.get("success") is False:
+        return False
+    return state.get("reflection_verdict") == "succeeded"
+
+
 def update_gui_memory(
     state: dict[str, Any],
     *,
@@ -1267,6 +1372,7 @@ def update_gui_memory(
     screen_id: str | None,
     reached_surface: str | None = None,
     semantic_screen_id: str | None = None,
+    had_effect: bool | None = None,
 ) -> dict[str, Any]:
     """Update GUI memory using only bounded identifiers and sanitized summaries."""
 
@@ -1337,6 +1443,12 @@ def update_gui_memory(
                 # H4: locate repeat identity (sanitized hint digest), never the
                 # raw query text.
                 "hint_digest": locate_hint_digest(action.get("target_text_hint")),
+                # Effect-guards: per-step productivity signal consumed by the
+                # consecutive-no-effect repeat guard. Reflect writes the
+                # action_had_effect verdict; execute rejection/failure paths
+                # write False explicitly; successful locates write True. Old
+                # entries without the field are treated as False at read time.
+                "had_effect": _derive_had_effect(state) if had_effect is None else bool(had_effect),
                 "result_success": (
                     (state.get("action_result") or {}).get("success")
                     if isinstance(state.get("action_result"), dict)
@@ -1740,11 +1852,9 @@ def _build_liveness_note(state: dict[str, Any]) -> str:
     if isinstance(tried, list) and tried and isinstance(tried[-1], dict):
         key = repeated_action_key(tried[-1])
         if key is not None:
-            repeat_count = sum(
-                1
-                for item in tried
-                if isinstance(item, dict) and repeated_action_key(item) == key
-            )
+            # Effect-guards: only consecutive no-effect attempts of the latest
+            # target count toward the loop note; a productive attempt resets it.
+            repeat_count = consecutive_no_effect_count(tried, key)
     if lang == "en":
         label = {"advancing": "advancing", "stuck": "stuck", "exploring": "exploring"}.get(
             liveness, liveness
@@ -1906,7 +2016,7 @@ def _build_avoid_repeating(state: dict[str, Any]) -> dict[str, Any]:
     key = repeated_action_key(latest)
     if key is None:
         return {}
-    repeats = sum(1 for item in tried if repeated_action_key(item) == key)
+    repeats = consecutive_no_effect_count(tried, key)
     lang = str(state.get("lang") or "cn")
     return {
         "action": latest.get("action"),

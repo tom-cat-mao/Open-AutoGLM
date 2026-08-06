@@ -17,7 +17,12 @@ SafetyRoute = Literal["confirm", "takeover"]
 
 # F1: how many locate actions may run per run, and how many locate marks may
 # be merged onto one screen snapshot before fail-closed rejection.
-LOCATE_MAX_PER_RUN = 3
+# R1 (effect-guards): the per-run locate budget is a pure runaway fuse, not a
+# scarcity budget — raised 3 -> 20 because a successful locate is progress and
+# must not be throttled by the same budget that used to fail-closed after 3
+# successful queries. Repeated failed/effect-less locates are handled by the
+# consecutive-no-effect repeat guard, not by this counter.
+LOCATE_MAX_PER_RUN = 20
 LOCATE_MAX_MARKS_PER_SCREEN = 5
 
 # R1: the locate TOOL path (scoped crop input) runs LocateAnything at this
