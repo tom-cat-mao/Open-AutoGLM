@@ -482,3 +482,216 @@ def test_bounded_ledger_keeps_observation_window() -> None:
     observations = [e for e in bounded if e.get("kind") == "model_observation"]
     assert len(observations) == 3
     assert [e["step"] for e in observations] == [7, 8, 9]
+
+
+# ----------------------------------------------------------------------
+# S7b: 残留启动 fixture replay (form 4) — 首屏即满足部分判据
+# ----------------------------------------------------------------------
+
+
+def test_residual_first_screen_observation_finishes_with_trajectory(
+    base_state, fake_device
+) -> None:
+    """残留启动正例：上一轮留下的筛选状态使首屏（step 1）即满足 departure_time
+    判据（面板观察在 s1 入账并封缄 S1）；finish 时 judge 对终局判据带
+    evidence_step 引用 → 通过；judge 提示词携带轨迹摘要（s1 观察）判因果。"""
+    from phone_agent.graph.goal_evidence import seal_satisfied_stages
+    from phone_agent.graph.nodes.acceptance import acceptance_node
+
+    contract = _run_g_contract()
+    base_state["goal_contract"] = contract
+    base_state["task"] = "查机票"
+    base_state["step_count"] = 1
+    base_state["expected_outcome"] = None
+    base_state["action_parsed"] = {
+        "_metadata": "finish",
+        "message": "done",
+        "matched_terminal_evidence": ["departure_time", "flight_results"],
+    }
+    base_state["action_result"] = {
+        "success": True,
+        "should_finish": False,
+        "message": "ok",
+    }
+    base_state["pending_finish"] = True
+    ledger = append_model_observations(
+        [],
+        contract_id="unbound-runtime-contract",
+        observations=[
+            {
+                "criterion": "departure_time",
+                "status": "observed",
+                "observed_value": "06:00-12:00",
+            }
+        ],
+        step=1,
+        screen_id="panel",
+        observation_epoch=1,
+    )
+    ledger, seals = seal_satisfied_stages(
+        ledger,
+        contract=contract,
+        contract_id="unbound-runtime-contract",
+        screen_id="panel",
+        step=1,
+    )
+    assert [s["stage_id"] for s in seals] == ["S1"]
+    base_state["goal_evidence_ledger"] = ledger
+    gap = criterion_gap_status(
+        contract=contract,
+        ledger=ledger,
+        contract_id="unbound-runtime-contract",
+        screen_id="panel",
+        observation_epoch=1,
+    )
+    assert gap is not None
+    assert gap["current_stage_id"] == "S2"
+    assert any(
+        r["name"] == "departure_time" and r["stage_id"] == "S1"
+        for r in gap["sealed"]
+    )
+
+    judge_model = _FakeModelClient(
+        _FakeModelResponse(
+            "",
+            json.dumps(
+                {
+                    "verdicts": [
+                        {
+                            "criterion": "flight_results",
+                            "status": "satisfied",
+                            "evidence_step": "final_screen",
+                        }
+                    ],
+                    "message": "done",
+                },
+                ensure_ascii=False,
+            ),
+        )
+    )
+    result = acceptance_node(
+        base_state,
+        {
+            "configurable": {
+                "model_client": judge_model,
+                "device_factory": fake_device,
+                "verbose": False,
+                "after_screen_marks": [
+                    {
+                        "mark_id": "ax_results",
+                        "bbox": [50, 100, 900, 200],
+                        "role": "TextView",
+                        "text_summary": "航班列表",
+                    }
+                ],
+                "grounding_provider_name": "off",
+            }
+        },
+    )
+    assert result["finished"] is True
+    assert result["finish_validation_status"] == "success"
+    parts: list[str] = []
+    for message in judge_model.messages or []:
+        for item in (message.get("content") or []) if isinstance(message, dict) else []:
+            if isinstance(item, dict) and item.get("type") == "text":
+                parts.append(str(item.get("text") or ""))
+    prompt_text = "\n".join(parts)
+    assert "轨迹摘要" in prompt_text
+    assert "s1" in prompt_text
+    assert "departure_time=06:00-12:00" in prompt_text
+
+
+def test_residual_first_screen_observation_judge_without_reference_blocked(
+    base_state, fake_device
+) -> None:
+    """残留启动反例：首屏观察已入账，但 judge 对终局判据不带 evidence_step
+    引用（自证）→ finish 被阻断（fail-closed，引用形式校验）。"""
+    from phone_agent.graph.goal_evidence import seal_satisfied_stages
+    from phone_agent.graph.nodes.acceptance import acceptance_node
+
+    contract = _run_g_contract()
+    base_state["goal_contract"] = contract
+    base_state["task"] = "查机票"
+    base_state["step_count"] = 1
+    base_state["expected_outcome"] = None
+    base_state["action_parsed"] = {
+        "_metadata": "finish",
+        "message": "done",
+        "matched_terminal_evidence": ["departure_time", "flight_results"],
+    }
+    base_state["action_result"] = {
+        "success": True,
+        "should_finish": False,
+        "message": "ok",
+    }
+    base_state["pending_finish"] = True
+    ledger = append_model_observations(
+        [],
+        contract_id="unbound-runtime-contract",
+        observations=[
+            {
+                "criterion": "departure_time",
+                "status": "observed",
+                "observed_value": "06:00-12:00",
+            }
+        ],
+        step=1,
+        screen_id="panel",
+        observation_epoch=1,
+    )
+    ledger, seals = seal_satisfied_stages(
+        ledger,
+        contract=contract,
+        contract_id="unbound-runtime-contract",
+        screen_id="panel",
+        step=1,
+    )
+    assert [s["stage_id"] for s in seals] == ["S1"]
+    base_state["goal_evidence_ledger"] = ledger
+
+    judge_model = _FakeModelClient(
+        _FakeModelResponse(
+            "",
+            json.dumps(
+                {
+                    "verdicts": [
+                        {
+                            "criterion": "departure_time",
+                            "status": "satisfied",
+                            "observed_value": "航班 06:05 起飞",
+                        },
+                        {"criterion": "flight_results", "status": "satisfied"},
+                    ],
+                    "message": "done",
+                },
+                ensure_ascii=False,
+            ),
+        )
+    )
+    result = acceptance_node(
+        base_state,
+        {
+            "configurable": {
+                "model_client": judge_model,
+                "device_factory": fake_device,
+                "verbose": False,
+                "after_screen_marks": [
+                    {
+                        "mark_id": "ax_results",
+                        "bbox": [50, 100, 900, 200],
+                        "role": "TextView",
+                        "text_summary": "航班列表",
+                    }
+                ],
+                "grounding_provider_name": "off",
+            }
+        },
+    )
+    assert result["finished"] is False
+    assert result["failure_cause"] == "goal_not_satisfied"
+    per_criterion = result["finish_validation_evidence"]["evidence"]["per_criterion"]
+    assert per_criterion["flight_results"]["status"] == "unknown"
+    assert (
+        per_criterion["flight_results"]["reason"]
+        == "judge_reference_missing_or_out_of_range"
+    )

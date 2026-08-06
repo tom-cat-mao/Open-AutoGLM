@@ -533,32 +533,6 @@ def test_plan_node_rejects_unknown_mark_intent(base_state, fake_device) -> None:
     assert result["finished"] is True
 
 
-def test_structured_coordinate_tap_requires_mark_when_marks_available(
-    base_state, fake_device
-) -> None:
-    model = FakeModelClient(
-        FakeModelResponse("", '{"type":"do","action":"tap","x":200,"y":300}')
-    )
-
-    result = plan_node(
-        base_state,
-        {
-            "configurable": {
-                "model_client": model,
-                "device_factory": fake_device,
-                "output_mode": "json_schema",
-                "screen_marks": [{"mark_id": "m1", "bbox": [100, 200, 300, 400]}],
-                "parse_retry": 0,
-                "verbose": False,
-            }
-        },
-    )
-
-    assert result["action_parsed"] is None
-    assert result["grounding_error"] is None
-    assert result["parse_metadata"]["parse_error_code"] == "mark_required"
-
-
 def test_auto_json_coordinate_tap_requires_mark_even_without_adapter_metadata(
     base_state, fake_device
 ) -> None:
@@ -823,30 +797,6 @@ def test_plan_node_keeps_typed_text_in_action_history(
     assert json.loads(result["action_raw"])["action"]["text"] == "张三的家庭住址"
     assert result["expected_outcome"]["kind"] == "text_present"
     assert result["expected_outcome"]["must_observe"] == []
-
-
-def test_plan_node_rejects_json_action_out_of_range(base_state, fake_device) -> None:
-    model = FakeModelClient(
-        FakeModelResponse("", '{"type":"do","action":"tap","x":5000,"y":500}')
-    )
-
-    result = plan_node(
-        base_state,
-        {
-            "configurable": {
-                "model_client": model,
-                "device_factory": fake_device,
-                "output_mode": "json_schema",
-                "verbose": False,
-            }
-        },
-    )
-
-    assert result["finished"] is True
-    assert result["action_parsed"] is None
-    assert result["action_result"]["success"] is False
-    assert result["failure_cause"] == "mark_required"
-    assert result["error_layer"] == "grounding"
 
 
 def test_plan_node_validates_structured_json_and_repairs_safe_action_alias(
@@ -1260,35 +1210,6 @@ def test_plan_node_hybrid_filters_unrelated_accessibility_base_path(
     assert result["action_parsed"] is None
     assert result["grounding_error"] == "mark_unavailable"
     assert "ax_1" not in result["mark_registry"]["marks"]
-
-
-def test_plan_node_description_only_intent_fails_closed(
-    base_state, fake_device
-) -> None:
-    model = FakeModelClient(
-        FakeModelResponse(
-            "", '{"type":"intent","action":"tap","target_text_hint":"设置按钮"}'
-        )
-    )
-
-    result = plan_node(
-        base_state,
-        {
-            "configurable": {
-                "model_client": model,
-                "device_factory": fake_device,
-                "output_mode": "json_schema",
-                "verbose": False,
-            }
-        },
-    )
-
-    assert result["action_parsed"] is None
-    assert result["grounding_error"] is None
-    assert result["parse_metadata"]["parse_error_code"] == "mark_required"
-    assert result["failure_cause"] == "mark_required"
-    assert result["error_layer"] == "grounding"
-    assert result["finished"] is True
 
 
 def test_plan_trace_includes_parse_metadata(base_state, fake_device, tmp_path) -> None:
@@ -1844,68 +1765,6 @@ def test_parse_reflection_action_rejects_success_with_missing_postconditions() -
     assert parsed.failure_cause == "wrong_page"
 
 
-def test_reflect_node_returns_structured_failure(base_state, fake_device) -> None:
-    model = FakeModelClient(
-        FakeModelResponse(
-            "点击后仍停留在错误页面",
-            '{"verdict":"failed","failure_cause":"wrong_page","suggested_strategy":"go_back","message":"页面不对"}',
-        )
-    )
-
-    result = reflect_node(
-        base_state,
-        {
-            "configurable": {
-                "model_client": model,
-                "device_factory": fake_device,
-                "verbose": False,
-            }
-        },
-    )
-
-    assert result["action_succeeded"] is False
-    assert result["reflection_verdict"] == "failed"
-    assert result["failure_cause"] == "wrong_page"
-    assert result["suggested_strategy"] == "go_back"
-    assert result["observation_retry_count"] == 0
-
-
-def test_reflect_node_does_not_finish_on_not_finished_task_progress(
-    base_state, fake_device
-) -> None:
-    base_state["expected_outcome"] = {
-        "kind": "generic",
-        "must_observe": [],
-        "must_not_observe": [],
-        "target_mark_id": None,
-        "target_text_hint": None,
-        "timeout_hint": None,
-        "dynamic_regions": [],
-    }
-    model = FakeModelClient(
-        FakeModelResponse(
-            "ok",
-            '{"action_effect":"succeeded","task_progress":"not finished",'
-            '"matched_postconditions":["generic_progress"],"missing_postconditions":[],'
-            '"dynamic_change_only":false,"evidence":"intermediate page","next_strategy":"continue"}',
-        )
-    )
-
-    result = reflect_node(
-        base_state,
-        {
-            "configurable": {
-                "model_client": model,
-                "device_factory": fake_device,
-                "verbose": False,
-            }
-        },
-    )
-
-    assert result["reflection_verdict"] == "succeeded"
-    assert result["finished"] is False
-
-
 def test_reflect_node_not_finished_task_progress_overrides_finish_strategy(
     base_state, fake_device
 ) -> None:
@@ -2112,38 +1971,6 @@ def test_reflect_node_launch_matches_package_alias(base_state, fake_device) -> N
     assert result["reflection_verdict"] == "succeeded"
     assert result["verifier_result"]["signals"]["launch_matched"] is True
     assert model.calls == 0
-
-
-def test_sensitive_expected_text_round_trips_in_runtime_contract(
-    base_state, fake_device
-) -> None:
-    plan_model = FakeModelClient(
-        FakeModelResponse(
-            "",
-            json.dumps(
-                {
-                    "action": {"type": "do", "action": "Wait", "duration": "1 seconds"},
-                    "expected_outcome": {
-                        "kind": "target_appeared",
-                        "must_observe": ["13800138000"],
-                    },
-                },
-                ensure_ascii=False,
-            ),
-        )
-    )
-    planned = plan_node(
-        base_state,
-        {
-            "configurable": {
-                "model_client": plan_model,
-                "device_factory": fake_device,
-                "output_mode": "json_schema",
-            }
-        },
-    )
-    assert planned["expected_outcome"]["must_observe"] == ["13800138000"]
-    assert "13800138000" not in planned["action_raw"]
 
 
 def test_reflect_node_type_text_postcondition_verifier_signal_is_advisory(

@@ -674,3 +674,80 @@ def test_llm_compiler_self_repair_loop_adds_missing_parameter_criterion() -> Non
     assert time_filter.control_hint == "筛选面板"
     # The repair prompt was appended to the second request.
     assert "self_check" in str(client.messages[-1])
+
+
+def test_llm_compiler_self_repair_runs_once_even_when_still_uncovered() -> None:
+    """S5 上界（结构断言）：修复响应仍声明 parameter_coverage_ok=false 时，
+    修复循环只执行一次就返回第二次契约——绝不无限循环；结构只验证调用次数
+    与采纳的契约，不替模型判断参数覆盖。"""
+    import json
+    from dataclasses import dataclass
+
+    from phone_agent.graph.goal_compiler import LLMGoalCompiler
+
+    @dataclass
+    class Response:
+        action: str
+
+    first = {
+        "objective": "查机票",
+        "success_criteria": [
+            {"name": "launch", "description": "app 前台", "verification": "app_or_activity_match", "required": True},
+            {"name": "results", "description": "航班列表", "verification": "vlm_judge", "required": True},
+        ],
+        "constraints": [],
+        "non_goals": [],
+        "target_app_hint": None,
+        "ordinal": None,
+        "task_plan": [
+            {"objective": "打开", "done_criteria": ["launch"], "fallback": ""},
+            {"objective": "结果", "done_criteria": ["results"], "fallback": ""},
+            {"objective": "完成", "done_criteria": ["launch", "results"], "fallback": ""},
+        ],
+        "self_check": {
+            "parameter_coverage_ok": False,
+            "missing_criteria": ["出发时段 06:00-12:00 没有独立判据"],
+        },
+    }
+    # 第二次响应仍声明未覆盖：循环必须退出并采纳它（单次修复上界）。
+    second = {
+        "objective": "查机票",
+        "success_criteria": [
+            {"name": "results", "description": "航班列表", "verification": "vlm_judge", "required": True},
+            {"name": "time_filter", "description": "筛选面板显示‘06:00-12:00’时段", "verification": "vlm_judge", "required": True, "provenance": "confirmed", "control_hint": "筛选面板"},
+        ],
+        "constraints": [],
+        "non_goals": [],
+        "target_app_hint": None,
+        "ordinal": None,
+        "task_plan": [
+            {"objective": "筛选", "done_criteria": ["time_filter"], "fallback": ""},
+            {"objective": "结果", "done_criteria": ["results"], "fallback": ""},
+            {"objective": "完成", "done_criteria": ["time_filter", "results"], "fallback": ""},
+        ],
+        "self_check": {"parameter_coverage_ok": False, "missing_criteria": []},
+    }
+
+    class Client:
+        def __init__(self) -> None:
+            self.calls = 0
+            self.messages = None
+
+        def request(self, messages, **kwargs):
+            self.messages = messages
+            self.calls += 1
+            if self.calls == 1:
+                return Response(json.dumps(first, ensure_ascii=False))
+            return Response(json.dumps(second, ensure_ascii=False))
+
+    client = Client()
+    contract = LLMGoalCompiler(client, lang="cn", retry_limit=1).compile(
+        task="查明天早上6点到12点的机票"
+    )
+    assert client.calls == 2
+    # 单次修复上界：即使第二次仍声明未覆盖，循环退出并采纳第二次契约。
+    assert contract.compile_status == "compiled"
+    assert contract.compile_attempts == 2
+    names = [c.name for c in contract.success_criteria]
+    assert "time_filter" in names
+    assert "results" in names
