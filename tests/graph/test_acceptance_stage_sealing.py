@@ -250,28 +250,25 @@ def test_parse_acceptance_verdicts_tri_state_and_legacy_compat() -> None:
 
 def test_fold_per_criterion_tri_state() -> None:
     contract = _flight_contract()
-    ledger = append_screen_text_digest(
+    from phone_agent.graph.goal_evidence import append_model_observations
+
+    ledger = append_model_observations(
         [],
         contract_id=contract.task_hash,
+        observations=[
+            {
+                "criterion": "date",
+                "status": "observed",
+                "observed_value": "2026年10月1日",
+            }
+        ],
+        step=3,
         screen_id="calendar",
         observation_epoch=3,
-        marks=[
-            {
-                "mark_id": "ax_cal",
-                "source": "accessibility_tree",
-                "text_summary": "2026年10月1日",
-            },
-            {
-                "mark_id": "locate_1",
-                "source": "locateanything",
-                "text_summary": "la 噪声",
-            },
-        ],
-        target_app_entered=True,
     )
 
-    # Unknown tier: judge not consulted yet → raw-text criterion closed by L1,
-    # terminal criterion unknown.
+    # Unknown tier: date observed, terminal criterion not read and no judge
+    # reference yet → unknown.
     fold = fold_acceptance_verdicts(
         contract=contract,
         ledger=ledger,
@@ -281,11 +278,12 @@ def test_fold_per_criterion_tri_state() -> None:
         finish_claim_matched=["date", "flight_results"],
     )
     assert fold["per_criterion"]["date"]["status"] == "satisfied"
-    assert fold["per_criterion"]["date"]["reason"] == "l1_digest_closed"
+    assert fold["per_criterion"]["date"]["reason"] == "model_observed"
     assert fold["per_criterion"]["flight_results"]["status"] == "unknown"
     assert fold["overall"] == "unknown"
 
-    # Satisfied tier: the judge settles the remaining criterion.
+    # Satisfied tier: the judge settles the remaining criterion with a valid
+    # evidence reference (S3).
     fold2 = fold_acceptance_verdicts(
         contract=contract,
         ledger=ledger,
@@ -293,7 +291,14 @@ def test_fold_per_criterion_tri_state() -> None:
         screen_id="results",
         observation_epoch=9,
         finish_claim_matched=["date", "flight_results"],
-        judge_verdicts=[{"criterion": "flight_results", "status": "satisfied"}],
+        judge_verdicts=[
+            {
+                "criterion": "flight_results",
+                "status": "satisfied",
+                "evidence_step": "final_screen",
+            }
+        ],
+        current_step=9,
     )
     assert fold2["overall"] == "satisfied"
     assert sorted(fold2["satisfied"]) == ["date", "flight_results"]
@@ -307,7 +312,14 @@ def test_fold_per_criterion_tri_state() -> None:
         screen_id="results",
         observation_epoch=9,
         finish_claim_matched=["date", "flight_results"],
-        judge_verdicts=[{"criterion": "flight_results", "status": "contradicted"}],
+        judge_verdicts=[
+            {
+                "criterion": "flight_results",
+                "status": "contradicted",
+                "evidence_step": "final_screen",
+            }
+        ],
+        current_step=9,
     )
     assert fold3["overall"] == "contradicted"
     assert fold3["contradicted"] == ["flight_results"]
@@ -346,7 +358,11 @@ def test_acceptance_seal_presented_passes_without_current_evidence(
             json.dumps(
                 {
                     "verdicts": [
-                        {"criterion": "flight_results", "status": "satisfied"}
+                        {
+                            "criterion": "flight_results",
+                            "status": "satisfied",
+                            "evidence_step": "final_screen",
+                        }
                     ],
                     "message": "done",
                 }
@@ -431,9 +447,9 @@ def test_acceptance_unknown_rejection_feedback_carries_stage_id(
 
 
 def test_judge_receives_ledger_digest_context(base_state, fake_device) -> None:
-    """The judge prompt carries the L1/L2 ledger digest so a literal that no
-    longer appears on the final screen is still available as mechanical fact
-    (the §1 root-cause fix: no second independent VLM needed)."""
+    """The judge prompt carries the L1/L2 ledger digest AND the trajectory
+    summary (S3), so a literal that no longer appears on the final screen is
+    still available as mechanical fact and causality is attributable."""
     contract = _flight_contract()
     reference, runtime_goal = _bind_contract(base_state, contract)
     # A digest that does NOT close "date" (different literal) — the judge is
@@ -460,8 +476,17 @@ def test_judge_receives_ledger_digest_context(base_state, fake_device) -> None:
             json.dumps(
                 {
                     "verdicts": [
-                        {"criterion": "date", "status": "satisfied"},
-                        {"criterion": "flight_results", "status": "satisfied"},
+                        {
+                            "criterion": "date",
+                            "status": "satisfied",
+                            "observed_value": "日历屏显示2026年10月1日",
+                            "evidence_step": "final_screen",
+                        },
+                        {
+                            "criterion": "flight_results",
+                            "status": "satisfied",
+                            "evidence_step": "final_screen",
+                        },
                     ],
                     "message": "done",
                 }
@@ -477,6 +502,8 @@ def test_judge_receives_ledger_digest_context(base_state, fake_device) -> None:
     prompt_text = _model_text(model)
     assert "证据账本摘要" in prompt_text
     assert "06:00-12:00" in prompt_text
+    # S3: the trajectory summary block is delivered.
+    assert "轨迹摘要" in prompt_text
     # Verbatim whitelist delivered (W1-A preserved).
     assert "flight_results" in prompt_text
     assert "date" in prompt_text
@@ -488,32 +515,30 @@ def test_judge_receives_ledger_digest_context(base_state, fake_device) -> None:
 # ----------------------------------------------------------------------
 
 
-def test_e2e_calendar_screen_year_l1_then_finish_passes(base_state, fake_device) -> None:
-    """The §11 regression: "2026年10月1日" is recorded mechanically on the
-    calendar screen (L1 digest, target-app-entered); the final results screen
-    no longer shows it; the finish claim still passes because completion is a
-    trajectory property, not a last-frame property."""
+def test_e2e_calendar_screen_year_observed_then_finish_passes(base_state, fake_device) -> None:
+    """The §11 regression (S2 semantics): "2026年10月1日" is read by the
+    model on the calendar screen (model_observation, trajectory property);
+    the final results screen no longer shows it; the finish claim still
+    passes because completion is a trajectory property, not a last-frame
+    property."""
+    from phone_agent.graph.goal_evidence import append_model_observations
+
     contract = _flight_contract()
     reference, runtime_goal = _bind_contract(base_state, contract)
     _seed_state(base_state, contract)
-    base_state["goal_evidence_ledger"] = append_screen_text_digest(
+    base_state["goal_evidence_ledger"] = append_model_observations(
         [],
         contract_id=reference,
+        observations=[
+            {
+                "criterion": "date",
+                "status": "observed",
+                "observed_value": "2026年10月1日",
+            }
+        ],
+        step=3,
         screen_id="calendar",
         observation_epoch=3,
-        marks=[
-            {
-                "mark_id": "ax_cal",
-                "source": "accessibility_tree",
-                "text_summary": "2026年10月1日",
-            },
-            {
-                "mark_id": "locate_1",
-                "source": "locateanything",
-                "text_summary": "la 噪声",
-            },
-        ],
-        target_app_entered=True,
     )
     model = _FakeModelClient(
         _FakeModelResponse(
@@ -521,7 +546,11 @@ def test_e2e_calendar_screen_year_l1_then_finish_passes(base_state, fake_device)
             json.dumps(
                 {
                     "verdicts": [
-                        {"criterion": "flight_results", "status": "satisfied"}
+                        {
+                            "criterion": "flight_results",
+                            "status": "satisfied",
+                            "evidence_step": "final_screen",
+                        }
                     ],
                     "message": "done",
                 }
@@ -537,11 +566,11 @@ def test_e2e_calendar_screen_year_l1_then_finish_passes(base_state, fake_device)
     assert result["finish_validation_status"] == "success"
     per_criterion = result["finish_validation_evidence"]["evidence"]["per_criterion"]
     assert per_criterion["date"]["status"] == "satisfied"
-    assert per_criterion["date"]["reason"] == "l1_digest_closed"
-    assert per_criterion["date"]["digest_screen_id"] == "calendar"
+    # The reflect read sealed stage S1; the seal is the authoritative reason.
+    assert per_criterion["date"]["reason"] in {"sealed_by_stage", "model_observed"}
     assert "date" in result["finish_validation_evidence"]["matched_terminal_evidence"]
 
-    # Negative control: without the L1 record the same final screen cannot
+    # Negative control: without the recorded read the same final screen cannot
     # pass — the year is simply not on it (fail-closed, absence ≠ success).
     base_state["goal_evidence_ledger"] = []
     rejected = acceptance_node(base_state, config)
@@ -552,16 +581,17 @@ def test_e2e_calendar_screen_year_l1_then_finish_passes(base_state, fake_device)
 def test_e2e_reflect_records_calendar_year_then_acceptance_passes(
     base_state, fake_device
 ) -> None:
-    """Full-loop §11 variant: the calendar-screen reflect step itself writes
-    the L1 digest (no model involvement for the year), and the acceptance step
-    on a year-free final screen still passes."""
+    """Full-loop §11 variant: the calendar-screen reflect step itself reads
+    the year (model criteria_observations → model_observation ledger entry),
+    and the acceptance step on a year-free final screen still passes."""
     from phone_agent.graph.nodes.reflect import reflect_node
 
     contract = _flight_contract()
     reference, runtime_goal = _bind_contract(base_state, contract)
     base_state["task"] = FLIGHT_TASK
 
-    # Step 1: reflect on the calendar screen where the year is visible.
+    # Step 1: reflect on the calendar screen where the year is visible; the
+    # model reads it as a screen observation.
     base_state["action_parsed"] = {
         "_metadata": "do",
         "action": "Tap",
@@ -581,7 +611,9 @@ def test_e2e_reflect_records_calendar_year_then_acceptance_passes(
         _FakeModelResponse(
             "",
             '{"verdict":"succeeded","failure_cause":"none",'
-            '"suggested_strategy":"finish","message":"ok"}',
+            '"suggested_strategy":"finish","message":"ok",'
+            '"criteria_observations":[{"criterion":"date","status":"observed",'
+            '"observed_value":"2026年10月1日"}]}',
         )
     )
     reflect_config = {
@@ -604,13 +636,15 @@ def test_e2e_reflect_records_calendar_year_then_acceptance_passes(
     }
     reflected = reflect_node(base_state, reflect_config)
     ledger = reflected["goal_evidence_ledger"]
-    digests = [e for e in ledger if e.get("kind") == "screen_text_digest"]
-    assert digests, "reflect step must write the calendar-screen L1 digest"
-    assert any(
-        item.get("text") == "2026年10月1日"
-        for entry in digests
-        for item in entry.get("texts") or []
-    )
+    observations = [
+        e
+        for e in ledger
+        if e.get("kind") == "model_observation"
+        and e.get("criterion") == "date"
+    ]
+    assert observations, "reflect step must record the date screen-read"
+    assert observations[-1]["status"] == "observed"
+    assert "2026年10月1日" in (observations[-1].get("observed_value") or "")
 
     # Step 2: acceptance on a final screen that no longer shows the year.
     base_state.update(reflected)
@@ -621,7 +655,11 @@ def test_e2e_reflect_records_calendar_year_then_acceptance_passes(
             json.dumps(
                 {
                     "verdicts": [
-                        {"criterion": "flight_results", "status": "satisfied"}
+                        {
+                            "criterion": "flight_results",
+                            "status": "satisfied",
+                            "evidence_step": "final_screen",
+                        }
                     ],
                     "message": "done",
                 }
@@ -636,7 +674,8 @@ def test_e2e_reflect_records_calendar_year_then_acceptance_passes(
     assert result["finish_validation_status"] == "success"
     per_criterion = result["finish_validation_evidence"]["evidence"]["per_criterion"]
     assert per_criterion["date"]["status"] == "satisfied"
-    assert per_criterion["date"]["reason"] == "l1_digest_closed"
+    # The reflect read sealed stage S1; the seal is the authoritative reason.
+    assert per_criterion["date"]["reason"] in {"sealed_by_stage", "model_observed"}
     assert "date" in result["finish_validation_evidence"]["matched_terminal_evidence"]
 
 
@@ -711,7 +750,20 @@ def test_goal_node_emits_terminal_literal_warning() -> None:
                     "semantic.entity_matches", "2026年10月1日"
                 ),
                 required=True,
-            )
+            ),
+            # L1: every explicit parameter constraint (here the interval) needs
+            # its own covered criterion — the adequacy gate now rejects
+            # contracts that carry only the date.
+            SuccessCriterion(
+                "time_window",
+                "筛选面板显示 '06:00-12:00' 时段",
+                "vlm_judge",
+                predicate=CORE_PREDICATE_CATALOG.create_spec(
+                    "semantic.entity_matches", "06:00-12:00"
+                ),
+                provenance="confirmed",
+                required=True,
+            ),
         ],
         target_app_hint="flights",
         entities_sha=list(requirements.target_entity_hashes),
@@ -741,4 +793,6 @@ def test_goal_node_emits_terminal_literal_warning() -> None:
         for event in writer.events
         if event["event"] == "terminal_literal_warning"
     ]
-    assert warnings == [{"criterion": "date", "literal_kinds": ["full_date_literal"]}]
+    by_criterion = {item["criterion"]: item["literal_kinds"] for item in warnings}
+    assert by_criterion["date"] == ["full_date_literal"]
+    assert by_criterion["time_window"] == ["interval_literal"]

@@ -64,6 +64,31 @@ def goal_node(state: "AgentState", config: RunnableConfig) -> dict:
     try:
         contract = compile_goal_contract(state, config)
     except GoalCompilationError as exc:
+        if exc.code == "compile_infrastructure_error":
+            # Transient network/gateway failure: end with a clear error, never
+            # a semantic takeover — the task may be perfectly verifiable.
+            emit_trace(
+                config,
+                state,
+                "goal",
+                "goal_compile_failed",
+                {
+                    "failure_cause": exc.code,
+                    "requirement_set": requirements.safe_projection(),
+                },
+            )
+            return {
+                "goal_contract": None,
+                "goal_contract_status": "failed",
+                "goal_compile_source": "llm",
+                "task_requirement_set": requirements.safe_projection(),
+                "failure_cause": "goal_compile_infrastructure",
+                "error": f"Goal compile infrastructure error: {exc}",
+                "error_layer": "goal",
+                "error_code": exc.code,
+                "recoverable": True,
+                "needs_recompile": False,
+            }
         emit_trace(
             config,
             state,

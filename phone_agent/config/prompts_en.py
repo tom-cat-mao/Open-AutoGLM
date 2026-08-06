@@ -47,6 +47,13 @@ CONTEXT_USAGE_RULES = """# Context usage rules
 - Prefer the current screenshot and user task; if context conflicts with the screenshot, trust the screenshot.
 - Do not repeat raw context content, and do not copy private context text into action messages.
 - `avoid_repeating` means the same target has been repeated; after the threshold, the system rejects the action and consumes a step, so choose a different target or strategy.
+- `criterion_gap_list` is a **neutral status description** of the acceptance
+  conditions, not an execution instruction: ⏳ = an unsatisfied acceptance
+  condition; ✅ = satisfied (including criteria sealed in earlier stages).
+  [confirm] = the condition must be read on the control's actual value
+  (inferring from the result list does not count); [observe] = the condition
+  must be observable on screen. Whether and how to satisfy these conditions is
+  your call based on the current screenshot.
 """
 
 FAILURE_RECOVERY_MAP = """# Failure recovery strategies
@@ -104,14 +111,15 @@ Prefer a JSON object. If the provider is explicitly configured for tool calls, t
 ACCEPTANCE_JUDGE_PROMPT_EN = """You are the terminal acceptance checker for a mobile automation task. The action has already executed; your job is to judge whether the **whole task** is genuinely complete.
 
 You MUST output exactly one JSON object. No Markdown, XML, function calls, or extra text:
-{"verdicts":[{"criterion":"criterion_name","status":"satisfied|unknown|contradicted","observed_value":"the text you actually see there or null"}],"message":"brief note"}
+{"verdicts":[{"criterion":"criterion_name","status":"satisfied|unknown|contradicted","observed_value":"the text you actually see there or null","evidence_step":"a trajectory step like s5, or final_screen"}],"message":"brief note"}
 The legacy format {"completed":true|false,"message":"...","named_evidence":[...]} is still accepted for compatibility, but the new verdicts format takes priority.
 
 Judgment criteria:
 - Judge only the criteria marked [judge] in the contract. Criteria marked [auto] are verified by the system from device state — do not cite or report them.
 - The "evidence ledger digest" in the user message is a mechanically extracted, programmatically verified record of screen text; you may trust it directly. Your job is to judge, criterion by criterion, only what the record does not already cover. A literal (a year, a time window) that no longer appears on the final screen is satisfied if the ledger already recorded it mechanically.
-- For each verdict give: criterion (its name), status (satisfied/unknown/contradicted), and observed_value (the text you actually see there, or null). Report what you see verbatim; do not guess values the system uses internally. observed_value is node-local and must not enter state or trace.
-- Only give satisfied when the screen or the ledger genuinely proves the criterion is met. Prefer under-reporting: a false claim makes the task wrongly count as finished.
+- The "trajectory summary" in the user message lists, per step, the action type → reflection verdict and that step's model screen readings (criterion=the value read). It is your ONLY source for judging causality (whether a state was produced by this run's behavior or is residual on screen): when you mark a criterion satisfied, evidence_step MUST reference the trajectory step where you read its content (e.g. s5), or final_screen when you read it on the current final screen.
+- For each verdict give: criterion (its name), status (satisfied/unknown/contradicted), observed_value (the text you actually see there, or null), and evidence_step (required only for satisfied: a trajectory step sN or final_screen). Report what you see verbatim; do not guess values the system uses internally. observed_value is node-local and must not enter state or trace.
+- Only give satisfied when the screen, the ledger, or the trajectory genuinely proves the criterion is met. Prefer under-reporting: a false claim makes the task wrongly count as finished.
 - Criterion name whitelist: the user message contains a "criterion name whitelist" listing the only legal names for this task. The criterion field of every verdict MUST equal one of the whitelist names VERBATIM — no paraphrasing, translation, case changes, prefixes/suffixes, or extra text.
 - Completeness: when completed=true (or every required [judge] criterion is satisfied), every required [judge] criterion in the whitelist must have exactly one named_evidence item / verdict whose criterion matches verbatim. Missing any one means the task is not complete — output completed=false.
 - If the task is not complete, output completed=false and leave verdicts empty, or report status="unknown" for the criteria you cannot settle.

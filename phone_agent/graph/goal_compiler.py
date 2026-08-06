@@ -26,14 +26,27 @@ from phone_agent.graph.goal_requirements import (
     ContractAdequacyValidator,
     TaskRequirementExtractor,
     TaskRequirementSet,
-    constraint_spans,
     extract_entity_spans,
     parse_chinese_ordinal,
     parse_toggle_intent,
-    raw_text_binding_is_observable,
     _digest as _requirement_digest,
 )
 from phone_agent.graph.predicates import CORE_PREDICATE_CATALOG
+
+
+def _is_infrastructure_error(exc: BaseException) -> bool:
+    """Whether an exception is a transient network/gateway failure (as opposed
+    to a semantic compile failure). Lazy-imports openai error types so the
+    compiler stays usable without the optional dependency."""
+
+    if isinstance(exc, (ConnectionError, TimeoutError)):
+        return True
+    try:  # pragma: no cover - depends on optional openai package
+        from openai import APIConnectionError, APITimeoutError
+
+        return isinstance(exc, (APIConnectionError, APITimeoutError))
+    except Exception:
+        return False
 
 
 class GoalCompilationError(ValueError):
@@ -195,16 +208,18 @@ class HeuristicGoalCompiler:
                     required=True,
                 ),
             )
+        # Default provenance dispatch (object_rank_match → confirmed, etc.) so
+        # the weak fallback contract still carries provenance semantics.
+        criteria = _dispatch_provenance(criteria)
         return GoalContract(
             task_hash=compute_task_hash(text),
             redacted_objective=redacted_obj,
             objective_length=len(text),
             success_criteria=criteria,
-            # Carry the constraint clauses the requirement extractor found, via
-            # the same function it uses, so the two sides agree by construction.
-            # Leaving this empty made every task containing 不要/只能/only
-            # permanently inadequate.
-            constraints=constraint_spans(text),
+            # S5: negative constraints are model-owned — the LLM compiler
+            # carries them from the contract; the heuristic fallback has none
+            # (code no longer reads task text for them).
+            constraints=[],
             non_goals=[],
             target_app_hint=app_hint,
             target_activity_hint=None,
@@ -271,7 +286,7 @@ GOAL_COMPILER_SYSTEM_PROMPT_CN = """你是一个任务目标编译器。你的�
 {
   "objective": "用户目标的脱敏重述（去除手机号/邮箱等隐私）",
   "success_criteria": [
-    {"name": "criterion_id", "description": "可观察的终态条件描述", "verification": "accessibility_text_match|object_hash_match|object_rank_match|app_or_activity_match|focus_or_keyboard|toggle_state_match|vlm_judge|external_probe", "required": true}
+    {"name": "criterion_id", "description": "可观察的终态条件描述", "verification": "accessibility_text_match|object_hash_match|object_rank_match|app_or_activity_match|focus_or_keyboard|toggle_state_match|vlm_judge|external_probe", "required": true, "provenance": "state|confirmed|caused", "control_hint": "需读取的控件描述（可省略）"}
   ],
   "constraints": ["约束1", "约束2"],
   "non_goals": ["非目标1"],
@@ -279,8 +294,14 @@ GOAL_COMPILER_SYSTEM_PROMPT_CN = """你是一个任务目标编译器。你的�
   "ordinal": null,
   "task_plan": [
     {"objective": "页面级目标（一句话）", "done_criteria": ["契约中 success_criteria 的名字"], "fallback": "该阶段卡住时的兜底策略（一句话）"}
-  ]
+  ],
+  "self_check": {"parameter_coverage_ok": true, "missing_criteria": []}
 }
+
+self_check 自查段（S5，输出契约前必须完成）：
+- 逐项检查任务中的每个显式参数（时段/日期/路线/排序/单程往返等）是否都有独立 success_criterion 覆盖；
+  缺则 parameter_coverage_ok=false，并在 missing_criteria 里用一句话列出缺失的参数；
+- 这是模型侧自查，代码不做任何文本比对。
 
 verification 枚举说明：
 - accessibility_text_match: 屏幕上可观察到特定文本（在 description 里逐字写出预期可见文本）
@@ -303,12 +324,21 @@ verification 枚举说明：
 - vlm_judge 标准的 description 必须描述**屏幕上可观察的具体内容**，不能只写抽象状态（如“任务完成”“目标已达成”）。
   写法示例：“出现含‘银石’字样的卡片”“设置页显示‘已开启’开关”。描述中给出具体的屏幕文本或元素，
   验收模型才能据实点名该标准并引用屏幕证据
+- **显式参数约束必须拥有独立判据**：任务中的每个参数约束（时段“早上6点到12点”“06:00-12:00”、
+  日期“2026年10月1日”、路线“从北京到上海”、排序“最便宜”、单程/往返）都要各有一条
+  required criterion，且该 criterion 声明 "provenance": "confirmed"；描述里用引号给出参数字面量
+  （如“筛选面板显示‘06:00-12:00’时段”），系统会用 typed predicate 机械读值，不接受“从结果列表推断”
+- provenance 语义：state=自显终态（App 前台/开关/结果页，默认）；confirmed=塑造答案的查询参数
+  （时段/日期/路线/排序）——必须本轮在控件上精确读值；caused=动作效果。拿不准就用 state
+- confirmed 的判据若用 vlm_judge，description 必须指明读取的控件（如“打开筛选面板读取时段值”）
+  并可用 control_hint 补充控件位置（如“筛选面板”）
 task_plan 规则：
 - 产出 3-6 个阶段，按执行顺序排列；阶段目标必须是**页面级**表述（如“进入某 UP 主主页”“找到目标视频并打开”），
   禁止控件/坐标级描述（一屏就碎）
 - done_criteria 里的每个名字必须逐字等于本契约 success_criteria 中某条 criterion 的 name，禁止新造名字
 - 每阶段至少包含一条**非恒真**的完成信号：不能只用 app_or_activity_match / app 前台类标准构成全部 done_criteria
   （否则阶段会在任务毫无进展时虚推进）；vlm_judge、accessibility_text_match 等真实观察类标准都可以
+  例外：首阶段（index 0）可以是纯启动阶段（仅 app 前台类标准）——从 0 到打开应用本身就是进展
 - fallback 写该阶段卡住时的一句兜底策略（如“返回上一页重试”“先滚动寻找目标”）；不写则留空字符串
 """
 
@@ -318,7 +348,7 @@ Output exactly one JSON object, no Markdown:
 {
   "objective": "privacy-redacted restatement of the user goal",
   "success_criteria": [
-    {"name": "criterion_id", "description": "observable terminal condition", "verification": "accessibility_text_match|object_hash_match|object_rank_match|app_or_activity_match|focus_or_keyboard|toggle_state_match|vlm_judge|external_probe", "required": true}
+    {"name": "criterion_id", "description": "observable terminal condition", "verification": "accessibility_text_match|object_hash_match|object_rank_match|app_or_activity_match|focus_or_keyboard|toggle_state_match|vlm_judge|external_probe", "required": true, "provenance": "state|confirmed|caused", "control_hint": "control to read (optional)"}
   ],
   "constraints": ["constraint1"],
   "non_goals": ["non_goal1"],
@@ -326,8 +356,16 @@ Output exactly one JSON object, no Markdown:
   "ordinal": null,
   "task_plan": [
     {"objective": "page-level goal (one sentence)", "done_criteria": ["a success_criteria name from this contract"], "fallback": "one-sentence recovery strategy if this stage stalls"}
-  ]
+  ],
+  "self_check": {"parameter_coverage_ok": true, "missing_criteria": []}
 }
+
+self_check section (S5 — complete it before emitting the contract):
+- Check every explicit parameter in the task (time window / date / route / sorting /
+  one-way-round-trip, etc.) and confirm each has its own success_criterion; if any
+  is missing set parameter_coverage_ok=false and name the missing parameter(s) in
+  missing_criteria.
+- This is a model-side self-check; the code performs no text matching.
 
 Rules:
 - At least 1 required criterion; criterion names must be unique identifiers
@@ -342,6 +380,20 @@ Rules:
   containing the text 'Silverstone' appears", "the settings page shows an 'Enabled'
   toggle". Name the specific screen text or element so the acceptance model can
   cite real screen evidence for it
+- **Every explicit parameter constraint gets its own criterion**: each parameter
+  in the task (time window "早上6点到12点" / "06:00-12:00", a date
+  "2026年10月1日", a route "从北京到上海", sorting "最便宜", one-way/round-trip)
+  needs a required criterion declaring "provenance": "confirmed"; quote the
+  parameter literal in the description (e.g. "the filter panel shows the
+  '06:00-12:00' window") so the system reads it with a typed predicate — never
+  accept deriving it from the result list
+- provenance semantics: state = self-evident terminal state (app foreground /
+  toggle / results page; the default); confirmed = query parameters that shape
+  the answer (window/date/route/sort) — must be read precisely on the control
+  THIS round; caused = action effect. When unsure, use state
+- A confirmed criterion that uses vlm_judge MUST name the control to read in its
+  description (e.g. "open the filter panel and read the time window") and may
+  add a control_hint with the control location (e.g. "filter panel")
 task_plan rules:
 - Produce 3-6 stages in execution order; each objective MUST be page-level
   (e.g. "reach the UP's home page", "find and open the target video") — never
@@ -351,6 +403,8 @@ task_plan rules:
 - Each stage needs at least one NON-always-true done signal: never build a stage
   whose done_criteria are only app_or_activity_match / app-foreground checks
   (that would let the stage advance with zero task progress); vlm_judge,
+  Exception: the first stage (index 0) may be a pure launch stage (app-foreground
+  only) — opening the app is itself progress
   accessibility_text_match and other real-observation criteria are fine
 - fallback is a one-sentence recovery strategy for when this stage stalls
   (e.g. "go back and retry", "scroll to find the target"); empty string if none
@@ -397,6 +451,7 @@ class LLMGoalCompiler:
         ]
 
         attempts = 0
+        self_repaired = False
         while attempts <= self._retry_limit:
             attempts += 1
             try:
@@ -406,7 +461,28 @@ class LLMGoalCompiler:
                 raw = response.action.strip()
                 data = json.loads(raw)
                 contract = self._parse_compiled_contract(data, task=text)
-                contract = _with_compile_meta(contract, source="llm", attempts=attempts)
+                # S5: one model-side self-repair pass. The model owns the
+                # content check (parameter coverage); code only reads the
+                # model's own declaration and re-asks once when it says a
+                # parameter lacks a criterion.
+                if (
+                    not self_repaired
+                    and isinstance(data.get("self_check"), dict)
+                    and data["self_check"].get("parameter_coverage_ok") is False
+                    and attempts <= self._retry_limit
+                ):
+                    missing = data["self_check"].get("missing_criteria") or []
+                    repair_prompt = self._repair_prompt(
+                        missing if isinstance(missing, list) else []
+                    )
+                    messages = messages + [
+                        MessageBuilder.create_user_message(text=repair_prompt)
+                    ]
+                    self_repaired = True
+                    continue
+                contract = _with_compile_meta(
+                    contract, source="llm", attempts=attempts
+                )
                 return contract
             except (
                 json.JSONDecodeError,
@@ -415,7 +491,15 @@ class LLMGoalCompiler:
                 TypeError,
             ):
                 continue
-            except Exception:
+            except Exception as exc:
+                if _is_infrastructure_error(exc):
+                    # Network/gateway failure is NOT a semantic failure: never
+                    # degrade to the heuristic contract (whose generic criteria
+                    # would be misread as "task is not verifiable" downstream).
+                    raise GoalCompilationError(
+                        "compile_infrastructure_error",
+                        f"goal compile model call failed: {type(exc).__name__}: {exc}",
+                    ) from exc
                 continue
 
         # Both attempts failed — return a failed sentinel; goal_node falls back.
@@ -430,9 +514,37 @@ class LLMGoalCompiler:
             compile_attempts=attempts,
         )
 
+    def _repair_prompt(self, missing: list) -> str:
+        """One model-side repair request: add criteria for the parameters the
+        model itself declared uncovered (S5)."""
+
+        missing_text = (
+            "; ".join(str(item) for item in missing[:8]) if missing else ""
+        )
+        if self._lang == "en":
+            base = (
+                "Your self_check reported missing parameter coverage"
+                + (f": {missing_text}" if missing_text else "")
+                + ". Re-emit the full contract JSON with a required criterion "
+                "added for each missing parameter (provenance: confirmed, "
+                "description naming the control and the literal), and set "
+                "self_check.parameter_coverage_ok=true."
+            )
+        else:
+            base = (
+                "你的 self_check 报告参数覆盖缺失"
+                + (f"：{missing_text}" if missing_text else "")
+                + "。请重新输出完整契约 JSON，为每个缺失参数补一条 required 判据"
+                "（provenance: confirmed，description 指明控件与字面量），并把 "
+                "self_check.parameter_coverage_ok 设为 true。"
+            )
+        return base
+
     def _parse_compiled_contract(
         self, data: dict[str, Any], *, task: str
     ) -> GoalContract:
+        if not isinstance(data, dict):
+            raise ValueError("compiler output is not a dict")
         if not isinstance(data, dict):
             raise ValueError("compiler output is not a dict")
 
@@ -461,6 +573,10 @@ class LLMGoalCompiler:
             from phone_agent.graph.context import redact_context_text
 
             description = redact_context_text(description)[:300]
+            raw_provenance = item.get("provenance")
+            if raw_provenance not in {"state", "confirmed", "caused"}:
+                raw_provenance = "state"
+            control_hint = str(item.get("control_hint") or "").strip()[:120] or None
 
             criteria.append(
                 SuccessCriterion(
@@ -469,6 +585,8 @@ class LLMGoalCompiler:
                     verification=verification,  # type: ignore[arg-type]
                     required=bool(item.get("required", True)),
                     probe_id=item.get("probe_id"),
+                    provenance=raw_provenance,  # type: ignore[arg-type]
+                    control_hint=control_hint,
                 )
             )
 
@@ -534,6 +652,10 @@ class LLMGoalCompiler:
             entity_span=entity_span,
             toggle_state=toggle_state,
         )
+        # Default provenance dispatch runs after predicate attachment so a
+        # description that names a parameter literal is upgraded to
+        # ``confirmed`` even when the model forgot to declare it.
+        criteria = _dispatch_provenance(criteria)
 
         task_plan = _parse_task_plan(
             data.get("task_plan"),
@@ -657,19 +779,35 @@ def _attach_core_predicates(
                     "ui.text_hash_present", match.group(1).casefold()
                 )
             else:
-                expected_text = _quoted_span(criterion.description)
-                if expected_text is None and raw_text_binding_is_observable(entity_span):
-                    expected_text = entity_span
-                if expected_text:
+                # S5: quoted literals bind a raw-text entity expectation; the
+                # model owns the content reading at finish. No interval/value
+                # special-casing (deleted with the parameter-span machinery).
+                spans = _quoted_spans(criterion.description)
+                if not spans and entity_span:
+                    spans = [entity_span]
+                if len(spans) == 1:
                     predicate = CORE_PREDICATE_CATALOG.create_spec(
-                        "semantic.entity_matches", expected_text
+                        "semantic.entity_matches", spans[0]
+                    )
+                elif len(spans) > 1:
+                    # Multiple fragments stay a conjunction over one control
+                    # subtree instead of collapsing to the shortest span.
+                    predicate = CORE_PREDICATE_CATALOG.create_spec(
+                        "semantic.attributes_present", list(spans)
                     )
         migrated.append(replace(criterion, predicate=predicate))
-    return migrated
+    return _dispatch_provenance(migrated)
 
 
-def _quoted_span(description: str) -> str | None:
-    """Extract the most specific non-empty literal from supported quote pairs."""
+def _quoted_spans(description: str) -> list[str]:
+    """All non-empty quoted literals in a description, in source order.
+
+    Multi-fragment descriptions bind ``semantic.attributes_present`` (a
+    conjunction over one control subtree) so a parameter criterion that names
+    several attributes ("显示‘上海’并筛选‘最便宜’") is not collapsed to the
+    shortest fragment — the pi-23 ``_quoted_span`` collapse that turned a
+    four-attribute criterion into bare "上海".
+    """
 
     candidates: list[str] = []
     for left, right in (("“", "”"), ('"', '"'), ("《", "》"), ("「", "」")):
@@ -680,7 +818,76 @@ def _quoted_span(description: str) -> str | None:
             )
             if item.strip()
         )
+    return candidates
+
+
+def _quoted_span(description: str) -> str | None:
+    """Compatibility accessor: the most specific (shortest) quoted literal.
+
+    Kept for callers/tests that predate the multi-fragment binding; the
+    compiler itself uses :func:`_quoted_spans`.
+    """
+
+    candidates = _quoted_spans(description)
     return min(candidates, key=len) if candidates else None
+
+
+_PARAMETER_TERMS = (
+    "筛选",
+    "时段",
+    "时间",
+    "日期",
+    "最便宜",
+    "价格",
+    "排序",
+    "单程",
+    "往返",
+    "出发",
+    "到达",
+)
+
+
+def _description_has_parameter_literal(description: str) -> bool:
+    """Whether a criterion description names a parameter literal or vocabulary.
+
+    Compile-time default provenance dispatch (L2): a criterion whose description
+    hits the parameter vocabulary is dispatched to ``confirmed`` so the finish
+    gate requires a control read rather than accepting passive residuals.
+    """
+
+    lowered = str(description or "").casefold()
+    return any(term.casefold() in lowered for term in _PARAMETER_TERMS)
+
+
+def _dispatch_provenance(
+    criteria: list[SuccessCriterion],
+) -> list[SuccessCriterion]:
+    """Compile-time default provenance dispatch (state/confirmed).
+
+    Explicit model-declared provenance is kept verbatim; otherwise:
+    ``app_or_activity_match`` / ``toggle_state_match`` → ``state``;
+    ``object_rank_match`` and any predicate whose id reads a parameter value
+    (``ui.object_rank``) → ``confirmed``; a description
+    that names parameter vocabulary → ``confirmed``; everything else → ``state``.
+    """
+
+    from dataclasses import replace
+
+    migrated: list[SuccessCriterion] = []
+    for criterion in criteria:
+        if criterion.provenance != "state" or criterion.predicate is None:
+            migrated.append(criterion)
+            continue
+        predicate_id = criterion.predicate.predicate_id
+        provenance = "state"
+        if criterion.verification == "object_rank_match":
+            provenance = "confirmed"
+        elif predicate_id == "ui.object_rank":
+            provenance = "confirmed"
+        elif _description_has_parameter_literal(criterion.description):
+            provenance = "confirmed"
+        migrated.append(replace(criterion, provenance=provenance))  # type: ignore[arg-type]
+    return migrated
 
 
 # ----------------------------------------------------------------------

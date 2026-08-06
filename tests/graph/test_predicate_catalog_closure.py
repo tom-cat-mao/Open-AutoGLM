@@ -33,7 +33,6 @@ from phone_agent.graph.fact_providers import (
 from phone_agent.graph.goal import VALID_VERIFICATIONS
 from phone_agent.graph.goal_compiler import _attach_core_predicates
 from phone_agent.graph.goal import SuccessCriterion
-from phone_agent.graph.goal_requirements import _terminal_state_is_covered
 from phone_agent.graph.marks import Mark, MarkRegistry
 from phone_agent.graph.objects import (
     ObjectRegistry,
@@ -62,6 +61,7 @@ _PROBE_VALUES: dict[str, object] = {
     "ui.dialog_open": True,
     "ui.dialog_closed": False,
     "semantic.entity_matches": "Silverstone",
+    "semantic.attributes_present": ["Silverstone"],
     "ui.object_present": "object-1",
     "ui.object_rank": 2,
     "external.effect_confirmed": {"ok": True},
@@ -100,7 +100,18 @@ def _probe_context() -> RuntimeObservationContext:
                 checkable=True,
                 checked=True,
                 visible=True,
-            )
+            ),
+            "node-2": StructureNode(
+                node_id="node-2",
+                path="/root/2",
+                parent_id=None,
+                role="TextView",
+                text_summary="06:00-12:00 06:00-12:00",
+                focused=False,
+                checkable=False,
+                checked=False,
+                visible=True,
+            ),
         },
     )
     observation = Observation(
@@ -246,11 +257,18 @@ def test_terminal_states_are_reachable_from_a_real_contract() -> None:
     unreachable = []
     for operation in sorted(_emittable_operations()):
         terminal_state = _terminal_state(operation)
-        programmatic = _terminal_state_is_covered(
-            terminal_state, observable_and_attachable, False
+        # S5: the terminal-state coverage decision table was deleted (model
+        # owns content coverage); only the predicate-observability closure
+        # matters — every terminal state maps to at least one predicate a
+        # provider can emit.
+        programmatic = bool(
+            observable_and_attachable
+            and any(
+                predicate_is_observable(predicate_id)
+                for predicate_id in observable_and_attachable
+            )
         )
-        with_judge = _terminal_state_is_covered(terminal_state, set(), True)
-        if not (programmatic or with_judge):
+        if not programmatic:
             unreachable.append((operation, terminal_state))
 
     assert unreachable == [], (
@@ -264,9 +282,6 @@ def test_external_effect_terminal_state_is_observable_when_probes_supplied() -> 
     still closes: the predicate is observable, and the state accepts it."""
     assert "external" not in _emittable_operations()
     assert predicate_is_observable("external.effect_confirmed")
-    assert _terminal_state_is_covered(
-        "external_effect_confirmed", {"external.effect_confirmed"}, False
-    )
 
 
 def test_attachable_predicates_are_all_observable() -> None:

@@ -52,7 +52,6 @@ from phone_agent.graph.goal import (
 )
 from phone_agent.graph.goal_evaluator import _normalize_criterion_name
 from phone_agent.graph import goal_evidence
-from phone_agent.graph.fact_providers import collect_goal_facts
 from phone_agent.graph.trace import emit_trace
 from phone_agent.graph.verifier import (
     merge_verifier_with_reflection,
@@ -67,7 +66,7 @@ if TYPE_CHECKING:
 REFLECT_SYSTEM_PROMPT_CN = """你是一个手机自动化任务的反思专家。你的职责是观察动作执行后的屏幕截图，判断动作是否生效。
 
 你必须只输出一个 JSON 对象，不要 Markdown、XML、函数调用或多余文本：
-{"verdict":"succeeded|failed|partial","failure_cause":"none|element_not_found|wrong_page|app_not_responding|network_or_loading|permission_or_login_or_captcha|unsafe_or_sensitive|coordinate_or_tap_offset|context_lost|repeated_action|model_parse_failed|unknown","suggested_strategy":"continue|retry|retry_with_offset|go_back|swipe_to_find|wait|takeover|finish","message":"xxx","named_evidence":[{"criterion":"criterion_name","screen_reference":"mark_id 或屏幕上的具体元素","observed_value":"你在该处实际看到的文字"}]}
+{"verdict":"succeeded|failed|partial","failure_cause":"none|element_not_found|wrong_page|app_not_responding|network_or_loading|permission_or_login_or_captcha|unsafe_or_sensitive|coordinate_or_tap_offset|context_lost|repeated_action|model_parse_failed|unknown","suggested_strategy":"continue|retry|retry_with_offset|go_back|swipe_to_find|wait|takeover|finish","message":"xxx","named_evidence":[{"criterion":"criterion_name","screen_reference":"mark_id 或屏幕上的具体元素","observed_value":"你在该处实际看到的文字"}],"criteria_observations":[{"criterion":"criterion_name","status":"observed|not_visible|contradicted","observed_value":"读到的值（可省略）"}]}
 
 判断标准：
 1. 动作生效：页面满足预期后置条件（如输入框聚焦、目标文本出现、目标页面打开、目标应用打开）
@@ -79,6 +78,8 @@ REFLECT_SYSTEM_PROMPT_CN = """你是一个手机自动化任务的反思专家�
 - message 只描述当前屏幕观察到的客观状态；禁止行动指令、禁止目标名/输入内容建议。
 - named_evidence 仅在 suggested_strategy="finish" 时需要输出，且只列出契约中标记为 [judge] 的成功标准。标记为 [auto] 的标准由系统读取设备状态自行核验，你不需要点名或回报。
 - 每条证据给出：criterion（标准名）、screen_reference（mark_id 或屏幕上的具体元素，不要写"区域1"/"屏幕"这类占位）、observed_value（你在该处实际看到的原文）。照实回报你看到的文字即可，不要猜测系统内部使用的取值。observed_value 仅用于当前 node 匹配，不写入 state/trace。
+- criteria_observations 是**读屏报告**，与 verdict（本动作是否生效）相互独立：verdict 只回答动作是否生效，criteria_observations 只报告判据内容在当前屏幕是否可读。只对用户消息"判据观察清单"中列出的判据输出，每条判据最多一条；若清单为空或未提供，不要输出该字段。
+- criteria_observations 状态语义：observed=当前屏幕直接读到该判据的内容，observed_value 填读到的值；not_visible=当前屏幕读不到该判据内容（不要推断、不要猜测）；contradicted=屏幕上读到与该判据矛盾的值（必须给 observed_value）。照实回报，不要为了让任务看起来完成而虚报 observed。
 - 只有在截图明确显示加载中、空白页、网络错误、进度条/转圈、或执行结果表示应用无响应时，才使用 failure_cause="network_or_loading" 和 suggested_strategy="wait"。
 - 如果刚执行的是 Launch/启动应用，且当前屏幕信息或截图已显示目标应用/设置页/目标页面已打开，即使任务还没完成，也应判定为 succeeded + continue，而不是 partial + wait。
 - 不要因为页面内容很多、设置项列表尚需下一步操作，就误判为加载中；可继续操作的稳定页面应输出 continue。
@@ -88,7 +89,7 @@ REFLECT_SYSTEM_PROMPT_CN = """你是一个手机自动化任务的反思专家�
 REFLECT_SYSTEM_PROMPT_EN = """You are a mobile automation reflection expert. Your job is to observe the screenshot after an action and judge whether the action succeeded.
 
 You MUST output exactly one JSON object. Do not output Markdown, XML, function calls, or extra text:
-{"verdict":"succeeded|failed|partial","failure_cause":"none|element_not_found|wrong_page|app_not_responding|network_or_loading|permission_or_login_or_captcha|unsafe_or_sensitive|coordinate_or_tap_offset|context_lost|repeated_action|model_parse_failed|unknown","suggested_strategy":"continue|retry|retry_with_offset|go_back|swipe_to_find|wait|takeover|finish","message":"xxx","named_evidence":[{"criterion":"criterion_name","screen_reference":"mark_id or a concrete on-screen element","observed_value":"the text you actually see there"}]}
+{"verdict":"succeeded|failed|partial","failure_cause":"none|element_not_found|wrong_page|app_not_responding|network_or_loading|permission_or_login_or_captcha|unsafe_or_sensitive|coordinate_or_tap_offset|context_lost|repeated_action|model_parse_failed|unknown","suggested_strategy":"continue|retry|retry_with_offset|go_back|swipe_to_find|wait|takeover|finish","message":"xxx","named_evidence":[{"criterion":"criterion_name","screen_reference":"mark_id or a concrete on-screen element","observed_value":"the text you actually see there"}],"criteria_observations":[{"criterion":"criterion_name","status":"observed|not_visible|contradicted","observed_value":"the value you read (optional)"}]}
 
 Judgment criteria:
 1. Action succeeded: expected postconditions are satisfied (for example focused input, expected text, target page, or target app)
@@ -100,6 +101,8 @@ Important constraints:
 - message describes only the objective state observed on the current screen; no action instructions, no target names, and no input-content suggestions.
 - named_evidence is only required when suggested_strategy="finish", and only for criteria marked [judge] in the contract. Criteria marked [auto] are verified by the system from device state — do not cite or report them.
 - For each evidence item give: criterion (its name), screen_reference (a mark_id or concrete on-screen element — never a placeholder like "region-1"/"screen"), and observed_value (the text you actually see there). Report what you see verbatim; do not guess values the system uses internally. observed_value is node-local and must not enter state or trace.
+- criteria_observations is a SCREEN-READING report, independent of the verdict (whether this action took effect): verdict only answers the action question; criteria_observations only reports whether each criterion's content is readable on the current screen. Report only the criteria listed in the user message's "criteria observation list", at most once per criterion; omit the field entirely when the list is absent or empty.
+- criteria_observations status semantics: observed = you directly read that criterion's content on the current screen (fill observed_value with what you read); not_visible = the current screen does not show it (do not infer or guess); contradicted = the screen shows a value contradicting the criterion (observed_value required). Report honestly — never claim observed just to make the task look complete.
 - Use failure_cause="network_or_loading" and suggested_strategy="wait" only when the screenshot clearly shows loading, a blank page, a network error, a spinner/progress indicator, or the execution result indicates the app is not responding.
 - If the action just executed is Launch and the current screen info or screenshot already shows the target app/settings/target page is open, judge it as succeeded + continue even if the overall task still needs more steps; do not return partial + wait.
 - Do not treat a stable page with many settings/list items as loading. If the page is actionable, return continue.
@@ -240,6 +243,10 @@ class ReflectionResult:
     has_evidence: bool = False
     named_evidence: list[dict[str, object]] | None = None
     directive_filtered: bool = False
+    # S1: model screen-readings of the unsatisfied-criteria list. Pure form
+    # validation here (criterion name + status); the observed_value is
+    # redacted before it enters the ledger.
+    criteria_observations: list[dict[str, object]] | None = None
     # P5 #1: set when the model call was skipped (deterministic path). The
     # reason distinguishes hard_failure from verifier high-confidence success
     # so the reflect_result trace can explain why no model call happened.
@@ -247,23 +254,29 @@ class ReflectionResult:
     model_skip_reason: str | None = None
 
 
-def _judge_evidence_pending(goal_agenda: list[dict] | None) -> bool:
+def _judge_evidence_pending(
+    goal_agenda: list[dict] | None, ledger: list[dict] | None, contract_id: str
+) -> bool:
     """Whether any goal-contract vlm_judge criterion still awaits evidence.
 
-    vlm_judge criteria are settled by model observation (named_evidence at
-    finish), so the deterministic reflect skip must not fire while such a
-    criterion is still unsatisfied — the model still needs to observe the
-    screen to collect that evidence. The agenda here is the reflect-side
-    fold of the same acceptance ledger (P5 #1 precondition), where a vlm_judge
-    criterion counts as satisfied only once its evidence was collected at a
-    trusted target-app observation and latched (P2).
+    vlm_judge criteria are settled by model screen-readings
+    (``criteria_observations`` → ``model_observation`` ledger entries), so the
+    deterministic reflect skip must not fire while such a criterion has no
+    ``observed`` reading — the model still needs to observe the screen to
+    collect that evidence.
     """
 
     for item in goal_agenda or []:
-        if str(item.get("verification") or "") == "vlm_judge" and str(
-            item.get("status") or ""
-        ) != "satisfied":
-            return True
+        if str(item.get("verification") or "") != "vlm_judge":
+            continue
+        if str(item.get("status") or "") == "satisfied":
+            continue
+        name = str(item.get("name") or "")
+        if name and goal_evidence.criterion_observed_in_ledger(
+            ledger or [], contract_id=contract_id, criterion=name
+        ):
+            continue
+        return True
     return False
 
 
@@ -288,6 +301,8 @@ def _reflection_from_verifier(
     action: dict | None,
     liveness: dict[str, object],
     goal_agenda: list[dict] | None = None,
+    goal_ledger: list[dict] | None = None,
+    goal_contract_id: str = "",
     allow_skip: bool = True,
 ) -> ReflectionResult | None:
     """Skip model reflection for self-evident action questions (P5 #1).
@@ -295,8 +310,9 @@ def _reflection_from_verifier(
     The verifier's deterministic success signals answer "did this action take
     effect?" without a vision-language call. The skip is gated by:
     1. ``hard_failure`` never skips — it produces the deterministic failure.
-    2. A pending vlm_judge criterion (``_judge_evidence_pending``) forces the
-       model call so finish evidence can still be collected.
+    2. A pending vlm_judge criterion (``_judge_evidence_pending``, which now
+       reads the model screen-readings ledger) forces the model call so the
+       screen-reading evidence can still be collected.
     3. status=success with confidence >= 0.9 (app_opened / surface_changed /
        typed_text_present / input_focused / text_present), or an explicit
        same-page ``selected_object_match`` (0.75 confidence but gated by P3 #4
@@ -319,7 +335,9 @@ def _reflection_from_verifier(
         return None
     if liveness.get("state") == "stuck":
         return None
-    if _judge_evidence_pending(goal_agenda):
+    if _judge_evidence_pending(
+        goal_agenda, goal_ledger, str(goal_contract_id or "")
+    ):
         return None
     matched_postconditions = list(
         (verifier_result.evidence or {}).get("matched_postconditions") or []
@@ -453,6 +471,7 @@ def parse_reflection_action(raw_action: str) -> ReflectionResult:
             named_evidence.append(evidence_item)
     if named_evidence:
         has_evidence = True
+    criteria_observations = _parse_criteria_observations(data)
     directive_filtered = _message_contains_directive(message)
     if directive_filtered:
         message = ""
@@ -464,7 +483,38 @@ def parse_reflection_action(raw_action: str) -> ReflectionResult:
         has_evidence,
         named_evidence,
         directive_filtered=directive_filtered,
+        criteria_observations=criteria_observations,
     )
+
+
+# S1: model screen-readings. Form validation only — the model owns the
+# content (status semantics are documented in the reflect system prompt).
+VALID_CRITERIA_OBSERVATION_STATUSES = frozenset(
+    {"observed", "not_visible", "contradicted"}
+)
+
+
+def _parse_criteria_observations(data: dict) -> list[dict[str, object]] | None:
+    """Extract and form-validate the model's screen readings."""
+
+    raw = data.get("criteria_observations") if isinstance(data, dict) else None
+    if raw is None:
+        return None
+    if not isinstance(raw, list):
+        return []
+    observations: list[dict[str, object]] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        criterion = str(item.get("criterion") or "").strip()[:128]
+        status = str(item.get("status") or "")
+        if not criterion or status not in VALID_CRITERIA_OBSERVATION_STATUSES:
+            continue
+        entry: dict[str, object] = {"criterion": criterion, "status": status}
+        if item.get("observed_value") is not None:
+            entry["observed_value"] = str(item.get("observed_value"))[:200]
+        observations.append(entry)
+    return observations
 
 
 
@@ -591,6 +641,70 @@ def _strip_images_for_reflect_prompt_debug(messages: list[dict]) -> list[dict]:
     ]
 
 
+# S1: the model is the only screen-content reader. Code hands it the list of
+# criteria still awaiting a screen reading (form only: name + description +
+# provenance annotation + control hint); the model reports observed /
+# not_visible / contradicted per criterion. App-foreground criteria are
+# [auto] — settled by the exact-and-free code sensor, never asked of the model.
+_MAX_CRITERIA_OBSERVATION_ROWS = 6
+
+
+def _criteria_observation_prompt_block(
+    *,
+    contract,
+    ledger: list[dict],
+    contract_id: str,
+    satisfied_by_code: set[str],
+    lang: str,
+) -> str:
+    """Render the unsatisfied-criteria list for the reflect model to screen-read."""
+
+    if contract is None or not contract.task_plan:
+        return ""
+    rows: list[str] = []
+    for criterion in contract.success_criteria:
+        name = criterion.name
+        if name in satisfied_by_code:
+            continue
+        if goal_evidence._criterion_app_foreground(criterion):
+            continue
+        entry = goal_evidence.latest_model_observation(
+            ledger, contract_id=contract_id, criterion=name
+        )
+        if entry is not None and entry.get("status") == "observed":
+            continue
+        provenance_tag = {
+            "state": "",
+            "confirmed": "[需确认]" if lang == "cn" else "[confirm]",
+            "caused": "[造成]" if lang == "cn" else "[caused]",
+        }.get(str(getattr(criterion, "provenance", "state") or "state"), "")
+        line = f"  - {name} {provenance_tag}: {criterion.description}".strip()
+        control_hint = str(getattr(criterion, "control_hint", None) or "")
+        if control_hint:
+            line = f"{line} (control: {control_hint})" if lang == "en" else f"{line}（控件：{control_hint}）"
+        rows.append(line)
+        if len(rows) >= _MAX_CRITERIA_OBSERVATION_ROWS:
+            break
+    if not rows:
+        return ""
+    rows_text = "\n".join(rows)
+    if lang == "en":
+        return (
+            "Criteria observation list (screen-read each criterion on the "
+            "current screenshot; at most one criteria_observations entry per "
+            "criterion; observed=read the content and give the value, "
+            "not_visible=not on screen (never infer), contradicted=the screen "
+            "shows a contradicting value and you must give it):\n"
+            f"{rows_text}"
+        )
+    return (
+        "需要读屏观察的判据（在截图上逐条读屏；每条判据最多输出一条 "
+        "criteria_observations；observed=读到内容并给出值，not_visible=屏幕读不到"
+        "（不推断），contradicted=读到矛盾值并必须给出值）：\n"
+        f"{rows_text}"
+    )
+
+
 def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
     """
     Reflect node: capture screen again, ask model to judge if action succeeded.
@@ -687,39 +801,20 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
     runtime_contract_id = goal_runtime_reference(state)
     ledger = list(state.get("goal_evidence_ledger") or [])
     goal_contract = ensure_goal_contract(state, config)
+    # S6: the fact-provider evidence path is retired — the model screen-read
+    # (criteria_observations) is the only content sensor. The app-foreground
+    # code check survives (exact and free): it resolves the target app against
+    # the device registry (P0 #8) and feeds the code-settled criteria.
     in_target_app = False
     if goal_contract is not None:
-        facts = collect_goal_facts(
-            goal_contract=goal_contract,
-            configurable=configurable,
-            screenshot=screenshot,
-            after_observation=after_observation,
-            runtime_contract_id=runtime_contract_id,
+        in_target_app = goal_evidence.target_app_entered(
+            goal_contract,
+            None,
+            current_app=current_app,
+            foreground_activity=after_observation.snapshot.foreground_activity,
         )
-        if facts:
-            in_target_app = goal_evidence.target_app_entered(
-                goal_contract,
-                facts["collected"],
-                current_app=current_app,
-                foreground_activity=after_observation.snapshot.foreground_activity,
-            )
-            semantic_keys = {
-                criterion.name: goal_evidence.criterion_semantic_key(
-                    criterion.description
-                )
-                for criterion in goal_contract.success_criteria
-            }
-            ledger = goal_evidence.append_evaluation_entries(
-                ledger,
-                evaluation={"evidence": {"per_criterion": facts["collected"]}},
-                contract_id=runtime_contract_id,
-                screen_id=after_observation.snapshot.screen_id,
-                observation_epoch=after_observation.snapshot.observation_epoch,
-                predicate_ids=facts["predicate_ids"],
-                target_app_entered=in_target_app,
-                semantic_keys=semantic_keys,
-            )
-        # L1: mechanically extract this screen's accessibility text digest.
+        # L1: mechanically extract this screen's accessibility text digest
+        # (judge prompt context only — never an evidence gate).
         ledger = goal_evidence.append_screen_text_digest(
             ledger,
             contract_id=runtime_contract_id,
@@ -728,15 +823,19 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
             marks=after_observation.mark_registry.marks.values(),
             target_app_entered=in_target_app,
         )
-        # Positive counter-observation on a sealed criterion revokes the seal
-        # (P0 #13a: revocation only on contradiction, never on absence).
-        if facts:
-            contradicted = {
-                name
-                for name, result in facts["collected"].items()
-                if isinstance(result, dict)
-                and result.get("status") == "contradicted"
-            }
+        # Positive model counter-observation revokes the seal (P0 #13a:
+        # revocation only on contradiction, never on absence).
+        contradicted = set()
+        for entry in ledger:
+            if not isinstance(entry, dict):
+                continue
+            if entry.get("kind") != "model_observation":
+                continue
+            if entry.get("contract_id") != runtime_contract_id:
+                continue
+            if entry.get("status") == "contradicted":
+                contradicted.add(str(entry.get("criterion") or ""))
+        if contradicted:
             ledger = goal_evidence.revoke_seals_on_contradiction(
                 ledger,
                 contract=goal_contract,
@@ -746,36 +845,26 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
                 step=state.get("step_count"),
             )
     goal_agenda: list[dict] = []
-    if goal_contract is not None:
-        from phone_agent.graph.goal_evaluator import pure_goal_evaluator
-
-        programmatic_names = [
+    # S1: app-foreground criteria are settled by the exact-and-free code
+    # sensor (target-app foreground check) — they never need a model read.
+    satisfied_by_code: set[str] = set()
+    if goal_contract is not None and in_target_app:
+        satisfied_by_code = {
             criterion.name
             for criterion in goal_contract.success_criteria
-            if criterion.verification != "vlm_judge" and criterion.predicate is not None
-        ]
-        folded = pure_goal_evaluator.evaluate(
-            contract=goal_contract,
-            contract_id=runtime_contract_id,
-            evidence_ledger=ledger,
-            finish_claim_matched=programmatic_names,
-            screen_id=after_observation.snapshot.screen_id,
-            observation_epoch=after_observation.snapshot.observation_epoch,
-        )
-        per_criterion = folded.evidence.get("per_criterion") or {}
+            if goal_evidence._criterion_app_foreground(criterion)
+        }
+    if goal_contract is not None:
         for criterion in goal_contract.success_criteria:
-            raw_status = str(
-                (per_criterion.get(criterion.name) or {}).get("status") or "unknown"
-            )
-            status = "satisfied" if raw_status == "matched" else raw_status
             item: dict = {
+                "name": criterion.name,
                 "description": sanitize_context_payload(
                     criterion.description,
                     "description",
                     consumer="default",
                     task_context=task,
                 ),
-                "status": status,
+                "status": "pending",
                 "verification": criterion.verification,
                 "predicate_id": (
                     criterion.predicate.predicate_id
@@ -783,22 +872,19 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
                     else None
                 ),
             }
-            if status != "satisfied":
-                # P2 milestone latch: plan-side display only. A criterion once
-                # matched at a trusted target-app observation stays "已满足"
-                # across transient current-observation staleness (keyboard
-                # popup, partial overlays). Deterministic counter-evidence
-                # (contradicted) unlocks. Acceptance never reads this field and
-                # keeps strict current_observation freshness semantics.
-                latch = goal_evidence.ever_matched(
+            if goal_evidence._criterion_app_foreground(criterion) and in_target_app:
+                item["status"] = "satisfied"
+            else:
+                observation = goal_evidence.latest_model_observation(
                     ledger,
-                    criterion_id=criterion.name,
                     contract_id=runtime_contract_id,
+                    criterion=criterion.name,
                 )
-                if latch.latched:
+                if observation is not None and observation.get("status") == "observed":
                     item["status"] = "satisfied"
                     item["latched"] = True
-                    item["latched_epoch"] = latch.matched_epoch
+                    if isinstance(observation.get("observation_epoch"), int):
+                        item["latched_epoch"] = observation["observation_epoch"]
             goal_agenda.append(item)
     # W2 T3: fold the same ledger into per-stage task-plan status. Pure ledger
     # fold — zero additional model calls; reflect's verdict semantics are
@@ -813,6 +899,7 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
                 criterion.name: criterion
                 for criterion in goal_contract.success_criteria
             },
+            satisfied_by_code=satisfied_by_code,
         )
     if configurable.get("enable_legacy_page_signal_adapter", False):
         observe_legacy_page_signals(
@@ -886,6 +973,8 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
         action=action_parsed,
         liveness=current_liveness,
         goal_agenda=goal_agenda,
+        goal_ledger=ledger,
+        goal_contract_id=runtime_contract_id,
         allow_skip=bool(
             configurable.get("skip_reflect_on_high_confidence", True)
         ),
@@ -963,6 +1052,15 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
         prompt_version=configurable.get("prompt_version"),
     )
     reflect_context_block = reflect_context_selection.context_block
+    criteria_observation_block = ""
+    if deterministic_reflection is None:
+        criteria_observation_block = _criteria_observation_prompt_block(
+            contract=goal_contract,
+            ledger=ledger,
+            contract_id=runtime_contract_id,
+            satisfied_by_code=satisfied_by_code,
+            lang=lang,
+        )
     if deterministic_reflection is None:
         verifier_signals = str(
             _sanitize_verifier_result_dict(
@@ -992,10 +1090,13 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
             )
             if reflect_context_block:
                 reflect_text = f"{reflect_text}\n{reflect_context_block}\n\n"
+            if criteria_observation_block:
+                reflect_text = f"{reflect_text}\n{criteria_observation_block}\n\n"
             reflect_text = (
                 f"{reflect_text}"
                 f"Output JSON with action_effect, task_progress, matched_postconditions, "
-                f"missing_postconditions, dynamic_change_only, evidence, next_strategy, named_evidence."
+                f"missing_postconditions, dynamic_change_only, evidence, next_strategy, named_evidence"
+                f", criteria_observations."
             )
         else:
             reflect_text = (
@@ -1010,10 +1111,13 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
             )
             if reflect_context_block:
                 reflect_text = f"{reflect_text}\n{reflect_context_block}\n\n"
+            if criteria_observation_block:
+                reflect_text = f"{reflect_text}\n{criteria_observation_block}\n\n"
             reflect_text = (
                 f"{reflect_text}"
                 f"请输出 JSON，字段为 action_effect、task_progress、matched_postconditions、"
-                f"missing_postconditions、dynamic_change_only、evidence、next_strategy、named_evidence。"
+                f"missing_postconditions、dynamic_change_only、evidence、next_strategy、named_evidence"
+                f"、criteria_observations。"
             )
 
         # Build messages: system(static) + goal_contract_block(static task-wide, separate msg for cache) + dynamic user
@@ -1153,6 +1257,44 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
 
     # --- Stage-Sealing tail (side effects only; P0 #13 single-step verdict
     # semantics are untouched above) ---
+    # S1: the model's screen-readings join the ledger. Form-only storage;
+    # observed_value is redacted on write (P0 #10) and the model owns the
+    # content interpretation. Empty when the deterministic path skipped the
+    # model call — those criteria stay pending (fail-closed).
+    if parsed_reflection.criteria_observations:
+        ledger = goal_evidence.append_model_observations(
+            ledger,
+            contract_id=runtime_contract_id,
+            observations=parsed_reflection.criteria_observations,
+            step=step_count,
+            screen_id=after_observation.snapshot.screen_id,
+            observation_epoch=after_observation.snapshot.observation_epoch,
+            semantic_keys={
+                criterion.name: goal_evidence.criterion_semantic_key(
+                    criterion.description
+                )
+                for criterion in goal_contract.success_criteria
+            }
+            if goal_contract is not None
+            else None,
+        )
+        # Positive model counter-observation on a sealed criterion revokes the
+        # seal (P0 #13a: revocation only on contradiction, never on absence).
+        if goal_contract is not None:
+            contradicted = {
+                str(item.get("criterion") or "")
+                for item in parsed_reflection.criteria_observations
+                if str(item.get("status") or "") == "contradicted"
+            }
+            if contradicted:
+                ledger = goal_evidence.revoke_seals_on_contradiction(
+                    ledger,
+                    contract=goal_contract,
+                    contract_id=runtime_contract_id,
+                    contradicted_criteria=contradicted,
+                    screen_id=after_observation.snapshot.screen_id,
+                    step=step_count,
+                )
     # L2: promote a succeeded/partial action to an effect event. The event is
     # judge context (authority below L1), never a gate on its own.
     if goal_contract is not None and goal_evidence.should_record_effect_event(
@@ -1216,6 +1358,7 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
                 str(after_observation.snapshot.screen_id),
                 f"step:{step_count}",
             ],
+            satisfied_by_code=satisfied_by_code,
         )
         for seal in new_seals:
             emit_trace(
@@ -1238,8 +1381,31 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
                 criterion.name: criterion
                 for criterion in goal_contract.success_criteria
             },
+            satisfied_by_code=satisfied_by_code,
         )
     ledger = goal_evidence.bounded_evidence_ledger(ledger)
+    # L4: plan-side per-criterion gap list (fold-accurate status + provenance
+    # requirement). Pure ledger fold over the model screen-readings plus the
+    # app-foreground code sensor; descriptions are inject-sanitized before
+    # they reach state (the contract descriptions are already regex-redacted,
+    # this is the defensive re-sanitization of the egress channel).
+    criterion_gap_list = None
+    if goal_contract is not None and goal_contract.task_plan:
+        gap_raw = goal_evidence.criterion_gap_status(
+            contract=goal_contract,
+            ledger=ledger,
+            contract_id=runtime_contract_id,
+            screen_id=after_observation.snapshot.screen_id,
+            observation_epoch=after_observation.snapshot.observation_epoch,
+            satisfied_by_code=satisfied_by_code,
+        )
+        if gap_raw:
+            criterion_gap_list = sanitize_context_payload(
+                gap_raw,
+                "criterion_gap_list",
+                consumer="inject",
+                task_context=task if isinstance(task, str) else None,
+            )
 
     context_updates = {"context_mode": context_mode}
     repeat_count = 0
@@ -1427,6 +1593,13 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
             ),
             "model_skipped": model_skipped,
             "model_skip_reason": model_skip_reason,
+            "criteria_observations": [
+                {
+                    "criterion": str(item.get("criterion") or ""),
+                    "status": str(item.get("status") or ""),
+                }
+                for item in (parsed_reflection.criteria_observations or [])
+            ],
         },
     )
 
@@ -1453,6 +1626,7 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
         "goal_evidence_ledger": ledger,
         "goal_agenda": goal_agenda,
         "task_plan_status": task_plan_status,
+        "criterion_gap_list": criterion_gap_list,
         "stage_stall_windows": stage_stall_windows,
         "stage_stall_grace_windows": stage_stall_grace,
         **({"needs_recompile": True} if stage_recompile else {}),

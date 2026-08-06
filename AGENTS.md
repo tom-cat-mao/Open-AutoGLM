@@ -20,18 +20,18 @@ phone_agent/
   agent.py          # PhoneAgent entry point
   graph/            # LangGraph StateGraph: nodes, edges, state, tools, trace, observation
     goal.py             # Declarative GoalContract + typed CriterionSpec data model
-    goal_compiler.py    # Goal contract compilation chain: External > LLM > Heuristic
-    goal_requirements.py # Independent TaskRequirementSet + ContractAdequacyValidator
-    goal_evidence.py    # Bounded privacy-safe criterion evidence ledger
-    goal_evaluator.py   # Pure typed ledger fold + legacy migration evaluator
-    predicates.py       # Typed predicates, neutral facts, matchers, evidence authority
-    fact_providers.py   # Concrete node-local fact providers + authority resolution
+    goal_compiler.py    # Goal contract compilation chain: External > LLM (self-check + 1 repair pass) > Heuristic
+    goal_requirements.py # Independent TaskRequirementSet (app metadata) + structural ContractAdequacyValidator
+    goal_evidence.py    # Bounded privacy-safe evidence ledger: model_observation / screen_text_digest / effect_event / seals
+    goal_evaluator.py   # Model-delegated ledger fold + legacy migration evaluator
+    predicates.py       # Typed predicates, exact code sensors, evidence authority
+    fact_providers.py   # Concrete node-local fact providers (exact device-state sensors only)
     runtime_goal.py     # Per-run private Goal values; never serialized
     compatibility_adapters.py # Legacy vocabulary shadow telemetry only
     runtime_observation.py # Node-local screenshot context; never serialized
     nodes/goal_node.py  # Compiles GoalContract once at task start; optional HITL approval
     nodes/plan.py       # Plan node (injects goal_contract_block as separate cacheable message)
-    nodes/reflect.py    # Reflect node (GoalEvaluator integration, reflect context window)
+    nodes/reflect.py    # Reflect node: single-step verdict + model screen-reads (criteria_observations) + gap list channel
     actions/          # Action IR pipeline: adapter, validator, repair, safety gate
       capability.py   # ToolCapability registry; availability enforced after Safety Gate
       receipt.py      # ActionReceipt dispatch evidence; never Goal progress

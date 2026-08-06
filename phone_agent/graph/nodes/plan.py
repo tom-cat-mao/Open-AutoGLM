@@ -285,6 +285,10 @@ def _maybe_emit_plan_prompt_debug(
             "objects_block": len(objects_block or ""),
             "marks_block": len(marks_block or ""),
             "context_block": len(context_block or ""),
+            "criterion_gap_list": len(
+                (state.get("criterion_gap_list") or {})
+                .get("items", [])
+            ),
         },
     }
     if configurable.get("trace_request_messages"):

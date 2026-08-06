@@ -4,7 +4,8 @@ inheritance."""
 
 from phone_agent.graph.goal import GoalContract, SuccessCriterion, TaskStage
 from phone_agent.graph.goal_evidence import (
-    append_evaluation_entries,
+    append_model_observations,
+    criterion_semantic_key,
     remap_ledger_for_contract,
     revoke_seals_on_contradiction,
     seal_records_for_contract,
@@ -54,29 +55,20 @@ def _contract() -> GoalContract:
     )
 
 
-def _matched_ledger(contract: GoalContract) -> list[dict]:
-    from phone_agent.graph.goal_evidence import criterion_semantic_key
+def _observed_ledger(contract: GoalContract) -> list[dict]:
+    """Model screen-reads: date observed at epoch 3, time at epoch 5."""
 
     ledger: list[dict] = []
     for criterion_id, epoch in (("date", 3), ("time", 5)):
-        ledger = append_evaluation_entries(
+        ledger = append_model_observations(
             ledger,
-            evaluation={
-                "evidence": {
-                    "per_criterion": {
-                        criterion_id: {
-                            "status": "matched",
-                            "reason": "existential_match",
-                            "source": "accessibility",
-                        }
-                    }
-                }
-            },
             contract_id=contract.task_hash,
+            observations=[
+                {"criterion": criterion_id, "status": "observed", "observed_value": "ok"}
+            ],
+            step=epoch,
             screen_id=f"screen-{epoch}",
             observation_epoch=epoch,
-            predicate_ids={criterion_id: "semantic.entity_matches"},
-            target_app_entered=True,
             semantic_keys={
                 criterion.name: criterion_semantic_key(criterion.description)
                 for criterion in contract.success_criteria
@@ -86,26 +78,15 @@ def _matched_ledger(contract: GoalContract) -> list[dict]:
 
 
 def _contradict_criterion(ledger: list[dict], contract: GoalContract, name: str, epoch: int) -> list[dict]:
-    from phone_agent.graph.goal_evidence import criterion_semantic_key
-
-    return append_evaluation_entries(
+    return append_model_observations(
         ledger,
-        evaluation={
-            "evidence": {
-                "per_criterion": {
-                    name: {
-                        "status": "contradicted",
-                        "reason": "target_mismatch",
-                        "source": "accessibility",
-                    }
-                }
-            }
-        },
         contract_id=contract.task_hash,
+        observations=[
+            {"criterion": name, "status": "contradicted", "observed_value": "other"}
+        ],
+        step=epoch,
         screen_id=f"screen-{epoch}",
         observation_epoch=epoch,
-        predicate_ids={name: "semantic.entity_matches"},
-        target_app_entered=True,
         semantic_keys={
             criterion.name: criterion_semantic_key(criterion.description)
             for criterion in contract.success_criteria
@@ -120,7 +101,7 @@ def _contradict_criterion(ledger: list[dict], contract: GoalContract, name: str,
 
 def test_seal_triggers_when_all_stage_criteria_latched() -> None:
     contract = _contract()
-    ledger = _matched_ledger(contract)
+    ledger = _observed_ledger(contract)
 
     new_ledger, new_seals = seal_satisfied_stages(
         ledger,
@@ -143,7 +124,7 @@ def test_seal_triggers_when_all_stage_criteria_latched() -> None:
 
 def test_seal_is_idempotent_per_semantic_key() -> None:
     contract = _contract()
-    ledger = _matched_ledger(contract)
+    ledger = _observed_ledger(contract)
 
     ledger, first = seal_satisfied_stages(
         ledger,
@@ -169,7 +150,7 @@ def test_unsealed_stage_can_reseal_after_latching_again() -> None:
     from phone_agent.graph.goal_evidence import criterion_semantic_key
 
     contract = _contract()
-    ledger = _matched_ledger(contract)
+    ledger = _observed_ledger(contract)
     ledger, _ = seal_satisfied_stages(
         ledger,
         contract=contract,
@@ -196,25 +177,16 @@ def test_unsealed_stage_can_reseal_after_latching_again() -> None:
         step=11,
     )
     assert new_seals == []
-    # A later trusted matched re-observation re-latches; eager sealing re-arms S1.
-    ledger = append_evaluation_entries(
+    # A later trusted observed re-read re-latches; eager sealing re-arms S1.
+    ledger = append_model_observations(
         ledger,
-        evaluation={
-            "evidence": {
-                "per_criterion": {
-                    "date": {
-                        "status": "matched",
-                        "reason": "existential_match",
-                        "source": "accessibility",
-                    }
-                }
-            }
-        },
         contract_id=contract.task_hash,
+        observations=[
+            {"criterion": "date", "status": "observed", "observed_value": "ok"}
+        ],
+        step=12,
         screen_id="screen-12",
         observation_epoch=12,
-        predicate_ids={"date": "semantic.entity_matches"},
-        target_app_entered=True,
         semantic_keys={
             criterion.name: criterion_semantic_key(criterion.description)
             for criterion in contract.success_criteria
@@ -254,7 +226,7 @@ def test_sealed_criteria_are_authoritative_in_pure_fold() -> None:
         task_plan=contract.task_plan,
         compile_status="compiled",
     )
-    ledger = _matched_ledger(contract)
+    ledger = _observed_ledger(contract)
     ledger, _ = seal_satisfied_stages(
         ledger,
         contract=staged_only,
@@ -279,7 +251,7 @@ def test_sealed_criteria_are_authoritative_in_pure_fold() -> None:
 
 def test_seal_record_surfaces_evidence_refs() -> None:
     contract = _contract()
-    ledger = _matched_ledger(contract)
+    ledger = _observed_ledger(contract)
     ledger, new_seals = seal_satisfied_stages(
         ledger,
         contract=contract,
@@ -302,7 +274,7 @@ def test_seal_record_surfaces_evidence_refs() -> None:
 
 def test_revocation_writes_unseal_only_on_contradiction() -> None:
     contract = _contract()
-    ledger = _matched_ledger(contract)
+    ledger = _observed_ledger(contract)
     ledger, _ = seal_satisfied_stages(
         ledger,
         contract=contract,
@@ -340,7 +312,7 @@ def test_revocation_writes_unseal_only_on_contradiction() -> None:
 
 def test_contradicted_evidence_unlocks_stage_status() -> None:
     contract = _contract()
-    ledger = _matched_ledger(contract)
+    ledger = _observed_ledger(contract)
     ledger, _ = seal_satisfied_stages(
         ledger,
         contract=contract,
@@ -376,7 +348,7 @@ def test_contradicted_evidence_unlocks_stage_status() -> None:
 
 def test_remap_renames_criterion_entries_by_semantic_key() -> None:
     contract = _contract()
-    ledger = _matched_ledger(contract)
+    ledger = _observed_ledger(contract)
 
     renamed = GoalContract(
         task_hash=contract.task_hash,
@@ -416,8 +388,10 @@ def test_remap_renames_criterion_entries_by_semantic_key() -> None:
         criteria={c.name: c for c in renamed.success_criteria},
         task_plan=renamed.task_plan,
     )
-    ids = [e["criterion_id"] for e in remapped if "criterion_id" in e]
-    assert ids == ["departure_date", "time_window"]
+    observations = [
+        e["criterion"] for e in remapped if e.get("kind") == "model_observation"
+    ]
+    assert observations == ["departure_date", "time_window"]
 
     folded = stage_status_from_ledger(
         remapped,
@@ -432,7 +406,7 @@ def test_remap_renames_criterion_entries_by_semantic_key() -> None:
 
 def test_seal_inherits_across_renamed_criteria() -> None:
     contract = _contract()
-    ledger = _matched_ledger(contract)
+    ledger = _observed_ledger(contract)
     ledger, _ = seal_satisfied_stages(
         ledger,
         contract=contract,

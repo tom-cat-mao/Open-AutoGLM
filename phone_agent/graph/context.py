@@ -60,6 +60,7 @@ DEFAULT_CONTEXT_BUDGET: dict[str, int] = {
 _SECTION_BUDGETS = {
     "goal_agenda": 800,
     "acceptance_rejection": 400,
+    "criterion_gap_list": 900,
 }
 DEFAULT_PROMPT_VERSION = "context_harness_v1"
 CONTEXT_SECTION_IDS = (
@@ -739,22 +740,22 @@ def trajectory_liveness(
 
 
 def _criterion_moved_toward_satisfaction(history: list[dict]) -> bool:
+    """S4: any fresh model screen-read (or new mechanical criterion entry)
+    between the two latest snapshots counts as trajectory movement.
+
+    The model-delegated sensor records a new ``model_observation`` per read;
+    a panel that keeps producing fresh reads (run-G shape) must never look
+    stuck even if the stage index did not advance (P0 #13b: this reads
+    observation history, never single-step verdicts).
+    """
+
     if len(history) < 2:
         return False
     previous = history[-2].get("per_criterion") or {}
     current = history[-1].get("per_criterion") or {}
-    rank = {
-        "invalid": 0,
-        "contradicted": 0,
-        "missing": 0,
-        "stale": 0,
-        "unobserved": 1,
-        "unknown": 1,
-        "matched": 2,
-    }
     return any(
-        rank.get(str(status), 0) > rank.get(str(previous.get(criterion)), 0)
-        for criterion, status in current.items()
+        current.get(criterion) != previous.get(criterion)
+        for criterion in set(current) | set(previous)
     )
 
 
@@ -1529,6 +1530,9 @@ def build_plan_context_block(
     acceptance_rejection = _render_acceptance_rejection(
         state, lang=lang, consumer=consumer, task_context=task_context
     )
+    criterion_gap_list = _render_criterion_gap_list(
+        state, lang=lang, consumer=consumer, task_context=task_context
+    )
 
     parts = []
     # Each section is trimmed against its own allowance. Trimming the concatenated
@@ -1545,6 +1549,14 @@ def build_plan_context_block(
             "task_plan_status",
             task_plan_status_section,
             budget.get("task_plan_status_chars"),
+        ),
+        (
+            "criterion_gap_list",
+            criterion_gap_list,
+            budget.get(
+                "criterion_gap_list_chars",
+                _SECTION_BUDGETS.get("criterion_gap_list", 900),
+            ),
         ),
         (
             "acceptance_rejection",
@@ -1920,6 +1932,93 @@ def _context_block_value_is_informative(label: str, value: Any) -> bool:
     if label == "gui_memory" and isinstance(value, dict):
         return _is_informative_gui_memory(value)
     return True
+
+
+def _render_criterion_gap_list(
+    state: dict[str, Any],
+    *,
+    lang: str,
+    consumer: ContextConsumer,
+    task_context: str | None,
+) -> str:
+    """Render the criterion-level gap list for the plan block (L4).
+
+    Pure presentation of the state field written by the reflect tail:
+    ⏳ = an unsatisfied acceptance condition; ✅ = satisfied (or sealed).
+    [需确认] = the confirmed criterion must be read on the control itself —
+    inferring it from the result list does not count. The block explains the
+    list's semantics only; it carries no behavioral instructions (prompt-side
+    text is the model's to interpret). All text re-sanitizes defensively.
+    """
+
+    value = state.get("criterion_gap_list")
+    if not isinstance(value, dict) or not isinstance(value.get("items"), list):
+        return ""
+    safe = sanitize_context_payload(
+        value, "criterion_gap_list", consumer=consumer, task_context=task_context
+    )
+    items = [item for item in safe.get("items") or [] if isinstance(item, dict)]
+    sealed = [item for item in safe.get("sealed") or [] if isinstance(item, dict)]
+    if not items and not sealed:
+        return ""
+    current_id = safe.get("current_stage_id")
+    objective = str(safe.get("current_objective") or "")[:80]
+    lines: list[str] = []
+    if lang == "en":
+        header = (
+            f"criterion_gap_list (current stage {current_id}: {objective}):"
+            if current_id
+            else "criterion_gap_list:"
+        )
+        lines.append(
+            "  legend: \u23f3 = unsatisfied acceptance condition; \u2705 = satisfied; "
+            "[confirm] = must read the control's actual value (inferring from "
+            "the result list does not count); [observe] = must be observable on screen"
+        )
+    else:
+        header = (
+            f"判据缺口清单（当前阶段 {current_id}：{objective}）："
+            if current_id
+            else "判据缺口清单："
+        )
+        lines.append(
+            "  图例：\u23f3=未满足的验收条件；\u2705=已满足；[需确认]=必须读取控件实际值"
+            "（从结果列表推断不算数）；[需观察]=须在屏幕上可观察"
+        )
+    lines.append(header)
+    for item in items:
+        name = str(item.get("name") or "")
+        description = str(item.get("description") or "")
+        if not name:
+            continue
+        if str(item.get("status") or "") == "satisfied":
+            lines.append(f"  \u2705 {name}")
+            continue
+        provenance = str(item.get("provenance") or "state")
+        if provenance == "confirmed":
+            tag = "[需确认]" if lang == "cn" else "[confirm]"
+            need = (
+                "必须读取控件实际值，从结果列表推断不算数"
+                if lang == "cn"
+                else "must be read on the control; inferring from the result list does not count"
+            )
+        else:
+            tag = "[需观察]" if lang == "cn" else "[observe]"
+            need = "须在屏幕上可观察" if lang == "cn" else "must be observable on screen"
+        hint = str(item.get("control_hint") or "")
+        suffix = f"（{hint}；{need}）" if hint else f"（{need}）"
+        text = f"{description}{suffix}" if description else suffix
+        lines.append(f"  \u23f3 {name} {tag}：{text}")
+    for row in sealed:
+        name = str(row.get("name") or "")
+        stage_id = str(row.get("stage_id") or "")
+        if not name:
+            continue
+        if lang == "en":
+            lines.append(f"  \u2705 {name} (confirmed at {stage_id})")
+        else:
+            lines.append(f"  \u2705 {name}（{stage_id} 已确认）")
+    return "\n".join(lines)
 
 
 def _is_informative_belief(value: dict[str, Any]) -> bool:

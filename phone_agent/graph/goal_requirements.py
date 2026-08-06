@@ -67,7 +67,6 @@ class TaskRequirementSet:
     target_app_identity: str | None
     ordinal: int | None
     required_terminal_state: str
-    constraint_hashes: tuple[str, ...] = ()
     source_span_count: int = 0
     confidence: float = 0.0
     ambiguities: tuple[str, ...] = ()
@@ -82,7 +81,6 @@ class TaskRequirementSet:
             "target_app_identity": self.target_app_identity,
             "ordinal": self.ordinal,
             "required_terminal_state": self.required_terminal_state,
-            "constraint_count": len(self.constraint_hashes),
             "source_span_count": self.source_span_count,
             "confidence_bucket": _confidence_bucket(self.confidence),
             "ambiguities": list(self.ambiguities),
@@ -108,9 +106,6 @@ class TaskRequirementSet:
             ),
             required_terminal_state=str(
                 value.get("required_terminal_state") or "task_state_observed"
-            ),
-            constraint_hashes=tuple(
-                str(item) for item in value.get("constraint_hashes") or []
             ),
             source_span_count=int(value.get("source_span_count") or 0),
             confidence=confidence,
@@ -162,7 +157,6 @@ class TaskRequirementExtractor:
                 None,
             )
         spans = extract_entity_spans(text, matched_alias, operation)
-        constraints = constraint_spans(text)
         ambiguity = []
         if app_resolution.status == "ambiguous":
             ambiguity.append("app_ambiguous")
@@ -177,7 +171,6 @@ class TaskRequirementExtractor:
             target_app_identity=app_identity,
             ordinal=ordinal,
             required_terminal_state=_terminal_state(operation),
-            constraint_hashes=tuple(_digest(item) for item in constraints[:6]),
             source_span_count=len(spans),
             confidence=confidence,
             ambiguities=tuple(ambiguity),
@@ -221,6 +214,13 @@ class ContractAdequacyValidator:
     def validate(
         self, requirements: TaskRequirementSet, contract: GoalContract
     ) -> AdequacyResult:
+        """Structural adequacy only (S5): the contract must be bound to the
+        task, carry a required criterion, use observable predicates, and
+        reference only real criterion names in its task plan. Content coverage
+        (whether every task parameter has a criterion) is delegated to the
+        model: the compiler prompt self-checks parameter coverage before
+        emitting the contract — code no longer reads task text for it.
+        """
         reasons: list[str] = []
         if requirements.task_hash != contract.task_hash:
             reasons.append("task_binding_mismatch")
@@ -251,30 +251,20 @@ class ContractAdequacyValidator:
             or any(item.verification == "vlm_judge" for item in required)
         ):
             reasons.append("semantic_criterion_missing")
-        predicate_ids = {
-            item.predicate.predicate_id
-            for item in required
-            if item.predicate is not None
-        }
-        has_vlm_judge = any(item.verification == "vlm_judge" for item in required)
-        if not _terminal_state_is_covered(
-            requirements.required_terminal_state, predicate_ids, has_vlm_judge
-        ):
-            reasons.append("terminal_state_uncovered")
-        if any(
-            item.verification == "vlm_judge"
-            and not judge_description_is_observable(item.description)
-            for item in contract.success_criteria
-        ):
-            reasons.append("judge_description_not_observable")
-        if requirements.constraint_hashes:
-            contract_constraint_hashes = {
-                _digest(item) for item in contract.constraints if str(item).strip()
-            }
-            if not set(requirements.constraint_hashes).issubset(
-                contract_constraint_hashes
-            ):
-                reasons.append("constraints_uncovered")
+        # Task-plan structural check (pure form): every done criterion name
+        # must exist in the contract and ids must be unique.
+        if contract.task_plan is not None:
+            from phone_agent.graph.goal import task_plan_validation_errors
+
+            plan_errors = task_plan_validation_errors(
+                contract.task_plan,
+                criterion_names=[item.name for item in contract.success_criteria],
+                criteria={
+                    item.name: item for item in contract.success_criteria
+                },
+            )
+            if plan_errors:
+                reasons.append("task_plan_invalid")
 
         codes = tuple(sorted(set(reasons)))
         # Ambiguity is a property of the task itself, so it outranks defects in
@@ -312,11 +302,6 @@ def _predicate_structural_defects(contract: GoalContract) -> list[str]:
             defects.append("predicate_unobservable")
             continue
         definition = CORE_PREDICATE_CATALOG.get(predicate.predicate_id)
-        if definition.value_domain == "raw_text" and not raw_text_binding_is_observable(
-            predicate.expected_value
-        ):
-            defects.append("predicate_unobservable")
-            continue
         if not _expected_value_in_domain(
             definition.value_domain, predicate.expected_value
         ):
@@ -324,99 +309,6 @@ def _predicate_structural_defects(contract: GoalContract) -> list[str]:
     return defects
 
 
-def raw_text_binding_is_observable(value: Any) -> bool:
-    """Whether a raw-text expectation has the shape of node text."""
-
-    values = value if isinstance(value, (list, tuple)) else [value]
-    max_chars = int(DEFAULT_VERIFICATION_POLICY.value("screen_literal_max_chars"))
-    meta_terms = ("屏幕", "页面", "可观察到", "显示", "已进入", "screen", "visible")
-    quote_pairs = (("“", "”"), ('"', '"'), ("《", "》"), ("「", "」"))
-    for item in values:
-        if not isinstance(item, str) or not item.strip():
-            return False
-        normalized = item.strip()
-        lowered = normalized.casefold()
-        # This guards prose shape; it is not a semantic stopword filter.
-        if (
-            len(normalized) > max_chars
-            or normalized.endswith(("。", "！", "？", "."))
-            or any(term in lowered for term in meta_terms)
-            or any(
-                normalized.count(left) >= 2
-                if left == right
-                else left in normalized and right in normalized
-                for left, right in quote_pairs
-            )
-        ):
-            return False
-    return True
-
-
-def judge_description_is_observable(description: str) -> bool:
-    """Heuristic: whether a vlm_judge description names concrete screen content.
-
-    Diagnostic only (severity=degraded, never a hard reject): an abstract
-    description ("task complete") cannot be grounded to screen evidence, so the
-    finish gate would depend on self-attestation. A quoted literal
-    ("出现含'银石'字样的卡片") always counts as observable; otherwise the
-    description must retain substantive content after abstract status terms are
-    stripped. Conservative by design — false positives merely degrade.
-    """
-
-    text = str(description or "").strip()
-    if not text:
-        return False
-    if len(text) < 4:
-        return False
-    for left, right in (("“", "”"), ('"', '"'), ("《", "》"), ("「", "」")):
-        if left in text and right in text:
-            return True
-    stripped = text
-    for term in sorted(_ABSTRACT_JUDGE_TERMS, key=len, reverse=True):
-        stripped = stripped.replace(term, " ")
-    stripped = re.sub(
-        r"[\s,，。.!！?？、:：;；'\"“”‘’《》「」()（）\[\]]+", "", stripped
-    )
-    return len(stripped) >= 4
-
-
-_ABSTRACT_JUDGE_TERMS: tuple[str, ...] = (
-    "可观察",
-    "显示",
-    "展示",
-    "出现",
-    "进入",
-    "达到",
-    "达成",
-    "完成",
-    "成功",
-    "生效",
-    "屏幕",
-    "页面",
-    "界面",
-    "可见",
-    "符合",
-    "满足",
-    "visible",
-    "appear",
-    "display",
-    "screen",
-    "page",
-    "interface",
-    "complete",
-    "completed",
-    "done",
-    "success",
-    "successful",
-    "achieve",
-    "achieved",
-    "finish",
-    "finished",
-    "final",
-    "target",
-    "goal",
-    "task",
-)
 
 
 def _expected_value_in_domain(domain: str, value: Any) -> bool:
@@ -449,8 +341,6 @@ def extract_entity_spans(
     the root cause of spurious `target_entities_uncovered` rejections.
     """
     cleaned = text
-    for constraint in constraint_spans(text):
-        cleaned = cleaned.replace(constraint, " ")
     if app_alias:
         cleaned = re.sub(re.escape(app_alias), " ", cleaned, flags=re.IGNORECASE)
     # Strip ALL operation vocabularies, not just the detected operation's.
@@ -507,74 +397,7 @@ def _terminal_state(operation: OperationKind) -> str:
     }[operation]
 
 
-def _terminal_state_is_covered(
-    terminal_state: str, predicate_ids: set[str], has_vlm_judge: bool = False
-) -> bool:
-    accepted = {
-        "target_app_foreground": {
-            "app.foreground_package",
-            "app.foreground_activity",
-            "app.foreground_identity",
-        },
-        "search_results_visible": {
-            "ui.text_equals",
-            "ui.text_hash_present",
-            "ui.collection_contains",
-            "semantic.entity_matches",
-        },
-        "selected_target_visible": {
-            "ui.object_selected",
-            "ui.object_rank",
-            "semantic.entity_matches",
-        },
-        "input_value_visible": {
-            "ui.focused",
-            "ui.value_equals",
-            "ui.text_equals",
-        },
-        "toggle_state_visible": {"ui.toggle_state"},
-        "external_effect_confirmed": {"external.effect_confirmed"},
-        "task_state_observed": set(),
-    }
-    # vlm_judge is the sanctioned fallback for semantic terminal states that
-    # no programmatic predicate can cover (AGENTS.md P0-13a). It never
-    # satisfies toggle/external states, which require programmatic signals.
-    vlm_judge_coverable = {
-        "search_results_visible",
-        "selected_target_visible",
-        "input_value_visible",
-    }
-    if terminal_state in vlm_judge_coverable and has_vlm_judge:
-        return True
-    required = accepted.get(terminal_state, set())
-    return terminal_state == "task_state_observed" or bool(
-        required.intersection(predicate_ids)
-    )
 
-
-def constraint_spans(text: str) -> list[str]:
-    """Constraint clauses in a raw task ("不要加糖", "only use wifi").
-
-    Shared by TaskRequirementExtractor and the goal compilers so requirement
-    constraint hashes and contract constraints are computed over identical
-    spans — divergence made every constrained task permanently inadequate.
-    """
-    markers = (
-        "不要",
-        "不得",
-        "只能",
-        "仅限",
-        "do not",
-        "must not",
-        "without",
-        "only",
-    )
-    spans: list[str] = []
-    for clause in re.split(r"[，,。.!！;；]+", text):
-        normalized = clause.strip()
-        if normalized and any(marker in normalized.casefold() for marker in markers):
-            spans.append(normalized)
-    return spans
 
 
 def parse_toggle_intent(text: str) -> bool | None:

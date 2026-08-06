@@ -31,6 +31,8 @@ APP_PACKAGES: dict[str, str] = {
     "肯德基": "com.yek.android.kfc.activitys",
     # Travel
     "携程": "ctrip.android.view",
+    "同程": "com.tongcheng.android",
+    "同程旅行": "com.tongcheng.android",
     "铁路12306": "com.MobileTicket",
     "12306": "com.MobileTicket",
     "去哪儿": "com.Qunar",
@@ -306,6 +308,8 @@ CANONICAL_APP_DISPLAY: dict[str, str] = {
     "高德地图": "高德地图",
     "百度地图": "百度地图",
     "携程": "携程",
+    "同程": "同程",
+    "同程旅行": "同程旅行",
     "滴滴出行": "滴滴出行",
     "知乎": "知乎",
     "豆瓣": "豆瓣",

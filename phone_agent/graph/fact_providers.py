@@ -154,7 +154,10 @@ class AccessibilityFactProvider:
                             contract_id,
                         )
                     )
-        elif predicate_id in {"ui.text_equals", "semantic.entity_matches"}:
+        elif predicate_id in {
+            "ui.text_equals",
+            "semantic.entity_matches",
+        }:
             for node in nodes:
                 for value in (node.text_summary, node.content_desc_summary):
                     if value:
@@ -163,6 +166,26 @@ class AccessibilityFactProvider:
                                 context, predicate_id, value, node.node_id, contract_id
                             )
                         )
+        elif predicate_id == "semantic.attributes_present":
+            # Multi-fragment conjunction over ONE control subtree: each node
+            # emits its texts as a list, so a fragment split across two nodes
+            # can never fabricate the attribute set.
+            for node in nodes:
+                texts = [
+                    value
+                    for value in (node.text_summary, node.content_desc_summary)
+                    if value
+                ]
+                if texts:
+                    facts.append(
+                        self._node_fact(
+                            context,
+                            predicate_id,
+                            list(texts),
+                            node.node_id,
+                            contract_id,
+                        )
+                    )
         elif predicate_id == "ui.text_hash_present":
             for node in nodes:
                 for value in (node.text_summary, node.content_desc_summary):
@@ -486,6 +509,7 @@ CORE_PROVIDER_PREDICATES: frozenset[str] = frozenset(
         "ui.dialog_open",
         "ui.dialog_closed",
         "semantic.entity_matches",
+        "semantic.attributes_present",
         # ObjectFactProvider
         "ui.object_present",
         "ui.object_rank",

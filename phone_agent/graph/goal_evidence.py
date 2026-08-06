@@ -47,6 +47,9 @@ L1_DIGEST_TEXT_LIMIT = 40
 L1_DIGEST_SCREEN_WINDOW = 30
 # L2: how many recent effect events the bounded ledger keeps.
 L2_EFFECT_EVENT_LIMIT = 24
+# Model-delegated screen observations (S1): per-criterion reads by the reflect
+# model. Bounded so a long run cannot grow the ledger unboundedly.
+MODEL_OBSERVATION_LIMIT = 48
 # Stage seals/unseals kept (active seal set is small; window bounds state size).
 SEAL_LEDGER_LIMIT = 32
 # One digest text is truncated to this many chars on write.
@@ -365,6 +368,161 @@ def append_effect_event(
 
 
 # ----------------------------------------------------------------------
+# S1: model_observation (model-delegated screen sensor)
+# ----------------------------------------------------------------------
+
+MODEL_OBSERVATION_STATUSES = frozenset({"observed", "not_visible", "contradicted"})
+
+
+def model_observation_entry(
+    *,
+    contract_id: str,
+    criterion: str,
+    status: str,
+    observed_value: str | None = None,
+    step: int | None = None,
+    screen_id: str | None = None,
+    observation_epoch: int | None = None,
+    semantic_key: str | None = None,
+) -> dict[str, Any]:
+    """One model screen-read observation for a criterion.
+
+    The model is the only content reader: it states whether the criterion is
+    directly readable on the current screen, what value it reads, or whether
+    the screen contradicts it. Code only records the form (redacted value,
+    step/screen binding); it never interprets the value. ``semantic_key``
+    (name-independent) lets a recompile that renames criteria keep its
+    observations (Stage-Sealing §8 inheritance).
+    """
+
+    status = str(status or "not_visible")
+    if status not in MODEL_OBSERVATION_STATUSES:
+        status = "not_visible"
+    return {
+        "kind": "model_observation",
+        "contract_id": contract_id,
+        "criterion": str(criterion or "")[:128],
+        "status": status,
+        "observed_value": (
+            redact_context_text(str(observed_value))[:200]
+            if observed_value is not None
+            else None
+        ),
+        "step": int(step or 0),
+        "screen_id": screen_id,
+        "observation_epoch": observation_epoch,
+        "semantic_key": semantic_key,
+    }
+
+
+def append_model_observations(
+    existing: list[dict[str, Any]] | None,
+    *,
+    contract_id: str,
+    observations: list[dict[str, Any]],
+    step: int | None = None,
+    screen_id: str | None = None,
+    observation_epoch: int | None = None,
+    semantic_keys: dict[str, str] | None = None,
+    limit: int | None = None,
+) -> list[dict[str, Any]]:
+    """Append one step's model screen reads; idempotent per
+    (contract, screen, step, criterion). Returns the bounded ledger.
+    """
+
+    entries = list(existing or [])
+    for item in observations or []:
+        if not isinstance(item, dict):
+            continue
+        criterion = str(item.get("criterion") or "")
+        if not criterion:
+            continue
+        status = str(item.get("status") or "not_visible")
+        if status not in MODEL_OBSERVATION_STATUSES:
+            continue
+        observed_value = item.get("observed_value")
+        if observed_value is not None and not isinstance(observed_value, str):
+            observed_value = str(observed_value)
+        key = (contract_id, screen_id, int(step or 0), criterion)
+        replaced = False
+        for index, entry in enumerate(entries):
+            if entry.get("kind") != "model_observation":
+                continue
+            if (
+                entry.get("contract_id") == key[0]
+                and entry.get("screen_id") == key[1]
+                and entry.get("step") == key[2]
+                and entry.get("criterion") == key[3]
+            ):
+                entries[index] = model_observation_entry(
+                    contract_id=contract_id,
+                    criterion=criterion,
+                    status=status,
+                    observed_value=observed_value,
+                    step=step,
+                    screen_id=screen_id,
+                    observation_epoch=observation_epoch,
+                    semantic_key=(
+                        (semantic_keys or {}).get(criterion) or None
+                    ),
+                )
+                replaced = True
+                break
+        if not replaced:
+            entries.append(
+                model_observation_entry(
+                    contract_id=contract_id,
+                    criterion=criterion,
+                    status=status,
+                    observed_value=observed_value,
+                    step=step,
+                    screen_id=screen_id,
+                    observation_epoch=observation_epoch,
+                    semantic_key=(
+                        (semantic_keys or {}).get(criterion) or None
+                    ),
+                )
+            )
+    return bounded_evidence_ledger(entries, observation_limit=limit)
+
+
+def latest_model_observation(
+    ledger: list[dict[str, Any]],
+    *,
+    contract_id: str,
+    criterion: str,
+) -> dict[str, Any] | None:
+    """Newest model screen-read for one criterion (append order wins)."""
+
+    latest: dict[str, Any] | None = None
+    for entry in ledger:
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("kind") != "model_observation":
+            continue
+        if entry.get("contract_id") != contract_id:
+            continue
+        if str(entry.get("criterion") or "") != criterion:
+            continue
+        latest = entry
+    return latest
+
+
+def criterion_observed_in_ledger(
+    ledger: list[dict[str, Any]],
+    *,
+    contract_id: str,
+    criterion: str,
+) -> bool:
+    """Whether the latest model read for a criterion is ``observed``."""
+
+    entry = latest_model_observation(
+        ledger, contract_id=contract_id, criterion=criterion
+    )
+    return entry is not None and entry.get("status") == "observed"
+
+
+# ----------------------------------------------------------------------
 # Bounded cross-kind crop
 # ----------------------------------------------------------------------
 
@@ -376,21 +534,26 @@ def bounded_evidence_ledger(
     digest_window: int | None = None,
     effect_limit: int | None = None,
     seal_limit: int | None = None,
+    observation_limit: int | None = None,
 ) -> list[dict[str, Any]]:
     """Per-kind bounded crop: criterion entries keep the anchor-preserving
-    limit, digests keep the last N screens, effect events and seals keep
-    their own windows. Per-kind chronological order is preserved, which is
-    all the folds require (each kind folds independently).
+    limit, digests keep the last N screens, effect events, model observations
+    and seals keep their own windows. Per-kind chronological order is
+    preserved, which is all the folds require (each kind folds independently).
     """
 
     if not entries:
         return []
     window = max(1, int(digest_window or l1_digest_screen_window()))
     effect_window = max(1, int(effect_limit or L2_EFFECT_EVENT_LIMIT))
+    observation_window = max(
+        1, int(observation_limit or MODEL_OBSERVATION_LIMIT)
+    )
     seal_window = max(1, int(seal_limit or SEAL_LEDGER_LIMIT))
     criterion: list[dict[str, Any]] = []
     digests: list[dict[str, Any]] = []
     effects: list[dict[str, Any]] = []
+    observations: list[dict[str, Any]] = []
     seals: list[dict[str, Any]] = []
     other: list[dict[str, Any]] = []
     for entry in entries:
@@ -399,6 +562,8 @@ def bounded_evidence_ledger(
             digests.append(entry)
         elif kind == "effect_event":
             effects.append(entry)
+        elif kind == "model_observation":
+            observations.append(entry)
         elif kind in {"stage_seal", "stage_unseal"}:
             seals.append(entry)
         elif "criterion_id" in entry:
@@ -410,6 +575,7 @@ def bounded_evidence_ledger(
         bounded_criterion
         + digests[-window:]
         + effects[-effect_window:]
+        + observations[-observation_window:]
         + seals[-seal_window:]
         + other
     )
@@ -638,6 +804,28 @@ def ever_matched(
     )
 
 
+# ----------------------------------------------------------------------
+# Provenance levels (L2): E1 weak hit / E2 residual / E3 derived /
+# E4 this-round precise / E5 this-round caused
+# ----------------------------------------------------------------------
+
+def latest_entry_for(
+    ledger: list[dict[str, Any]], *, contract_id: str, criterion_id: str
+) -> dict[str, Any] | None:
+    """The newest ledger entry for one criterion (append order wins)."""
+
+    latest: dict[str, Any] | None = None
+    for entry in ledger:
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("contract_id") != contract_id:
+            continue
+        if str(entry.get("criterion_id") or "") != criterion_id:
+            continue
+        latest = entry
+    return latest
+
+
 def unattested_raw_text_bindings(
     ledger: list[dict[str, Any]],
     contract: GoalContract,
@@ -678,11 +866,17 @@ def unattested_raw_text_bindings(
 def criterion_history_from_ledger(
     ledger: list[dict[str, Any]], *, contract_id: str
 ) -> list[dict[str, Any]]:
-    """Group bounded ledger entries into per-observation criterion snapshots."""
+    """Group bounded ledger entries into per-observation criterion snapshots.
+
+    S4: the liveness signal reads the model screen-readings (``model_observation``
+    entries) in addition to mechanical criterion entries, so a panel producing
+    a stream of fresh observations is visible as movement — the run-G case
+    that was misjudged stuck.
+    """
 
     snapshots: dict[tuple[Any, Any], dict[str, Any]] = {}
     for item in ledger:
-        if item.get("contract_id") != contract_id:
+        if not isinstance(item, dict) or item.get("contract_id") != contract_id:
             continue
         key = (item.get("screen_id"), item.get("observation_epoch"))
         snapshot = snapshots.setdefault(
@@ -693,9 +887,18 @@ def criterion_history_from_ledger(
                 "per_criterion": {},
             },
         )
-        snapshot["per_criterion"][str(item.get("criterion_id"))] = str(
-            item.get("status") or "unknown"
-        )
+        if item.get("kind") == "model_observation":
+            criterion = str(item.get("criterion") or "")
+            if criterion:
+                snapshot["per_criterion"][criterion] = str(
+                    item.get("status") or "unknown"
+                )
+            continue
+        criterion_id = str(item.get("criterion_id") or "")
+        if criterion_id:
+            snapshot["per_criterion"][criterion_id] = str(
+                item.get("status") or "unknown"
+            )
     return list(snapshots.values())
 
 
@@ -706,16 +909,18 @@ def stage_status_from_ledger(
     *,
     contract_id: str,
     criteria: dict[str, Any] | None = None,
+    satisfied_by_code: set[str] | None = None,
 ) -> dict[str, Any] | None:
     """Fold the evidence ledger into per-stage status (W2 T3).
 
     Pure ledger fold, zero model calls. A stage is ``satisfied`` when every
-    done-criterion is pinned by the ever-matched latch (which is monotonic:
-    a matched observation stays latched across transient staleness, and only
-    a positive ``contradicted`` counter-observation unlocks). The current
-    stage is the first non-satisfied stage in plan order; when every stage is
-    satisfied ``current_stage_index`` is None. Returns None when there is no
-    plan.
+    done-criterion's LATEST ``model_observation`` is ``observed`` (the model
+    directly read the criterion's content), or when the exact-and-free app-
+    foreground code sensor proved it (``satisfied_by_code``). A later
+    ``contradicted`` read keeps the stage pending — absence never upgrades
+    (P0 #13a). The current stage is the first non-satisfied stage in plan
+    order; when every stage is satisfied ``current_stage_index`` is None.
+    Returns None when there is no plan.
 
     ``criteria`` (name -> CriterionSpec) is the Stage-Sealing extension:
     when provided, the ledger is remapped by semantic key first, so a
@@ -730,18 +935,23 @@ def stage_status_from_ledger(
         ledger = remap_ledger_for_contract(
             ledger, contract_id=contract_id, criteria=criteria, task_plan=task_plan
         )
+    code_satisfied = set(satisfied_by_code or set())
     per_stage: list[dict[str, Any]] = []
     current_index: int | None = None
     for stage in task_plan:
         satisfied: list[str] = []
         pending: list[str] = []
         for name in stage.done_criteria:
-            latch = ever_matched(
-                ledger,
-                criterion_id=name,
-                contract_id=contract_id,
+            if name in code_satisfied:
+                satisfied.append(name)
+                continue
+            entry = latest_model_observation(
+                ledger, contract_id=contract_id, criterion=name
             )
-            (satisfied if latch.latched else pending).append(name)
+            if entry is not None and entry.get("status") == "observed":
+                satisfied.append(name)
+            else:
+                pending.append(name)
         status = "satisfied" if not pending else "pending"
         per_stage.append(
             {
@@ -758,50 +968,6 @@ def stage_status_from_ledger(
         "current_stage_index": current_index,
         "per_stage": per_stage,
     }
-
-
-def criterion_satisfied_by_digest(
-    ledger: list[dict[str, Any]],
-    *,
-    contract_id: str,
-    criterion: Any,
-) -> tuple[bool, dict[str, Any] | None]:
-    """L1 closure: is this raw-text criterion settled by a trusted digest?
-
-    A criterion whose typed predicate expects raw text is mechanically
-    satisfied once that expected value was recorded verbatim in any
-    ``screen_text_digest`` taken at a target-app-entered observation — even
-    if the current (final) screen no longer shows it (Stage-Sealing §3 L1:
-    completion is a trajectory property). Only exact matches on digest texts
-    close a criterion; everything else stays unknown and is left to the L3
-    judge. Returns ``(closed, digest_entry)``.
-    """
-
-    predicate = getattr(criterion, "predicate", None)
-    if predicate is None:
-        return False, None
-    definition = CORE_PREDICATE_CATALOG.get(predicate.predicate_id)
-    if definition is None or definition.value_domain != "raw_text":
-        return False, None
-    expected = getattr(predicate, "expected_value", None)
-    if expected is None:
-        return False, None
-    expected_text = normalize_semantic_text(expected)
-    if not expected_text:
-        return False, None
-    for entry in ledger:
-        if not isinstance(entry, dict):
-            continue
-        if entry.get("kind") != "screen_text_digest":
-            continue
-        if entry.get("contract_id") != contract_id:
-            continue
-        if entry.get("target_app_entered") is not True:
-            continue
-        for item in entry.get("texts") or []:
-            if normalize_semantic_text(item.get("text")) == expected_text:
-                return True, entry
-    return False, None
 
 
 # ----------------------------------------------------------------------
@@ -836,9 +1002,12 @@ def seal_records_for_contract(
     if contract is None or not contract.task_plan:
         return []
     criteria = _criteria_map(contract)
-    key_to_stage = {
-        stage_semantic_key(stage, criteria): stage for stage in contract.task_plan
-    }
+    key_to_stage: dict[str, Any] = {}
+    for stage in contract.task_plan:
+        # First-wins (smallest index): when two stages share a semantic key
+        # (identical done criteria), the seal belongs to the EARLIER stage —
+        # pi-23's key-collision artifact attributed it to the later one.
+        key_to_stage.setdefault(stage_semantic_key(stage, criteria), stage)
     active: dict[str, dict[str, Any]] = {}
     for entry in ledger:
         if not isinstance(entry, dict):
@@ -857,6 +1026,9 @@ def seal_records_for_contract(
                     "screen_id": entry.get("screen_id"),
                     "step": entry.get("step"),
                     "sealed_at": entry.get("sealed_at"),
+                    "provenance_by_criterion": dict(
+                        entry.get("provenance_by_criterion") or {}
+                    ),
                 }
         elif kind == "stage_unseal":
             active.pop(entry.get("semantic_key"), None)
@@ -885,26 +1057,24 @@ def seal_satisfied_stages(
     screen_id: str | None,
     step: int | None,
     evidence_refs: list[str] | None = None,
+    satisfied_by_code: set[str] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Eagerly seal every stage whose done criteria are all latched.
+    """Eagerly seal every stage whose done criteria are all observed.
 
-    Idempotent: a stage already sealed (same semantic key, still active) is
-    skipped. Returns ``(ledger, new_seals)`` where ``new_seals`` lists only
-    the records actually written now.
+    Model-delegated gate: a stage seals once every done criterion's LATEST
+    ``model_observation`` is ``observed`` (the model directly read the
+    criterion's content on a screen) or the exact-and-free app-foreground
+    code sensor proved it (``satisfied_by_code``). Idempotent: a stage
+    already sealed (same semantic key, still active) is skipped. A later
+    positive ``contradicted`` read revokes the seal (P0 #13a: revocation
+    only on contradiction, never on absence — handled by
+    ``revoke_seals_on_contradiction``). Returns ``(ledger, new_seals)``.
     """
 
     if contract is None or not contract.task_plan:
         return list(ledger or []), []
     criteria = _criteria_map(contract)
-    folded = stage_status_from_ledger(
-        ledger,
-        contract.task_plan,
-        contract_id=contract_id,
-        criteria=criteria,
-    )
-    if folded is None:
-        return list(ledger or []), []
-    per_stage = {item["stage_id"]: item for item in folded["per_stage"]}
+    code_satisfied = set(satisfied_by_code or set())
     active_keys = {
         record["semantic_key"]
         for record in seal_records_for_contract(
@@ -914,12 +1084,26 @@ def seal_satisfied_stages(
     new_ledger = list(ledger or [])
     new_seals: list[dict[str, Any]] = []
     for stage in contract.task_plan:
-        item = per_stage.get(stage.stage_id)
-        if item is None or item["status"] != "satisfied":
-            continue
         key = stage_semantic_key(stage, criteria)
         if key in active_keys:
             continue
+        all_observed = True
+        for name in stage.done_criteria:
+            if name in code_satisfied:
+                continue
+            entry = latest_model_observation(
+                ledger, contract_id=contract_id, criterion=name
+            )
+            if entry is None or entry.get("status") != "observed":
+                all_observed = False
+                break
+        if not all_observed:
+            continue
+        provenance_by_criterion = {
+            name: str(getattr(criteria.get(name), "provenance", "state") or "state")
+            for name in stage.done_criteria
+            if name in criteria
+        }
         record = {
             "kind": "stage_seal",
             "contract_id": contract_id,
@@ -930,6 +1114,7 @@ def seal_satisfied_stages(
             "step": int(step or 0),
             "sealed_at": int(step or 0),
             "semantic_key": key,
+            "provenance_by_criterion": provenance_by_criterion,
         }
         new_ledger.append(record)
         new_seals.append(record)
@@ -1019,9 +1204,11 @@ def remap_ledger_for_contract(
         criterion_semantic_key(_criterion_description(criterion)): name
         for name, criterion in criteria.items()
     }
-    key_to_stage = {
-        stage_semantic_key(stage, criteria): stage for stage in (task_plan or ())
-    }
+    key_to_stage: dict[str, Any] = {}
+    for stage in task_plan or ():
+        # First-wins (smallest index) mirrors seal_records_for_contract: a
+        # shared semantic key resolves to the EARLIER stage.
+        key_to_stage.setdefault(stage_semantic_key(stage, criteria), stage)
     remapped: list[dict[str, Any]] = []
     for entry in ledger:
         if not isinstance(entry, dict):
@@ -1053,6 +1240,12 @@ def remap_ledger_for_contract(
                 named.append(item)
             new["named_evidence"] = named
             remapped.append(new)
+        elif kind == "model_observation":
+            new = dict(entry)
+            stored_key = entry.get("semantic_key")
+            if stored_key and stored_key in key_to_name:
+                new["criterion"] = key_to_name[stored_key]
+            remapped.append(new)
         elif "criterion_id" in entry:
             new = dict(entry)
             stored_key = entry.get("semantic_key")
@@ -1062,3 +1255,131 @@ def remap_ledger_for_contract(
         else:
             remapped.append(entry)
     return remapped
+
+
+# ----------------------------------------------------------------------
+# L4: per-criterion gap list (plan injection data source)
+# ----------------------------------------------------------------------
+
+
+def _criterion_app_foreground(criterion: Any) -> bool:
+    """Whether this criterion is settled by the exact-and-free app-foreground
+    code sensor (the only retained code-side content check)."""
+
+    if getattr(criterion, "verification", None) == "app_or_activity_match":
+        return True
+    predicate = getattr(criterion, "predicate", None)
+    if predicate is not None:
+        predicate_id = getattr(predicate, "predicate_id", None)
+        if predicate_id and str(predicate_id).startswith("app.foreground"):
+            return True
+    return False
+
+
+def criterion_gap_status(
+    *,
+    contract: GoalContract | None,
+    ledger: list[dict[str, Any]],
+    contract_id: str,
+    screen_id: str,
+    observation_epoch: int,
+    satisfied_by_code: set[str] | None = None,
+) -> dict[str, Any] | None:
+    """The plan-side criterion-level gap list (L4).
+
+    Model-delegated fold: a criterion is satisfied only when the LATEST
+    ``model_observation`` for it is ``observed`` (the model directly read the
+    criterion's content on a screen), or when the exact-and-free app-foreground
+    code sensor proved it (``satisfied_by_code``). ``contradicted`` and
+    ``not_visible`` reads, and absence of any read, all stay pending — code
+    never upgrades absence to success (P0 #13a fail-closed). ``confirmed``
+    criteria keep their provenance annotation so the renderer marks
+    [需确认]. Already-sealed stages render one-line ✅ confirmations.
+    Returns None when there is no plan. The caller (reflect tail) sanitizes
+    descriptions before writing to state.
+    """
+
+    if contract is None or not contract.task_plan:
+        return None
+    criteria = {
+        criterion.name: criterion for criterion in contract.success_criteria
+    }
+    seals = seal_records_for_contract(
+        ledger, contract=contract, contract_id=contract_id
+    )
+    sealed_names: dict[str, str] = {}
+    for record in seals:
+        for name in record["criteria_sealed"]:
+            sealed_names.setdefault(name, record["stage_id"])
+    fold_status: dict[str, str] = {}
+    code_satisfied = set(satisfied_by_code or set())
+    for name, criterion in criteria.items():
+        if name in sealed_names:
+            fold_status[name] = "satisfied"
+            continue
+        if name in code_satisfied:
+            fold_status[name] = "satisfied"
+            continue
+        entry = latest_model_observation(
+            ledger, contract_id=contract_id, criterion=name
+        )
+        if entry is not None and entry.get("status") == "observed":
+            fold_status[name] = "satisfied"
+        else:
+            fold_status[name] = "pending"
+    current_stage: Any = None
+    for stage in contract.task_plan:
+        if any(fold_status.get(name) != "satisfied" for name in stage.done_criteria):
+            current_stage = stage
+            break
+    items: list[dict[str, Any]] = []
+    if current_stage is not None:
+        for name in current_stage.done_criteria:
+            criterion = criteria.get(name)
+            if criterion is None:
+                continue
+            items.append(
+                {
+                    "name": name,
+                    "description": str(
+                        getattr(criterion, "description", "") or ""
+                    )[:200],
+                    "status": fold_status.get(name, "pending"),
+                    "provenance": str(
+                        getattr(criterion, "provenance", "state") or "state"
+                    ),
+                    "control_hint": (
+                        str(getattr(criterion, "control_hint", None) or "")[:120]
+                        or None
+                    ),
+                }
+            )
+    sealed_rows: list[dict[str, Any]] = []
+    current_names = (
+        set(current_stage.done_criteria) if current_stage is not None else set()
+    )
+    for name in sorted(sealed_names):
+        if name in current_names:
+            continue
+        criterion = criteria.get(name)
+        sealed_rows.append(
+            {
+                "name": name,
+                "stage_id": sealed_names[name],
+                "description": str(
+                    getattr(criterion, "description", "") or ""
+                )[:200],
+            }
+        )
+    return {
+        "current_stage_id": (
+            current_stage.stage_id if current_stage is not None else None
+        ),
+        "current_objective": (
+            str(getattr(current_stage, "objective", "") or "")[:120]
+            if current_stage is not None
+            else None
+        ),
+        "items": items,
+        "sealed": sealed_rows,
+    }

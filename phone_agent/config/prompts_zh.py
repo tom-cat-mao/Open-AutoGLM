@@ -49,6 +49,10 @@ CONTEXT_USAGE_RULES = """# Context 使用规则
 - 优先相信当前截图和用户任务；context 与截图冲突时，以截图为准。
 - 不要复读 context 内容，不要把其中的隐私文本写入动作 message。
 - `avoid_repeating` 表示同一目标已重复；超过阈值后系统会拒绝执行并消耗一步预算，请改换目标或策略。
+- `criterion_gap_list`（判据缺口清单）是验收条件的**中性状态说明**，不是执行指令：
+  ⏳=尚未满足的验收条件；✅=已满足（含已封存阶段的判据）。
+  [需确认]=该条件必须读取控件上的实际值（从结果列表推断不算数）；[需观察]=该条件须在屏幕上可观察。
+  是否以及如何满足这些条件由你根据当前截图自行决定。
 """
 
 FAILURE_RECOVERY_MAP = """# 失败恢复策略
@@ -105,16 +109,20 @@ AUTO_OUTPUT_CONTRACT = """# 输出格式：auto
 ACCEPTANCE_JUDGE_PROMPT_ZH = """你是一个手机自动化任务的终局验收员。屏幕上的动作已经执行完毕，现在要判断**整个任务**是否真的完成了。
 
 你必须只输出一个 JSON 对象，不要 Markdown、XML、函数调用或多余文本：
-{"verdicts":[{"criterion":"标准名","status":"satisfied|unknown|contradicted","observed_value":"你在该处实际看到的文字或 null"}],"message":"简短说明"}
+{"verdicts":[{"criterion":"标准名","status":"satisfied|unknown|contradicted","observed_value":"你在该处实际看到的文字或 null","evidence_step":"轨迹步号（如 s5）或 final_screen"}],"message":"简短说明"}
 旧格式 {"completed":true|false,"message":"...","named_evidence":[...]} 仍会被接受（兼容），但新格式 verdicts 优先。
 
 判断标准：
 - 只判断契约中标记为 [judge] 的成功标准。标记为 [auto] 的标准由系统读取设备状态自行核验，你不需要点名或回报。
 - 用户消息中的"证据账本摘要"是程序从无障碍树机械提取的屏幕文本记录，属于已确证事实，可直接采信；
   你的任务是对账本未覆盖的判据逐条给出判断。终屏不再出现的字面量（如年份、时间区间）若已在账本中机械记录，视为已满足。
-- 每条 verdict 给出：criterion（标准名）、status（satisfied/unknown/contradicted）、observed_value（你实际看到的原文，没有则 null）。
-  照实回报你看到的文字，不要猜测系统内部使用的取值。observed_value 仅用于当前 node 匹配，不写入 state/trace。
-- 只有当屏幕或账本确实证明该标准已满足时才给 satisfied。宁可漏报，不要虚报——虚报会让任务被错误地判定为完成。
+- 用户消息中的"轨迹摘要"按步骤列出每一步的动作类型→反思结论，以及该步的模型屏幕观察（判据=读到的值）。
+  这是你判断因果（某状态是本轮行为产生的还是屏上残留）的唯一信息来源：判定一条判据 satisfied 时，
+  evidence_step 必须引用你在其上读到该内容的轨迹步号（如 s5），或写 final_screen（当前终屏读到）。
+- 每条 verdict 给出：criterion（标准名）、status（satisfied/unknown/contradicted）、observed_value（你实际看到的原文，没有则 null）、
+  evidence_step（仅 satisfied 必需：轨迹步号 sN 或 final_screen）。照实回报你看到的文字，不要猜测系统内部使用的取值。
+  observed_value 仅用于当前 node 匹配，不写入 state/trace。
+- 只有当屏幕、账本或轨迹确实证明该标准已满足时才给 satisfied。宁可漏报，不要虚报——虚报会让任务被错误地判定为完成。
 - 标准名白名单：用户消息中的"标准名白名单"列出了本任务的合法标准名。verdicts 中每条 verdict 的 criterion 字段必须**逐字等于**白名单中的名称之一，禁止改写、翻译、大小写变化、加前后缀或拼接其他文字。
 - 完整性：completed=true（或全部 required 的 [judge] 标准均 satisfied）时，白名单中每个 required 的 [judge] 标准都必须各有一条 criterion 逐字命中的 verdict，缺一不可；缺少任何一条即视为任务未完成，输出 completed=false。
 - 如果任务尚未完成，输出 completed=false 并把 verdicts 留空，或对仍不确定的判据输出 status="unknown"。

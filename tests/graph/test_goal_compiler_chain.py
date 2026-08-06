@@ -508,3 +508,169 @@ def test_agent_config_exposes_fact_extractors() -> None:
     config = AgentConfig()
     assert config.visual_fact_extractor is None
     assert config.whole_screen_fact_extractor is None
+
+
+def test_llm_compiler_infra_error_raises_distinct_code() -> None:
+    """Infrastructure failures (connection/timeout) must NOT silently degrade
+    to the failed sentinel -> heuristic fallback -> semantic takeover chain."""
+    from phone_agent.graph.goal_compiler import (
+        GoalCompilationError,
+        LLMGoalCompiler,
+    )
+
+    class _ConnFailModel:
+        def request(self, *args, **kwargs):
+            raise ConnectionError("Connection refused")
+
+    compiler = LLMGoalCompiler(_ConnFailModel(), lang="cn", retry_limit=1)
+    try:
+        compiler.compile(task="查明天从北京到上海的航班")
+        raise AssertionError("should have raised")
+    except GoalCompilationError as exc:
+        assert exc.code == "compile_infrastructure_error"
+
+
+def test_llm_compiler_semantic_failure_still_returns_failed_sentinel() -> None:
+    from phone_agent.graph.goal_compiler import LLMGoalCompiler
+
+    class _GarbageModel:
+        def request(self, *args, **kwargs):
+            class _R:
+                action = "not json at all"
+
+            return _R()
+
+    compiler = LLMGoalCompiler(_GarbageModel(), lang="cn", retry_limit=1)
+    contract = compiler.compile(task="查明天从北京到上海的航班")
+    assert contract.compile_status == "failed"
+
+
+def test_goal_node_infra_error_ends_with_error_not_takeover() -> None:
+    from phone_agent.graph.goal_compiler import GoalCompilationError
+    from phone_agent.graph.nodes import goal_node as goal_node_mod
+
+    def _raise_infra(state, config):
+        raise GoalCompilationError("compile_infrastructure_error", "boom")
+
+    original = goal_node_mod.compile_goal_contract
+    goal_node_mod.compile_goal_contract = _raise_infra
+    try:
+        from phone_agent.graph.runtime_goal import RuntimeGoalContext
+
+        result = goal_node_mod.goal_node(
+            {"task": "查明天从北京到上海的航班", "step_count": 0, "messages": []},
+            {"configurable": {"runtime_goal_context": RuntimeGoalContext()}},
+        )
+    finally:
+        goal_node_mod.compile_goal_contract = original
+    assert result.get("error")
+    assert result.get("failure_cause") == "goal_compile_infrastructure"
+    assert "pending_interrupt" not in result
+    assert result.get("goal_contract_status") == "failed"
+
+
+def test_task_plan_launch_stage_exemption() -> None:
+    """stage_0 with only app-foreground criteria is a legitimate launch stage;
+    a trivial-only mid-task stage is still rejected."""
+    from phone_agent.graph.goal import (
+        CriterionSpec,
+        TaskStage,
+        task_plan_validation_errors,
+    )
+
+    fg = CriterionSpec("fg", "app 前台", "app_or_activity_match")
+    real = CriterionSpec("route", "路线可见", "accessibility_text_match")
+    names = {"fg", "route"}
+    cmap = {"fg": fg, "route": real}
+    launch_first = (
+        TaskStage("s0", "打开携程", ("fg",), "", 0),
+        TaskStage("s1", "设置路线", ("route",), "", 1),
+    )
+    assert task_plan_validation_errors(
+        launch_first, criterion_names=names, criteria=cmap
+    ) == []
+    trivial_mid = (
+        TaskStage("s0", "设置路线", ("route",), "", 0),
+        TaskStage("s1", "前台", ("fg",), "", 1),
+    )
+    errors = task_plan_validation_errors(
+        trivial_mid, criterion_names=names, criteria=cmap
+    )
+    assert any("trivial_only_done_criteria" in e for e in errors)
+
+
+def test_llm_compiler_self_repair_loop_adds_missing_parameter_criterion() -> None:
+    """S5: the model's own self_check declares a missing parameter criterion;
+    the compiler re-asks ONCE and adopts the repaired contract."""
+    import json
+    from dataclasses import dataclass
+
+    from phone_agent.graph.goal_compiler import LLMGoalCompiler
+
+    @dataclass
+    class Response:
+        action: str
+
+    first = {
+        "objective": "查机票",
+        "success_criteria": [
+            {"name": "launch", "description": "app 前台", "verification": "app_or_activity_match", "required": True},
+            {"name": "results", "description": "航班列表", "verification": "vlm_judge", "required": True}
+        ],
+        "constraints": [],
+        "non_goals": [],
+        "target_app_hint": None,
+        "ordinal": None,
+        "task_plan": [
+            {"objective": "打开", "done_criteria": ["launch"], "fallback": ""},
+            {"objective": "结果", "done_criteria": ["results"], "fallback": ""},
+            {"objective": "完成", "done_criteria": ["launch", "results"], "fallback": ""},
+        ],
+        "self_check": {
+            "parameter_coverage_ok": False,
+            "missing_criteria": ["出发时段 06:00-12:00 没有独立判据"],
+        },
+    }
+    repaired = {
+        "objective": "查机票",
+        "success_criteria": [
+            {"name": "results", "description": "航班列表", "verification": "vlm_judge", "required": True},
+            {"name": "time_filter", "description": "筛选面板显示‘06:00-12:00’时段", "verification": "vlm_judge", "required": True, "provenance": "confirmed", "control_hint": "筛选面板"},
+        ],
+        "constraints": [],
+        "non_goals": [],
+        "target_app_hint": None,
+        "ordinal": None,
+        "task_plan": [
+            {"objective": "筛选", "done_criteria": ["time_filter"], "fallback": ""},
+            {"objective": "结果", "done_criteria": ["results"], "fallback": ""},
+            {"objective": "完成", "done_criteria": ["time_filter", "results"], "fallback": ""},
+        ],
+        "self_check": {"parameter_coverage_ok": True, "missing_criteria": []},
+    }
+
+    class Client:
+        def __init__(self) -> None:
+            self.calls = 0
+            self.messages = None
+
+        def request(self, messages, **kwargs):
+            self.messages = messages
+            self.calls += 1
+            if self.calls == 1:
+                return Response(json.dumps(first, ensure_ascii=False))
+            return Response(json.dumps(repaired, ensure_ascii=False))
+
+    client = Client()
+    contract = LLMGoalCompiler(client, lang="cn", retry_limit=1).compile(
+        task="查明天早上6点到12点的机票"
+    )
+    assert client.calls == 2
+    assert contract.compile_status == "compiled"
+    names = [c.name for c in contract.success_criteria]
+    assert "time_filter" in names
+    time_filter = next(c for c in contract.success_criteria if c.name == "time_filter")
+    assert time_filter.provenance == "confirmed"
+    assert time_filter.control_hint == "筛选面板"
+    # The repair prompt was appended to the second request.
+    assert "self_check" in str(client.messages[-1])

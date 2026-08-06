@@ -125,6 +125,21 @@ def _entry(epoch, criterion, status, *, target_app_entered=True) -> dict:
     }
 
 
+def _observe(epoch, criterion, status="observed") -> dict:
+    """S2: one model screen-read (the stage fold's evidence channel)."""
+
+    return {
+        "kind": "model_observation",
+        "contract_id": "h",
+        "criterion": criterion,
+        "status": status,
+        "observed_value": None,
+        "step": epoch,
+        "screen_id": f"s{epoch}",
+        "observation_epoch": epoch,
+    }
+
+
 # ----------------------------------------------------------------------
 # T1: data model + serialization + validation
 # ----------------------------------------------------------------------
@@ -351,31 +366,37 @@ def test_llm_compiler_rejects_unknown_done_criterion_name() -> None:
 
 
 def test_llm_compiler_rejects_trivial_only_stage() -> None:
-    """A stage whose done criteria are ALL always-true auto standards is rejected."""
-    plan = (
-        TaskStage(
-            stage_id="s1",
-            objective="x",
-            done_criteria=("target_app_visible",),
-            fallback="",
-            index=0,
-        ),
-    )
+    """A MID-TASK stage whose done criteria are ALL always-true auto standards is
+    rejected; a pure launch stage at index 0 is legitimate progress (the app was
+    not open before) and is now explicitly allowed."""
     contract = _plan_contract()
-    errors = task_plan_validation_errors(
-        plan,
-        criterion_names=[item.name for item in contract.success_criteria],
-        criteria={item.name: item for item in contract.success_criteria},
+    names = [item.name for item in contract.success_criteria]
+    cmap = {item.name: item for item in contract.success_criteria}
+
+    # Launch stage at index 0 → valid (exemption).
+    launch_plan = (
+        TaskStage("s0", "打开应用", ("target_app_visible",), "", 0),
+        TaskStage("s1", "x", ("player_visible",), "", 1),
+        TaskStage("s2", "y", ("task_objective_achieved",), "", 2),
     )
+    assert task_plan_validation_errors(launch_plan, criterion_names=names, criteria=cmap) == []
+
+    # Trivial-only stage at index 1 → rejected.
+    mid_plan = (
+        TaskStage("s0", "x", ("player_visible",), "", 0),
+        TaskStage("s1", "y", ("target_app_visible",), "", 1),
+    )
+    errors = task_plan_validation_errors(mid_plan, criterion_names=names, criteria=cmap)
     assert any("trivial_only_done_criteria" in error for error in errors)
 
+    # LLM output with a trivial-only stage in the MIDDLE must fail compilation.
     model = FakeModelClient(
         FakeModelResponse(
             "",
             _llm_json(
                 [
-                    {"objective": "打开b站", "done_criteria": ["target_app_visible"], "fallback": ""},
                     {"objective": "找到目标视频", "done_criteria": ["player_visible"], "fallback": ""},
+                    {"objective": "应用还在前台", "done_criteria": ["target_app_visible"], "fallback": ""},
                     {"objective": "开始播放", "done_criteria": ["task_objective_achieved"], "fallback": ""},
                 ]
             ),
@@ -454,8 +475,11 @@ def test_external_compiler_strips_invalid_plan() -> None:
 
 
 # ----------------------------------------------------------------------
-# T3: stage_status_from_ledger (pure fold, ever_matched semantics)
+# T3: stage_status_from_ledger (pure fold, model screen-read semantics)
 # ----------------------------------------------------------------------
+
+
+CODE_SET = {"target_app_visible"}
 
 
 def test_stage_status_all_pending() -> None:
@@ -470,13 +494,13 @@ def test_stage_status_all_pending() -> None:
 
 
 def test_stage_status_partial_satisfied() -> None:
-    """player_visible gates both stage 0 and stage 1, so matching the two
-    observed signals satisfies the first two stages: current = stage 2."""
-    ledger = [
-        _entry(1, "target_app_visible", "matched"),
-        _entry(1, "player_visible", "matched"),
-    ]
-    status = stage_status_from_ledger(ledger, _plan_contract().task_plan, contract_id="h")
+    """player_visible gates both stage 0 and stage 1; the app-foreground
+    criterion is settled by the code sensor, so observing player_visible
+    satisfies the first two stages: current = stage 2."""
+    ledger = [_observe(1, "player_visible")]
+    status = stage_status_from_ledger(
+        ledger, _plan_contract().task_plan, contract_id="h", satisfied_by_code=CODE_SET
+    )
 
     assert status["per_stage"][0]["status"] == "satisfied"
     assert status["per_stage"][1]["status"] == "satisfied"
@@ -485,35 +509,31 @@ def test_stage_status_partial_satisfied() -> None:
 
 
 def test_stage_status_all_satisfied_current_none() -> None:
-    ledger = [
-        _entry(1, "target_app_visible", "matched"),
-        _entry(1, "player_visible", "matched"),
-        _entry(1, "task_objective_achieved", "matched"),
-    ]
-    status = stage_status_from_ledger(ledger, _plan_contract().task_plan, contract_id="h")
+    ledger = [_observe(1, "player_visible"), _observe(1, "task_objective_achieved")]
+    status = stage_status_from_ledger(
+        ledger, _plan_contract().task_plan, contract_id="h", satisfied_by_code=CODE_SET
+    )
 
     assert status["current_stage_index"] is None
     assert all(stage["status"] == "satisfied" for stage in status["per_stage"])
 
 
-def test_stage_status_ever_matched_locks_across_transient_staleness() -> None:
-    """A matched observation stays latched across later unknown/stale rounds —
-    no oscillation regression (matches the goal_agenda latch semantics)."""
+def test_stage_status_observed_read_pins_criterion() -> None:
+    """A later not_visible read stays pending — the latest read wins, so an
+    absence never upgrades a previously observed criterion (fail-closed)."""
     ledger = [
-        _entry(1, "target_app_visible", "matched"),
-        _entry(2, "target_app_visible", "unknown"),
-        _entry(3, "target_app_visible", "stale"),
+        _observe(1, "player_visible"),
+        _observe(2, "player_visible", "not_visible"),
     ]
-    status = stage_status_from_ledger(ledger, _plan_contract().task_plan, contract_id="h")
+    status = stage_status_from_ledger(
+        ledger, _plan_contract().task_plan, contract_id="h", satisfied_by_code=CODE_SET
+    )
 
-    assert status["per_stage"][0]["satisfied_criteria"] == ["target_app_visible"]
+    assert status["per_stage"][0]["pending_criteria"] == ["player_visible"]
 
 
-def test_stage_status_contradiction_unlocks_latch() -> None:
-    ledger = [
-        _entry(1, "target_app_visible", "matched"),
-        _entry(2, "target_app_visible", "contradicted"),
-    ]
+def test_stage_status_contradiction_unlocks_stage() -> None:
+    ledger = [_observe(1, "target_app_visible"), _observe(2, "target_app_visible", "contradicted")]
     status = stage_status_from_ledger(ledger, _plan_contract().task_plan, contract_id="h")
 
     assert status["per_stage"][0]["status"] == "pending"
@@ -1101,9 +1121,9 @@ def test_finish_gate_fails_closed_on_missing_evidence_even_with_stages_done() ->
     closed — stage status can never substitute for criterion evidence."""
     contract = _judge_only_contract()
     ledger = [
-        _entry(1, "page_home_visible", "matched"),
-        _entry(1, "player_opened", "matched"),
-        _entry(1, "video_playing", "matched"),
+        _observe(1, "page_home_visible"),
+        _observe(1, "player_opened"),
+        _observe(1, "video_playing"),
     ]
     stage = stage_status_from_ledger(ledger, contract.task_plan, contract_id="h")
     assert stage["current_stage_index"] is None

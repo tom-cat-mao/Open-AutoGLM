@@ -65,6 +65,14 @@ class CriterionSpec:
     recovery_policy: str | None = None
     dependencies: tuple[str, ...] = ()
     contradictions: tuple[str, ...] = ()
+    # Provenance (L2): state = self-evident terminal (app foreground / toggle /
+    # results page); confirmed = query parameters shaping the answer (window /
+    # date / route / sort) that must be read precisely on the control THIS
+    # round; caused = action effect. ``ambiguity_policy`` is zero-consumed and
+    # its semantics are now carried by provenance (the field stays untouched
+    # for backward compat).
+    provenance: Literal["state", "confirmed", "caused"] = "state"
+    control_hint: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         value = {
@@ -80,7 +88,10 @@ class CriterionSpec:
             "recovery_policy": self.recovery_policy,
             "dependencies": list(self.dependencies),
             "contradictions": list(self.contradictions),
+            "provenance": self.provenance,
         }
+        if self.control_hint is not None:
+            value["control_hint"] = self.control_hint
         if self.predicate is not None:
             definition = CORE_PREDICATE_CATALOG.get(self.predicate.predicate_id)
             value["predicate"] = {
@@ -190,6 +201,7 @@ def task_plan_validation_errors(
     errors: list[str] = []
     seen_ids: set[str] = set()
     seen_indices: set[int] = set()
+    seen_done_sets: dict[tuple[str, ...], int] = {}
     for stage in task_plan:
         if not isinstance(stage, TaskStage):
             errors.append("stage_not_typed")
@@ -216,8 +228,22 @@ def task_plan_validation_errors(
             _criterion_is_stage_substantive(criteria_map.get(name))
             for name in stage.done_criteria
         )
-        if not substantive:
+        # A pure launch stage (index 0, only app-foreground criteria) is real
+        # progress — the app was not open before — not a false advance; only
+        # mid-task trivial-only stages are rejected.
+        if not substantive and stage.index != 0:
             errors.append(f"stage_{stage.index}:trivial_only_done_criteria")
+        # W2 T7 (L3): stages whose done-criteria are the EXACT same set are
+        # rejected at compile time — a duplicated stage would let a later stage
+        # "piggyback" on an earlier seal (pi-23 stage_2 搭便车).
+        done_key = tuple(sorted(set(stage.done_criteria)))
+        if done_key in seen_done_sets:
+            errors.append(
+                f"stage_{stage.index}:duplicate_done_criteria_of_stage_"
+                f"{seen_done_sets[done_key]}"
+            )
+        else:
+            seen_done_sets[done_key] = stage.index
     return errors
 
 
@@ -283,7 +309,15 @@ class GoalContract:
             self,
             "success_criteria",
             [
-                replace(item, description=redact_context_text(item.description)[:300])
+                replace(
+                    item,
+                    description=redact_context_text(item.description)[:300],
+                    control_hint=(
+                        redact_context_text(item.control_hint)[:120]
+                        if item.control_hint
+                        else None
+                    ),
+                )
                 for item in self.success_criteria
             ],
         )
@@ -383,6 +417,7 @@ class GoalContract:
                     "name": c.name,
                     "verification": c.verification,
                     "required": c.required,
+                    "provenance": c.provenance,
                     "description_chars": len(c.description),
                     "predicate_id": (
                         c.predicate.predicate_id if c.predicate is not None else None
@@ -426,8 +461,14 @@ class GoalContract:
             else:
                 arbiter = "judge"
                 judge_names.append(crit.name)
+            provenance_tag = {
+                "state": "",
+                "confirmed": "[确认]" if lang == "cn" else "[confirm]",
+                "caused": "[造成]" if lang == "cn" else "[caused]",
+            }.get(crit.provenance, "")
             criteria_lines.append(
-                f"  - {crit.name} [{crit.verification}] ({tag}, {arbiter}):"
+                f"  - {crit.name} [{crit.verification}] ({tag}, {arbiter}"
+                f"{', ' + provenance_tag if provenance_tag else ''}):"
                 f" {crit.description}"
             )
         criteria_block = "\n".join(criteria_lines) if criteria_lines else "  (none)"
@@ -532,6 +573,14 @@ class GoalContract:
                     ),
                     contradictions=tuple(
                         str(value) for value in item.get("contradictions") or []
+                    ),
+                    provenance=(
+                        item.get("provenance")
+                        if item.get("provenance") in {"state", "confirmed", "caused"}
+                        else "state"
+                    ),
+                    control_hint=(
+                        str(item.get("control_hint") or "").strip()[:120] or None
                     ),
                 )
             )

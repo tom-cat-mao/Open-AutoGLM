@@ -150,6 +150,9 @@ class AgentState(TypedDict):
     finish_validation_evidence: Optional[dict]  # trace-safe final goal evidence
     goal_evidence_ledger: list[dict]  # bounded privacy-safe criterion evidence; Reflect-owned
     goal_agenda: list[dict]  # criterion descriptions and folded statuses; no evidence text
+    criterion_gap_list: Optional[
+        dict
+    ]  # per-criterion gap list for plan injection; folded from model_observation ledger entries by reflect (declared channel: previously absent so the reflect return was silently dropped by LangGraph)
     task_plan_status: Optional[
         dict
     ]  # W2 T3: reflect 推导的阶段状态（current_stage_index + per_stage）；无 plan 时 None；永不当门槛

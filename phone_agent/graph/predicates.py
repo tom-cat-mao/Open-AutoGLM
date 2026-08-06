@@ -234,6 +234,7 @@ class Matcher:
             "exact",
             "casefold_exact",
             "contains",
+            "contains_all",
             "collection_contains",
             "collection_not_contains",
         }
@@ -259,6 +260,23 @@ class Matcher:
             if not isinstance(expected, str) or not isinstance(observed, str):
                 return MatchResult("unknown", spec.matcher_id, "value_type_invalid")
             matched = expected.casefold().strip() in observed.casefold()
+        elif spec.matcher_id == "contains_all":
+            # Conjunction over ONE control subtree: every expected fragment must
+            # appear in the same observed text (attributes_present). Each fact
+            # carries one subtree's texts as a list, so the match requires a
+            # single element containing all fragments.
+            if not isinstance(expected, (list, tuple, set)) or not all(
+                isinstance(item, str) for item in expected
+            ):
+                return MatchResult("unknown", spec.matcher_id, "value_type_invalid")
+            if not isinstance(observed, (list, tuple, set)) or not all(
+                isinstance(item, str) for item in observed
+            ):
+                return MatchResult("unknown", spec.matcher_id, "value_type_invalid")
+            matched = any(
+                all(str(item).casefold().strip() in text.casefold() for item in expected)
+                for text in observed
+            )
         else:
             if not isinstance(expected, (list, tuple, set)) or not isinstance(
                 observed, (list, tuple, set)
@@ -592,6 +610,18 @@ CORE_PREDICATE_CATALOG = PredicateCatalog(
             evidence_scope="existential",
         ),
         _definition(
+            "semantic.attributes_present",
+            "string_list",
+            {"accessibility", "visual_region", "whole_screen"},
+            # Multi-fragment conjunction over ONE control subtree: every expected
+            # fragment must appear in the same observed text (pi-23 collapse fix).
+            matcher_id="contains_all",
+            projection=PRIVATE_RUNTIME,
+            whole_screen_allowed=True,
+            value_domain="raw_text",
+            evidence_scope="existential",
+        ),
+        _definition(
             "external.effect_confirmed",
             "mapping",
             {"external_probe"},
@@ -635,3 +665,5 @@ def _confidence_bucket(confidence: float) -> str:
     if confidence >= 0.6:
         return "medium"
     return "low"
+
+

@@ -171,6 +171,8 @@ def parse_acceptance_verdicts(raw: str) -> list[dict] | None:
             entry["observed_value"] = item.get("observed_value")
         if "screen_reference" in item:
             entry["screen_reference"] = str(item.get("screen_reference"))[:128]
+        if "evidence_step" in item:
+            entry["evidence_step"] = item.get("evidence_step")
         verdicts.append(entry)
     return verdicts
 
@@ -285,6 +287,73 @@ def _ledger_digest_for_judge(
     return str(safe or "")[:2000]
 
 
+def _trajectory_summary_for_judge(
+    ledger: list[dict], *, contract_id: str, lang: str, task_context: str | None
+) -> str:
+    """Bounded (~12-step) trajectory summary for the L3 judge (S3).
+
+    Code builds the FORM from ledger records — per step: action type →
+    reflect verdict (from effect events), and the model screen readings
+    (criterion=value from ``model_observation``). The judge uses this to
+    attribute causality (this-run behavior vs residual screen state); code
+    never interprets the values. All text was redacted on ledger write and is
+    re-sanitized before egress.
+    """
+
+    buckets: dict[int, dict[str, Any]] = {}
+    for entry in ledger:
+        if not isinstance(entry, dict) or entry.get("contract_id") != contract_id:
+            continue
+        kind = entry.get("kind")
+        try:
+            step = int(entry.get("step") or 0)
+        except (TypeError, ValueError):
+            continue
+        bucket = buckets.setdefault(step, {"actions": [], "observations": []})
+        if kind == "effect_event":
+            action = str(entry.get("action") or "") or "?"
+            observed_after = str(entry.get("observed_after") or "")
+            verdict = ""
+            for part in observed_after.split():
+                if part.startswith("verdict="):
+                    verdict = part[len("verdict="):]
+                    break
+            bucket["actions"].append(
+                f"{action} -> {verdict or '?'}"
+            )
+        elif kind == "model_observation":
+            status = str(entry.get("status") or "")
+            if status != "observed":
+                continue
+            criterion = str(entry.get("criterion") or "")[:128]
+            value = str(entry.get("observed_value") or "")[:80]
+            bucket["observations"].append(
+                f"{criterion}={value}" if value else criterion
+            )
+    if not buckets:
+        return ""
+    lines: list[str] = []
+    for step in sorted(buckets)[-12:]:
+        bucket = buckets[step]
+        action_text = "; ".join(bucket["actions"]) if bucket["actions"] else "?"
+        line = f"s{step}: {action_text}"
+        if bucket["observations"]:
+            line += f"; \u89c2\u5bdf: {', '.join(bucket['observations'])}"
+        lines.append(line)
+    prefix = (
+        "Trajectory summary (action -> reflection verdict; observation = model screen reads; "
+        "your only source for causality):"
+        if lang == "en"
+        else "轨迹摘要（动作 -> 反思结论；观察 = 模型读屏结果；判断因果的唯一来源）："
+    )
+    summary_text = prefix + "\n" + "\n".join(lines)
+    safe = sanitize_context_payload(
+        summary_text, consumer="reflect_prompt", task_context=task_context
+    )
+    return str(safe or "")[:2000]
+
+
+
 def _stage_hint(stage_id: str, *, lang: str) -> str:
     if lang == "en":
         return (
@@ -292,6 +361,40 @@ def _stage_hint(stage_id: str, *, lang: str) -> str:
             "recorded — return to the relevant screen so the evidence can be observed."
         )
     return f"该判据属于阶段 {stage_id}，其证据未入账——请回到对应页面让证据可被观察。"
+
+
+def _confirmed_stage_hint(stage_id: str, *, lang: str) -> str:
+    """Rejection hint for an unsatisfied CONFIRMED criterion (provenance).
+
+    Confirmed criteria (query parameters) must be read on the control itself;
+    the hint guides the agent back to the parameter panel instead of letting
+    it re-assert the same finish claim from the result list.
+    """
+
+    if lang == "en":
+        return (
+            f"This criterion belongs to stage {stage_id} and needs a confirmed "
+            "parameter read — open the filter/parameter panel so the value is "
+            "readable on its control (inferring it from the result list does "
+            "not count)."
+        )
+    return (
+        f"该判据属于阶段 {stage_id}，需要确认参数值——请打开筛选/参数面板，"
+        "让参数值在控件上可被读取（从结果列表推断不算数）。"
+    )
+
+
+def _confirmed_terminal_hint(*, lang: str) -> str:
+    if lang == "en":
+        return (
+            "This confirmed parameter criterion has no recorded control read — "
+            "open the parameter panel so the value can be read on its control "
+            "(inferring it from the result list does not count)."
+        )
+    return (
+        "该确认参数判据暂无控件读值入账——请打开参数面板让值在控件上可被读取"
+        "（从结果列表推断不算数）。"
+    )
 
 
 def _terminal_hint(*, lang: str) -> str:
@@ -308,22 +411,33 @@ def _missing_feedback(
 ) -> dict:
     """Structured rejection feedback: per-unknown-criterion stage + neutral hint
     (Phase C §7). Only criterion names / stage ids / hints — never raw screen
-    text — so it is safe for the plan feedback channel.
+    text — so it is safe for the plan feedback channel. Confirmed criteria get
+    a control-read hint (L2 provenance): the agent must open the parameter
+    panel, not re-derive the value from the result list.
     """
     stage_map = criterion_stage_map(contract)
+    criteria_by_name = {
+        criterion.name: criterion for criterion in contract.success_criteria
+    }
     missing: list[dict] = []
     for name in sorted(unknown_names):
         stage_id = stage_map.get(name)
+        criterion = criteria_by_name.get(name)
+        confirmed = getattr(criterion, "provenance", "state") == "confirmed"
+        if confirmed:
+            hint = (
+                _confirmed_stage_hint(stage_id, lang=lang)
+                if stage_id
+                else _confirmed_terminal_hint(lang=lang)
+            )
+        else:
+            hint = (
+                _stage_hint(stage_id, lang=lang)
+                if stage_id
+                else _terminal_hint(lang=lang)
+            )
         missing.append(
-            {
-                "criterion": name,
-                "stage_id": stage_id,
-                "hint": (
-                    _stage_hint(stage_id, lang=lang)
-                    if stage_id
-                    else _terminal_hint(lang=lang)
-                ),
-            }
+            {"criterion": name, "stage_id": stage_id, "hint": hint}
         )
     return {"missing": missing}
 
@@ -648,6 +762,7 @@ def acceptance_node(state: "AgentState", config: RunnableConfig) -> dict:
         screen_id=after_observation.snapshot.screen_id,
         observation_epoch=after_observation.snapshot.observation_epoch,
         finish_claim_matched=finish_claim_matched,
+        current_step=state.get("step_count"),
     )
     # --- layer 3: semantic judgement, only for judge-eligible unknowns ---
     criteria_by_name = {
@@ -672,13 +787,20 @@ def acceptance_node(state: "AgentState", config: RunnableConfig) -> dict:
                 after_verifier_observation, task_context=task
             ),
             ledger_digest=digest,
+            trajectory_summary=_trajectory_summary_for_judge(
+                ledger,
+                contract_id=runtime_contract_id,
+                lang=lang,
+                task_context=task,
+            ),
         )
         merged_verdicts: list[dict] = []
         if verdicts is not None:
             merged_verdicts = list(verdicts)
         if named_evidence:
             # Legacy contract: each grounded named_evidence item is a
-            # satisfied verdict (W1-A whitelist preserved).
+            # satisfied verdict (W1-A whitelist preserved), read on the final
+            # screen (S3: evidence_step="final_screen").
             for item in named_evidence:
                 merged_verdicts.append(
                     {
@@ -686,6 +808,7 @@ def acceptance_node(state: "AgentState", config: RunnableConfig) -> dict:
                         "status": "satisfied",
                         "observed_value": item.get("observed_value"),
                         "screen_reference": item.get("screen_reference"),
+                        "evidence_step": "final_screen",
                     }
                 )
         if merged_verdicts:
@@ -705,6 +828,7 @@ def acceptance_node(state: "AgentState", config: RunnableConfig) -> dict:
             observation_epoch=after_observation.snapshot.observation_epoch,
             finish_claim_matched=finish_claim_matched,
             judge_verdicts=merged_verdicts or None,
+            current_step=state.get("step_count"),
         )
     elif fold["overall"] == "unknown" and _needs_semantic_judgement(goal_contract):
         emit_trace(
@@ -986,6 +1110,7 @@ def _run_semantic_judge(
     screenshot,
     after_observation_summary: dict,
     ledger_digest: str = "",
+    trajectory_summary: str = "",
 ) -> tuple[list[dict] | None, list[dict] | None, str]:
     """Ask the model whether the raw-text criteria are satisfied (layer 3).
 
@@ -1019,8 +1144,10 @@ def _run_semantic_judge(
             f"Current app: {current_app}\n"
             f"After-observation summary: {after_observation_summary}\n"
             f"Evidence ledger digest: {digest_block}\n"
+            f"Trajectory summary: {trajectory_summary or '(no trajectory records yet)'}\n"
             "Is the whole task complete? Judge only the [judge] criteria; "
-            "the ledger digest is mechanically extracted fact you may trust directly."
+            "the ledger digest is mechanically extracted fact you may trust directly, "
+            "and the trajectory summary is your only causality source."
         )
     else:
         body = (
@@ -1028,7 +1155,9 @@ def _run_semantic_judge(
             f"当前应用：{current_app}\n"
             f"当前屏幕摘要：{after_observation_summary}\n"
             f"证据账本摘要：{digest_block}\n"
-            "整个任务是否已完成？只判断 [judge] 标准；账本摘要是程序提取的事实，可直接采信。"
+            f"轨迹摘要：{trajectory_summary or '（暂无轨迹记录）'}\n"
+            "整个任务是否已完成？只判断 [judge] 标准；账本摘要是程序提取的事实，可直接采信；"
+            "轨迹摘要是判断因果的唯一来源。"
         )
     if whitelist:
         body = f"{body}\n\n{whitelist}"

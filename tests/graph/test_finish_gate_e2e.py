@@ -218,16 +218,15 @@ def test_previously_undeployable_tasks_now_compile(task: str) -> None:
 @pytest.mark.parametrize(
     "task", ["在美团点一杯咖啡不要加糖", "only use wifi to download"]
 )
-def test_constrained_tasks_report_no_constraint_gap(task: str) -> None:
-    """Requirement and contract constraints come from one function, so a
-    constrained task must not even register the gap that used to kill it."""
+def test_constrained_tasks_compile_without_code_side_gap(task: str) -> None:
+    """S5: negative constraints are model-owned — code no longer reads task
+    text for them, so a constrained task never registers a coverage gap."""
     requirements = TaskRequirementExtractor().extract(task)
     contract = HeuristicGoalCompiler().compile(task=task)
 
-    assert requirements.constraint_hashes
-    assert contract.constraints
     adequacy = ContractAdequacyValidator().validate(requirements, contract)
     assert "constraints_uncovered" not in adequacy.reason_codes
+    assert adequacy.status == "adequate"
 
 
 def test_finish_still_blocked_without_any_evidence() -> None:

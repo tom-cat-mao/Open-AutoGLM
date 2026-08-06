@@ -385,17 +385,26 @@ def _latch_contract() -> GoalContract:
     )
 
 
-def test_reflect_node_latches_goal_agenda_across_stale_observation(
+def test_reflect_node_keeps_goal_agenda_satisfied_from_model_observation(
     base_state, fake_device
 ) -> None:
-    """Wiring: reflect writes satisfied+latched when the current observation is
-    stale but an earlier trusted observation already matched the criterion."""
+    """Wiring: reflect writes satisfied+latched when the criterion was read by
+    the model on an earlier screen (model_observation ledger entry)."""
 
     base_state["goal_contract"] = _latch_contract()
     base_state["goal_contract_status"] = "compiled"
-    # Past trusted observation matched the criterion inside the target app.
+    # An earlier model screen-read observed the criterion.
     base_state["goal_evidence_ledger"] = [
-        _entry("matched", epoch=5, criterion="target_app_open", screen_id="screen-old")
+        {
+            "kind": "model_observation",
+            "contract_id": CONTRACT_ID,
+            "criterion": "target_app_open",
+            "status": "observed",
+            "observed_value": "目标应用",
+            "step": 5,
+            "screen_id": "screen-old",
+            "observation_epoch": 5,
+        }
     ]
     model = FakeModelClient(
         FakeModelResponse(
@@ -426,7 +435,10 @@ def test_reflect_node_latches_goal_agenda_across_stale_observation(
     assert item["status"] == "satisfied"
     assert item.get("latched") is True
     assert item.get("latched_epoch") == 5
-    # The current observation's own entry is appended but must not break the latch.
-    latest = result["goal_evidence_ledger"][-1]
-    assert latest["criterion_id"] == "target_app_open"
-    assert latest["status"] != "matched"
+    # The current step's own (observation-less) reflect pass must not break it.
+    observations = [
+        e
+        for e in result["goal_evidence_ledger"]
+        if e.get("kind") == "model_observation"
+    ]
+    assert observations and observations[0]["status"] == "observed"

@@ -82,6 +82,15 @@ def _is_self_observable(criterion: SuccessCriterion) -> bool:
     """Whether the system can settle this criterion without model testimony."""
 
     if criterion.verification == "vlm_judge":
+        predicate = criterion.predicate
+        if predicate is None:
+            return False
+        # Provenance != state with a typed predicate goes through the
+        # mechanical channel: a confirmed parameter read or a caused effect is
+        # settled by the ledger, never by self-attestation. Only `state`
+        # raw-text criteria need the judge.
+        if criterion.provenance in {"confirmed", "caused"}:
+            return True
         return False
     predicate = criterion.predicate
     if predicate is None:
@@ -935,33 +944,65 @@ def _latest_entry_for(
     return latest
 
 
-def _effect_event_evidence(
-    ledger: list[dict[str, Any]], *, contract_id: str, criterion_id: str
-) -> list[dict[str, Any]]:
-    """Grounded named_evidence for one criterion from L2 effect events."""
-    matched: list[dict[str, Any]] = []
-    for entry in ledger:
-        if not isinstance(entry, dict):
-            continue
-        if entry.get("kind") != "effect_event":
-            continue
-        if entry.get("contract_id") != contract_id:
-            continue
-        for item in entry.get("named_evidence") or []:
-            if not isinstance(item, dict):
-                continue
-            raw_name = str(item.get("criterion") or "")
-            if _normalize_criterion_name(raw_name) != _normalize_criterion_name(
-                criterion_id
-            ):
-                continue
-            screen_reference = str(item.get("screen_reference") or "").strip()
-            if not screen_reference or _is_placeholder_screen_reference(
-                screen_reference
-            ):
-                continue
-            matched.append(item)
-    return matched
+# S3: form-only reference validation for judge ``satisfied`` verdicts. The
+# judge must name the trajectory step (or "final_screen") where it read the
+# criterion; code only checks the FORM (present and in range), never the
+# content.
+
+def _evidence_step_valid(evidence_step: Any, current_step: int | None) -> bool:
+    """Whether a judge's evidence reference is well-formed and in range.
+
+    ``final_screen`` is always valid (the judge is reading the final screen);
+    a numeric step must be <= the current step count. Missing or out-of-range
+    references make a ``satisfied`` verdict invalid → unknown (fail-closed).
+    """
+
+    if evidence_step == "final_screen":
+        return True
+    if isinstance(evidence_step, bool):
+        return False
+    if isinstance(evidence_step, int):
+        step = evidence_step
+    else:
+        try:
+            step = int(str(evidence_step or "").strip().lstrip("sS"))
+        except (TypeError, ValueError):
+            return False
+    if current_step is None:
+        return step >= 0
+    return 0 <= step <= int(current_step)
+
+
+# S2: the fold's authority split. A criterion is CODE-settled only when an
+# exact-and-free sensor (app foreground / device state like toggle, rank,
+# focus) can decide it. Anything whose content is raw screen text (including
+# ``confirmed`` parameter criteria) belongs to the model tier (screen-read
+# + judge) — the model owns all content judgement.
+_CODE_SETTLED_VERIFICATIONS = frozenset(
+    {
+        "app_or_activity_match",
+        "object_hash_match",
+        "object_rank_match",
+        "focus_or_keyboard",
+        "toggle_state_match",
+        "external_probe",
+    }
+)
+
+
+def _code_settled_criterion(criterion: SuccessCriterion) -> bool:
+    """Whether an exact-and-free code sensor can settle this criterion."""
+
+    predicate = criterion.predicate
+    if predicate is None:
+        return criterion.verification in _CODE_SETTLED_VERIFICATIONS
+    if predicate.predicate_id.startswith("app.foreground"):
+        return True
+    try:
+        definition = CORE_PREDICATE_CATALOG.get(predicate.predicate_id)
+    except ValueError:
+        return criterion.verification in _CODE_SETTLED_VERIFICATIONS
+    return definition.value_domain not in {"raw_text", "structured"}
 
 
 def fold_acceptance_verdicts(
@@ -973,27 +1014,30 @@ def fold_acceptance_verdicts(
     observation_epoch: int,
     finish_claim_matched: list[str],
     judge_verdicts: list[dict[str, Any]] | None = None,
+    current_step: int | None = None,
 ) -> dict[str, Any]:
     """Stage-Sealing per-criterion fold (Phase C).
 
-    Replaces the all-or-nothing finish evaluation with a per-criterion
+    Replaces the decision-table finish evaluation with a per-criterion
     tri-state fold. Authority order per criterion:
 
     1. seal (stage sealed, authoritative) → ``satisfied``
-    2. L1 digest closure (mechanical raw-text record at a trusted
-       observation) → ``satisfied``
-    3. trusted latched evidence (ever-matched) → ``satisfied``
-    4. L2 grounded effect-event named_evidence → ``satisfied``
-    5. L3 judge verdict → as reported (``satisfied`` / ``unknown`` /
-       ``contradicted``)
-    6. otherwise → ``unknown``
+    2. latest ``model_observation``: ``observed`` → ``satisfied``;
+       ``contradicted`` → ``contradicted``
+    3. L3 judge verdict → as reported (``satisfied`` / ``unknown`` /
+       ``contradicted``); a ``satisfied`` verdict MUST carry a valid
+       ``evidence_step`` reference (trajectory step number or
+       ``final_screen``) — missing or out-of-range references degrade to
+       ``unknown`` (S3 form-only reference validation)
+    4. programmatic (self-observable) criteria: the current-observation
+       device truth (verifier signals / app-foreground code check)
+    5. otherwise → ``unknown``
 
-    Positive counter-observations (``contradicted``) override lower tiers at
-    their own tier; ``unknown``/absence never upgrades to success (P0 #13a).
+    Positive counter-observations (``contradicted``) override lower tiers;
+    ``unknown``/absence never upgrades to success (P0 #13a).
     """
     from phone_agent.graph.goal_evidence import (
-        criterion_satisfied_by_digest,
-        ever_matched,
+        latest_model_observation,
         remap_ledger_for_contract,
         seal_records_for_contract,
     )
@@ -1028,7 +1072,6 @@ def fold_acceptance_verdicts(
     for criterion in contract.success_criteria:
         name = criterion.name
         normalized = _normalize_criterion_name(name)
-        verdict: dict[str, Any] | None = None
         # 1. seal authority
         seal = seal_by_criterion.get(name)
         if seal is not None:
@@ -1051,98 +1094,44 @@ def fold_acceptance_verdicts(
             }
             satisfied.append(name)
             continue
-        # 2. L1 mechanical closure (raw-text predicates only)
-        closed, digest = criterion_satisfied_by_digest(
-            ledger, contract_id=contract_id, criterion=criterion
+        # 2. model screen-read (the model-delegated sensor; the model owns the
+        # content, code records only the form)
+        observation = latest_model_observation(
+            ledger, contract_id=contract_id, criterion=name
         )
-        if closed:
-            per_criterion[name] = {
-                "status": "satisfied",
-                "reason": "l1_digest_closed",
-                "digest_screen_id": digest.get("screen_id") if digest else None,
-            }
-            satisfied.append(name)
-            continue
-        # judge criteria (model tier) and trajectory-scoped programmatic
-        # criteria are trajectory properties: a trusted matched observation
-        # latches them permanently (positive contradiction later unlocks).
-        is_judge = not _is_self_observable(criterion)
-        trajectory_scoped = is_judge or criterion.freshness == "trajectory"
-        if trajectory_scoped:
-            # 3. trusted latched evidence
-            latch = ever_matched(
-                ledger, criterion_id=name, contract_id=contract_id
-            )
-            if latch.latched:
+        if observation is not None:
+            obs_status = str(observation.get("status") or "")
+            if obs_status == "observed":
                 per_criterion[name] = {
                     "status": "satisfied",
-                    "reason": "evidence_latched",
-                    "latched_epoch": latch.matched_epoch,
-                    "latched_screen_id": latch.matched_screen_id,
+                    "reason": "model_observed",
+                    "observed_value": observation.get("observed_value"),
+                    "observed_step": observation.get("step"),
+                    "observed_screen_id": observation.get("screen_id"),
                 }
                 satisfied.append(name)
                 continue
-            latest_status = str(
-                (_latest_entry_for(ledger, contract_id=contract_id, criterion_id=name) or {})
-                .get("status")
-                or "unknown"
-            )
-            if latest_status == "contradicted":
+            if obs_status == "contradicted":
                 per_criterion[name] = {
                     "status": "contradicted",
-                    "reason": "evidence_contradicted",
+                    "reason": "model_observation_contradicted",
                 }
                 contradicted.append(name)
                 continue
-            # 3b. A trusted ``matched`` entry (typed provider fact at a trusted
-            # observation, e.g. L1 mechanical raw-text record) settles a
-            # trajectory-scoped criterion directly. The plan-side latch is
-            # target-app gated, so this direct read is what restores the legacy
-            # typed-fold behaviour for judge criteria whose fact was collected
-            # at the acceptance observation.
-            if latest_status == "matched":
-                entry = _latest_entry_for(
-                    ledger, contract_id=contract_id, criterion_id=name
-                )
-                per_criterion[name] = {
-                    "status": "satisfied",
-                    "reason": "evidence_matched",
-                    "matched_epoch": entry.get("observation_epoch"),
-                    "matched_screen_id": entry.get("screen_id"),
-                }
-                satisfied.append(name)
-                continue
-        if is_judge:
-            # 4. L2 grounded effect-event named_evidence (model tier)
-            l2 = _effect_event_evidence(
-                ledger, contract_id=contract_id, criterion_id=name
-            )
-            if l2:
-                per_criterion[name] = {
-                    "status": "satisfied",
-                    "reason": "l2_effect_event",
-                    "screen_references": [
-                        str(item.get("screen_reference") or "")[:128] for item in l2
-                    ],
-                }
-                satisfied.append(name)
-                continue
-            # 5. L3 judge verdict
+        # 3. L3 judge verdict (model tier) with form-only reference check
+        if not _code_settled_criterion(criterion):
             verdict = judge_map.get(normalized)
             if verdict is not None:
-                # Legacy named_evidence items carry a screen_reference; an
-                # ungrounded (placeholder) reference cannot settle a criterion
-                # (W1-A provenance rule preserved). New-contract verdicts
-                # carry no reference and are accepted as the judge's statement.
-                screen_ref = str(verdict.get("screen_reference") or "").strip()
-                if screen_ref and _is_placeholder_screen_reference(screen_ref):
+                status = str(verdict.get("status") or "unknown")
+                if status == "satisfied" and not _evidence_step_valid(
+                    verdict.get("evidence_step"), current_step
+                ):
                     per_criterion[name] = {
                         "status": "unknown",
-                        "reason": "judge_verdict_ungrounded",
+                        "reason": "judge_reference_missing_or_out_of_range",
                     }
                     unknown.append(name)
                     continue
-                status = str(verdict.get("status") or "unknown")
                 per_criterion[name] = {
                     "status": status,
                     "reason": "judge_verdict",
@@ -1159,14 +1148,14 @@ def fold_acceptance_verdicts(
                 else:
                     unknown.append(name)
                 continue
-            # 6. otherwise unknown
+            # 5. otherwise unknown
             per_criterion[name] = {
                 "status": "unknown",
-                "reason": "no_evidence_no_judgement",
+                "reason": "no_observation_no_judgement",
             }
             unknown.append(name)
             continue
-        # programmatic (self-observable, current_observation) criteria keep
+        # 4. programmatic (self-observable, current_observation) criteria keep
         # strict freshness: only the CURRENT screen's observation settles them
         # (P0 #13a fail-closed; trajectory permanence does not apply).
         entry = _latest_entry_for(
