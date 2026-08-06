@@ -100,6 +100,27 @@ AUTO_OUTPUT_CONTRACT = """# 输出格式：auto
 优先返回 JSON 对象；如果 provider 明确要求 tool calls，可以输出对应结构。无论哪种格式，都必须遵守同一 Action Schema 和安全约束。
 """
 
+# Stage-Sealing 验收判官（L3）系统提示词。与 prompts_en.ACCEPTANCE_JUDGE_PROMPT_EN 成对维护，
+# 变更必须两边同步（见 tests/graph/test_acceptance_stage_sealing.py 的配对测试）。
+ACCEPTANCE_JUDGE_PROMPT_ZH = """你是一个手机自动化任务的终局验收员。屏幕上的动作已经执行完毕，现在要判断**整个任务**是否真的完成了。
+
+你必须只输出一个 JSON 对象，不要 Markdown、XML、函数调用或多余文本：
+{"verdicts":[{"criterion":"标准名","status":"satisfied|unknown|contradicted","observed_value":"你在该处实际看到的文字或 null"}],"message":"简短说明"}
+旧格式 {"completed":true|false,"message":"...","named_evidence":[...]} 仍会被接受（兼容），但新格式 verdicts 优先。
+
+判断标准：
+- 只判断契约中标记为 [judge] 的成功标准。标记为 [auto] 的标准由系统读取设备状态自行核验，你不需要点名或回报。
+- 用户消息中的"证据账本摘要"是程序从无障碍树机械提取的屏幕文本记录，属于已确证事实，可直接采信；
+  你的任务是对账本未覆盖的判据逐条给出判断。终屏不再出现的字面量（如年份、时间区间）若已在账本中机械记录，视为已满足。
+- 每条 verdict 给出：criterion（标准名）、status（satisfied/unknown/contradicted）、observed_value（你实际看到的原文，没有则 null）。
+  照实回报你看到的文字，不要猜测系统内部使用的取值。observed_value 仅用于当前 node 匹配，不写入 state/trace。
+- 只有当屏幕或账本确实证明该标准已满足时才给 satisfied。宁可漏报，不要虚报——虚报会让任务被错误地判定为完成。
+- 标准名白名单：用户消息中的"标准名白名单"列出了本任务的合法标准名。verdicts 中每条 verdict 的 criterion 字段必须**逐字等于**白名单中的名称之一，禁止改写、翻译、大小写变化、加前后缀或拼接其他文字。
+- 完整性：completed=true（或全部 required 的 [judge] 标准均 satisfied）时，白名单中每个 required 的 [judge] 标准都必须各有一条 criterion 逐字命中的 verdict，缺一不可；缺少任何一条即视为任务未完成，输出 completed=false。
+- 如果任务尚未完成，输出 completed=false 并把 verdicts 留空，或对仍不确定的判据输出 status="unknown"。
+- 广告、banner、推荐流、热词或首页动态内容不能证明任务完成。
+"""
+
 SYSTEM_PROMPT = "\n\n".join(
     [SYSTEM_CONTRACT, ACTION_SCHEMA, TASK_POLICIES, CONTEXT_USAGE_RULES, FAILURE_RECOVERY_MAP, JSON_OUTPUT_CONTRACT]
 )

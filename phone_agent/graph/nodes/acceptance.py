@@ -31,6 +31,8 @@ from phone_agent.config.policy import (
     DEFAULT_VERIFICATION_POLICY,
     absolute_max_steps,
 )
+from phone_agent.config.prompts_en import ACCEPTANCE_JUDGE_PROMPT_EN
+from phone_agent.config.prompts_zh import ACCEPTANCE_JUDGE_PROMPT_ZH
 from phone_agent.device_factory import ObservationCaptureError
 from phone_agent.graph.context import (
     continuation_credential,
@@ -43,6 +45,7 @@ from phone_agent.graph.fact_providers import (
     collect_goal_facts,
 )
 from phone_agent.graph.goal import (
+    GoalContract,
     build_goal_prompt_block,
     ensure_goal_contract,
     goal_runtime_reference,
@@ -52,11 +55,16 @@ from phone_agent.graph.goal_evaluator import (
     GoalEvaluation,
     _is_self_observable,
     _normalize_criterion_name,
-    evaluate_finish_claim,
-    pure_goal_evaluator,
+    evaluation_from_acceptance_fold,
+    fold_acceptance_verdicts,
+    resolve_programmatic_criteria,
 )
 from phone_agent.graph.goal_evidence import (
     append_evaluation_entries,
+    append_screen_text_digest,
+    criterion_semantic_key,
+    criterion_stage_map,
+    revoke_seals_on_contradiction,
     target_app_entered,
     unattested_raw_text_bindings,
 )
@@ -76,37 +84,12 @@ from phone_agent.model.client import MessageBuilder
 if TYPE_CHECKING:
     from phone_agent.graph.state import AgentState
 
-ACCEPTANCE_SYSTEM_PROMPT_CN = """你是一个手机自动化任务的终局验收员。屏幕上的动作已经执行完毕，现在要判断**整个任务**是否真的完成了。
-
-你必须只输出一个 JSON 对象，不要 Markdown、XML、函数调用或多余文本：
-{"completed":true|false,"message":"简短说明","named_evidence":[{"criterion":"标准名","screen_reference":"mark_id 或屏幕上的具体元素","observed_value":"你在该处实际看到的文字"}]}
-
-判断标准：
-- 只判断契约中标记为 [judge] 的成功标准。标记为 [auto] 的标准由系统读取设备状态自行核验，你不需要点名或回报。
-- 每条证据给出：criterion（标准名）、screen_reference（mark_id 或屏幕上的具体元素，不要写"区域1"/"屏幕"这类占位）、observed_value（你在该处实际看到的原文）。
-- 照实回报你看到的文字，不要猜测系统内部使用的取值。observed_value 仅用于当前 node 匹配，不写入 state/trace。
-- 只有当屏幕确实显示该标准已满足时才点名它。宁可漏报，不要虚报——虚报会让任务被错误地判定为完成。
-- 标准名白名单：用户消息中的"标准名白名单"列出了本任务的合法标准名。named_evidence 中每条 evidence 的 criterion 字段必须**逐字等于**白名单中的名称之一，禁止改写、翻译、大小写变化、加前后缀或拼接其他文字。
-- 完整性：completed=true 时，白名单中每个 required 的 [judge] 标准都必须各有一条 criterion 逐字命中的 named_evidence，缺一不可；缺少任何一条即视为任务未完成，输出 completed=false。
-- 如果任务尚未完成，输出 completed=false 并把 named_evidence 留空。
-- 广告、banner、推荐流、热词或首页动态内容不能证明任务完成。
-"""
-
-ACCEPTANCE_SYSTEM_PROMPT_EN = """You are the terminal acceptance checker for a mobile automation task. The action has already executed; your job is to judge whether the **whole task** is genuinely complete.
-
-You MUST output exactly one JSON object. No Markdown, XML, function calls, or extra text:
-{"completed":true|false,"message":"brief note","named_evidence":[{"criterion":"criterion_name","screen_reference":"mark_id or a concrete on-screen element","observed_value":"the text you actually see there"}]}
-
-Judgment criteria:
-- Judge only the criteria marked [judge] in the contract. Criteria marked [auto] are verified by the system from device state — do not cite or report them.
-- For each evidence item give: criterion (its name), screen_reference (a mark_id or concrete on-screen element — never a placeholder like "region-1"/"screen"), and observed_value (the text you actually see there).
-- Report what you see verbatim; do not guess values the system uses internally. observed_value is node-local and must not enter state or trace.
-- Only name a criterion when the screen genuinely shows it satisfied. Prefer under-reporting: a false claim makes the task wrongly count as finished.
-- Criterion name whitelist: the user message contains a "criterion name whitelist" listing the only legal names for this task. The criterion field of every named_evidence item MUST equal one of the whitelist names VERBATIM — no paraphrasing, translation, case changes, prefixes/suffixes, or extra text.
-- Completeness: when completed=true, every required [judge] criterion in the whitelist must have exactly one named_evidence item whose criterion matches verbatim. Missing any one means the task is not complete — output completed=false.
-- If the task is not complete, output completed=false and leave named_evidence empty.
-- Ads, banners, recommendation feeds, trending words, and home-screen churn never prove completion.
-"""
+# Stage-Sealing judge prompts (L3). Single source of truth lives in
+# config/prompts_zh.py / prompts_en.py (CN/EN must stay in lockstep — see the
+# pairing test). The old names are retained as aliases for callers/tests that
+# predate the Stage-Sealing contract change.
+ACCEPTANCE_SYSTEM_PROMPT_CN = ACCEPTANCE_JUDGE_PROMPT_ZH
+ACCEPTANCE_SYSTEM_PROMPT_EN = ACCEPTANCE_JUDGE_PROMPT_EN
 
 _EVIDENCE_SOURCES = frozenset(
     {
@@ -156,7 +139,45 @@ def parse_acceptance_response(raw: str) -> tuple[bool, str, list[dict] | None]:
     return completed, message, evidence
 
 
-def _hard_veto(collected: dict[str, dict] | None, goal_contract) -> list[str]:
+def parse_acceptance_verdicts(raw: str) -> list[dict] | None:
+    """Parse the Stage-Sealing judge contract: a ``verdicts`` list.
+
+    None means the model produced no usable verdicts field (the caller falls
+    back to the legacy ``completed``/``named_evidence`` contract); an empty
+    list means "judge ran but had nothing satisfied to report". Verdict
+    statuses are validated against the tri-state.
+    """
+    try:
+        data = json.loads(str(raw or "").strip())
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    raw_verdicts = data.get("verdicts")
+    if not isinstance(raw_verdicts, list):
+        return None
+    verdicts: list[dict] = []
+    for item in raw_verdicts:
+        if not isinstance(item, dict):
+            continue
+        status = str(item.get("status") or "")
+        if status not in {"satisfied", "unknown", "contradicted"}:
+            continue
+        entry: dict[str, object] = {
+            "criterion": str(item.get("criterion", ""))[:128],
+            "status": status,
+        }
+        if "observed_value" in item:
+            entry["observed_value"] = item.get("observed_value")
+        if "screen_reference" in item:
+            entry["screen_reference"] = str(item.get("screen_reference"))[:128]
+        verdicts.append(entry)
+    return verdicts
+
+
+def _hard_veto(
+    collected: dict[str, dict] | None, goal_contract
+) -> list[str]:
     """Required criteria that collected facts directly contradict (layer 1)."""
 
     if not collected:
@@ -210,6 +231,101 @@ def _judge_whitelist_block(names: list[str], *, lang: str) -> str:
             "paraphrasing, translation, or case changes):\n" + names_block
         )
     return "标准名白名单（必须逐字使用，禁止改写、翻译或大小写变化）：\n" + names_block
+
+
+def _ledger_digest_for_judge(
+    ledger: list[dict], *, contract_id: str, lang: str, task_context: str | None
+) -> str:
+    """Bounded L1+L2+seal summary handed to the L3 judge (Phase C §5).
+
+    All text inside was regex-redacted on write; the rendered digest is
+    re-sanitized before egress so raw literals never leak into the prompt
+    consumer beyond the redacted form.
+    """
+    from phone_agent.graph.goal_evidence import l1_digest_screen_window
+
+    window = l1_digest_screen_window()
+    lines: list[str] = []
+    if lang == "en":
+        lines.append(
+            "Evidence ledger digest (program-extracted screen-text records; "
+            "authoritative mechanical facts — trust them directly):"
+        )
+    else:
+        lines.append(
+            "证据账本摘要（程序从无障碍树机械提取的屏幕文本记录，属已确证事实，可直接采信）："
+        )
+    digests = [e for e in ledger if isinstance(e, dict) and e.get("kind") == "screen_text_digest"]
+    if not digests:
+        lines.append("  (no screen-text records yet)" if lang == "en" else "  （暂无屏幕文本记录）")
+    for entry in digests[-window:]:
+        texts = [
+            str(item.get("text") or "")[:120]
+            for item in (entry.get("texts") or [])[:12]
+        ]
+        if not texts:
+            continue
+        screen = str(entry.get("screen_id") or "unknown")[:64]
+        joined = " | ".join(texts)
+        lines.append(f"  screen[{screen}]: {joined}")
+    events = [e for e in ledger if isinstance(e, dict) and e.get("kind") == "effect_event"]
+    for entry in events[-8:]:
+        lines.append(
+            f"  action[{entry.get('action') or ''}]@{entry.get('step') or 0}"
+            f" screen[{str(entry.get('screen_id') or '')[:48]}]"
+        )
+    seals = [e for e in ledger if isinstance(e, dict) and e.get("kind") == "stage_seal"]
+    for entry in seals[-8:]:
+        criteria = ", ".join(str(c) for c in (entry.get("criteria_sealed") or []))
+        lines.append(f"  sealed stage[{entry.get('stage_id') or ''}] criteria: {criteria}")
+    digest_text = "\n".join(lines)
+    safe = sanitize_context_payload(
+        digest_text, consumer="reflect_prompt", task_context=task_context
+    )
+    return str(safe or "")[:2000]
+
+
+def _stage_hint(stage_id: str, *, lang: str) -> str:
+    if lang == "en":
+        return (
+            f"This criterion belongs to stage {stage_id}; its evidence was not "
+            "recorded — return to the relevant screen so the evidence can be observed."
+        )
+    return f"该判据属于阶段 {stage_id}，其证据未入账——请回到对应页面让证据可被观察。"
+
+
+def _terminal_hint(*, lang: str) -> str:
+    if lang == "en":
+        return (
+            "No evidence was recorded for this terminal criterion — return to the "
+            "relevant screen so it can be observed."
+        )
+    return "该终局判据暂无证据入账——请回到相关页面让其可被观察。"
+
+
+def _missing_feedback(
+    contract, unknown_names: list[str], *, lang: str
+) -> dict:
+    """Structured rejection feedback: per-unknown-criterion stage + neutral hint
+    (Phase C §7). Only criterion names / stage ids / hints — never raw screen
+    text — so it is safe for the plan feedback channel.
+    """
+    stage_map = criterion_stage_map(contract)
+    missing: list[dict] = []
+    for name in sorted(unknown_names):
+        stage_id = stage_map.get(name)
+        missing.append(
+            {
+                "criterion": name,
+                "stage_id": stage_id,
+                "hint": (
+                    _stage_hint(stage_id, lang=lang)
+                    if stage_id
+                    else _terminal_hint(lang=lang)
+                ),
+            }
+        )
+    return {"missing": missing}
 
 
 def acceptance_node(state: "AgentState", config: RunnableConfig) -> dict:
@@ -375,10 +491,13 @@ def acceptance_node(state: "AgentState", config: RunnableConfig) -> dict:
 
     runtime_contract_id = goal_runtime_reference(state)
     state_contract = state.get("goal_contract")
-    has_runtime_binding = isinstance(state_contract, dict) and isinstance(
-        state_contract.get("runtime_reference"), str
-    )
-    ledger = list(state.get("goal_evidence_ledger") or []) if has_runtime_binding else []
+    # The ledger is trustworthy whenever the state carries a usable contract
+    # (runtime-bound dict or a direct GoalContract object); only legacy/trace
+    # payload states (no runtime reference) start from an empty ledger.
+    if isinstance(state_contract, (dict, GoalContract)):
+        ledger = list(state.get("goal_evidence_ledger") or [])
+    else:
+        ledger = []
 
     # --- layers 1 & 2: what the system can establish on its own ---
     facts = collect_goal_facts(
@@ -395,6 +514,10 @@ def acceptance_node(state: "AgentState", config: RunnableConfig) -> dict:
         current_app=current_app,
         foreground_activity=after_observation.snapshot.foreground_activity,
     )
+    semantic_keys = {
+        criterion.name: criterion_semantic_key(criterion.description)
+        for criterion in goal_contract.success_criteria
+    }
     if facts:
         ledger = append_evaluation_entries(
             ledger,
@@ -404,6 +527,33 @@ def acceptance_node(state: "AgentState", config: RunnableConfig) -> dict:
             observation_epoch=after_observation.snapshot.observation_epoch,
             predicate_ids=facts["predicate_ids"],
             target_app_entered=in_target_app,
+            semantic_keys=semantic_keys,
+        )
+    # L1: the terminal observation's mechanical text digest joins the ledger
+    # (the final screen is part of the trajectory too).
+    ledger = append_screen_text_digest(
+        ledger,
+        contract_id=runtime_contract_id,
+        screen_id=after_observation.snapshot.screen_id,
+        observation_epoch=after_observation.snapshot.observation_epoch,
+        marks=after_observation.mark_registry.marks.values(),
+        target_app_entered=in_target_app,
+    )
+    # Positive counter-observation on a sealed criterion revokes the seal
+    # (P0 #13a: revocation only on contradiction, never on absence).
+    if facts:
+        contradicted_facts = {
+            name
+            for name, result in collected.items()
+            if isinstance(result, dict) and result.get("status") == "contradicted"
+        }
+        ledger = revoke_seals_on_contradiction(
+            ledger,
+            contract=goal_contract,
+            contract_id=runtime_contract_id,
+            contradicted_criteria=contradicted_facts,
+            screen_id=after_observation.snapshot.screen_id,
+            step=state.get("step_count"),
         )
 
     unattested = unattested_raw_text_bindings(
@@ -466,11 +616,52 @@ def acceptance_node(state: "AgentState", config: RunnableConfig) -> dict:
             },
         )
 
-    # --- layer 3: semantic judgement, only where it is actually needed ---
-    named_evidence: list[dict] | None = None
+    # --- Stage-Sealing fold: per-criterion tri-state (Phase C) ---
+    # Self-observable criteria without a typed predicate (legacy
+    # object_rank_match / object_hash_match / app_or_activity_match /
+    # focus_or_keyboard / accessibility_text_match contracts) have no provider
+    # fact, so the only mechanical truth for them is the acceptance
+    # observation's verifier signals. Resolve them here and write the results
+    # into the ledger (current screen/epoch) so the fold's programmatic tier
+    # can settle them against the same trust rules as typed facts.
+    programmatic_results = resolve_programmatic_criteria(
+        goal_contract=goal_contract,
+        verifier_evidence=verifier_result.evidence,
+        after_observation=after_verifier_observation,
+        device_signals=device_signals,
+        goal_probes=configurable.get("goal_probes"),
+    )
+    if programmatic_results:
+        ledger = append_evaluation_entries(
+            ledger,
+            evaluation={"evidence": {"per_criterion": programmatic_results}},
+            contract_id=runtime_contract_id,
+            screen_id=after_observation.snapshot.screen_id,
+            observation_epoch=after_observation.snapshot.observation_epoch,
+            predicate_ids={name: None for name in programmatic_results},
+            semantic_keys=semantic_keys,
+        )
+    fold = fold_acceptance_verdicts(
+        contract=goal_contract,
+        ledger=ledger,
+        contract_id=runtime_contract_id,
+        screen_id=after_observation.snapshot.screen_id,
+        observation_epoch=after_observation.snapshot.observation_epoch,
+        finish_claim_matched=finish_claim_matched,
+    )
+    # --- layer 3: semantic judgement, only for judge-eligible unknowns ---
+    criteria_by_name = {
+        criterion.name: criterion for criterion in goal_contract.success_criteria
+    }
+    judge_eligible_unknowns = [
+        name for name in fold["unknown"] if not _is_self_observable(criteria_by_name[name])
+    ]
     model_message = ""
-    if _needs_semantic_judgement(goal_contract):
-        named_evidence, model_message = _run_semantic_judge(
+    if judge_eligible_unknowns:
+        digest = _ledger_digest_for_judge(
+            ledger, contract_id=runtime_contract_id, lang=lang, task_context=task
+        )
+        verdicts, named_evidence, model_message = _run_semantic_judge(
             state=state,
             config=config,
             lang=lang,
@@ -480,30 +671,71 @@ def acceptance_node(state: "AgentState", config: RunnableConfig) -> dict:
             after_observation_summary=sanitize_verifier_observation_payload(
                 after_verifier_observation, task_context=task
             ),
+            ledger_digest=digest,
         )
+        merged_verdicts: list[dict] = []
+        if verdicts is not None:
+            merged_verdicts = list(verdicts)
         if named_evidence:
-            claimed = set()
+            # Legacy contract: each grounded named_evidence item is a
+            # satisfied verdict (W1-A whitelist preserved).
             for item in named_evidence:
+                merged_verdicts.append(
+                    {
+                        "criterion": item.get("criterion"),
+                        "status": "satisfied",
+                        "observed_value": item.get("observed_value"),
+                        "screen_reference": item.get("screen_reference"),
+                    }
+                )
+        if merged_verdicts:
+            claimed = set()
+            for item in merged_verdicts:
                 if not isinstance(item, dict) or not item.get("criterion"):
                     continue
                 normalized = _normalize_criterion_name(item.get("criterion"))
                 if normalized:
                     claimed.add(normalized)
             finish_claim_matched = sorted(set(finish_claim_matched) | claimed)
+        fold = fold_acceptance_verdicts(
+            contract=goal_contract,
+            ledger=ledger,
+            contract_id=runtime_contract_id,
+            screen_id=after_observation.snapshot.screen_id,
+            observation_epoch=after_observation.snapshot.observation_epoch,
+            finish_claim_matched=finish_claim_matched,
+            judge_verdicts=merged_verdicts or None,
+        )
+    elif fold["overall"] == "unknown" and _needs_semantic_judgement(goal_contract):
+        emit_trace(
+            config,
+            state,
+            "acceptance",
+            "acceptance_judge_skipped",
+            {"unknown_criteria": fold["unknown"], "reason": "programmatic_only"},
+        )
 
-    evaluation = evaluate_finish_claim(
-        contract=goal_contract,
-        verifier_status=verifier_result.status,
-        verifier_evidence=verifier_result.evidence,
-        after_observation=after_verifier_observation,
-        device_signals=device_signals,
-        finish_claim_matched=finish_claim_matched,
-        reflect_named_evidence=named_evidence,
-        goal_probes=configurable.get("goal_probes"),
+    evaluation = evaluation_from_acceptance_fold(
+        fold, finish_claim_matched=finish_claim_matched
     )
+    fold_per_criterion = {
+        name: {
+            "status": (
+                "matched"
+                if result.get("status") == "satisfied"
+                else (
+                    "contradicted"
+                    if result.get("status") == "contradicted"
+                    else "unknown"
+                )
+            ),
+            "reason": result.get("reason"),
+        }
+        for name, result in fold["per_criterion"].items()
+    }
     ledger = append_evaluation_entries(
         ledger,
-        evaluation=evaluation.to_dict(),
+        evaluation={"evidence": {"per_criterion": fold_per_criterion}},
         contract_id=runtime_contract_id,
         screen_id=after_observation.snapshot.screen_id,
         observation_epoch=after_observation.snapshot.observation_epoch,
@@ -515,10 +747,11 @@ def acceptance_node(state: "AgentState", config: RunnableConfig) -> dict:
             )
             for criterion in goal_contract.success_criteria
         },
+        semantic_keys=semantic_keys,
     )
     if facts:
-        # Re-append provider facts last. The typed fold reads the newest entry
-        # per criterion, so collected evidence must settle after the
+        # Re-append provider facts last. The fold reads the newest entry per
+        # criterion, so collected evidence must settle after the
         # model-informed pass — otherwise testimony would silently outrank the
         # device truth this node is built to trust.
         ledger = append_evaluation_entries(
@@ -528,40 +761,8 @@ def acceptance_node(state: "AgentState", config: RunnableConfig) -> dict:
             screen_id=after_observation.snapshot.screen_id,
             observation_epoch=after_observation.snapshot.observation_epoch,
             predicate_ids=facts["predicate_ids"],
+            semantic_keys=semantic_keys,
         )
-
-    # The typed fold is authoritative when every criterion carries a predicate,
-    # except where it saw nothing at all: absence is not counter-evidence.
-    if goal_contract.success_criteria and all(
-        criterion.predicate is not None for criterion in goal_contract.success_criteria
-    ):
-        pure_evaluation = pure_goal_evaluator.evaluate(
-            contract=goal_contract,
-            contract_id=runtime_contract_id,
-            evidence_ledger=ledger,
-            finish_claim_matched=finish_claim_matched,
-            screen_id=after_observation.snapshot.screen_id,
-            observation_epoch=after_observation.snapshot.observation_epoch,
-        )
-        per_criterion = (pure_evaluation.evidence or {}).get("per_criterion") or {}
-        has_unobserved = any(
-            isinstance(value, dict) and value.get("reason") == "criterion_unobserved"
-            for value in per_criterion.values()
-        )
-        if not has_unobserved:
-            evaluation = pure_evaluation
-        else:
-            emit_trace(
-                config,
-                state,
-                "acceptance",
-                "pure_evaluation_degraded",
-                {
-                    "reason": "criterion_unobserved",
-                    "kept_status": evaluation.status,
-                    "pure_status": pure_evaluation.status,
-                },
-            )
 
     emit_trace(
         config,
@@ -573,6 +774,8 @@ def acceptance_node(state: "AgentState", config: RunnableConfig) -> dict:
             "goal_contract": goal_trace_payload(state, config),
             "finish_claim_matched": sorted(finish_claim_matched),
             "finish_validation": evaluation.to_dict(),
+            "fold_overall": fold["overall"],
+            "seal_count": len(fold["seals"] or []),
             "device_signals": sanitize_context_payload(
                 device_signals, consumer="reflect_prompt", task_context=task
             ),
@@ -585,6 +788,20 @@ def acceptance_node(state: "AgentState", config: RunnableConfig) -> dict:
             if budget_forced
             else {}
         )
+        feedback = None
+        if fold["overall"] == "unknown" and fold["unknown"]:
+            feedback = _missing_feedback(
+                goal_contract, fold["unknown"], lang=lang
+            )
+            emit_trace(
+                config,
+                state,
+                "acceptance",
+                "acceptance_rejection_feedback",
+                sanitize_context_payload(
+                    feedback, consumer="trace_payload", task_context=task
+                ),
+            )
         return _rejected(
             state,
             context_mode=context_mode,
@@ -593,6 +810,7 @@ def acceptance_node(state: "AgentState", config: RunnableConfig) -> dict:
             ledger=ledger,
             observation=after_observation,
             current_app=current_app,
+            feedback=feedback,
             extra_update={
                 **adequacy_update,
                 **budget_update,
@@ -715,6 +933,7 @@ def _rejected(
     ledger: list[dict] | None = None,
     observation=None,
     current_app: str | None = None,
+    feedback: dict | None = None,
     extra_update: dict | None = None,
 ) -> dict:
     """Reject a finish claim and send the run back to planning."""
@@ -722,6 +941,7 @@ def _rejected(
     acceptance_round_count = int(state.get("acceptance_round_count") or 0) + 1
     round_limit = int(DEFAULT_VERIFICATION_POLICY.value("acceptance_round_limit"))
     limit_reached = acceptance_round_count >= round_limit
+    task_context = state.get("task") if isinstance(state.get("task"), str) else None
     update: dict = {
         "pending_finish": False,
         "finished": False,
@@ -742,6 +962,10 @@ def _rejected(
         "acceptance_round_count": acceptance_round_count,
         "context_mode": context_mode,
     }
+    if feedback is not None:
+        update["acceptance_rejection_feedback"] = sanitize_context_payload(
+            feedback, "acceptance_rejection_feedback", consumer="inject", task_context=task_context
+        )
     if ledger is not None:
         update["goal_evidence_ledger"] = ledger
     if observation is not None and current_app is not None:
@@ -761,8 +985,16 @@ def _run_semantic_judge(
     current_app: str,
     screenshot,
     after_observation_summary: dict,
-) -> tuple[list[dict] | None, str]:
-    """Ask the model whether the raw-text criteria are satisfied (layer 3)."""
+    ledger_digest: str = "",
+) -> tuple[list[dict] | None, list[dict] | None, str]:
+    """Ask the model whether the raw-text criteria are satisfied (layer 3).
+
+    Returns ``(verdicts, named_evidence, message)``:
+    * ``verdicts`` — the Stage-Sealing tri-state contract (None when the
+      model replied with the legacy ``completed``/``named_evidence`` format);
+    * ``named_evidence`` — the legacy parse (None when unparseable);
+    * ``message`` — the judge's message.
+    """
 
     configurable = config.get("configurable", {})
     model_client = configurable["model_client"]
@@ -778,19 +1010,25 @@ def _run_semantic_judge(
     whitelist = _judge_whitelist_block(
         _judge_criterion_names(ensure_goal_contract(state, config)), lang=lang
     )
+    digest_block = ledger_digest if ledger_digest else (
+        "(no evidence ledger records)" if lang == "en" else "（无证据账本记录）"
+    )
     if lang == "en":
         body = (
             f"Original task: {task_for_prompt}\n"
             f"Current app: {current_app}\n"
             f"After-observation summary: {after_observation_summary}\n"
-            "Is the whole task complete? Judge only the [judge] criteria."
+            f"Evidence ledger digest: {digest_block}\n"
+            "Is the whole task complete? Judge only the [judge] criteria; "
+            "the ledger digest is mechanically extracted fact you may trust directly."
         )
     else:
         body = (
             f"原始任务：{task_for_prompt}\n"
             f"当前应用：{current_app}\n"
             f"当前屏幕摘要：{after_observation_summary}\n"
-            "整个任务是否已完成？只判断 [judge] 标准。"
+            f"证据账本摘要：{digest_block}\n"
+            "整个任务是否已完成？只判断 [judge] 标准；账本摘要是程序提取的事实，可直接采信。"
         )
     if whitelist:
         body = f"{body}\n\n{whitelist}"
@@ -815,6 +1053,7 @@ def _run_semantic_judge(
             ):
                 raise
             response = model_client.request(messages)
+        verdicts = parse_acceptance_verdicts(response.action)
         completed, message, named_evidence = parse_acceptance_response(response.action)
         # A3: the judge's raw reply is the only attribution source when the
         # gate fails — surface its key fields (redacted) in the trace. Only
@@ -828,6 +1067,16 @@ def _run_semantic_judge(
                 {
                     "completed": completed,
                     "message": message,
+                    "verdicts": [
+                        {
+                            "criterion": str(item.get("criterion", ""))[:128],
+                            "status": str(item.get("status", ""))[:32],
+                            "observed_value": str(
+                                item.get("observed_value", "")
+                            )[:200],
+                        }
+                        for item in (verdicts or [])
+                    ],
                     "named_evidence": [
                         {
                             "criterion": str(item.get("criterion", ""))[:128],
@@ -845,7 +1094,7 @@ def _run_semantic_judge(
                 task_context=task,
             ),
         )
-        return named_evidence, message
+        return verdicts, named_evidence, message
     except Exception as exc:
         message = f"Acceptance judgement failed: {type(exc).__name__}"
         emit_trace(
@@ -858,6 +1107,6 @@ def _run_semantic_judge(
                 "parse_metadata": getattr(exc, "parse_metadata", {}) or {},
             },
         )
-        # No testimony collected. Returning None (not []) keeps the evaluator's
-        # "not yet consulted" semantics, which is fail-closed: unknown blocks.
-        return None, message
+        # No testimony collected. Returning None keeps fail-closed semantics:
+        # unknown blocks.
+        return None, None, message

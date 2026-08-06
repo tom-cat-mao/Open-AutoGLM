@@ -50,6 +50,7 @@ from phone_agent.graph.goal import (
     goal_runtime_reference,
     goal_trace_payload,
 )
+from phone_agent.graph.goal_evaluator import _normalize_criterion_name
 from phone_agent.graph import goal_evidence
 from phone_agent.graph.fact_providers import collect_goal_facts
 from phone_agent.graph.trace import emit_trace
@@ -686,6 +687,7 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
     runtime_contract_id = goal_runtime_reference(state)
     ledger = list(state.get("goal_evidence_ledger") or [])
     goal_contract = ensure_goal_contract(state, config)
+    in_target_app = False
     if goal_contract is not None:
         facts = collect_goal_facts(
             goal_contract=goal_contract,
@@ -701,6 +703,12 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
                 current_app=current_app,
                 foreground_activity=after_observation.snapshot.foreground_activity,
             )
+            semantic_keys = {
+                criterion.name: goal_evidence.criterion_semantic_key(
+                    criterion.description
+                )
+                for criterion in goal_contract.success_criteria
+            }
             ledger = goal_evidence.append_evaluation_entries(
                 ledger,
                 evaluation={"evidence": {"per_criterion": facts["collected"]}},
@@ -709,6 +717,33 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
                 observation_epoch=after_observation.snapshot.observation_epoch,
                 predicate_ids=facts["predicate_ids"],
                 target_app_entered=in_target_app,
+                semantic_keys=semantic_keys,
+            )
+        # L1: mechanically extract this screen's accessibility text digest.
+        ledger = goal_evidence.append_screen_text_digest(
+            ledger,
+            contract_id=runtime_contract_id,
+            screen_id=after_observation.snapshot.screen_id,
+            observation_epoch=after_observation.snapshot.observation_epoch,
+            marks=after_observation.mark_registry.marks.values(),
+            target_app_entered=in_target_app,
+        )
+        # Positive counter-observation on a sealed criterion revokes the seal
+        # (P0 #13a: revocation only on contradiction, never on absence).
+        if facts:
+            contradicted = {
+                name
+                for name, result in facts["collected"].items()
+                if isinstance(result, dict)
+                and result.get("status") == "contradicted"
+            }
+            ledger = goal_evidence.revoke_seals_on_contradiction(
+                ledger,
+                contract=goal_contract,
+                contract_id=runtime_contract_id,
+                contradicted_criteria=contradicted,
+                screen_id=after_observation.snapshot.screen_id,
+                step=state.get("step_count"),
             )
     goal_agenda: list[dict] = []
     if goal_contract is not None:
@@ -774,6 +809,10 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
             ledger,
             goal_contract.task_plan,
             contract_id=runtime_contract_id,
+            criteria={
+                criterion.name: criterion
+                for criterion in goal_contract.success_criteria
+            },
         )
     if configurable.get("enable_legacy_page_signal_adapter", False):
         observe_legacy_page_signals(
@@ -1111,6 +1150,96 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
         verifier_result.hard_failure or final_verdict != "succeeded"
     ):
         parsed_reflection.suggested_strategy = "continue"
+
+    # --- Stage-Sealing tail (side effects only; P0 #13 single-step verdict
+    # semantics are untouched above) ---
+    # L2: promote a succeeded/partial action to an effect event. The event is
+    # judge context (authority below L1), never a gate on its own.
+    if goal_contract is not None and goal_evidence.should_record_effect_event(
+        verdict=str(final_verdict or ""),
+        hard_failure=bool(verifier_result.hard_failure),
+    ):
+        action_dict = action_parsed if isinstance(action_parsed, dict) else {}
+        target_value = None
+        grounding_target = (state.get("grounding_observation") or {}).get("target") or {}
+        if isinstance(grounding_target, dict):
+            target_value = grounding_target.get("mark_id") or grounding_target.get(
+                "text"
+            )
+        matched_codes = (
+            list(
+                (verifier_result.evidence or {}).get("matched_postconditions") or []
+            )
+            or None
+        )
+        named_keys: dict[str, str] = {}
+        for item in parsed_reflection.named_evidence or []:
+            name = str(item.get("criterion") or "")
+            if not name:
+                continue
+            for criterion in goal_contract.success_criteria:
+                if _normalize_criterion_name(criterion.name) == _normalize_criterion_name(
+                    name
+                ):
+                    named_keys.setdefault(
+                        name,
+                        goal_evidence.criterion_semantic_key(criterion.description),
+                    )
+                    break
+        ledger = goal_evidence.append_effect_event(
+            ledger,
+            contract_id=runtime_contract_id,
+            action=str(action_dict.get("action") or ""),
+            target=str(target_value) if target_value else None,
+            observed_after=(
+                f"verdict={final_verdict} postconditions={','.join(matched_codes)}"
+                if matched_codes
+                else f"verdict={final_verdict}"
+            ),
+            screen_id=after_observation.snapshot.screen_id,
+            step=step_count,
+            named_evidence=parsed_reflection.named_evidence,
+            semantic_keys=named_keys or None,
+            target_app_entered=in_target_app or None,
+        )
+    # Eager sealing: a stage whose done criteria are all latched is sealed
+    # once (idempotent by semantic key). Sealed criteria are authoritative in
+    # later folds until a positive counter-observation revokes the seal.
+    if goal_contract is not None and goal_contract.task_plan:
+        ledger, new_seals = goal_evidence.seal_satisfied_stages(
+            ledger,
+            contract=goal_contract,
+            contract_id=runtime_contract_id,
+            screen_id=after_observation.snapshot.screen_id,
+            step=step_count,
+            evidence_refs=[
+                str(after_observation.snapshot.screen_id),
+                f"step:{step_count}",
+            ],
+        )
+        for seal in new_seals:
+            emit_trace(
+                config,
+                state,
+                "reflect",
+                "stage_sealed",
+                {
+                    "stage_id": seal["stage_id"],
+                    "criteria_sealed": seal["criteria_sealed"],
+                    "semantic_key": seal["semantic_key"],
+                    "step": seal["step"],
+                },
+            )
+        task_plan_status = goal_evidence.stage_status_from_ledger(
+            ledger,
+            goal_contract.task_plan,
+            contract_id=runtime_contract_id,
+            criteria={
+                criterion.name: criterion
+                for criterion in goal_contract.success_criteria
+            },
+        )
+    ledger = goal_evidence.bounded_evidence_ledger(ledger)
 
     context_updates = {"context_mode": context_mode}
     repeat_count = 0

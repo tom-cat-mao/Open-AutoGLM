@@ -11,6 +11,7 @@ from langgraph.types import interrupt
 from langchain_core.runnables import RunnableConfig
 
 from phone_agent.graph.goal_compiler import GoalCompilationError, compile_goal_contract
+from phone_agent.graph.goal_evidence import terminal_literal_warnings
 from phone_agent.graph.goal_requirements import (
     ContractAdequacyValidator,
     TaskRequirementExtractor,
@@ -236,6 +237,19 @@ def goal_node(state: "AgentState", config: RunnableConfig) -> dict:
             {"failure_cause": "runtime_goal_binding_invalid"},
         )
         return _runtime_goal_failure("runtime_goal_binding_invalid")
+    # Stage-Sealing §4.1: non-blocking compile-time signal for terminal
+    # criteria whose description embeds a full-date or interval literal that
+    # may never appear on the final screen — trace-visible structural hint
+    # that the criterion likely belongs on the stage that produces it.
+    literal_warnings = terminal_literal_warnings(contract)
+    for warning in literal_warnings:
+        emit_trace(
+            config,
+            state,
+            "goal",
+            "terminal_literal_warning",
+            warning,
+        )
     contract_dict = contract.to_state_payload(runtime_reference=runtime_reference)
 
     emit_trace(
@@ -255,6 +269,7 @@ def goal_node(state: "AgentState", config: RunnableConfig) -> dict:
                 "status": adequacy.status,
                 "reason_codes": list(adequacy.reason_codes),
             },
+            "terminal_literal_warning_count": len(literal_warnings),
         },
     )
 

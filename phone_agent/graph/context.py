@@ -9,7 +9,6 @@ from dataclasses import asdict, dataclass
 from typing import Any, Literal
 
 from phone_agent.config.policy import (
-    CONTINUATION_GRANT_STEPS,
     CONTINUATION_MAX_GRANTS,
     CONTINUATION_NOVELTY_NEGATION_STREAK,
     CONTINUATION_WINDOW_STEPS,
@@ -56,9 +55,11 @@ DEFAULT_CONTEXT_BUDGET: dict[str, int] = {
     "tried_action_items": 6,
     "visited_screen_items": 6,
     "task_plan_status_chars": 500,
+    "acceptance_rejection_chars": 400,
 }
 _SECTION_BUDGETS = {
     "goal_agenda": 800,
+    "acceptance_rejection": 400,
 }
 DEFAULT_PROMPT_VERSION = "context_harness_v1"
 CONTEXT_SECTION_IDS = (
@@ -1414,8 +1415,6 @@ def build_plan_context_block(
     if lang != "en":
         title = "** 短期上下文（仅为信念，不代表授权） **"
 
-    current_app = state.get("current_app") or "unknown"
-
     task_context = state.get("task") if isinstance(state.get("task"), str) else None
 
     action_parsed = state.get("action_parsed") or {}
@@ -1527,6 +1526,9 @@ def build_plan_context_block(
     avoid_repeating = _build_avoid_repeating(state)
     liveness_note = _build_liveness_note(state)
     task_plan_status_section = _render_task_plan_status(state, lang, consumer=consumer)
+    acceptance_rejection = _render_acceptance_rejection(
+        state, lang=lang, consumer=consumer, task_context=task_context
+    )
 
     parts = []
     # Each section is trimmed against its own allowance. Trimming the concatenated
@@ -1543,6 +1545,14 @@ def build_plan_context_block(
             "task_plan_status",
             task_plan_status_section,
             budget.get("task_plan_status_chars"),
+        ),
+        (
+            "acceptance_rejection",
+            acceptance_rejection,
+            budget.get(
+                "acceptance_rejection_chars",
+                _SECTION_BUDGETS["acceptance_rejection"],
+            ),
         ),
         ("budget", budget_section, None),
         ("liveness_note", liveness_note, None),
@@ -1807,6 +1817,50 @@ def _render_goal_agenda(
     if unsatisfied:
         lines.append(("Not satisfied: " if lang == "en" else "未满足: ") + ", ".join(unsatisfied))
     return "\n".join(lines)
+
+
+def _render_acceptance_rejection(
+    state: dict[str, Any],
+    *,
+    lang: str,
+    consumer: ContextConsumer,
+    task_context: str | None,
+) -> str:
+    """Render the Stage-Sealing structured rejection feedback for the next plan.
+
+    The feedback dict (criterion names + stage ids + neutral hints) is already
+    inject-sanitized at state write; this pass re-sanitizes defensively.
+    """
+
+    feedback = state.get("acceptance_rejection_feedback")
+    if not isinstance(feedback, dict) or not isinstance(feedback.get("missing"), list):
+        return ""
+    rows: list[str] = []
+    for item in feedback["missing"]:
+        if not isinstance(item, dict):
+            continue
+        criterion = sanitize_context_payload(
+            str(item.get("criterion") or ""),
+            consumer=consumer,
+            task_context=task_context,
+        )
+        stage_id = sanitize_context_payload(
+            str(item.get("stage_id") or "terminal"),
+            consumer=consumer,
+            task_context=task_context,
+        )
+        hint = sanitize_context_payload(
+            str(item.get("hint") or ""),
+            consumer=consumer,
+            task_context=task_context,
+        )
+        if not criterion or not hint:
+            continue
+        rows.append(f"{criterion} [{stage_id}]: {hint}")
+    if not rows:
+        return ""
+    title = "Acceptance rejection guidance (evidence-driven, do not repeat the same claim)" if lang == "en" else "验收拒绝指引（按证据取证，勿重复同一条 finish 声明）"
+    return "\n".join([title, *rows])
 
 
 def _build_avoid_repeating(state: dict[str, Any]) -> dict[str, Any]:

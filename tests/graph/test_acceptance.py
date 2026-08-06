@@ -415,7 +415,7 @@ def test_semantic_judge_emits_redacted_reply_trace(base_state) -> None:
     writer = _FakeTraceWriter()
     config = {"configurable": {"model_client": model, "trace_writer": writer}}
 
-    named_evidence, message = _run_semantic_judge(
+    verdicts, named_evidence, message = _run_semantic_judge(
         state=base_state,
         config=config,
         lang="cn",
@@ -432,6 +432,7 @@ def test_semantic_judge_emits_redacted_reply_trace(base_state) -> None:
     payload = replies[0]["payload"]
     assert payload["completed"] is True
     assert payload["message"] == "done"
+    assert "verdicts" in payload
     assert payload["named_evidence"][0]["criterion"] == "task_completed"
     assert payload["named_evidence"][0]["screen_reference"] == "mark_id=x"
     # A phone number in observed_value must not survive trace egress.

@@ -170,6 +170,9 @@ class AgentState(TypedDict):
     model_skip_reason: Optional[str]  # P5: 跳过原因（仅稳定机器码，不包含原始屏幕文本）
     observation_retry_count: int  # consecutive observation infrastructure failures
     acceptance_round_count: int  # rejected finish claims requiring replanning
+    acceptance_rejection_feedback: Optional[
+        dict
+    ]  # Stage-Sealing: structured rejection feedback {missing:[{criterion, stage_id, hint}]} for the next plan
 
     # === Context & Observability Harness (Phase 11) ===
     context_mode: str  # off / observe / inject

@@ -98,6 +98,26 @@ AUTO_OUTPUT_CONTRACT = """# Output format: auto
 Prefer a JSON object. If the provider is explicitly configured for tool calls, the corresponding structure is also accepted. Every format must follow the same Action Schema and safety constraints.
 """
 
+# Stage-Sealing acceptance judge (L3) system prompt. Maintained in lockstep
+# with prompts_zh.ACCEPTANCE_JUDGE_PROMPT_ZH; both must change together (see
+# the pairing test in tests/graph/test_acceptance_stage_sealing.py).
+ACCEPTANCE_JUDGE_PROMPT_EN = """You are the terminal acceptance checker for a mobile automation task. The action has already executed; your job is to judge whether the **whole task** is genuinely complete.
+
+You MUST output exactly one JSON object. No Markdown, XML, function calls, or extra text:
+{"verdicts":[{"criterion":"criterion_name","status":"satisfied|unknown|contradicted","observed_value":"the text you actually see there or null"}],"message":"brief note"}
+The legacy format {"completed":true|false,"message":"...","named_evidence":[...]} is still accepted for compatibility, but the new verdicts format takes priority.
+
+Judgment criteria:
+- Judge only the criteria marked [judge] in the contract. Criteria marked [auto] are verified by the system from device state — do not cite or report them.
+- The "evidence ledger digest" in the user message is a mechanically extracted, programmatically verified record of screen text; you may trust it directly. Your job is to judge, criterion by criterion, only what the record does not already cover. A literal (a year, a time window) that no longer appears on the final screen is satisfied if the ledger already recorded it mechanically.
+- For each verdict give: criterion (its name), status (satisfied/unknown/contradicted), and observed_value (the text you actually see there, or null). Report what you see verbatim; do not guess values the system uses internally. observed_value is node-local and must not enter state or trace.
+- Only give satisfied when the screen or the ledger genuinely proves the criterion is met. Prefer under-reporting: a false claim makes the task wrongly count as finished.
+- Criterion name whitelist: the user message contains a "criterion name whitelist" listing the only legal names for this task. The criterion field of every verdict MUST equal one of the whitelist names VERBATIM — no paraphrasing, translation, case changes, prefixes/suffixes, or extra text.
+- Completeness: when completed=true (or every required [judge] criterion is satisfied), every required [judge] criterion in the whitelist must have exactly one named_evidence item / verdict whose criterion matches verbatim. Missing any one means the task is not complete — output completed=false.
+- If the task is not complete, output completed=false and leave verdicts empty, or report status="unknown" for the criteria you cannot settle.
+- Ads, banners, recommendation feeds, trending words, and home-screen churn never prove completion.
+"""
+
 BASE_SYSTEM_PROMPT = "\n\n".join(
     [SYSTEM_CONTRACT, ACTION_SCHEMA, TASK_POLICIES, CONTEXT_USAGE_RULES, FAILURE_RECOVERY_MAP]
 )

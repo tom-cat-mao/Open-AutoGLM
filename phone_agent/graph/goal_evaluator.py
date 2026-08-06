@@ -174,7 +174,13 @@ class GoalEvaluator(Protocol):
 
 
 class PureGoalEvaluator:
-    """Pure typed-criterion fold over a bounded, already-matched evidence ledger."""
+    """Pure typed-criterion fold over a bounded, already-matched evidence ledger.
+
+    Stage-Sealing (Phase B): the ledger is first remapped by semantic key onto
+    the current contract (recompile inheritance), and criteria sealed by an
+    active ``stage_seal`` record are authoritative (``matched``) without any
+    re-verification or current-observation freshness requirement.
+    """
 
     _BLOCKING = {"invalid", "contradicted", "stale", "missing"}
 
@@ -188,11 +194,25 @@ class PureGoalEvaluator:
         screen_id: str,
         observation_epoch: int,
     ) -> GoalEvaluation:
+        from phone_agent.graph.goal_evidence import (
+            remap_ledger_for_contract,
+            sealed_criteria,
+        )
+
+        ledger = remap_ledger_for_contract(
+            evidence_ledger,
+            contract_id=contract_id,
+            criteria={item.name: item for item in contract.success_criteria},
+            task_plan=contract.task_plan,
+        )
+        sealed = sealed_criteria(
+            ledger, contract=contract, contract_id=contract_id
+        )
         claim_ids = set(finish_claim_matched)
         criterion_ids = {criterion.name for criterion in contract.success_criteria}
         unknown_claim_ids = sorted(claim_ids - criterion_ids)
         latest: dict[str, dict[str, Any]] = {}
-        for entry in evidence_ledger:
+        for entry in ledger:
             if not isinstance(entry, dict):
                 continue
             if entry.get("contract_id") != contract_id:
@@ -206,6 +226,18 @@ class PureGoalEvaluator:
         unknown: list[str] = []
         results: dict[str, dict[str, Any]] = {}
         for criterion in contract.success_criteria:
+            if criterion.name in sealed:
+                results[criterion.name] = {
+                    "status": "matched",
+                    "reason": "sealed_by_stage",
+                    "predicate_id": (
+                        criterion.predicate.predicate_id
+                        if criterion.predicate is not None
+                        else None
+                    ),
+                }
+                matched.append(criterion.name)
+                continue
             if criterion.name not in claim_ids:
                 status = "missing"
                 reason = "not_named_in_finish_claim"
@@ -817,6 +849,48 @@ default_goal_evaluator = AggregatingGoalEvaluator()
 pure_goal_evaluator = PureGoalEvaluator()
 
 
+def resolve_programmatic_criteria(
+    *,
+    goal_contract: GoalContract,
+    verifier_evidence: dict[str, Any] | None,
+    after_observation: dict[str, Any] | None,
+    device_signals: dict[str, Any] | None,
+    goal_probes: dict[str, Any] | None,
+) -> dict[str, dict[str, Any]]:
+    """Resolve self-observable, predicate-less criteria from verifier signals.
+
+    Stage-Sealing acceptance (Phase C): typed criteria are settled by the fact
+    providers from the ledger, and judge criteria wait for the L3 judge. But a
+    self-observable criterion that carries no typed predicate (legacy
+    ``object_rank_match`` / ``object_hash_match`` / ``app_or_activity_match`` /
+    ``focus_or_keyboard`` / ``accessibility_text_match`` contracts) has no
+    provider fact at all — the only mechanical truth available is the current
+    observation's verifier signals, so they are resolved here and written into
+    the ledger for the acceptance fold (mechanical evidence outranks model
+    testimony; absence maps to ``missing`` and never upgrades).
+    """
+    resolved: dict[str, dict[str, Any]] = {}
+    if goal_contract is None:
+        return resolved
+    for criterion in goal_contract.success_criteria:
+        if criterion.predicate is not None:
+            continue
+        if not _is_self_observable(criterion):
+            continue
+        result = default_goal_evaluator._check_programmatic(
+            criterion,
+            contract=goal_contract,
+            verifier_evidence=verifier_evidence,
+            after_observation=after_observation,
+            device_signals=device_signals,
+            goal_probes=goal_probes,
+        )
+        if result is None:
+            continue
+        resolved[criterion.name] = result
+    return resolved
+
+
 def evaluate_finish_claim(
     *,
     contract: GoalContract,
@@ -838,4 +912,350 @@ def evaluate_finish_claim(
         finish_claim_matched=finish_claim_matched,
         reflect_named_evidence=reflect_named_evidence,
         goal_probes=goal_probes,
+    )
+
+
+# ----------------------------------------------------------------------
+# Stage-Sealing acceptance fold (Phase C): per-criterion tri-state
+# ----------------------------------------------------------------------
+
+
+def _latest_entry_for(
+    ledger: list[dict[str, Any]], *, contract_id: str, criterion_id: str
+) -> dict[str, Any] | None:
+    latest: dict[str, Any] | None = None
+    for entry in ledger:
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("contract_id") != contract_id:
+            continue
+        if str(entry.get("criterion_id") or "") != criterion_id:
+            continue
+        latest = entry
+    return latest
+
+
+def _effect_event_evidence(
+    ledger: list[dict[str, Any]], *, contract_id: str, criterion_id: str
+) -> list[dict[str, Any]]:
+    """Grounded named_evidence for one criterion from L2 effect events."""
+    matched: list[dict[str, Any]] = []
+    for entry in ledger:
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("kind") != "effect_event":
+            continue
+        if entry.get("contract_id") != contract_id:
+            continue
+        for item in entry.get("named_evidence") or []:
+            if not isinstance(item, dict):
+                continue
+            raw_name = str(item.get("criterion") or "")
+            if _normalize_criterion_name(raw_name) != _normalize_criterion_name(
+                criterion_id
+            ):
+                continue
+            screen_reference = str(item.get("screen_reference") or "").strip()
+            if not screen_reference or _is_placeholder_screen_reference(
+                screen_reference
+            ):
+                continue
+            matched.append(item)
+    return matched
+
+
+def fold_acceptance_verdicts(
+    *,
+    contract: GoalContract,
+    ledger: list[dict[str, Any]],
+    contract_id: str,
+    screen_id: str,
+    observation_epoch: int,
+    finish_claim_matched: list[str],
+    judge_verdicts: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Stage-Sealing per-criterion fold (Phase C).
+
+    Replaces the all-or-nothing finish evaluation with a per-criterion
+    tri-state fold. Authority order per criterion:
+
+    1. seal (stage sealed, authoritative) → ``satisfied``
+    2. L1 digest closure (mechanical raw-text record at a trusted
+       observation) → ``satisfied``
+    3. trusted latched evidence (ever-matched) → ``satisfied``
+    4. L2 grounded effect-event named_evidence → ``satisfied``
+    5. L3 judge verdict → as reported (``satisfied`` / ``unknown`` /
+       ``contradicted``)
+    6. otherwise → ``unknown``
+
+    Positive counter-observations (``contradicted``) override lower tiers at
+    their own tier; ``unknown``/absence never upgrades to success (P0 #13a).
+    """
+    from phone_agent.graph.goal_evidence import (
+        criterion_satisfied_by_digest,
+        ever_matched,
+        remap_ledger_for_contract,
+        seal_records_for_contract,
+    )
+
+    ledger = remap_ledger_for_contract(
+        ledger,
+        contract_id=contract_id,
+        criteria={item.name: item for item in contract.success_criteria},
+        task_plan=contract.task_plan,
+    )
+    seals = seal_records_for_contract(ledger, contract=contract, contract_id=contract_id)
+    seal_by_criterion: dict[str, dict[str, Any]] = {}
+    for record in seals:
+        for name in record["criteria_sealed"]:
+            seal_by_criterion[name] = record
+
+    judge_map: dict[str, dict[str, Any]] = {}
+    for verdict in judge_verdicts or []:
+        if not isinstance(verdict, dict):
+            continue
+        normalized = _normalize_criterion_name(verdict.get("criterion"))
+        if not normalized:
+            continue
+        judge_map.setdefault(normalized, verdict)
+
+    satisfied: list[str] = []
+    unknown: list[str] = []
+    contradicted: list[str] = []
+    programmatic_missing: list[str] = []
+    per_criterion: dict[str, dict[str, Any]] = {}
+
+    for criterion in contract.success_criteria:
+        name = criterion.name
+        normalized = _normalize_criterion_name(name)
+        verdict: dict[str, Any] | None = None
+        # 1. seal authority
+        seal = seal_by_criterion.get(name)
+        if seal is not None:
+            per_criterion[name] = {
+                "status": "satisfied",
+                "reason": "sealed_by_stage",
+                "seal": {
+                    key: seal[key]
+                    for key in (
+                        "stage_id",
+                        "criteria_sealed",
+                        "evidence_refs",
+                        "screen_id",
+                        "step",
+                        "sealed_at",
+                        "semantic_key",
+                    )
+                    if key in seal
+                },
+            }
+            satisfied.append(name)
+            continue
+        # 2. L1 mechanical closure (raw-text predicates only)
+        closed, digest = criterion_satisfied_by_digest(
+            ledger, contract_id=contract_id, criterion=criterion
+        )
+        if closed:
+            per_criterion[name] = {
+                "status": "satisfied",
+                "reason": "l1_digest_closed",
+                "digest_screen_id": digest.get("screen_id") if digest else None,
+            }
+            satisfied.append(name)
+            continue
+        # judge criteria (model tier) and trajectory-scoped programmatic
+        # criteria are trajectory properties: a trusted matched observation
+        # latches them permanently (positive contradiction later unlocks).
+        is_judge = not _is_self_observable(criterion)
+        trajectory_scoped = is_judge or criterion.freshness == "trajectory"
+        if trajectory_scoped:
+            # 3. trusted latched evidence
+            latch = ever_matched(
+                ledger, criterion_id=name, contract_id=contract_id
+            )
+            if latch.latched:
+                per_criterion[name] = {
+                    "status": "satisfied",
+                    "reason": "evidence_latched",
+                    "latched_epoch": latch.matched_epoch,
+                    "latched_screen_id": latch.matched_screen_id,
+                }
+                satisfied.append(name)
+                continue
+            latest_status = str(
+                (_latest_entry_for(ledger, contract_id=contract_id, criterion_id=name) or {})
+                .get("status")
+                or "unknown"
+            )
+            if latest_status == "contradicted":
+                per_criterion[name] = {
+                    "status": "contradicted",
+                    "reason": "evidence_contradicted",
+                }
+                contradicted.append(name)
+                continue
+            # 3b. A trusted ``matched`` entry (typed provider fact at a trusted
+            # observation, e.g. L1 mechanical raw-text record) settles a
+            # trajectory-scoped criterion directly. The plan-side latch is
+            # target-app gated, so this direct read is what restores the legacy
+            # typed-fold behaviour for judge criteria whose fact was collected
+            # at the acceptance observation.
+            if latest_status == "matched":
+                entry = _latest_entry_for(
+                    ledger, contract_id=contract_id, criterion_id=name
+                )
+                per_criterion[name] = {
+                    "status": "satisfied",
+                    "reason": "evidence_matched",
+                    "matched_epoch": entry.get("observation_epoch"),
+                    "matched_screen_id": entry.get("screen_id"),
+                }
+                satisfied.append(name)
+                continue
+        if is_judge:
+            # 4. L2 grounded effect-event named_evidence (model tier)
+            l2 = _effect_event_evidence(
+                ledger, contract_id=contract_id, criterion_id=name
+            )
+            if l2:
+                per_criterion[name] = {
+                    "status": "satisfied",
+                    "reason": "l2_effect_event",
+                    "screen_references": [
+                        str(item.get("screen_reference") or "")[:128] for item in l2
+                    ],
+                }
+                satisfied.append(name)
+                continue
+            # 5. L3 judge verdict
+            verdict = judge_map.get(normalized)
+            if verdict is not None:
+                # Legacy named_evidence items carry a screen_reference; an
+                # ungrounded (placeholder) reference cannot settle a criterion
+                # (W1-A provenance rule preserved). New-contract verdicts
+                # carry no reference and are accepted as the judge's statement.
+                screen_ref = str(verdict.get("screen_reference") or "").strip()
+                if screen_ref and _is_placeholder_screen_reference(screen_ref):
+                    per_criterion[name] = {
+                        "status": "unknown",
+                        "reason": "judge_verdict_ungrounded",
+                    }
+                    unknown.append(name)
+                    continue
+                status = str(verdict.get("status") or "unknown")
+                per_criterion[name] = {
+                    "status": status,
+                    "reason": "judge_verdict",
+                    "observed_value": (
+                        str(verdict.get("observed_value") or "")[:200]
+                        if verdict.get("observed_value") is not None
+                        else None
+                    ),
+                }
+                if status == "satisfied":
+                    satisfied.append(name)
+                elif status == "contradicted":
+                    contradicted.append(name)
+                else:
+                    unknown.append(name)
+                continue
+            # 6. otherwise unknown
+            per_criterion[name] = {
+                "status": "unknown",
+                "reason": "no_evidence_no_judgement",
+            }
+            unknown.append(name)
+            continue
+        # programmatic (self-observable, current_observation) criteria keep
+        # strict freshness: only the CURRENT screen's observation settles them
+        # (P0 #13a fail-closed; trajectory permanence does not apply).
+        entry = _latest_entry_for(
+            ledger, contract_id=contract_id, criterion_id=name
+        )
+        if entry is None:
+            per_criterion[name] = {"status": "unknown", "reason": "criterion_unobserved"}
+            unknown.append(name)
+            continue
+        if (
+            entry.get("screen_id") != screen_id
+            or entry.get("observation_epoch") != observation_epoch
+        ):
+            per_criterion[name] = {
+                "status": "unknown",
+                "reason": "evidence_binding_stale",
+            }
+            unknown.append(name)
+            continue
+        status = str(entry.get("status") or "unknown")
+        if status == "matched":
+            per_criterion[name] = {"status": "satisfied", "reason": "evidence_matched"}
+            satisfied.append(name)
+        elif status == "contradicted":
+            per_criterion[name] = {
+                "status": "contradicted",
+                "reason": "evidence_contradicted",
+            }
+            contradicted.append(name)
+        else:
+            # A verifier-resolved ``missing`` (rank mismatch, wrong object,
+            # app not in foreground...) is a mechanical determination, not an
+            # absence of observation. It stays fail-closed ``unknown`` in the
+            # tri-state but is surfaced on the legacy missing list (P0 #13a:
+            # unknown never upgrades to success).
+            if status == "missing":
+                programmatic_missing.append(name)
+            per_criterion[name] = {
+                "status": "unknown",
+                "reason": str(entry.get("reason_code") or "evidence_unsettled"),
+            }
+            unknown.append(name)
+
+    if contradicted:
+        overall: str = "contradicted"
+    elif unknown:
+        overall = "unknown"
+    else:
+        overall = "satisfied"
+    return {
+        "overall": overall,
+        "per_criterion": per_criterion,
+        "satisfied": satisfied,
+        "unknown": unknown,
+        "contradicted": contradicted,
+        "programmatic_missing": sorted(set(programmatic_missing)),
+        "seals": seals,
+    }
+
+
+def evaluation_from_acceptance_fold(
+    fold: dict[str, Any], *, finish_claim_matched: list[str]
+) -> GoalEvaluation:
+    """Map a Stage-Sealing fold onto the legacy GoalEvaluation shape.
+
+    Legacy semantics preserved: a verifier-resolved programmatic ``missing``
+    (mechanical determination of non-satisfaction) lands on the legacy missing
+    list alongside genuine contradictions, so ``missing_terminal_evidence``
+    keeps its historical contract (existing tests unaffected).
+    """
+    overall = fold["overall"]
+    programmatic_missing = list(fold.get("programmatic_missing") or [])
+    if overall == "satisfied":
+        status: Literal["success", "failure", "unknown"] = "success"
+        missing: list[str] = []
+        soft = list(fold["unknown"])
+    else:
+        missing = sorted(set(fold["contradicted"]) | set(programmatic_missing))
+        soft = list(fold["unknown"])
+        status = "failure" if overall == "contradicted" else "unknown"
+    return GoalEvaluation(
+        status=status,
+        matched=list(fold["satisfied"]),
+        missing=missing,
+        soft_matched=soft,
+        evidence={
+            "per_criterion": fold["per_criterion"],
+            "fold": "stage_sealing_v1",
+            "seals": fold["seals"],
+            "finish_claim_matched": sorted(finish_claim_matched),
+        },
     )
