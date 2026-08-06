@@ -1,7 +1,10 @@
 """App name to package name mapping for supported applications."""
 
+from typing import Any
+
 from phone_agent.config.app_registry import (
     AppRegistry,
+    InstalledAppInventory,
     LaunchPolicy,
     LaunchTargetResolver,
 )
@@ -358,11 +361,20 @@ def _legacy_launch_name(canonical_id: str) -> str | None:
     return None
 
 
-def get_app_registry_summary(lang: str = "cn", max_chars: int = 2400) -> str:
-    """Build a compact app name list for prompt injection.
+def get_app_registry_summary(
+    lang: str = "cn",
+    max_chars: int = 2400,
+    *,
+    learning: Any | None = None,
+    inventory: InstalledAppInventory | None = None,
+    installed_top_n: int = 30,
+) -> str:
+    """Build a compact app list for prompt injection.
 
-    Returns a section that can be appended to the system prompt to tell
-    the model which app names are valid for the Launch action.
+    The static registry is an alias seed: the summary always lists the static
+    seed, unions in the per-run learned mappings (``learning``), and appends
+    the device-installed package Top-N when ``inventory`` is available. The
+    goal contract should only reference apps that actually exist.
     """
     app_list = ", ".join(
         identity.display_name
@@ -372,17 +384,30 @@ def get_app_registry_summary(lang: str = "cn", max_chars: int = 2400) -> str:
 
     if lang == "en":
         header = "# Available Apps (Launch action must use one of these names)"
+        learned_header = "# Learned app mappings this run (term => package)"
+        installed_header = f"# Installed device apps (first {installed_top_n} alphabetically; Launch accepts these package names)"
     else:
         header = "# 可用应用（Launch 动作必须使用以下名称之一）"
+        learned_header = "# 本跑已学习应用映射（术语 => 包名）"
+        installed_header = f"# 设备实装应用（按字母序前 {installed_top_n} 条；Launch 可直接使用这些包名）"
 
-    result = f"{header}\n{app_list}"
+    sections = [f"{header}\n{app_list}"]
+    if learning is not None:
+        snapshot = learning.snapshot()
+        if snapshot:
+            sections.append(
+                learned_header
+                + "\n"
+                + ", ".join(f"{term}=>{package}" for term, package in snapshot.items())
+            )
+    if inventory is not None and inventory.packages:
+        installed = sorted(inventory.packages)[: max(0, installed_top_n)]
+        sections.append(installed_header + "\n" + ", ".join(installed))
+
+    result = "\n\n".join(sections)
     if len(result) > max_chars:
-        truncated = app_list[: max_chars - len(header) - 10]
-        last_comma = truncated.rfind(", ")
-        if last_comma > 0:
-            truncated = truncated[:last_comma]
-        result = f"{header}\n{truncated}, ..."
-
+        truncated = result[: max_chars - 3]
+        result = f"{truncated}..."
     return result
 
 

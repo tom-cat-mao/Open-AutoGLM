@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import re
 import unicodedata
-from typing import Iterable, Literal, Mapping
+from typing import Any, Iterable, Literal, Mapping
 
 ResolutionStatus = Literal["resolved", "unknown", "ambiguous"]
 LaunchResolutionStatus = Literal[
@@ -295,16 +295,47 @@ class InstalledAppInventory:
 
 @dataclass(frozen=True)
 class LaunchPolicy:
-    """Deterministic allowlist independent of identity recognition."""
+    """Launch authority: static allowlist union device installation.
+
+    The device is the fact source: a package installed on the device is
+    launchable. The static allowlist remains as a seed so launch never depends
+    on a stale static table. ``observation_only`` identities stay denied.
+    """
 
     allowed_packages: frozenset[str]
 
-    def is_allowed(self, identity: AppIdentity) -> bool:
+    def allows_package(
+        self,
+        package_name: str,
+        *,
+        inventory: InstalledAppInventory | None = None,
+    ) -> bool:
+        """Return whether a package is launch-authorized."""
+
+        package = str(package_name or "").strip()
+        if not package:
+            return False
+        if package in self.allowed_packages:
+            return True
+        if inventory is not None and inventory.contains(package):
+            return True
+        return False
+
+    def is_allowed(
+        self,
+        identity: AppIdentity,
+        *,
+        inventory: InstalledAppInventory | None = None,
+    ) -> bool:
         """Return whether at least one package is launch-authorized."""
 
-        return not identity.observation_only and bool(
-            identity.packages & self.allowed_packages
-        )
+        if identity.observation_only:
+            return False
+        if identity.packages & self.allowed_packages:
+            return True
+        if inventory is not None and bool(identity.packages & inventory.packages):
+            return True
+        return False
 
 
 @dataclass(frozen=True)
@@ -315,11 +346,19 @@ class LaunchTargetResolution:
     term: str
     identity: AppIdentity | None = None
     package_name: str | None = None
-    candidates: tuple[AppIdentity, ...] = ()
+    candidates: tuple[AppIdentity | str, ...] = ()
 
 
 class LaunchTargetResolver:
-    """Resolve launch targets without conflating known, installed, and allowed."""
+    """Resolve launch targets without conflating known, installed, and allowed.
+
+    Resolution chain (all stages share the same status state machine):
+    a. static registry alias hit (the static table is an alias seed);
+    b. per-run learned mapping hit (RuntimeAppLearningContext);
+    c. device inventory path: caller-supplied ``candidates`` are matched
+       case-insensitively as substrings against the installed inventory
+       (unique -> resolved, multiple -> ambiguous, none -> unknown).
+    """
 
     def __init__(self, registry: AppRegistry, policy: LaunchPolicy) -> None:
         self._registry = registry
@@ -330,45 +369,145 @@ class LaunchTargetResolver:
         term: str,
         *,
         inventory: InstalledAppInventory | None = None,
+        candidates: Iterable[str] | None = None,
+        learning: Any | None = None,
     ) -> LaunchTargetResolution:
         """Resolve one launch request using explicit policy and inventory facts."""
 
         resolution = self._registry.resolve_term(term)
-        if resolution.status == "unknown":
-            return LaunchTargetResolution(status="unknown", term=term)
         if resolution.status == "ambiguous":
             return LaunchTargetResolution(
                 status="ambiguous",
                 term=term,
                 candidates=resolution.candidates,
             )
-        identity = resolution.identity
-        assert identity is not None
-        if not self._policy.is_allowed(identity):
+        if resolution.status == "resolved" and resolution.identity is not None:
+            return self._resolve_identity(
+                term, resolution.identity, inventory=inventory
+            )
+        # b. per-run learned mapping (device already confirmed launchability).
+        if learning is not None:
+            learned_package = learning.lookup(term)
+            if learned_package is not None:
+                return self._resolve_known_package(
+                    term, learned_package, inventory=inventory
+                )
+        # c. device inventory candidates: substring match, fail-closed.
+        if candidates and inventory is not None:
+            matches = tuple(
+                sorted(_match_candidates_to_inventory(candidates, inventory))
+            )
+            if len(matches) == 1:
+                return self._resolve_known_package(
+                    term, matches[0], inventory=inventory
+                )
+            if len(matches) > 1:
+                return LaunchTargetResolution(
+                    status="ambiguous", term=term, candidates=matches
+                )
+        return LaunchTargetResolution(status="unknown", term=term)
+
+    def _resolve_identity(
+        self,
+        term: str,
+        identity: AppIdentity,
+        *,
+        inventory: InstalledAppInventory | None,
+    ) -> LaunchTargetResolution:
+        """Resolve a statically known identity under policy and install facts."""
+
+        if not self._policy.is_allowed(identity, inventory=inventory):
             return LaunchTargetResolution(status="denied", term=term, identity=identity)
+        if inventory is not None:
+            package = next(
+                (
+                    item
+                    for item in sorted(identity.packages)
+                    if inventory.contains(item)
+                    and self._policy.allows_package(item, inventory=inventory)
+                ),
+                None,
+            )
+            if package is not None:
+                return LaunchTargetResolution(
+                    status="resolved",
+                    term=term,
+                    identity=identity,
+                    package_name=package,
+                )
+            fallback = next(
+                (
+                    item
+                    for item in sorted(identity.packages)
+                    if self._policy.allows_package(item, inventory=None)
+                ),
+                None,
+            )
+            if fallback is None:
+                return LaunchTargetResolution(
+                    status="denied", term=term, identity=identity
+                )
+            return LaunchTargetResolution(
+                status="not_installed",
+                term=term,
+                identity=identity,
+                package_name=fallback,
+            )
         package = next(
             (
                 item
                 for item in sorted(identity.packages)
-                if item in self._policy.allowed_packages
+                if self._policy.allows_package(item, inventory=None)
             ),
             None,
         )
         if package is None:
             return LaunchTargetResolution(status="denied", term=term, identity=identity)
-        if inventory is not None and not inventory.contains(package):
-            return LaunchTargetResolution(
-                status="not_installed",
-                term=term,
-                identity=identity,
-                package_name=package,
-            )
         return LaunchTargetResolution(
             status="resolved",
             term=term,
             identity=identity,
             package_name=package,
         )
+
+    def _resolve_known_package(
+        self,
+        term: str,
+        package_name: str,
+        *,
+        inventory: InstalledAppInventory | None,
+    ) -> LaunchTargetResolution:
+        """Resolve a package from learning/candidates under policy facts."""
+
+        if not self._policy.allows_package(package_name, inventory=inventory):
+            return LaunchTargetResolution(status="denied", term=term)
+        package_identity = self._registry.resolve_package(package_name).identity
+        if package_identity is not None and package_identity.observation_only:
+            return LaunchTargetResolution(
+                status="denied", term=term, package_name=package_name
+            )
+        return LaunchTargetResolution(
+            status="resolved", term=term, package_name=package_name
+        )
+
+
+def _match_candidates_to_inventory(
+    candidates: Iterable[str], inventory: InstalledAppInventory
+) -> frozenset[str]:
+    """Case-insensitive substring match of candidate terms against packages."""
+
+    matches: set[str] = set()
+    normalized_packages = {
+        normalize_app_term(package): package for package in inventory.packages
+    }
+    for candidate in candidates:
+        needle = normalize_app_term(str(candidate or ""))
+        if not needle:
+            continue
+        for normalized_package, package in normalized_packages.items():
+            if needle in normalized_package:
+                matches.add(package)
+    return frozenset(matches)
 
 
 def _canonical_id(name: str) -> str:

@@ -401,6 +401,97 @@ def test_validate_action_rejects_unknown_launch_app() -> None:
         validate_action(action)
 
 
+def test_validate_action_unknown_app_with_candidates_passes() -> None:
+    from phone_agent.actions.validator import validate_action
+
+    action = {
+        "_metadata": "do",
+        "action": "Launch",
+        "app": "SomeNewApp",
+        "package_candidates": ["com.example.newapp", "newapp"],
+    }
+    result = validate_action(action)
+
+    assert result["app"] == "SomeNewApp"
+    assert result["package_candidates"] == ["com.example.newapp", "newapp"]
+
+
+def test_validate_action_normalizes_known_app_with_candidates() -> None:
+    from phone_agent.actions.validator import validate_action
+
+    action = {
+        "_metadata": "do",
+        "action": "Launch",
+        "app": "chrome",
+        "package_candidates": ["com.android.chrome"],
+    }
+    result = validate_action(action)
+
+    assert result["app"] == "Chrome"
+    assert result["package_candidates"] == ["com.android.chrome"]
+
+
+def test_validate_action_rejects_invalid_package_candidates() -> None:
+    from phone_agent.actions.validator import ActionValidationError, validate_action
+
+    for bad in (
+        "not-a-list",
+        [],
+        ["ok", ""],
+        ["ok", 3],
+    ):
+        action = {
+            "_metadata": "do",
+            "action": "Launch",
+            "app": "SomeNewApp",
+            "package_candidates": bad,
+        }
+        with pytest.raises(ActionValidationError):
+            validate_action(action)
+
+
+def test_launch_without_package_candidates_behavior_unchanged() -> None:
+    from phone_agent.actions.validator import ActionValidationError, validate_action
+
+    known = validate_action({"_metadata": "do", "action": "Launch", "app": "设置"})
+    assert known["app"] == "Settings"
+    assert "package_candidates" not in known
+
+    with pytest.raises(ActionValidationError, match="unknown app"):
+        validate_action({"_metadata": "do", "action": "Launch", "app": "SomeNewApp"})
+
+
+def test_adapter_launch_accepts_package_candidates() -> None:
+    from phone_agent.actions.adapter import adapt_json_action
+
+    action = adapt_json_action(
+        {
+            "type": "do",
+            "action": "launch",
+            "app": "SomeNewApp",
+            "package_candidates": ["com.example.newapp"],
+        }
+    )
+
+    assert action["app"] == "SomeNewApp"
+    assert action["package_candidates"] == ["com.example.newapp"]
+
+
+def test_adapter_launch_rejects_bad_package_candidates() -> None:
+    from phone_agent.actions.adapter import ActionAdapterError, adapt_json_action
+
+    for bad in ("com.example.newapp", [], ["com.example.newapp", ""]):
+        with pytest.raises(ActionAdapterError):
+            adapt_json_action(
+                {
+                    "type": "do",
+                    "action": "launch",
+                    "app": "SomeNewApp",
+                    "package_candidates": bad,
+                }
+            )
+
+
 def test_build_screen_belief_accepts_derived_fields() -> None:
     from phone_agent.graph.context import build_screen_belief
 

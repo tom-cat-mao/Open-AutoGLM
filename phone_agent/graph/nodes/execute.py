@@ -28,6 +28,12 @@ from phone_agent.graph.context import (
 )
 from phone_agent.graph.tools import dispatch_tool
 from phone_agent.graph.tools.locate import locate_target, trace_safe_payload
+from phone_agent.graph.tools.runtime import (
+    reset_tool_app_learning,
+    reset_tool_trace_emitter,
+    set_tool_app_learning,
+    set_tool_trace_emitter,
+)
 from phone_agent.graph.goal import finish_claim_summary
 from phone_agent.graph.marks import MarkRegistry
 from phone_agent.graph.trace import emit_trace
@@ -100,9 +106,22 @@ def _dispatch_with_receipt(
     device_factory: object | None,
     correlation_id: str | None,
     verbose: bool,
+    config: RunnableConfig | None = None,
+    state: dict | None = None,
 ) -> tuple[ActionResult, ActionReceipt, dict]:
     """Dispatch an implemented capability and return receipt plus compatibility result."""
 
+    app_learning = None
+    if config is not None:
+        configurable = config.get("configurable", {}) if config else {}
+        app_learning = configurable.get("app_learning_context")
+
+    def _trace_launch(event: str, payload: dict) -> None:
+        if state is not None:
+            emit_trace(config, state, "execute", event, payload)
+
+    token_learning = set_tool_app_learning(app_learning)
+    token_emitter = set_tool_trace_emitter(_trace_launch)
     try:
         result = dispatch_tool(
             action,
@@ -124,6 +143,9 @@ def _dispatch_with_receipt(
             side_effect_receipt={"tool_dispatch_status": "unknown"},
         )
         return result, receipt, _layered_error("execution", "dispatch_failed")
+    finally:
+        reset_tool_trace_emitter(token_emitter)
+        reset_tool_app_learning(token_learning)
     return (
         result,
         _receipt_for_result(
@@ -760,6 +782,8 @@ def execute_node(state: "AgentState", config: RunnableConfig) -> dict:
             device_factory=device_factory,
             correlation_id=correlation_id,
             verbose=verbose,
+            config=config,
+            state=state,
         )
         emit_trace(
             config,
@@ -974,6 +998,8 @@ def execute_node(state: "AgentState", config: RunnableConfig) -> dict:
         device_factory=device_factory,
         correlation_id=correlation_id,
         verbose=verbose,
+        config=config,
+        state=state,
     )
     emit_trace(
         config,

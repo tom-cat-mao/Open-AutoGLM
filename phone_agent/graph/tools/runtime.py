@@ -12,6 +12,45 @@ _device_factory_var: ContextVar[Any | None] = ContextVar(
     "phone_agent_tool_device_factory", default=None
 )
 
+_app_learning_var: ContextVar[Any | None] = ContextVar(
+    "phone_agent_tool_app_learning", default=None
+)
+
+_trace_emitter_var: ContextVar[Any | None] = ContextVar(
+    "phone_agent_tool_trace_emitter", default=None
+)
+
+
+def set_tool_app_learning(learning: Any | None) -> Token[Any | None]:
+    """Set the per-run learned app mapping for the current tool-dispatch context."""
+    return _app_learning_var.set(learning)
+
+
+def reset_tool_app_learning(token: Token[Any | None]) -> None:
+    """Reset the learned app mapping context to its previous value."""
+    _app_learning_var.reset(token)
+
+
+def get_tool_app_learning() -> Any | None:
+    """Get the per-run learned app mapping, or None outside a graph dispatch."""
+    return _app_learning_var.get()
+
+
+def set_tool_trace_emitter(emitter: Any | None) -> Token[Any | None]:
+    """Set an ``(event, payload)`` trace emitter for the current dispatch context."""
+    return _trace_emitter_var.set(emitter)
+
+
+def reset_tool_trace_emitter(token: Token[Any | None]) -> None:
+    """Reset the trace emitter context to its previous value."""
+    _trace_emitter_var.reset(token)
+
+
+def get_tool_trace_emitter() -> Any | None:
+    """Get the trace emitter, or None outside a graph dispatch."""
+    return _trace_emitter_var.get()
+
+
 
 def set_tool_device_factory(device_factory: Any | None) -> Token[Any | None]:
     """Set the DeviceFactory for the current tool-dispatch context."""

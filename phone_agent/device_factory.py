@@ -2,7 +2,7 @@
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any
+from typing import Any, Iterable
 
 from phone_agent.config.app_registry import (
     ForegroundAppObservation,
@@ -214,10 +214,24 @@ class DeviceFactory:
         return self.module.home(device_id, delay)
 
     def launch_app(
-        self, app_name: str, device_id: str | None = None, delay: float | None = None
+        self,
+        app_name: str,
+        device_id: str | None = None,
+        delay: float | None = None,
+        *,
+        package_candidates: Iterable[str] | None = None,
+        learning: Any | None = None,
+        inventory: InstalledAppInventory | None = None,
     ) -> bool:
-        """Launch an app."""
-        return self.module.launch_app(app_name, device_id, delay)
+        """Launch an app by name, package name, or candidate package hints."""
+        return self.module.launch_app(
+            app_name,
+            device_id,
+            delay,
+            package_candidates=package_candidates,
+            learning=learning,
+            inventory=inventory,
+        )
 
     def type_text(self, text: str, device_id: str | None = None):
         """Type text."""

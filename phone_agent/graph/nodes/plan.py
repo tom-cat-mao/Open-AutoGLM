@@ -637,6 +637,19 @@ def _plan_error_observation_fields(observation) -> dict[str, Any]:
     }
 
 
+def _cheap_device_inventory(device_factory: Any, device_id: str | None) -> Any | None:
+    """Return the device inventory when cheaply available, else None."""
+
+    if device_factory is None or not hasattr(
+        device_factory, "get_installed_app_inventory"
+    ):
+        return None
+    try:
+        return device_factory.get_installed_app_inventory(device_id)
+    except Exception:
+        return None
+
+
 def _action_for_history(action: dict | None) -> dict | None:
     """Return a display-safe action copy for message history/state action_raw."""
 
@@ -956,7 +969,11 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
             prompt_version=prompt_version,
         )
         if not custom_prompt:
-            app_registry = get_app_registry_summary(lang=lang)
+            app_registry = get_app_registry_summary(
+                lang=lang,
+                learning=configurable.get("app_learning_context"),
+                inventory=_cheap_device_inventory(device_factory, device_id),
+            )
             system_prompt = f"{system_prompt}\n\n{app_registry}"
         new_messages.append(MessageBuilder.create_system_message(system_prompt))
 

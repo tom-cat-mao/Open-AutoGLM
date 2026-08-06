@@ -34,7 +34,7 @@ ALLOWED_FIELDS_BY_ACTION: dict[str, set[str]] = {
     "Type_Name": {"_metadata", "action", "text"},
     "Back": {"_metadata", "action"},
     "Home": {"_metadata", "action"},
-    "Launch": {"_metadata", "action", "app"},
+    "Launch": {"_metadata", "action", "app", "package_candidates"},
     "Wait": {"_metadata", "action", "duration"},
     "Note": {"_metadata", "action", "message"},
     "Call_API": {"_metadata", "action", "message"},
@@ -142,10 +142,20 @@ def validate_action(action: dict[str, Any] | ActionIR) -> dict[str, Any]:
     elif action_name == "Launch":
         _require_str(action_dict, "app")
         from phone_agent.config.apps import normalize_app_name
+        package_candidates = action_dict.get("package_candidates")
+        if package_candidates is not None:
+            action_dict["package_candidates"] = _validate_package_candidates(
+                package_candidates
+            )
         canonical_app = normalize_app_name(action_dict["app"])
-        if canonical_app is None:
+        # An app outside the static registry is allowed when the model supplies
+        # candidate package hints; the device inventory path resolves it at
+        # execution time. Without candidates the previous fail-closed behavior
+        # is unchanged.
+        if canonical_app is None and not action_dict.get("package_candidates"):
             raise ActionValidationError("unknown_app", f"unknown app: {action_dict['app']}")
-        action_dict["app"] = canonical_app
+        if canonical_app is not None:
+            action_dict["app"] = canonical_app
     elif action_name == "Wait":
         _require_str(action_dict, "duration")
         _validate_wait_duration(action_dict["duration"])
@@ -190,6 +200,41 @@ def _reject_dangerous_fields(action: dict[str, Any]) -> None:
 def _require_str(action: dict[str, Any], field: str) -> None:
     if not isinstance(action.get(field), str):
         raise ActionValidationError("missing_field", f"{field} must be a string")
+
+
+MAX_PACKAGE_CANDIDATES = 20
+
+
+def _validate_package_candidates(value: Any) -> list[str]:
+    """Validate and normalize the optional Launch candidate package list."""
+
+    if not isinstance(value, list):
+        raise ActionValidationError(
+            "unsafe_value", "Launch package_candidates must be a list"
+        )
+    if not value:
+        raise ActionValidationError(
+            "unsafe_value", "Launch package_candidates must be non-empty when provided"
+        )
+    if len(value) > MAX_PACKAGE_CANDIDATES:
+        raise ActionValidationError(
+            "unsafe_value",
+            f"Launch package_candidates must have <= {MAX_PACKAGE_CANDIDATES} items",
+        )
+    candidates: list[str] = []
+    for item in value:
+        if not isinstance(item, str):
+            raise ActionValidationError(
+                "unsafe_value", "Launch package_candidates items must be strings"
+            )
+        stripped = item.strip()
+        if not stripped:
+            raise ActionValidationError(
+                "unsafe_value",
+                "Launch package_candidates items must be non-empty strings",
+            )
+        candidates.append(stripped)
+    return candidates
 
 
 def _require_point(action: dict[str, Any], field: str) -> None:

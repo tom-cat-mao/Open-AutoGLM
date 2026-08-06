@@ -22,6 +22,7 @@ from phone_agent.graph.context import (
 from phone_agent.graph.state import AgentState
 from phone_agent.graph.trace import JsonlTraceWriter
 from phone_agent.graph.runtime_goal import RuntimeGoalContext
+from phone_agent.graph.runtime_app_learning import RuntimeAppLearningContext
 from phone_agent.config.policy import absolute_max_steps
 from phone_agent.grounding.factory import DEFAULT_GROUNDING_PROVIDER_NAME
 
@@ -509,6 +510,7 @@ class PhoneAgent:
                 "visual_fact_extractor": self.agent_config.visual_fact_extractor,
                 "whole_screen_fact_extractor": self.agent_config.whole_screen_fact_extractor,
                 "runtime_goal_context": RuntimeGoalContext(),
+                "app_learning_context": RuntimeAppLearningContext(),
             }
         }
         # P2: the run-scoped LA singleton (built once in __init__) is injected
