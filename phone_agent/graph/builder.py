@@ -19,9 +19,14 @@ from phone_agent.graph.edges import (
 )
 
 
-def create_agent_graph():
+def create_agent_graph(checkpointer=None):
     """
     Create and compile the Plan-Execute-Reflect StateGraph.
+
+    ``checkpointer`` (optional) is passed to ``graph.compile()``; when a
+    checkpointer is present, ``interrupt()`` inside confirm/takeover pauses
+    the graph instead of escaping as a ``GraphInterrupt`` and the run can be
+    resumed with ``Command(resume=...)`` (HITL resume).
 
     Graph topology:
     ```
@@ -92,4 +97,4 @@ def create_agent_graph():
         {"reflect": "reflect", "end": END},
     )
 
-    return graph.compile()
+    return graph.compile(checkpointer=checkpointer)
