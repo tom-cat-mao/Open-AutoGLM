@@ -46,6 +46,13 @@ Dry run (no model, no device):
 .venv/bin/python .agents/skills/phone-agent-live-diagnosis/scripts/run_diagnosis.py "完成一个本地 smoke 任务" --dry-run
 ```
 
+Interactive HITL resume (confirm/takeover pauses for human input, then the agent
+resumes in place via the checkpointer-backed `run_live` path):
+
+```bash
+.venv/bin/python .agents/skills/phone-agent-live-diagnosis/scripts/run_diagnosis.py "登录后支付" --live
+```
+
 Inspect a long-running job:
 
 ```bash

@@ -5,8 +5,10 @@ import uuid
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
+from phone_agent.checkpoint import build_hitl_checkpointer
 from phone_agent.device_factory import get_device_factory
 from langgraph.errors import GraphInterrupt
+from langgraph.types import Command
 from phone_agent.model import ModelClient, ModelConfig
 from phone_agent.graph.builder import create_agent_graph
 from phone_agent.config import PROMPT_VERSION, get_prompt_version
@@ -62,6 +64,10 @@ class AgentConfig:
     locateanything_max_visual_candidates: int = 30
     locateanything_visual_category_budget: int = 5
     locateanything_max_structure_calls: int = 5
+    # HITL resume: with this flag the graph is compiled with a process-local
+    # InMemorySaver and confirm/takeover interrupts can be resumed in-place via
+    # run_live() instead of ending the run.
+    enable_hitl_resume: bool = False
     # Optional fact extractors for typed-predicate evidence collection.
     # Both default to None; reflect only wires ExtractorFactProvider when a
     # callable is present (fact_providers.ExtractorFactProvider).
@@ -170,6 +176,31 @@ def interrupt_payload(
     return message, interrupt_type
 
 
+def extract_interrupt(result: Any) -> tuple[str, str] | None:
+    """Extract (message, type) from a ``__interrupt__`` marker in a result dict.
+
+    langgraph >= 1.x returns the pending interrupt in the invoke result under
+    the ``__interrupt__`` key (a list of ``Interrupt`` objects) instead of
+    raising ``GraphInterrupt`` once a checkpointer is attached; callers that
+    want to resume must read the marker. Returns None when no interrupt is
+    pending.
+    """
+
+    if not isinstance(result, dict):
+        return None
+    marker = result.get("__interrupt__")
+    if not marker:
+        return None
+    for item in marker:
+        value = getattr(item, "value", None)
+        if isinstance(value, dict):
+            return (
+                str(value.get("message") or "User intervention required"),
+                str(value.get("type") or "takeover"),
+            )
+    return None
+
+
 class PhoneAgent:
     """
     AI-powered agent for automating Android phone interactions.
@@ -199,7 +230,10 @@ class PhoneAgent:
         self.agent_config = agent_config or AgentConfig()
 
         self.model_client = ModelClient(self.model_config)
-        self._graph = create_agent_graph()
+        self._checkpointer = (
+            build_hitl_checkpointer() if self.agent_config.enable_hitl_resume else None
+        )
+        self._graph = create_agent_graph(checkpointer=self._checkpointer)
         # P2: one LocateAnythingMLXProvider per agent, built once here and
         # injected through configurable["locate_provider"] so the
         # plan/observation/locate paths share the same (lazily loaded) MLX
@@ -338,6 +372,133 @@ class PhoneAgent:
             trace_writer.emit(
                 "agent", "run_end", run_result.steps, run_result.to_dict()
             )
+        return run_result
+
+    def run_live(
+        self,
+        task: str,
+        resume_input: Any = None,
+    ) -> RunResult:
+        """Run the agent interactively, resuming in place after HITL interrupts.
+
+        Requires ``AgentConfig(enable_hitl_resume=True)``: the graph is compiled
+        with a process-local checkpointer, so ``interrupt()`` in the
+        confirm/takeover nodes pauses the run and returns a ``__interrupt__``
+        marker in the invoke result instead of ending it. For every interrupt
+        the loop calls ``resume_input(prompt)`` (defaults to ``input()``) and
+        resumes the graph with ``Command(resume=answer)`` — takeover passes the
+        answer through (the node ignores its content and continues), confirm
+        feeds the string to its Y/N parser.
+
+        Entering ``n``/``no`` (or ``None``) aborts: the run ends as a terminal
+        ``RunResult`` with ``failure_cause`` = interrupt type, matching the
+        structured-run interrupt attribution. An empty answer (plain Enter)
+        resumes immediately. ``hitl_count`` accumulates across the loop. Trace
+        is add-only: ``run_interrupted`` / ``run_resumed`` events are emitted
+        per round.
+        """
+
+        if not self.agent_config.enable_hitl_resume:
+            raise ValueError(
+                "run_live requires AgentConfig(enable_hitl_resume=True)"
+            )
+        if resume_input is None:
+            resume_input = input
+        started_at = time.perf_counter()
+        trace_id = str(uuid.uuid4())
+        self.model_client.reset_run_state()
+        device_factory = get_device_factory()
+        trace_writer = self._build_trace_writer(trace_id)
+        if trace_writer:
+            trace_writer.emit("agent", "run_start", 0, {"task": task})
+        hitl_count = 0
+
+        def _terminal(
+            message: str, interrupt_type: str, steps: int = 0
+        ) -> RunResult:
+            return RunResult(
+                success=False,
+                finished=True,
+                steps=steps,
+                duration=time.perf_counter() - started_at,
+                final_message=message,
+                error=None,
+                failure_cause=interrupt_type,
+                hitl_count=hitl_count,
+                trace_id=trace_id,
+                trace_path=str(trace_writer.path) if trace_writer else None,
+                context_mode=self.agent_config.context_mode,
+                prompt_version=self.agent_config.prompt_version,
+            )
+
+        try:
+            screenshot = device_factory.get_screenshot(self.agent_config.device_id)
+            initial_state = self._build_initial_state(task, screenshot)
+            config = self._build_graph_config(device_factory, trace_id, trace_writer)
+            result = self._graph.invoke(initial_state, config)
+            while True:
+                pending = extract_interrupt(result)
+                if pending is None:
+                    break
+                message, interrupt_type = pending
+                hitl_count += 1
+                if trace_writer:
+                    trace_writer.emit(
+                        "agent",
+                        "run_interrupted",
+                        0,
+                        {"type": interrupt_type, "message": message},
+                    )
+                prompt = f"{message}\n完成后按回车继续（输入 n 终止）: "
+                answer = resume_input(prompt)
+                if answer is None or str(answer).strip().lower() in ("n", "no"):
+                    return _terminal(
+                        message, interrupt_type, int(result.get("step_count") or 0)
+                    )
+                if trace_writer:
+                    trace_writer.emit(
+                        "agent", "run_resumed", 0, {"type": interrupt_type}
+                    )
+                result = self._graph.invoke(Command(resume=answer), config)
+        except GraphInterrupt as interrupt:
+            # Defensive: only reachable when the graph was compiled without a
+            # checkpointer (older langgraph raised instead of returning the
+            # marker). Terminate with the same attribution as run_structured.
+            message, interrupt_type = interrupt_payload(interrupt)
+            hitl_count += 1
+            if trace_writer:
+                trace_writer.emit(
+                    "agent",
+                    "run_interrupted",
+                    0,
+                    {"type": interrupt_type, "message": message},
+                )
+            return _terminal(message, interrupt_type)
+        except Exception as e:
+            if trace_writer:
+                trace_writer.emit("agent", "run_error", 0, {"message": str(e)})
+            return RunResult(
+                success=False,
+                finished=True,
+                steps=0,
+                duration=time.perf_counter() - started_at,
+                final_message=f"Error: {e}",
+                error=str(e),
+                hitl_count=hitl_count,
+                trace_id=trace_id,
+                trace_path=str(trace_writer.path) if trace_writer else None,
+                context_mode=self.agent_config.context_mode,
+                prompt_version=self.agent_config.prompt_version,
+            )
+
+        run_result = self._state_to_run_result(
+            result,
+            time.perf_counter() - started_at,
+            trace_id,
+            str(trace_writer.path) if trace_writer else None,
+        )
+        if trace_writer:
+            trace_writer.emit("agent", "run_end", run_result.steps, run_result.to_dict())
         return run_result
 
     def _build_initial_state(self, task: str, screenshot: Any) -> AgentState:
@@ -516,6 +677,11 @@ class PhoneAgent:
         # the locate tool's factory falls back to its config-derived provider.
         if self.locate_provider is not None:
             config["configurable"]["locate_provider"] = self.locate_provider
+        # HITL resume: bind this run to a unique thread so the process-local
+        # checkpointer keeps this run's checkpoint namespace (each run gets a
+        # fresh trace_id, so resume cannot collide with a previous run).
+        if self.agent_config.enable_hitl_resume:
+            config["configurable"]["thread_id"] = trace_id
         return config
 
     def _state_to_run_result(

@@ -376,9 +376,19 @@ def main() -> int:
     write_json(run_dir / "preflight.json", preflight)
 
     cmd = build_eval_command(args, task_path, trace_dir)
-    command_result = run_command(cmd, env=build_env(args), run_dir=run_dir, trace_dir=trace_dir)
-
-    result = parse_eval_result(command_result.stdout, command_result.stderr, command_result.returncode)
+    if args.live:
+        if args.dry_run:
+            print("--live requires a real device/model; incompatible with --dry-run", file=sys.stderr)
+            return 2
+        command_result, result = run_live_agent(args, run_dir=run_dir, trace_dir=trace_dir)
+        cmd = ["run_diagnosis.py", "--live", args.target]
+    else:
+        command_result = run_command(
+            cmd, env=build_env(args), run_dir=run_dir, trace_dir=trace_dir
+        )
+        result = parse_eval_result(
+            command_result.stdout, command_result.stderr, command_result.returncode
+        )
     write_json(run_dir / "result.json", result)
 
     record = first_result_record(result)
@@ -427,6 +437,13 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run Open-AutoGLM live diagnosis")
     parser.add_argument("target", nargs="?", help="Natural-language phone-agent test target")
     parser.add_argument("--status", help="Read a run directory or status.json and print current runtime status")
+    parser.add_argument(
+        "--live",
+        action="store_true",
+        help="Interactive HITL resume mode: run in-process via PhoneAgent.run_live "
+        "so confirm/takeover interrupts pause for human input and resume in place "
+        "(requires a real device; not compatible with --dry-run)",
+    )
     parser.add_argument("--dry-run", action="store_true", help="Use eval dry-run without model/device")
     parser.add_argument("--device-id", default=os.getenv("PHONE_AGENT_DEVICE_ID"))
     parser.add_argument("--expected-app", default=None)
@@ -841,6 +858,134 @@ def run_command(cmd: list[str], env: dict[str, str], *, run_dir: Path, trace_dir
         stderr=stderr,
         duration=time.perf_counter() - started,
     )
+
+
+def run_live_agent(
+    args: argparse.Namespace, *, run_dir: Path, trace_dir: Path
+) -> tuple[CommandResult, dict[str, Any]]:
+    """Interactive HITL resume path: run PhoneAgent.run_live in-process.
+
+    Unlike the eval path (subprocess → run_eval.py → run_structured, which
+    keeps its batch interrupt attribution untouched), this wires the graph with
+    a process-local checkpointer (``enable_hitl_resume=True``) so confirm /
+    takeover interrupts pause and prompt the human, then resume in place via
+    ``Command(resume=...)``. Batch eval semantics are not affected.
+    """
+
+    from phone_agent.agent import AgentConfig, PhoneAgent, RunResult
+    from phone_agent.model import ModelConfig
+
+    started = time.perf_counter()
+    stdout_path = run_dir / "run_output.log"
+    stderr_path = run_dir / "run_error.log"
+    status_path = run_dir / "status.json"
+    extra_body: dict[str, Any] = {}
+    if args.model_extra_body:
+        try:
+            extra_body = json.loads(args.model_extra_body)
+        except json.JSONDecodeError:
+            extra_body = {}
+
+    model_config = ModelConfig(
+        base_url=args.base_url,
+        model_name=args.model,
+        api_key=args.apikey,
+        timeout=args.model_timeout,
+        max_retries=args.model_max_retries,
+        stream=args.stream,
+        extra_body=extra_body,
+        thinking_mode=args.thinking_mode,
+        thinking_param=args.thinking_param,
+        trace_raw_model_response=args.trace_raw_model_response,
+        lang=args.lang,
+        output_mode=args.output_mode,
+    )
+    agent = PhoneAgent(
+        model_config=model_config,
+        agent_config=AgentConfig(
+            max_steps=args.max_steps,
+            device_id=args.device_id,
+            lang=args.lang,
+            verbose=not args.quiet,
+            trace_enabled=True,
+            trace_dir=str(trace_dir),
+            trace_raw_model_response=args.trace_raw_model_response,
+            trace_request_messages=args.trace_request_messages,
+            trace_prompt_blocks=args.trace_prompt_blocks,
+            trace_unredacted_prompt=args.trace_unredacted_prompt,
+            context_mode=args.context_mode,
+            grounding_provider_name=args.grounding_provider,
+            accessibility_timeout=args.accessibility_timeout,
+            accessibility_max_marks=args.accessibility_max_marks,
+            locateanything_context_max_chars=args.locateanything_context_max_chars,
+            locateanything_structure_mode=args.locateanything_structure_mode,
+            locateanything_max_visual_candidates=args.locateanything_max_visual_candidates,
+            locateanything_visual_category_budget=args.locateanything_visual_category_budget,
+            locateanything_max_structure_calls=args.locateanything_max_structure_calls,
+            enable_hitl_resume=True,
+        ),
+    )
+    error_text = None
+    try:
+        result = agent.run_live(args.target, resume_input=input)
+    except Exception as exc:  # defensive: never crash the diagnosis wrapper
+        error_text = str(exc)
+        result = RunResult(
+            success=False,
+            finished=True,
+            error=error_text,
+            final_message=f"Error: {error_text}",
+            steps=0,
+            hitl_count=0,
+        )
+    finally:
+        try:
+            agent.unload_models()
+        except Exception:
+            pass
+
+    record = result.to_dict()
+    record.update(
+        {
+            "task_id": slugify(args.target)[:48] or "live_task",
+            "task": args.target,
+            "category": "live",
+            "expected_app": args.expected_app,
+            "max_steps": args.max_steps,
+        }
+    )
+    eval_result: dict[str, Any] = {
+        "summary": {
+            "total": 1,
+            "success": 1 if result.success else 0,
+            "success_rate": 1.0 if result.success else 0.0,
+            "hitl_count": result.hitl_count,
+            "context_mode": args.context_mode,
+            "prompt_version": result.prompt_version,
+        },
+        "results": [record],
+    }
+    returncode = 0 if error_text is None else 1
+    stdout_path.write_text(
+        json.dumps(eval_result, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    if error_text is not None:
+        stderr_path.write_text(error_text, encoding="utf-8")
+    write_runtime_status(
+        status_path,
+        ["run_diagnosis.py", "--live", args.target],
+        None,
+        returncode,
+        started,
+        trace_dir,
+    )
+    command_result = CommandResult(
+        returncode=returncode,
+        stdout=json.dumps(eval_result, ensure_ascii=False),
+        stderr=error_text or "",
+        duration=time.perf_counter() - started,
+    )
+    return command_result, eval_result
 
 
 def write_runtime_status(
