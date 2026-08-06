@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import base64
 import io
+from types import SimpleNamespace
 
 from PIL import Image
 
@@ -220,6 +221,11 @@ def test_locate_path_passes_tier_every_call_not_just_first(
 
 def test_observation_fallback_path_keeps_960_tier(monkeypatch) -> None:
     provider = LocateAnythingMLXProvider(max_size=960)
+    # Synthetic: the provider's file-existence gate is stubbed so the test is
+    # CWD-independent and never needs the real LocateAnything checkpoint.
+    monkeypatch.setattr(
+        provider, "model_path", SimpleNamespace(exists=lambda: True)
+    )
     received: dict = {}
 
     def fake_prepare(screenshot, max_size=None):

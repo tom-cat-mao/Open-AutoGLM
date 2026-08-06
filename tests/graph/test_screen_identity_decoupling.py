@@ -562,8 +562,11 @@ def build_ax_digests_differ(previous: MarkRegistry, new: MarkRegistry) -> bool:
 # ---------------------------------------------------------------------------
 
 
+# Dummy model path: these unit tests never load a real model file.
+_DUMMY_MODEL_PATH = "dummy-la-model-path"
+
 def _stub_la_provider() -> LocateAnythingMLXProvider:
-    provider = LocateAnythingMLXProvider(model_path="models/LocateAnything-3B-4bit")
+    provider = LocateAnythingMLXProvider(model_path="_DUMMY_MODEL_PATH")
     return provider
 
 
@@ -677,7 +680,7 @@ def test_a_lite_factory_skips_locateanything_for_observation_only() -> None:
     common = {
         "grounding_provider_name": "hybrid",
         "accessibility_tree_dump": lambda timeout=None: "<hierarchy />",
-        "grounding_model_path": "models/LocateAnything-3B-4bit",
+        "grounding_model_path": "_DUMMY_MODEL_PATH",
     }
     skipped = build_mark_providers({**common, "skip_locateanything": True})
     assert [provider.name for provider in skipped[0].providers] == [
@@ -702,7 +705,7 @@ def test_a_lite_factory_skips_locateanything_for_observation_only() -> None:
         {
             "grounding_provider_name": "hybrid",
             "skip_locateanything": True,
-            "grounding_model_path": "models/LocateAnything-3B-4bit",
+            "grounding_model_path": "_DUMMY_MODEL_PATH",
         }
     )
     assert locate is not None

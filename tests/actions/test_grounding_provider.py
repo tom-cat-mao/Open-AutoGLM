@@ -29,6 +29,11 @@ from phone_agent.grounding.provider import (
 from phone_agent.graph.marks import MarkRegistry
 
 
+# Dummy model path: LA provider unit tests never load a real model file;
+# the path is only stored on the provider instance (synthetic input).
+_DUMMY_MODEL_PATH = "dummy-la-model-path"
+
+
 class Screenshot:
     base64_data = "fake-image"
     width = 1000
@@ -85,7 +90,7 @@ def test_resize_calibration_keeps_normalized_bbox_and_rejects_bad_size() -> None
 
 
 def test_locateanything_default_max_size_is_960() -> None:
-    provider = LocateAnythingMLXProvider(model_path="models/LocateAnything-3B-4bit")
+    provider = LocateAnythingMLXProvider(model_path="_DUMMY_MODEL_PATH")
 
     assert provider.max_size == 960
     assert provider.context_max_chars == 0
@@ -95,7 +100,7 @@ def test_mark_provider_factory_passes_locateanything_max_size_from_config() -> N
     provider = build_mark_provider(
         {
             "grounding_provider_name": "locateanything",
-            "grounding_model_path": "models/LocateAnything-3B-4bit",
+            "grounding_model_path": "_DUMMY_MODEL_PATH",
             "grounding_max_size": 720,
         }
     )
@@ -151,7 +156,7 @@ def test_mark_providers_default_to_hybrid(monkeypatch) -> None:
 
     providers = build_mark_providers(
         {
-            "grounding_model_path": "models/LocateAnything-3B-4bit",
+            "grounding_model_path": "_DUMMY_MODEL_PATH",
         }
     )
 
@@ -1009,7 +1014,7 @@ def test_hybrid_factory_builds_accessibility_then_locateanything_fallback() -> N
         {
             "grounding_provider_name": "hybrid",
             "accessibility_tree_dump": lambda timeout=None: "<hierarchy />",
-            "grounding_model_path": "models/LocateAnything-3B-4bit",
+            "grounding_model_path": "_DUMMY_MODEL_PATH",
         }
     )
 
@@ -1096,7 +1101,7 @@ def test_locateanything_provider_multiple_hints_create_multiple_marks(
     monkeypatch,
 ) -> None:
     outputs = iter(["<box>100 200 300 400</box>", "<box>500 600 700 800</box>"])
-    provider = LocateAnythingMLXProvider(model_path="models/LocateAnything-3B-4bit")
+    provider = LocateAnythingMLXProvider(model_path="_DUMMY_MODEL_PATH")
 
     monkeypatch.setattr(
         "phone_agent.grounding.locateanything.platform.system", lambda: "Darwin"
@@ -1133,7 +1138,7 @@ def test_locateanything_target_structure_mode_returns_visual_sidecar(
     monkeypatch,
 ) -> None:
     provider = LocateAnythingMLXProvider(
-        model_path="models/LocateAnything-3B-4bit", structure_mode="target"
+        model_path="_DUMMY_MODEL_PATH", structure_mode="target"
     )
 
     monkeypatch.setattr(
@@ -1174,7 +1179,7 @@ def test_locateanything_target_structure_mode_multi_box_is_not_immediately_execu
     monkeypatch,
 ) -> None:
     provider = LocateAnythingMLXProvider(
-        model_path="models/LocateAnything-3B-4bit", structure_mode="target"
+        model_path="_DUMMY_MODEL_PATH", structure_mode="target"
     )
 
     monkeypatch.setattr(
@@ -1245,7 +1250,7 @@ def test_mark_provider_result_to_dict_sanitizes_metadata_and_structure_text() ->
 def test_locateanything_provider_ambiguous_single_hint_fails_closed(
     monkeypatch,
 ) -> None:
-    provider = LocateAnythingMLXProvider(model_path="models/LocateAnything-3B-4bit")
+    provider = LocateAnythingMLXProvider(model_path="_DUMMY_MODEL_PATH")
 
     monkeypatch.setattr(
         "phone_agent.grounding.locateanything.platform.system", lambda: "Darwin"
@@ -1308,11 +1313,11 @@ def test_locateanything_mlx_run_model_uses_gui_prompt_and_fallback_generate(
         SimpleNamespace(apply_chat_template=fake_apply_chat_template),
     )
 
-    provider = LocateAnythingMLXProvider(model_path="models/LocateAnything-3B-4bit")
+    provider = LocateAnythingMLXProvider(model_path="_DUMMY_MODEL_PATH")
     output = provider._run_model(object(), "WLAN setting")
 
     assert output == "<ref>WLAN</ref><box><100><200><300><400></box>"
-    assert captured["model_path"] == "models/LocateAnything-3B-4bit"
+    assert captured["model_path"] == "_DUMMY_MODEL_PATH"
     assert captured["model"].config == {"model_type": "locateanything"}
     assert captured["processor"] == "processor"
     assert (
@@ -1411,11 +1416,11 @@ def test_locateanything_mlx_run_model_prefers_parallel_box_decoding(
     monkeypatch.setitem(sys.modules, "mlx_vlm.prompt_utils", prompt_utils_module)
     monkeypatch.setitem(sys.modules, "mlx_vlm.utils", utils_module)
 
-    provider = LocateAnythingMLXProvider(model_path="models/LocateAnything-3B-4bit")
+    provider = LocateAnythingMLXProvider(model_path="_DUMMY_MODEL_PATH")
     output = provider._run_model(object(), "WLAN setting")
 
     assert output == "<ref>WLAN</ref><box><100><200><300><400></box>"
-    assert captured["model_path"] == "models/LocateAnything-3B-4bit"
+    assert captured["model_path"] == "_DUMMY_MODEL_PATH"
     assert (
         captured["template_prompt"]
         == "Locate the region that matches the following description: WLAN setting."
@@ -1472,7 +1477,7 @@ def _fake_mlx_vlm(monkeypatch, *, output: str = "<box>100 200 300 400</box>"):
 
 
 def _mlx_ready_provider(monkeypatch):
-    provider = LocateAnythingMLXProvider(model_path="models/LocateAnything-3B-4bit")
+    provider = LocateAnythingMLXProvider(model_path="_DUMMY_MODEL_PATH")
     monkeypatch.setattr(
         "phone_agent.grounding.locateanything.platform.system", lambda: "Darwin"
     )
@@ -1532,7 +1537,7 @@ def test_locate_provider_unload_clears_mlx_cache(monkeypatch) -> None:
         mx_core, "clear_cache", lambda: calls.__setitem__("cleared", calls["cleared"] + 1)
     )
 
-    provider = LocateAnythingMLXProvider(model_path="models/LocateAnything-3B-4bit")
+    provider = LocateAnythingMLXProvider(model_path="_DUMMY_MODEL_PATH")
     provider._model = object()
     provider._processor = object()
     provider.unload()
@@ -1545,7 +1550,7 @@ def test_locate_provider_unload_clears_mlx_cache(monkeypatch) -> None:
 def test_mark_providers_hybrid_reuses_injected_locate_provider() -> None:
     """P2: build_mark_providers' hybrid branch reuses the injected
     config['locate_provider'] instance instead of building a new one."""
-    la = LocateAnythingMLXProvider(model_path="models/LocateAnything-3B-4bit")
+    la = LocateAnythingMLXProvider(model_path="_DUMMY_MODEL_PATH")
     providers = build_mark_providers(
         {
             "grounding_provider_name": "hybrid",
@@ -1564,7 +1569,7 @@ def test_mark_providers_hybrid_reuses_injected_locate_provider() -> None:
 def test_mark_providers_hybrid_ignores_injected_provider_when_skipped() -> None:
     """A-lite: skip_locateanything still drops the LA child even when an
     injected singleton is present."""
-    la = LocateAnythingMLXProvider(model_path="models/LocateAnything-3B-4bit")
+    la = LocateAnythingMLXProvider(model_path="_DUMMY_MODEL_PATH")
     providers = build_mark_providers(
         {
             "grounding_provider_name": "hybrid",

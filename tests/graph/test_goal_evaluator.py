@@ -1,5 +1,7 @@
 """Tests for the GoalEvaluator (Phase 3)."""
 
+import pytest
+
 from phone_agent.graph.goal import GoalContract, SuccessCriterion
 from phone_agent.graph.goal_evaluator import evaluate_finish_claim
 
@@ -23,45 +25,38 @@ def _contract(criteria, **kwargs):
 # ----------------------------------------------------------------------
 
 
-def test_accessibility_text_match_matches_when_sha256_stub_present() -> None:
+@pytest.mark.parametrize(
+    ("criterion_name", "description", "marks_text", "expected_status", "in_matched", "in_missing"),
+    (
+        ("title", "stub", "视频标题一", "success", {"title"}, set()),
+        ("title", "missing", "other text", "unknown", set(), set()),
+        ("search_query_visible", "raw", "搜索结果：村长托马斯", "success", {"search_query_visible"}, set()),
+    ),
+)
+def test_accessibility_text_match_states(
+    criterion_name, description, marks_text, expected_status, in_matched, in_missing
+) -> None:
     import hashlib
 
-    text = "视频标题一"
-    stub = f"sha256:{hashlib.sha256(text.encode('utf-8')).hexdigest()[:12]}"
+    if description == "stub":
+        stub = f"sha256:{hashlib.sha256(marks_text.encode('utf-8')).hexdigest()[:12]}"
+        description = f"screen shows {stub}"
+    elif description == "missing":
+        description = "screen shows sha256:0123456789ab"
+    elif description == "raw":
+        description = marks_text
     contract = _contract([
-        SuccessCriterion(name="title", description=f"screen shows {stub}", verification="accessibility_text_match"),
+        SuccessCriterion(name=criterion_name, description=description, verification="accessibility_text_match"),
     ])
-    obs = {"marks": [{"text_summary": text}]}
-    result = evaluate_finish_claim(contract=contract, after_observation=obs)
-    assert result.status == "success"
-    assert "title" in result.matched
-
-
-def test_accessibility_text_match_is_unknown_when_text_not_found() -> None:
-    contract = _contract([
-        SuccessCriterion(name="title", description="screen shows sha256:0123456789ab", verification="accessibility_text_match"),
-    ])
-    obs = {"marks": [{"text_summary": "other text"}]}
-    result = evaluate_finish_claim(contract=contract, after_observation=obs)
-    assert result.status == "unknown"
-    assert "title" not in result.missing
-    assert "title" not in result.matched
-
-
-def test_accessibility_text_match_uses_raw_visible_text() -> None:
-    contract = _contract([
-        SuccessCriterion(
-            name="search_query_visible",
-            description="村长托马斯",
-            verification="accessibility_text_match",
-        ),
-    ])
-    observation = {"marks": [{"text_summary": "搜索结果：村长托马斯"}]}
-
-    result = evaluate_finish_claim(contract=contract, after_observation=observation)
-
-    assert result.status == "success"
-    assert result.matched == ["search_query_visible"]
+    result = evaluate_finish_claim(
+        contract=contract, after_observation={"marks": [{"text_summary": marks_text}]}
+    )
+    assert result.status == expected_status
+    assert in_matched <= set(result.matched)
+    assert in_missing <= set(result.missing)
+    if expected_status == "unknown":
+        assert criterion_name not in result.missing
+        assert criterion_name not in result.matched
 
 
 # ----------------------------------------------------------------------
@@ -69,44 +64,34 @@ def test_accessibility_text_match_uses_raw_visible_text() -> None:
 # ----------------------------------------------------------------------
 
 
-def test_object_rank_match_success() -> None:
+@pytest.mark.parametrize(
+    ("ordinal", "expected_rank", "expected_status", "in_matched", "in_missing"),
+    (
+        (2, 2, "success", {"rank_2"}, set()),
+        (2, 1, "failure", set(), {"rank_2"}),
+        (None, None, "failure", set(), {"rank_none"}),
+    ),
+)
+def test_object_rank_match_states(
+    ordinal, expected_rank, expected_status, in_matched, in_missing
+) -> None:
+    criterion_name = "rank_none" if ordinal is None else "rank_2"
     contract = _contract(
         [
-            SuccessCriterion(name="rank_2", description="2nd item", verification="object_rank_match"),
+            SuccessCriterion(name=criterion_name, description="rank", verification="object_rank_match"),
         ],
-        ordinal=2,
+        ordinal=ordinal,
     )
-    evidence = {"selected_object_signals": {"selected_object_match": True, "selected_object_expected_rank": 2}}
+    evidence = {
+        "selected_object_signals": {
+            "selected_object_match": True,
+            "selected_object_expected_rank": expected_rank,
+        }
+    }
     result = evaluate_finish_claim(contract=contract, verifier_evidence=evidence)
-    assert result.status == "success"
-
-
-def test_object_rank_match_mismatch() -> None:
-    contract = _contract(
-        [
-            SuccessCriterion(name="rank_2", description="2nd item", verification="object_rank_match"),
-        ],
-        ordinal=2,
-    )
-    # expected_rank = 1 in signals but ordinal = 2
-    evidence = {"selected_object_signals": {"selected_object_match": True, "selected_object_expected_rank": 1}}
-    result = evaluate_finish_claim(contract=contract, verifier_evidence=evidence)
-    assert result.status == "failure"
-    assert "rank_2" in result.missing
-
-
-def test_object_rank_match_with_null_ordinal_is_missing() -> None:
-    """P2-2: ordinal=None must not spuriously match when expected_rank is also None."""
-    contract = _contract(
-        [
-            SuccessCriterion(name="rank_none", description="no ordinal", verification="object_rank_match"),
-        ],
-        ordinal=None,
-    )
-    evidence = {"selected_object_signals": {"selected_object_match": True, "selected_object_expected_rank": None}}
-    result = evaluate_finish_claim(contract=contract, verifier_evidence=evidence)
-    assert result.status == "failure"
-    assert "rank_none" in result.missing
+    assert result.status == expected_status
+    assert in_matched <= set(result.matched)
+    assert in_missing <= set(result.missing)
 
 
 # ----------------------------------------------------------------------
@@ -114,55 +99,35 @@ def test_object_rank_match_with_null_ordinal_is_missing() -> None:
 # ----------------------------------------------------------------------
 
 
-def test_vlm_judge_not_named_in_finish_is_failure() -> None:
+@pytest.mark.parametrize(
+    ("finish_matched", "reflect", "expected_status"),
+    (
+        ([], None, "failure"),
+        (["c"], None, "unknown"),
+        (["c"], [], "failure"),
+        (["c"], [{"criterion": "c", "screen_reference": "mark_id=player"}], "success"),
+    ),
+)
+def test_vlm_judge_three_part_check(
+    finish_matched, reflect, expected_status
+) -> None:
+    """The vlm_judge three-part check: named-in-finish / VLM consulted /
+    grounded evidence. Each state (missing / unknown / failure / success) is a
+    distinct case of the same evaluate_finish_claim path."""
     contract = _contract([
         SuccessCriterion(name="c", description="visible", verification="vlm_judge"),
     ])
     result = evaluate_finish_claim(
-        contract=contract, finish_claim_matched=[], reflect_named_evidence=None
+        contract=contract, finish_claim_matched=finish_matched, reflect_named_evidence=reflect
     )
-    assert result.status == "failure"
-    assert "c" in result.missing
-
-
-def test_vlm_judge_vlm_not_run_is_unknown_not_failure() -> None:
-    contract = _contract([
-        SuccessCriterion(name="c", description="visible", verification="vlm_judge"),
-    ])
-    result = evaluate_finish_claim(
-        contract=contract,
-        finish_claim_matched=["c"],
-        reflect_named_evidence=None,  # VLM not consulted yet
-    )
-    assert result.status == "unknown"
-    assert "c" not in result.missing
-    assert "c" not in result.matched
-
-
-def test_vlm_judge_vlm_ran_no_evidence_is_failure() -> None:
-    contract = _contract([
-        SuccessCriterion(name="c", description="visible", verification="vlm_judge"),
-    ])
-    result = evaluate_finish_claim(
-        contract=contract,
-        finish_claim_matched=["c"],
-        reflect_named_evidence=[],  # VLM ran but returned no evidence
-    )
-    assert result.status == "failure"
-    assert "c" in result.missing
-
-
-def test_vlm_judge_with_grounded_evidence_is_success() -> None:
-    contract = _contract([
-        SuccessCriterion(name="player_visible", description="player", verification="vlm_judge"),
-    ])
-    result = evaluate_finish_claim(
-        contract=contract,
-        finish_claim_matched=["player_visible"],
-        reflect_named_evidence=[{"criterion": "player_visible", "screen_reference": "mark_id=player"}],
-    )
-    assert result.status == "success"
-    assert "player_visible" in result.matched
+    assert result.status == expected_status
+    if expected_status == "unknown":
+        assert "c" not in result.missing
+        assert "c" not in result.matched
+    elif expected_status == "failure":
+        assert "c" in result.missing
+    else:
+        assert "c" in result.matched
 
 
 # ----------------------------------------------------------------------
@@ -189,34 +154,26 @@ def test_normalize_criterion_name_collapses_only_format_drift() -> None:
         assert _normalize_criterion_name(raw) == expected
 
 
-def test_vlm_judge_case_and_space_drift_normalizes_to_match() -> None:
+@pytest.mark.parametrize(
+    ("raw_criterion", "criterion_name"),
+    (
+        ("Flight Search Parameters", "flight_search_parameters"),
+        ("cheapest-flight-result", "cheapest_flight_result"),
+    ),
+)
+def test_vlm_judge_format_drift_normalizes_to_match(raw_criterion, criterion_name) -> None:
     contract = _contract([
-        SuccessCriterion(name="flight_search_parameters", description="params", verification="vlm_judge"),
+        SuccessCriterion(name=criterion_name, description="params", verification="vlm_judge"),
     ])
     result = evaluate_finish_claim(
         contract=contract,
-        finish_claim_matched=["flight_search_parameters"],
+        finish_claim_matched=[criterion_name],
         reflect_named_evidence=[
-            {"criterion": "Flight Search Parameters", "screen_reference": "mark_id=form"}
+            {"criterion": raw_criterion, "screen_reference": "mark_id=row"}
         ],
     )
     assert result.status == "success"
-    assert "flight_search_parameters" in result.matched
-
-
-def test_vlm_judge_hyphen_underscore_drift_normalizes_to_match() -> None:
-    contract = _contract([
-        SuccessCriterion(name="cheapest_flight_result", description="cheapest", verification="vlm_judge"),
-    ])
-    result = evaluate_finish_claim(
-        contract=contract,
-        finish_claim_matched=["cheapest_flight_result"],
-        reflect_named_evidence=[
-            {"criterion": "cheapest-flight-result", "screen_reference": "mark_id=row"}
-        ],
-    )
-    assert result.status == "success"
-    assert "cheapest_flight_result" in result.matched
+    assert criterion_name in result.matched
 
 
 def test_vlm_judge_typed_predicate_accepts_drifted_criterion_name() -> None:
@@ -417,34 +374,20 @@ def test_app_or_activity_match_failure_wrong_app() -> None:
 # ----------------------------------------------------------------------
 
 
-def test_external_probe_pass() -> None:
+@pytest.mark.parametrize(
+    ("probe_result", "expected_status"),
+    ((True, "success"), (False, "failure"), (None, "failure")),
+)
+def test_external_probe_outcomes(probe_result, expected_status) -> None:
     contract = _contract([
         SuccessCriterion(name="probe", description="", verification="external_probe", probe_id="test_probe"),
     ])
+    goal_probes = {} if probe_result is None else {"test_probe": lambda: probe_result}
     result = evaluate_finish_claim(
         contract=contract,
-        goal_probes={"test_probe": lambda: True},
+        goal_probes=goal_probes,
     )
-    assert result.status == "success"
-
-
-def test_external_probe_fail() -> None:
-    contract = _contract([
-        SuccessCriterion(name="probe", description="", verification="external_probe", probe_id="test_probe"),
-    ])
-    result = evaluate_finish_claim(
-        contract=contract,
-        goal_probes={"test_probe": lambda: False},
-    )
-    assert result.status == "failure"
-
-
-def test_external_probe_not_registered() -> None:
-    contract = _contract([
-        SuccessCriterion(name="probe", description="", verification="external_probe", probe_id="missing"),
-    ])
-    result = evaluate_finish_claim(contract=contract, goal_probes={})
-    assert result.status == "failure"
+    assert result.status == expected_status
 
 
 # ----------------------------------------------------------------------

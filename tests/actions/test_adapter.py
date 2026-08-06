@@ -7,13 +7,6 @@ from phone_agent.actions.safety import decide_safety
 from phone_agent.actions.validator import ActionValidationError, validate_action
 
 
-def test_adapt_json_rejects_lowercase_tap_xy_without_mark() -> None:
-    with pytest.raises(ActionAdapterError) as exc_info:
-        adapt_json_action('{"type":"do","action":"tap","x":500,"y":250}')
-
-    assert exc_info.value.code == "mark_required"
-
-
 def test_adapt_json_maps_mark_payload_to_intent_ir_not_canonical_action() -> None:
     action = adapt_json_action({"type": "intent", "action": "tap", "target_mark_id": "m1"})
 
@@ -101,7 +94,7 @@ def test_adapt_json_maps_finish_to_canonical_action() -> None:
     (
         ("not-json", "invalid_json"),
         ({"type": "do", "action": "unknown"}, "unknown_action"),
-        ({"type": "do", "action": "tap", "x": 1}, "mark_required"),
+        ({"type": "do", "action": "tap", "x": 500, "y": 250}, "mark_required"),
         ({"type": "do", "action": "tap", "x": 1001, "y": 1}, "mark_required"),
         ({"type": "do", "action": "tap", "element": ["__import__", 1]}, "mark_required"),
     ),
@@ -170,9 +163,24 @@ def test_adapt_json_wait_requires_explicit_duration() -> None:
     assert exc_info.value.code == "missing_field"
 
 
-def test_adapt_tool_calls_rejects_unknown_tool() -> None:
+@pytest.mark.parametrize(
+    "tool_calls",
+    (
+        [{"function": {"name": "shell", "arguments": "{}"}}],
+        [
+            {
+                "type": "not_function",
+                "function": {
+                    "name": "do",
+                    "arguments": '{"type":"do","action":"tap","x":1,"y":2}',
+                },
+            }
+        ],
+    ),
+)
+def test_adapt_tool_calls_rejects_unsupported_shape(tool_calls) -> None:
     with pytest.raises(ActionAdapterError) as exc_info:
-        adapt_tool_calls([{"function": {"name": "shell", "arguments": "{}"}}])
+        adapt_tool_calls(tool_calls)
 
     assert exc_info.value.code == "unsupported_tool_call"
 
@@ -217,59 +225,24 @@ def test_adapt_tool_calls_rejects_extra_dangerous_envelope_fields() -> None:
     assert exc_info.value.code == "unsafe_value"
 
 
-def test_adapt_tool_calls_rejects_invalid_envelope_type() -> None:
-    with pytest.raises(ActionAdapterError) as exc_info:
-        adapt_tool_calls(
-            [
-                {
-                    "type": "not_function",
-                    "function": {
-                        "name": "do",
-                        "arguments": '{"type":"do","action":"tap","x":1,"y":2}',
-                    },
-                }
-            ]
-        )
-
-    assert exc_info.value.code == "unsupported_tool_call"
-
-
-def test_validator_rejects_dangerous_extra_fields() -> None:
+@pytest.mark.parametrize(
+    ("action", "code"),
+    (
+        (
+            {"_metadata": "do", "action": "Tap", "element": [500, 500], "command": "rm -rf /"},
+            "unsafe_value",
+        ),
+        ({"_metadata": "do", "action": "Shell"}, "unknown_action"),
+        ({"_metadata": "do", "action": "Tap", "element": [1001, 1]}, "unsafe_value"),
+        ({"_metadata": "do", "action": "Wait", "duration": "999 seconds"}, "unsafe_value"),
+        ({"_metadata": "do", "action": "Wait", "duration": "0 seconds"}, "unsafe_value"),
+    ),
+)
+def test_validator_rejects_invalid_actions(action, code: str) -> None:
     with pytest.raises(ActionValidationError) as exc_info:
-        validate_action(
-            {
-                "_metadata": "do",
-                "action": "Tap",
-                "element": [500, 500],
-                "command": "rm -rf /",
-            }
-        )
+        validate_action(action)
 
-    assert exc_info.value.code == "unsafe_value"
-
-
-def test_validator_rejects_unknown_action_and_bad_coordinates() -> None:
-    with pytest.raises(ActionValidationError) as unknown_exc:
-        validate_action({"_metadata": "do", "action": "Shell"})
-    with pytest.raises(ActionValidationError) as coord_exc:
-        validate_action({"_metadata": "do", "action": "Tap", "element": [1001, 1]})
-
-    assert unknown_exc.value.code == "unknown_action"
-    assert coord_exc.value.code == "unsafe_value"
-
-
-def test_validator_rejects_unbounded_wait_duration() -> None:
-    with pytest.raises(ActionValidationError) as exc_info:
-        validate_action({"_metadata": "do", "action": "Wait", "duration": "999 seconds"})
-
-    assert exc_info.value.code == "unsafe_value"
-
-
-def test_validator_rejects_zero_wait_duration() -> None:
-    with pytest.raises(ActionValidationError) as exc_info:
-        validate_action({"_metadata": "do", "action": "Wait", "duration": "0 seconds"})
-
-    assert exc_info.value.code == "unsafe_value"
+    assert exc_info.value.code == code
 
 
 def test_action_ir_metadata_is_authoritative_when_serializing() -> None:
@@ -377,20 +350,13 @@ def test_mark_registry_rejects_prompt_injection_metadata() -> None:
     assert registry.marks == {}
 
 
-def test_validate_action_normalizes_launch_app_alias() -> None:
+@pytest.mark.parametrize(("app", "expected"), (("设置", "Settings"), ("chrome", "Chrome")))
+def test_validate_action_normalizes_launch_app(app, expected) -> None:
     from phone_agent.actions.validator import validate_action
 
-    action = {"_metadata": "do", "action": "Launch", "app": "设置"}
+    action = {"_metadata": "do", "action": "Launch", "app": app}
     result = validate_action(action)
-    assert result["app"] == "Settings"
-
-
-def test_validate_action_normalizes_launch_app_case() -> None:
-    from phone_agent.actions.validator import validate_action
-
-    action = {"_metadata": "do", "action": "Launch", "app": "chrome"}
-    result = validate_action(action)
-    assert result["app"] == "Chrome"
+    assert result["app"] == expected
 
 
 def test_validate_action_rejects_unknown_launch_app() -> None:
@@ -401,34 +367,26 @@ def test_validate_action_rejects_unknown_launch_app() -> None:
         validate_action(action)
 
 
-def test_validate_action_unknown_app_with_candidates_passes() -> None:
+@pytest.mark.parametrize(
+    ("app", "candidates", "expected_app"),
+    (
+        ("SomeNewApp", ["com.example.newapp", "newapp"], "SomeNewApp"),
+        ("chrome", ["com.android.chrome"], "Chrome"),
+    ),
+)
+def test_validate_action_launch_with_candidates(app, candidates, expected_app) -> None:
     from phone_agent.actions.validator import validate_action
 
     action = {
         "_metadata": "do",
         "action": "Launch",
-        "app": "SomeNewApp",
-        "package_candidates": ["com.example.newapp", "newapp"],
+        "app": app,
+        "package_candidates": candidates,
     }
     result = validate_action(action)
 
-    assert result["app"] == "SomeNewApp"
-    assert result["package_candidates"] == ["com.example.newapp", "newapp"]
-
-
-def test_validate_action_normalizes_known_app_with_candidates() -> None:
-    from phone_agent.actions.validator import validate_action
-
-    action = {
-        "_metadata": "do",
-        "action": "Launch",
-        "app": "chrome",
-        "package_candidates": ["com.android.chrome"],
-    }
-    result = validate_action(action)
-
-    assert result["app"] == "Chrome"
-    assert result["package_candidates"] == ["com.android.chrome"]
+    assert result["app"] == expected_app
+    assert result["package_candidates"] == candidates
 
 
 def test_validate_action_rejects_invalid_package_candidates() -> None:

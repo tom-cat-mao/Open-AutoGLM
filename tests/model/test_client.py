@@ -20,53 +20,46 @@ main = importlib.util.module_from_spec(MAIN_SPEC)
 MAIN_SPEC.loader.exec_module(main)
 
 
-def test_model_config_rejects_invalid_output_mode() -> None:
-    with pytest.raises(ValueError, match="output_mode"):
-        ModelConfig(output_mode="bad")  # type: ignore[arg-type]
+@pytest.mark.parametrize(
+    ("kwargs", "match"),
+    (
+        ({"output_mode": "bad"}, "output_mode"),
+        ({"output_mode": "text_dsl"}, "output_mode"),
+        ({"timeout": 0}, "timeout"),
+        ({"max_retries": -1}, "max_retries"),
+        ({"thinking_mode": "bad"}, "thinking_mode"),
+        ({"thinking_param": "bad"}, "thinking_param"),
+    ),
+)
+def test_model_config_rejects_invalid_options(kwargs, match: str) -> None:
+    with pytest.raises(ValueError, match=match):
+        ModelConfig(**kwargs)
 
 
 def test_model_config_defaults_to_structured_json_schema() -> None:
     assert ModelConfig().output_mode == "json_schema"
 
 
-def test_model_config_rejects_invalid_http_options() -> None:
-    with pytest.raises(ValueError, match="timeout"):
-        ModelConfig(timeout=0)
-    with pytest.raises(ValueError, match="max_retries"):
-        ModelConfig(max_retries=-1)
-
-
-def test_model_config_rejects_invalid_thinking_options() -> None:
-    with pytest.raises(ValueError, match="thinking_mode"):
-        ModelConfig(thinking_mode="bad")  # type: ignore[arg-type]
-    with pytest.raises(ValueError, match="thinking_param"):
-        ModelConfig(thinking_param="bad")  # type: ignore[arg-type]
-
-
-def test_build_extra_body_applies_enable_thinking_flag() -> None:
+@pytest.mark.parametrize(
+    ("thinking_mode", "thinking_param", "extra_body", "expected"),
+    (
+        ("off", "enable_thinking", {"top_k": 20}, {"top_k": 20, "enable_thinking": False}),
+        (
+            "on",
+            "chat_template_kwargs",
+            {"chat_template_kwargs": {"foo": "bar"}},
+            {"chat_template_kwargs": {"foo": "bar", "enable_thinking": True}},
+        ),
+    ),
+)
+def test_build_extra_body_applies_thinking_config(
+    thinking_mode, thinking_param, extra_body, expected
+) -> None:
     client = ModelClient(
-        ModelConfig(
-            extra_body={"top_k": 20},
-            thinking_mode="off",
-            thinking_param="enable_thinking",
-        )
+        ModelConfig(extra_body=extra_body, thinking_mode=thinking_mode, thinking_param=thinking_param)
     )
 
-    assert client._build_extra_body() == {"top_k": 20, "enable_thinking": False}
-
-
-def test_build_extra_body_applies_chat_template_kwargs() -> None:
-    client = ModelClient(
-        ModelConfig(
-            extra_body={"chat_template_kwargs": {"foo": "bar"}},
-            thinking_mode="on",
-            thinking_param="chat_template_kwargs",
-        )
-    )
-
-    assert client._build_extra_body() == {
-        "chat_template_kwargs": {"foo": "bar", "enable_thinking": True}
-    }
+    assert client._build_extra_body() == expected
 
 
 def test_model_client_passes_http_options_to_openai(monkeypatch) -> None:
@@ -241,35 +234,33 @@ def test_diagnose_model_api_redacts_sensitive_error(monkeypatch, capsys) -> None
     assert "[REDACTED]" in output
 
 
-def test_parse_response_prefers_xml_answer_over_inner_json() -> None:
-    client = ModelClient()
-
-    thinking, action = client._parse_response(
-        '<think>思考</think><answer>{"type":"do","action":"wait","duration":"1 seconds"}</answer>'
-    )
-
-    assert thinking == "思考"
-    assert action == '{"type":"do","action":"wait","duration":"1 seconds"}'
-    assert "</answer>" not in action
-
-
 @pytest.mark.parametrize(
-    ("content", "expected_action"),
+    ("content", "expected_thinking", "expected_action"),
     (
-        ('  {"type":"do","action":"wait","duration":"1 seconds"}  ', '{"type":"do","action":"wait","duration":"1 seconds"}'),
-        ('```\n{"type":"finish","message":"done"}\n```', '{"type":"finish","message":"done"}'),
-        ('```json\n{"type":"do","action":"back"}\n```', '{"type":"do","action":"back"}'),
+        (
+            '<think>思考</think><answer>{"type":"do","action":"wait","duration":"1 seconds"}</answer>',
+            "思考",
+            '{"type":"do","action":"wait","duration":"1 seconds"}',
+        ),
+        (
+            '  {"type":"do","action":"wait","duration":"1 seconds"}  ',
+            "",
+            '{"type":"do","action":"wait","duration":"1 seconds"}',
+        ),
+        ('```\n{"type":"finish","message":"done"}\n```', "", '{"type":"finish","message":"done"}'),
+        ('```json\n{"type":"do","action":"back"}\n```', "", '{"type":"do","action":"back"}'),
     ),
 )
 def test_parse_response_normalizes_structured_text_and_code_fence(
-    content: str, expected_action: str
+    content: str, expected_thinking: str, expected_action: str
 ) -> None:
     client = ModelClient()
 
     thinking, action = client._parse_response(content)
 
-    assert thinking == ""
+    assert thinking == expected_thinking
     assert action == expected_action
+    assert "</answer>" not in action
 
 
 @pytest.mark.parametrize(
@@ -346,12 +337,6 @@ def test_parse_response_with_metadata_adapts_tool_calls() -> None:
     assert '"action": "Back"' in action
     assert metadata["detected_format"] == "tool_calls"
     assert metadata["adapter_used"] == "tool_calls"
-
-
-def test_model_config_rejects_removed_text_dsl_mode() -> None:
-    with pytest.raises(ValueError, match="output_mode"):
-        ModelConfig(output_mode="text_dsl")  # type: ignore[arg-type]
-
 
 
 def test_trace_raw_model_response_opt_in_records_parse_failure_text() -> None:
