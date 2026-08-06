@@ -11,6 +11,7 @@ import re
 import unicodedata
 from typing import Any, Protocol
 
+from phone_agent.config.app_registry import InstalledAppInventory
 from phone_agent.config.apps import DEFAULT_APP_REGISTRY, get_app_registry_summary
 from phone_agent.graph.goal import (
     LEGACY_SHA256_STUB_PATTERN,
@@ -424,10 +425,27 @@ class LLMGoalCompiler:
         model_client: Any,
         lang: str = "cn",
         retry_limit: int = 1,
+        learning: Any | None = None,
+        device_factory: Any | None = None,
+        device_id: str | None = None,
     ) -> None:
         self._model = model_client
         self._lang = lang
         self._retry_limit = max(0, retry_limit)
+        self._learning = learning
+        self._device_factory = device_factory
+        self._device_id = device_id
+
+    def _cheap_inventory(self) -> InstalledAppInventory | None:
+        """Return the device inventory when cheaply available, else None."""
+
+        factory = self._device_factory
+        if factory is None or not hasattr(factory, "get_installed_app_inventory"):
+            return None
+        try:
+            return factory.get_installed_app_inventory(self._device_id)
+        except Exception:
+            return None
 
     def compile(
         self, *, task: str, hints: dict[str, Any] | None = None
@@ -443,7 +461,14 @@ class LLMGoalCompiler:
             else GOAL_COMPILER_SYSTEM_PROMPT_CN
         )
         system_prompt = "\n\n".join(
-            [system_prompt, get_app_registry_summary(lang=self._lang)]
+            [
+                system_prompt,
+                get_app_registry_summary(
+                    lang=self._lang,
+                    learning=self._learning,
+                    inventory=self._cheap_inventory(),
+                ),
+            ]
         )
         messages = [
             MessageBuilder.create_system_message(system_prompt),
@@ -933,7 +958,14 @@ def compile_goal_contract(
     # 2. LLM compiler (if model_client available)
     model_client = configurable.get("model_client")
     if model_client is not None:
-        llm_compiler = LLMGoalCompiler(model_client, lang=lang, retry_limit=retry_limit)
+        llm_compiler = LLMGoalCompiler(
+            model_client,
+            lang=lang,
+            retry_limit=retry_limit,
+            learning=configurable.get("app_learning_context"),
+            device_factory=configurable.get("device_factory"),
+            device_id=state.get("device_id"),
+        )
         contract = llm_compiler.compile(task=task)
         if contract.compile_status == "compiled":
             return contract

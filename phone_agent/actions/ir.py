@@ -20,6 +20,7 @@ class DoActionDict(TypedDict, total=False):
     text: str
     message: str
     app: str
+    package_candidates: list[str]
     duration: str
 
 

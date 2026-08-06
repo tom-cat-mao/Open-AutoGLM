@@ -23,6 +23,15 @@ class FakeScreenshot:
 class FakeDeviceFactory:
     def __init__(self) -> None:
         self.calls: list[tuple[str, tuple[Any, ...], dict[str, Any]]] = []
+        self.inventory_packages = frozenset(
+            {
+                "com.android.chrome",
+                "com.android.settings",
+                "com.tongcheng.android",
+                "com.example.unknown.app",
+                "com.yiche.app",
+            }
+        )
 
     def _record(self, name: str, *args: Any, **kwargs: Any) -> None:
         self.calls.append((name, args, kwargs))
@@ -60,9 +69,29 @@ class FakeDeviceFactory:
     def home(self, device_id: str | None = None) -> None:
         self._record("home", device_id)
 
-    def launch_app(self, app: str, device_id: str | None = None) -> bool:
-        self._record("launch_app", app, device_id)
+    def launch_app(
+        self,
+        app: str,
+        device_id: str | None = None,
+        *,
+        package_candidates: list[str] | None = None,
+        learning: Any | None = None,
+        inventory: Any | None = None,
+    ) -> bool:
+        self._record(
+            "launch_app",
+            app,
+            device_id,
+            package_candidates=package_candidates,
+            learning=learning is not None,
+        )
         return app != "missing"
+
+    def get_installed_app_inventory(self, device_id: str | None = None):
+        from phone_agent.config.app_registry import InstalledAppInventory
+
+        self._record("get_installed_app_inventory", device_id)
+        return InstalledAppInventory(self.inventory_packages, device_id=device_id)
 
     def detect_and_set_adb_keyboard(self, device_id: str | None = None) -> str:
         self._record("detect_and_set_adb_keyboard", device_id)

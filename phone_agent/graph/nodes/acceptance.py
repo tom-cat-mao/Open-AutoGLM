@@ -595,6 +595,7 @@ def acceptance_node(state: "AgentState", config: RunnableConfig) -> dict:
         before_observation=state_before_observation_payload(state, task_context=task),
         after_observation=after_verifier_observation,
         page_signal_adapter=None,
+        learning=configurable.get("app_learning_context"),
     )
 
     finish_claim_matched: list[str] = []

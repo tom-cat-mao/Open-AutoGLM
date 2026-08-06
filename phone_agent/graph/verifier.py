@@ -42,6 +42,7 @@ def verify_action_outcome(
     before_observation: dict[str, Any] | None = None,
     after_observation: dict[str, Any] | None = None,
     page_signal_adapter: PageSignalAdapter | None = None,
+    learning: Any | None = None,
 ) -> VerifierResult:
     """Compute conservative deterministic outcome signals.
 
@@ -91,8 +92,10 @@ def verify_action_outcome(
         )
     if isinstance(action, dict) and action.get("action") == "Launch":
         target = str(action.get("app") or "")
-        target_package = _package_for_app_name(target)
-        after_package = _package_for_app_name(str(after_app or ""))
+        target_package = _package_for_app_name(target, learning=learning)
+        after_package = _package_for_app_name(
+            str(after_app or ""), learning=learning
+        )
         after_component = " ".join(
             str(value or "")
             for value in (
@@ -518,7 +521,15 @@ def _progress_signals(
     return signals
 
 
-def _package_for_app_name(app_name: str) -> str | None:
+def _package_for_app_name(
+    app_name: str, *, learning: Any | None = None
+) -> str | None:
+    """Resolve an app term to a package, checking the per-run learned mapping first."""
+
+    if learning is not None:
+        learned = learning.lookup(app_name)
+        if learned is not None:
+            return learned
     canonical = normalize_app_name(app_name)
     if canonical:
         return get_package_name(canonical)

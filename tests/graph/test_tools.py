@@ -179,6 +179,8 @@ def test_adb_launch_app_uses_am_start_not_monkey(monkeypatch) -> None:
         calls.append(cmd)
         if "resolve-activity" in cmd:
             return subprocess.CompletedProcess(cmd, 0, stdout="com.android.settings/.Settings\n", stderr="")
+        if "pm" in cmd and "list" in cmd and "packages" in cmd:
+            return subprocess.CompletedProcess(cmd, 0, stdout="package:com.android.settings\npackage:com.android.chrome\n", stderr="")
         return subprocess.CompletedProcess(cmd, 0, stdout="Starting: Intent\n", stderr="")
 
     monkeypatch.setattr(device_module.subprocess, "run", fake_run)
@@ -204,6 +206,8 @@ def test_adb_launch_app_falls_back_when_launcher_component_missing(monkeypatch) 
         calls.append(cmd)
         if "resolve-activity" in cmd:
             return subprocess.CompletedProcess(cmd, 0, stdout="No activity found\n", stderr="")
+        if "pm" in cmd and "list" in cmd and "packages" in cmd:
+            return subprocess.CompletedProcess(cmd, 0, stdout="package:com.android.settings\npackage:com.android.chrome\n", stderr="")
         return subprocess.CompletedProcess(cmd, 0, stdout="Starting: Intent\n", stderr="")
 
     monkeypatch.setattr(device_module.subprocess, "run", fake_run)
@@ -227,6 +231,8 @@ def test_adb_launch_app_returns_false_on_am_start_error(monkeypatch) -> None:
     def fake_run(cmd, **kwargs):
         if "resolve-activity" in cmd:
             return subprocess.CompletedProcess(cmd, 0, stdout="com.android.settings/.Settings\n", stderr="")
+        if "pm" in cmd and "list" in cmd and "packages" in cmd:
+            return subprocess.CompletedProcess(cmd, 0, stdout="package:com.android.settings\npackage:com.android.chrome\n", stderr="")
         return subprocess.CompletedProcess(cmd, 0, stdout="Error: Activity not started\n", stderr="")
 
     monkeypatch.setattr(device_module.subprocess, "run", fake_run)

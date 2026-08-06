@@ -80,7 +80,7 @@ ALLOWED_PROVIDER_FIELDS_BY_ACTION: dict[str, set[str]] = {
     "Type_Name": COMMON_DO_FIELDS | {"text"},
     "Back": COMMON_DO_FIELDS,
     "Home": COMMON_DO_FIELDS,
-    "Launch": COMMON_DO_FIELDS | {"app", "app_name"},
+    "Launch": COMMON_DO_FIELDS | {"app", "app_name", "package_candidates"},
     "Wait": COMMON_DO_FIELDS | {"duration"},
     "Note": COMMON_DO_FIELDS | {"text"},
     "Call_API": COMMON_DO_FIELDS | {"text"},
@@ -220,6 +220,19 @@ def adapt_json_action(payload: str | dict[str, Any]) -> dict[str, Any]:
         if not isinstance(app, str):
             raise ActionAdapterError("missing_field", "Launch requires app")
         action["app"] = app
+        if "package_candidates" in data:
+            candidates = data["package_candidates"]
+            if not isinstance(candidates, list) or not candidates:
+                raise ActionAdapterError(
+                    "unsafe_value", "package_candidates must be a non-empty list"
+                )
+            for item in candidates:
+                if not isinstance(item, str) or not item.strip():
+                    raise ActionAdapterError(
+                        "unsafe_value",
+                        "package_candidates items must be non-empty strings",
+                    )
+            action["package_candidates"] = [item.strip() for item in candidates]
     elif action_name == "Wait":
         if "duration" not in data:
             raise ActionAdapterError("missing_field", "Wait requires duration")

@@ -3,6 +3,7 @@
 import re
 import subprocess
 import time
+from typing import Any, Iterable
 
 from phone_agent.config.app_registry import (
     ForegroundAppObservation,
@@ -271,23 +272,45 @@ def home(device_id: str | None = None, delay: float | None = None) -> None:
 
 
 def launch_app(
-    app_name: str, device_id: str | None = None, delay: float | None = None
+    app_name: str,
+    device_id: str | None = None,
+    delay: float | None = None,
+    *,
+    package_candidates: Iterable[str] | None = None,
+    learning: Any | None = None,
+    inventory: InstalledAppInventory | None = None,
 ) -> bool:
     """
-    Launch an app by name.
+    Launch an app by name, package name, or candidate package hints.
+
+    Resolution chain: static registry alias -> per-run learned mapping ->
+    device inventory substring match against ``package_candidates``. The
+    device is the fact source: an app installed on the device is launchable.
 
     Args:
-        app_name: The app name (must be in APP_PACKAGES).
+        app_name: The app name (static name, package name, or user term).
         device_id: Optional ADB device ID.
         delay: Delay in seconds after launching. If None, uses configured default.
+        package_candidates: Optional candidate package names/keywords for apps
+            not present in the static registry.
+        learning: Optional per-run learned app term -> package mapping.
+        inventory: Optional pre-fetched installed inventory; fetched when None.
 
     Returns:
-        True if app was launched, False if app not found.
+        True if app was launched, False otherwise (resolution failed, app not
+        installed, or launch error).
     """
     if delay is None:
         delay = TIMING_CONFIG.device.default_launch_delay
 
-    target = DEFAULT_LAUNCH_TARGET_RESOLVER.resolve(app_name)
+    if inventory is None:
+        inventory = get_installed_app_inventory(device_id)
+    target = DEFAULT_LAUNCH_TARGET_RESOLVER.resolve(
+        app_name,
+        inventory=inventory,
+        candidates=package_candidates,
+        learning=learning,
+    )
     if target.status != "resolved" or not target.package_name:
         return False
 

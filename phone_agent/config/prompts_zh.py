@@ -24,7 +24,7 @@ ACTION_SCHEMA = """# Action Schema（唯一动作契约）
 - 屏幕目标点击类动作必须使用带 `target_mark_id` 的 IntentIR：`{"type":"intent","action":"tap|double_tap|long_press","target_mark_id":"m1"}`；不要猜 Tap 坐标，也不要把目标描述当成可执行目标。
 - 如果 Screen Objects block 中存在唯一可见对象，也可输出 observation-local selector：`target_object_id`，或 `object_role`+`ordinal`/strict `object_filter`；selector 只是 IntentIR metadata，系统必须先编译成唯一 `target_mark_id` 才能执行。reobserve 后不要复用旧 object_id/list_id/ordinal。
 - `object_filter` 只能是 flat JSON object，key 仅限 `object_type`、`role`、`source`、`list_id`、`title_hash_prefix`、`text_hash_prefix`、`resource_id_hash_prefix`、`lineage_hash_prefix`；禁止 raw title/text、regex、array、nested object、provider/backend/device 字段。
-- Launch: `{"type":"do","action":"launch","app":"应用名"}`，优先用于启动目标 App。
+- Launch: `{"type":"do","action":"launch","app":"应用名"}`，优先用于启动目标 App。若应用不在“可用应用”列表，可补充候选包名/关键词：`{"type":"do","action":"launch","app":"同程","package_candidates":["com.tongcheng.android"]}`，系统会用设备实装列表核验。
 - Type / Type_Name: `{"type":"do","action":"type","text":"文本"}`；输入前先确保输入框聚焦，系统会自动清空旧文本。
 - Swipe: `{"type":"do","action":"swipe","start":[x1,y1],"end":[x2,y2]}`，坐标为 0-1000 相对坐标。
 - Back / Home: `{"type":"do","action":"back"}` / `{"type":"do","action":"home"}`。
@@ -85,6 +85,7 @@ JSON_OUTPUT_CONTRACT = """# 输出格式：JSON schema
 - {"type":"do","action":"swipe","start":[500,800],"end":[500,200]}
 - {"type":"do","action":"type","text":"你好"}
 - {"type":"do","action":"launch","app":"Settings"}
+- {"type":"do","action":"launch","app":"同程","package_candidates":["com.tongcheng.android"]}
 - {"type":"do","action":"wait","duration":"1 seconds"}
 - {"type":"do","action":"back"}
 - {"type":"do","action":"home"}

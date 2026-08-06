@@ -797,6 +797,7 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
         before_observation=before_verifier_observation,
         after_observation=after_verifier_observation,
         page_signal_adapter=None,
+        learning=configurable.get("app_learning_context"),
     )
     runtime_contract_id = goal_runtime_reference(state)
     ledger = list(state.get("goal_evidence_ledger") or [])

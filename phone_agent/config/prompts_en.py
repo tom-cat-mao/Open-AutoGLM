@@ -22,7 +22,7 @@ ACTION_SCHEMA = """# Action Schema (single action contract)
 - Screen-target tap-like actions must use IntentIR with `target_mark_id`, for example `{"type":"intent","action":"tap|double_tap|long_press","target_mark_id":"m1"}`; do not guess Tap coordinates and do not use target descriptions as executable targets.
 - If the Screen Objects block has a unique visible object, you may emit observation-local selectors: `target_object_id`, or `object_role`+`ordinal`/strict `object_filter`; selectors are only IntentIR metadata and the harness must compile them to one `target_mark_id` before execution. Do not reuse old object_id/list_id/ordinal after reobserve.
 - `object_filter` must be a flat JSON object. Allowed keys: `object_type`, `role`, `source`, `list_id`, `title_hash_prefix`, `text_hash_prefix`, `resource_id_hash_prefix`, `lineage_hash_prefix`; raw title/text, regex, arrays, nested objects, provider/backend/device fields are forbidden.
-- Launch: `{"type":"do","action":"launch","app":"AppName"}`, preferred when opening the target app.
+- Launch: `{"type":"do","action":"launch","app":"AppName"}`, preferred when opening the target app. If the app is not in the available-app list, you may add candidate package names/keywords: `{"type":"do","action":"launch","app":"Tongcheng","package_candidates":["com.tongcheng.android"]}`; the system verifies them against the installed-device inventory.
 - Type / Type_Name: `{"type":"do","action":"type","text":"text"}`; focus the input first, existing text is cleared automatically.
 - Swipe: `{"type":"do","action":"swipe","start":[x1,y1],"end":[x2,y2]}` in 0-1000 relative coordinates.
 - Back / Home: `{"type":"do","action":"back"}` / `{"type":"do","action":"home"}`.
@@ -86,6 +86,7 @@ Examples:
 - {"type":"do","action":"swipe","start":[500,800],"end":[500,200]}
 - {"type":"do","action":"type","text":"hello"}
 - {"type":"do","action":"launch","app":"Settings"}
+- {"type":"do","action":"launch","app":"Tongcheng","package_candidates":["com.tongcheng.android"]}
 - {"type":"do","action":"wait","duration":"1 seconds"}
 - {"type":"do","action":"back"}
 - {"type":"do","action":"home"}
