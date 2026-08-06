@@ -17,12 +17,14 @@ from phone_agent.graph.context import (
     action_target_center,
     action_text_identity,
     build_action_outcome_summary,
+    build_skinny_trajectory_line,
     context_enabled,
     get_context_mode,
     locate_hint_digest,
     sanitize_context_payload,
     repeated_action_key,
     state_surface_identity,
+    _trajectory_step_index,
     update_gui_memory,
 )
 from phone_agent.graph.tools import dispatch_tool
@@ -36,8 +38,52 @@ if TYPE_CHECKING:
     from phone_agent.graph.state import AgentState
 
 
+def _replace_last_user_message(messages: list[dict], text: str) -> None:
+    """Replace the last user message with a text-only (skinny) message.
+
+    Used by the trajectory conversion: the step's fat observation tail is
+    replaced by its one-line record once the result is known. No-op when no
+    user message exists (e.g. a resume path that already stripped it).
+    """
+    for index in range(len(messages) - 1, -1, -1):
+        if messages[index].get("role") == "user":
+            messages[index] = {
+                "role": "user",
+                "content": [{"type": "text", "text": text}],
+            }
+            return
+
+
+def _skinny_for_step(
+    state: "AgentState",
+    result: dict | None = None,
+    *,
+    placeholder_message: str | None = None,
+) -> str:
+    """Build the trajectory row for the step whose fat tail is being replaced.
+
+    The step index is derived from the assistant rows already in the history,
+    so it stays correct on resume/confirm-reject paths where step_count may
+    have been incremented without a completed step.
+    """
+    lang = state.get("lang", "cn")
+    messages = list(state.get("messages") or [])
+    if placeholder_message is not None:
+        result = {"success": None, "message": placeholder_message}
+
+    return build_skinny_trajectory_line(
+        state,
+        step_index=_trajectory_step_index(messages),
+        result=result,
+        lang=lang,
+    )
+
+
 def _strip_and_append(
-    messages: list[dict], thinking: str, action_raw: str
+    messages: list[dict],
+    thinking: str,
+    action_raw: str,
+    skinny_line: str | None = None,
 ) -> list[dict]:
     """Strip images from last user message and append assistant message.
 
@@ -46,9 +92,17 @@ def _strip_and_append(
     model sees its own reasoning in history. Providers without a reasoning
     channel keep the historical ``<think...>...</think...>`` placeholder
     byte-for-byte, so no-reasoning runs are format-identical to before.
+
+    P-E: when ``skinny_line`` is provided the step's fat observation tail is
+    replaced by its one-line trajectory record (the image is dropped with it,
+    which is P0 #3's stronger form); otherwise the historical image is simply
+    stripped as before.
     """
     if messages:
-        messages[-1] = MessageBuilder.remove_images_from_message(messages[-1])
+        if skinny_line is not None:
+            _replace_last_user_message(messages, skinny_line)
+        else:
+            messages[-1] = MessageBuilder.remove_images_from_message(messages[-1])
     if thinking and thinking.strip():
         assistant_content = f"<think>{thinking}</think>\n<answer>{action_raw}</answer>"
     else:
@@ -295,7 +349,9 @@ def execute_node(state: "AgentState", config: RunnableConfig) -> dict:
             if capability is not None
             else None
         )
-        messages = _strip_and_append(messages, thinking, action_raw)
+        messages = _strip_and_append(
+            messages, thinking, action_raw, skinny_line=_skinny_for_step(state, result.__dict__)
+        )
         emit_trace(
             config,
             state,
@@ -449,7 +505,9 @@ def execute_node(state: "AgentState", config: RunnableConfig) -> dict:
                     "reason_code": failure_code,
                 },
             )
-            messages = _strip_and_append(messages, thinking, action_raw)
+            messages = _strip_and_append(
+                messages, thinking, action_raw, skinny_line=_skinny_for_step(state, result.__dict__)
+            )
             emit_trace(
                 config,
                 state,
@@ -512,7 +570,9 @@ def execute_node(state: "AgentState", config: RunnableConfig) -> dict:
                     "reason_code": "registry_missing",
                 },
             )
-            messages = _strip_and_append(messages, thinking, action_raw)
+            messages = _strip_and_append(
+                messages, thinking, action_raw, skinny_line=_skinny_for_step(state, result.__dict__)
+            )
             locate_memory = update_gui_memory(
                 {
                     **state,
@@ -574,7 +634,9 @@ def execute_node(state: "AgentState", config: RunnableConfig) -> dict:
                 "latency_ms": outcome.latency_ms,
             },
         )
-        messages = _strip_and_append(messages, thinking, action_raw)
+        messages = _strip_and_append(
+            messages, thinking, action_raw, skinny_line=_skinny_for_step(state, result.__dict__)
+        )
         # R2: a SUCCESSFUL locate skips reflect (capability routes straight
         # back to plan), so this is the only writer that records the attempt in
         # gui_memory.tried_actions — without it the repeat guard's prior count
@@ -621,7 +683,9 @@ def execute_node(state: "AgentState", config: RunnableConfig) -> dict:
             should_finish=False,
             message=action_parsed.get("message"),
         )
-        messages = _strip_and_append(messages, thinking, action_raw)
+        messages = _strip_and_append(
+            messages, thinking, action_raw, skinny_line=_skinny_for_step(state, result.__dict__)
+        )
         matched_evidence = action_parsed.get("matched_terminal_evidence") or []
         finish_claim = finish_claim_summary(result.message or "")
         if isinstance(matched_evidence, list) and matched_evidence:
@@ -649,7 +713,9 @@ def execute_node(state: "AgentState", config: RunnableConfig) -> dict:
             should_finish=True,
             message=f"Unknown action type: {action_parsed.get('_metadata')}",
         )
-        messages = _strip_and_append(messages, thinking, action_raw)
+        messages = _strip_and_append(
+            messages, thinking, action_raw, skinny_line=_skinny_for_step(state, result.__dict__)
+        )
         emit_trace(config, state, "execute", "execute_error", {"message": result.message})
         return {
             "action_result": result.__dict__,
@@ -753,6 +819,12 @@ def execute_node(state: "AgentState", config: RunnableConfig) -> dict:
         )
 
         # CRITICAL-2: mark action_confirmed=True (keep action_parsed for reflect)
+        # P-E: the confirm first pass already converted the fat tail into a
+        # skinny row with a pending label; now that the real result exists,
+        # replace that row in place (no second assistant append).
+        _replace_last_user_message(
+            messages, _skinny_for_step(state, result.__dict__)
+        )
         finished = result.should_finish
         return {
             "action_result": result.__dict__,
@@ -760,7 +832,7 @@ def execute_node(state: "AgentState", config: RunnableConfig) -> dict:
             **_receipt_ledger_update(
                 state, action_parsed.get("action"), receipt
             ),
-            "messages": messages,  # unchanged (already stripped + assistant appended)
+            "messages": messages,  # in-place skinny update, no duplicate append
             "finished": finished,
             "pending_execute": False,
             "action_confirmed": True,
@@ -793,7 +865,9 @@ def execute_node(state: "AgentState", config: RunnableConfig) -> dict:
             should_finish=False,
             message=action_parsed.get("message", "User intervention required"),
         )
-        messages = _strip_and_append(messages, thinking, action_raw)
+        messages = _strip_and_append(
+            messages, thinking, action_raw, skinny_line=_skinny_for_step(state, result.__dict__)
+        )
         emit_trace(
             config,
             state,
@@ -827,7 +901,15 @@ def execute_node(state: "AgentState", config: RunnableConfig) -> dict:
         }
 
     if safety_decision.route == "confirm":
-        messages = _strip_and_append(messages, thinking, action_raw)
+        pending_label = (
+            "awaiting confirmation" if state.get("lang") == "en" else "待确认"
+        )
+        messages = _strip_and_append(
+            messages,
+            thinking,
+            action_raw,
+            skinny_line=_skinny_for_step(state, placeholder_message=pending_label),
+        )
         emit_trace(
             config,
             state,
@@ -874,7 +956,9 @@ def execute_node(state: "AgentState", config: RunnableConfig) -> dict:
             correlation_id=correlation_id,
             side_effect_receipt={"reason_code": "capability_unavailable"},
         )
-        messages = _strip_and_append(messages, thinking, action_raw)
+        messages = _strip_and_append(
+            messages, thinking, action_raw, skinny_line=_skinny_for_step(state, result.__dict__)
+        )
         emit_trace(
             config,
             state,
@@ -908,7 +992,9 @@ def execute_node(state: "AgentState", config: RunnableConfig) -> dict:
             correlation_id=correlation_id,
             side_effect_receipt={"delegation_status": "awaiting_acknowledgement"},
         )
-        messages = _strip_and_append(messages, thinking, action_raw)
+        messages = _strip_and_append(
+            messages, thinking, action_raw, skinny_line=_skinny_for_step(state, result.__dict__)
+        )
         emit_trace(
             config,
             state,
@@ -966,7 +1052,9 @@ def execute_node(state: "AgentState", config: RunnableConfig) -> dict:
     )
 
     # 5. Strip images and append assistant message
-    messages = _strip_and_append(messages, thinking, action_raw)
+    messages = _strip_and_append(
+        messages, thinking, action_raw, skinny_line=_skinny_for_step(state, result.__dict__)
+    )
 
     # 6. Check should_finish
     finished = result.should_finish

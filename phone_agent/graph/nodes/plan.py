@@ -18,6 +18,7 @@ from phone_agent.graph.context import (
     build_context_metrics,
     compact_messages_for_request,
     get_context_mode,
+    replace_fat_tails_with_skinny,
     sanitize_context_payload,
     select_plan_context,
 )
@@ -277,6 +278,10 @@ def _maybe_emit_plan_prompt_debug(
     payload: dict[str, Any] = {
         "request_message_count": len(request_messages),
         "request_message_roles": [message.get("role") for message in request_messages],
+        # P-E: the request is a permanent prefix + skinny trajectory + current
+        # tail; these fields make the three-stage split observable in traces.
+        "prefix_pinned": True,
+        "trajectory_skinny_chars": _trajectory_skinny_chars(request_messages),
         "prompt_block_chars": {
             "task": len(task or ""),
             "task_goal_block": len(task_goal_block or ""),
@@ -305,6 +310,19 @@ def _maybe_emit_plan_prompt_debug(
         }
     if "request_messages" in payload or "prompt_blocks" in payload:
         emit_trace(config, state, "plan", "plan_prompt_debug", payload)
+
+
+def _trajectory_skinny_chars(messages: list[dict]) -> int:
+    """Approximate chars held by skinny trajectory rows in a request."""
+    total = 0
+    for message in messages:
+        content = message.get("content")
+        if isinstance(content, list):
+            for item in content:
+                text = item.get("text") if isinstance(item, dict) else None
+                if isinstance(text, str) and text.startswith("s") and " → " in text:
+                    total += len(text)
+    return total
 
 
 def _strip_images_for_prompt_debug(messages: list[dict]) -> list[dict]:
@@ -969,8 +987,15 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
                 MessageBuilder.create_user_message(text=task_goal_block)
             )
 
+        # P-E: the task text is part of the permanent prefix (sent once, like
+        # the contract block); screen_info is the variable part that stays in
+        # the per-step tail.
+        new_messages.append(
+            MessageBuilder.create_user_message(text=str(task or ""))
+        )
+
         screen_info = MessageBuilder.build_screen_info(current_app)
-        text_content = f"{task}\n\n{screen_info}"
+        text_content = f"** Screen Info **\n\n{screen_info}"
         objects_block = (
             observation.object_registry.prompt_block(
                 mark_registry=mark_registry,
@@ -1004,13 +1029,6 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
             if progress_note_line
             else task_context_line
         )
-        # P5 #2 prompt-cache: the goal contract block is task-static; keeping it
-        # as its own message (not embedded in the per-step dynamic text) keeps
-        # the system + static-prefix stable for prefix-caching providers.
-        if task_goal_block:
-            new_messages.append(
-                MessageBuilder.create_user_message(text=task_goal_block)
-            )
         screen_info = MessageBuilder.build_screen_info(current_app)
         text_content = f"{intent_continuity_block}\n\n** Screen Info **\n\n{screen_info}"
         objects_block = (
@@ -1040,6 +1058,17 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
 
     # 3. Model inference (pass full messages for context)
     full_messages = list(state["messages"]) + new_messages
+    # P-E: safety net — replace any fat tail that survived in state history
+    # (e.g. confirm-reject / interrupted flows) with a skinny trajectory row
+    # before the request is compacted. Only the history slice is scanned; the
+    # current observation tail is never touched.
+    if len(new_messages) <= len(full_messages):
+        history, _replaced = replace_fat_tails_with_skinny(
+            full_messages[: len(full_messages) - len(new_messages)],
+            state,
+            lang=lang,
+        )
+        full_messages = history + new_messages
     request_messages, context_selection = compact_messages_for_request(
         full_messages, context_selection
     )
