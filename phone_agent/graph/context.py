@@ -42,7 +42,6 @@ DEFAULT_CONTEXT_BUDGET: dict[str, int] = {
     # some section had to starve on every step regardless of ordering. For scale, the
     # marks block in the same prompt runs ~11k chars, so this is a small share.
     "context_block_chars": 2200,
-    "request_recent_messages": 6,
     "reflect_recent_outcomes": 3,
     "reflect_context_block_chars": 1200,
     # Per-section floors. The block used to be concatenated and then cut from the
@@ -2507,14 +2506,185 @@ def build_reflect_context_block(
     }
 
 
+# ---------------------------------------------------------------------------
+# P-E true three-stage plan context (prefix-cache friendly)
+#
+# Request layout is now: [permanent prefix: system + goal contract + task]
+# + [append-only skinny trajectory: one "sN: action → result" row per step]
+# + [current tail: screenshot + marks/objects + context block + screen info].
+# Historical marks/objects/context never re-enter a request; execute_node
+# converts each step's fat tail into a skinny row during its full rebuild, and
+# plan_node re-scans the history as a safety net.
+# ---------------------------------------------------------------------------
+
+_TRAJECTORY_TAIL_MARKERS = (
+    "** Screen Info **",
+    "** Screen Marks",
+    "** 屏幕标记",
+    "** Screen Objects",
+    "** 屏幕对象",
+)
+
+
+def _message_text(message: dict[str, Any]) -> str:
+    """Plain-text approximation of a chat message for marker checks."""
+    content = message.get("content")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "\n".join(
+            str(item.get("text") or "")
+            for item in content
+            if isinstance(item, dict) and item.get("type") == "text"
+        )
+    return ""
+
+
+def is_fat_tail_message(message: dict[str, Any]) -> bool:
+    """Return whether a user message is a fat observation tail.
+
+    A plan observation tail carries the screen-info/marks/objects/context
+    block; the permanent prefix (contract, task) and skinny trajectory rows
+    never do, so content markers are a stable discriminator.
+    """
+    if message.get("role") != "user":
+        return False
+    text = _message_text(message)
+    return any(marker in text for marker in _TRAJECTORY_TAIL_MARKERS)
+
+
+def _action_target_summary(action: dict[str, Any] | None) -> str:
+    """Short, non-executable target summary for a trajectory row."""
+    if not isinstance(action, dict):
+        return ""
+    for key in ("target_text_hint", "text"):
+        value = action.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    mark_id = action.get("target_mark_id")
+    if isinstance(mark_id, str) and mark_id:
+        return str(mark_id)
+    for key in ("element", "start"):
+        value = action.get(key)
+        if isinstance(value, (list, tuple)) and len(value) == 2:
+            return "@{0},{1}".format(int(value[0]), int(value[1]))
+    return ""
+
+
+def _result_summary_for_skinny(result: dict[str, Any] | None, lang: str) -> str:
+    """One-line result digest; the localized pending marker is passed by callers."""
+    if not isinstance(result, dict):
+        return "unknown"
+    if result.get("success") is True:
+        return "ok"
+    message = result.get("message")
+    if isinstance(message, str) and message.strip():
+        return " ".join(message.split())[:60]
+    if result.get("success") is False:
+        return "failed"
+    return "unknown"
+
+
+def build_skinny_trajectory_line(
+    state: dict[str, Any],
+    *,
+    step_index: int,
+    result: dict[str, Any] | None = None,
+    lang: str = "cn",
+    max_chars: int = 200,
+) -> str:
+    """Build one append-only trajectory row: ``s{N}: <action> <target> → <result>``.
+
+    The row is regex-redacted (inject consumer) and hard-capped so history
+    stays lean; action text/targets are never executable from the row alone.
+    ``result`` overrides ``state["action_result"]`` (execute knows the fresh
+    result before it is written back to state).
+    """
+    action = state.get("action_parsed")
+    if isinstance(action, dict):
+        action_type = str(action.get("action") or action.get("_metadata") or "unknown")
+    else:
+        action_type = "unknown"
+    target = _action_target_summary(action)
+    state_result = state.get("action_result")
+    result_dict = (
+        result
+        if isinstance(result, dict)
+        else (state_result if isinstance(state_result, dict) else None)
+    )
+    body = action_type + (f" {target}" if target else "")
+    row = f"s{int(step_index)}: {body} → {_result_summary_for_skinny(result_dict, lang)}"
+    safe = sanitize_context_payload(row, consumer="inject")
+    if not isinstance(safe, str) or not safe:
+        return ""
+    if len(safe) > max_chars:
+        safe = safe[:max_chars]
+    return safe
+
+
+def _trajectory_step_index(messages: list[dict[str, Any]]) -> int:
+    """Step index of the last user message = assistant rows before it."""
+    last_user_index = -1
+    for index in range(len(messages) - 1, -1, -1):
+        if messages[index].get("role") == "user":
+            last_user_index = index
+            break
+    if last_user_index < 0:
+        return 0
+    return sum(
+        1
+        for message in messages[:last_user_index]
+        if message.get("role") == "assistant"
+    )
+
+
+def replace_fat_tails_with_skinny(
+    messages: list[dict[str, Any]],
+    state: dict[str, Any],
+    *,
+    result: dict[str, Any] | None = None,
+    lang: str | None = None,
+) -> tuple[list[dict[str, Any]], int]:
+    """Replace historical fat tails in a message list with skinny rows.
+
+    Callers pass only the *history* slice (never the current observation), so
+    the current screenshot/marks tail is untouched. Each row's step index is
+    derived from the assistant rows that precede it, keeping ``sN`` correct
+    even when a stale tail resurfaces after a confirm-reject loop.
+    """
+    resolved_lang = lang or str(state.get("lang") or "cn")
+    rebuilt: list[dict[str, Any]] = []
+    assistant_before = 0
+    replaced = 0
+    for message in messages:
+        if message.get("role") == "assistant":
+            assistant_before += 1
+        if is_fat_tail_message(message):
+            row = build_skinny_trajectory_line(
+                state, step_index=assistant_before, result=result, lang=resolved_lang
+            )
+            if row:
+                rebuilt.append(
+                    {
+                        "role": "user",
+                        "content": [{"type": "text", "text": row}],
+                    }
+                )
+                replaced += 1
+                continue
+        rebuilt.append(message)
+    return rebuilt, replaced
+
+
 def compact_messages_for_request(
     messages: list[dict[str, Any]], selection: ContextSelectionResult
 ) -> tuple[list[dict[str, Any]], ContextSelectionResult]:
     """Compact request messages without mutating state messages.
 
     Historical images are stripped from every message except the latest user
-    request. Older text is bounded in the request copy; state messages remain
-    untouched for reducer/audit semantics.
+    request (P0 #3). The sliding-window bound is gone: with the skinny
+    trajectory the history is already lean, so dropping messages would only
+    break the cacheable prefix and the append-only trajectory.
     """
     before_chars = _messages_approx_chars(messages)
     compacted = [_compact_message(message, keep_images=False) for message in messages]
@@ -2523,7 +2693,6 @@ def compact_messages_for_request(
         compacted[latest_user_index] = _compact_message(
             messages[latest_user_index], keep_images=True
         )
-    compacted = _bound_request_messages(compacted)
     after_chars = _messages_approx_chars(compacted)
     updated = ContextSelectionResult(
         **{
@@ -2537,21 +2706,6 @@ def compact_messages_for_request(
         }
     )
     return compacted, updated
-
-
-def _bound_request_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    max_recent = DEFAULT_CONTEXT_BUDGET["request_recent_messages"]
-    if len(messages) <= max_recent:
-        return messages
-    system_messages = [
-        message for message in messages if message.get("role") == "system"
-    ][:1]
-    tail = messages[-max_recent:]
-    bounded: list[dict[str, Any]] = []
-    for message in system_messages + tail:
-        if message not in bounded:
-            bounded.append(message)
-    return bounded
 
 
 def _section_has_value(state: dict[str, Any], section: str) -> bool:

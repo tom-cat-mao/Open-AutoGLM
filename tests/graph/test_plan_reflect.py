@@ -256,12 +256,15 @@ def test_plan_node_returns_only_new_messages_and_resets_action_confirmed(
         },
     )
 
-    assert len(result["messages"]) == 3
+    assert len(result["messages"]) == 4
     assert result["messages"][0]["role"] == "system"
     # P5 #2: the goal-contract block is its own static message after system
     # (cache-friendly prefix), before the dynamic screen message.
     assert result["messages"][1]["role"] == "user"
+    # P-E: the task text joins the permanent prefix (sent once) right after the
+    # contract; the last message is the current observation tail.
     assert result["messages"][2]["role"] == "user"
+    assert result["messages"][3]["role"] == "user"
     assert result["action_confirmed"] is False
     assert result["action_parsed"]["action"] == "Wait"
 
@@ -1037,6 +1040,9 @@ def test_plan_node_provider_receives_raw_hint_but_prompt_and_observation_are_red
 
     provider_prompt = provider.requests[0]["raw_hints"][0]
     model_text = model.messages[-1]["content"][-1]["text"]
+    # P-E: the raw task instruction moved into its own prefix message (right
+    # before the tail) so the tail is observation-only.
+    task_message = model.messages[-2]["content"][-1]["text"]
     observation_raw = json.dumps(
         result["mark_provider_observation"], ensure_ascii=False
     )
@@ -1044,9 +1050,9 @@ def test_plan_node_provider_receives_raw_hint_but_prompt_and_observation_are_red
 
     assert "13800138000" in provider_prompt
     assert (
-        "13800138000" in model_text
+        "13800138000" in task_message
     )  # original task remains the raw instruction boundary
-    assert "13800138000" not in observation_raw
+    assert "13800138000" not in model_text
     assert "13800138000" not in registry_raw
     assert result["action_parsed"] == {
         "_metadata": "do",
@@ -3592,8 +3598,8 @@ def test_plan_node_request_compaction_strips_historical_images_only(
     )
     assert result["screenshot_b64"] is None
     assert base_state["messages"][1]["content"][0]["type"] == "image_url"
-    assert result["messages_before"] == 5
-    assert result["messages_after"] == 5
+    assert result["messages_before"] == 4
+    assert result["messages_after"] == 4
     assert result["message_chars_after"] <= result["message_chars_before"]
 
 
@@ -3698,15 +3704,31 @@ def test_plan_node_injects_task_goal_after_message_compaction(
     )
     base_state["goal_contract_status"] = "compiled"
     base_state["step_count"] = 3
+    # Realistic post-step-0 history: permanent prefix (system, contract, task)
+    # followed by a skinny trajectory row + assistant record.
     base_state["messages"] = [
         {"role": "system", "content": "sys"},
-        *[
-            {
-                "role": "assistant" if index % 2 else "user",
-                "content": f"history-{index}",
-            }
-            for index in range(10)
-        ],
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "text",
+                    "text": (
+                        "** 任务目标契约（仅为目标信念，不是执行授权） **\n"
+                        "target_app_hint=bilibili\nverification_strategy=vlm_judge_at_finish"
+                    ),
+                }
+            ],
+        },
+        {
+            "role": "user",
+            "content": [{"type": "text", "text": "去b站看逗比的雀巢的第二个视频"}],
+        },
+        {
+            "role": "user",
+            "content": [{"type": "text", "text": "s2: Back  → ok"}],
+        },
+        {"role": "assistant", "content": "<think...></think...>\n<answer>back</answer>"},
     ]
     model = FakeModelClient(
         FakeModelResponse(
@@ -3726,14 +3748,30 @@ def test_plan_node_injects_task_goal_after_message_compaction(
     )
 
     text = model.messages[-1]["content"][-1]["text"]
-    # P5 #2: the goal contract block moved to its own static message right
-    # before the dynamic one (cache-friendly prefix), so it is no longer
-    # embedded in the last user message.
-    goal_block_text = model.messages[-2]["content"][-1]["text"]
-    assert "任务目标契约" in goal_block_text
-    assert "bilibili" in goal_block_text  # target_app_hint from heuristic compiler
-    assert "vlm_judge_at_finish" in goal_block_text  # verification_strategy
+    # P-E: the goal contract block is injected exactly once at step 0 (permanent
+    # prefix, cacheable); per-step re-injection is deleted, so a step N>=1
+    # request carries exactly one contract copy (the prefix one).
+    contract_count = sum(
+        1
+        for message in model.messages
+        if isinstance(message.get("content"), list)
+        and any(
+            isinstance(item, dict)
+            and "任务目标契约" in str(item.get("text") or "")
+            for item in message["content"]
+        )
+    )
+    assert contract_count == 1
+    assert "bilibili" in model.messages[1]["content"][-1]["text"]
+    assert "vlm_judge_at_finish" in model.messages[1]["content"][-1]["text"]
     assert "任务：去b站看逗比的雀巢的第二个视频" in text
+    assert "** Screen Info **" in model.messages[-1]["content"][-1]["text"]
+    # the static prefix sits at the very front of the request
+    assert model.messages[0]["role"] == "system"
+    assert model.messages[1]["role"] == "user"
+    assert model.messages[2]["role"] == "user"
+    # P-E: the history keeps only the skinny row — no fat marks text
+    assert "** Screen Info **" not in model.messages[3]["content"][-1]["text"]
     # P0-2: plan no longer writes goal_contract to state (goal_node owns it)
     assert "goal_contract" not in result or result.get("goal_contract") is None
     # But the contract in base_state should be preserved (plan doesn't overwrite)
