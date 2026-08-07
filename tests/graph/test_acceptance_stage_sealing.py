@@ -275,7 +275,6 @@ def test_fold_per_criterion_tri_state() -> None:
         contract_id=contract.task_hash,
         screen_id="results",
         observation_epoch=9,
-        finish_claim_matched=["date", "flight_results"],
     )
     assert fold["per_criterion"]["date"]["status"] == "satisfied"
     assert fold["per_criterion"]["date"]["reason"] == "model_observed"
@@ -290,7 +289,6 @@ def test_fold_per_criterion_tri_state() -> None:
         contract_id=contract.task_hash,
         screen_id="results",
         observation_epoch=9,
-        finish_claim_matched=["date", "flight_results"],
         judge_verdicts=[
             {
                 "criterion": "flight_results",
@@ -311,7 +309,6 @@ def test_fold_per_criterion_tri_state() -> None:
         contract_id=contract.task_hash,
         screen_id="results",
         observation_epoch=9,
-        finish_claim_matched=["date", "flight_results"],
         judge_verdicts=[
             {
                 "criterion": "flight_results",

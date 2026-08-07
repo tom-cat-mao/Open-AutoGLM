@@ -9,9 +9,10 @@ appropriate signal source:
 * ``object_rank_match`` → verifier_evidence.selected_object_expected_rank == ordinal
 * ``app_or_activity_match`` → current_app / top_activity package match
 * ``focus_or_keyboard`` → verifier focus signals
-* ``vlm_judge`` → three-part check: (1) named in finish_claim_matched,
-  (2) grounded screen_reference in reflect_named_evidence,
-  (3) not contradicted by a programmatic criterion's missing signal
+* ``vlm_judge`` → two-part check: (1) grounded screen_reference in
+  reflect_named_evidence, (2) not contradicted by a programmatic
+  criterion's missing signal (finish-claim naming retired — the ledger is
+  the evidence authority, not the claim's name list)
 * ``external_probe`` → callable from configurable["goal_probes"]
 
 Fail-closed: ``unknown`` (no explicit missing, but not all required matched)
@@ -247,10 +248,7 @@ class PureGoalEvaluator:
                 }
                 matched.append(criterion.name)
                 continue
-            if criterion.name not in claim_ids:
-                status = "missing"
-                reason = "not_named_in_finish_claim"
-            elif criterion.predicate is None:
+            if criterion.predicate is None:
                 status = "invalid"
                 reason = "typed_predicate_missing"
             else:
@@ -477,11 +475,10 @@ class AggregatingGoalEvaluator:
                 goal_probes=goal_probes,
             )
             if programmatic is not None:
-                # Deliberately not gated on finish_matched_set: naming exists to
-                # stop the model claiming criteria it cannot see. Where the
-                # system reads ground truth, the model's endorsement is
-                # irrelevant and requiring it would recreate the dependency this
-                # dispatch removes.
+                # Deliberately not gated on finish_claim naming (retired,
+                # Fix A): where the system reads ground truth, the model's
+                # endorsement is irrelevant and requiring it would recreate
+                # the dependency this dispatch removes.
                 return programmatic
         if crit.predicate is not None:
             typed = self._check_typed_predicate(
@@ -573,8 +570,9 @@ class AggregatingGoalEvaluator:
     ) -> dict[str, Any]:
         """Match a typed expected predicate against current grounded evidence."""
 
-        if crit.name not in finish_matched_set:
-            return {"status": "missing", "reason": "not_named_in_finish_claim"}
+        # Finish-claim naming retired (Fix A): the ledger evidence is the
+        # authority, not the claim's name list. `finish_matched_set` stays in
+        # the signature for direct-call compatibility.
         if vlm_not_run:
             return {"status": "unknown", "reason": "typed_fact_not_yet_collected"}
         evidence = named_evidence_map.get(_normalize_criterion_name(crit.name))
@@ -807,11 +805,10 @@ class AggregatingGoalEvaluator:
         named_evidence_map: dict[str, dict[str, Any]],
         vlm_not_run: bool,
     ) -> dict[str, Any]:
-        # Part 1: criterion must be named in finish.matched_terminal_evidence
-        if crit.name not in finish_matched_set:
-            return {"status": "missing", "reason": "not_named_in_finish_claim"}
-
-        # Part 2: must have a grounded screen_reference in reflect_named_evidence
+        # Part 1 (retired, Fix A): the criterion used to have to be named in
+        # finish.matched_terminal_evidence; the ledger is now the evidence
+        # authority, so naming is only trace/evidence metadata.
+        # Part 2: must have a grounded screen_reference in reflect_named_evidence.
         # When VLM has not been consulted yet (named_evidence_map is empty), emit "unknown"
         # so the caller knows to run the VLM for evidence. This is fail-closed: unknown
         # does NOT auto-upgrade to success.
@@ -946,15 +943,24 @@ def _latest_entry_for(
 
 # S3: form-only reference validation for judge ``satisfied`` verdicts. The
 # judge must name the trajectory step (or "final_screen") where it read the
-# criterion; code only checks the FORM (present and in range), never the
+# criterion; code only checks the FORM (present, in range, and — Fix F — a
+# member of the steps the trajectory summary actually exposes), never the
 # content.
 
-def _evidence_step_valid(evidence_step: Any, current_step: int | None) -> bool:
+def _evidence_step_valid(
+    evidence_step: Any,
+    current_step: int | None,
+    allowed_steps: set[int] | None = None,
+) -> bool:
     """Whether a judge's evidence reference is well-formed and in range.
 
-    ``final_screen`` is always valid (the judge is reading the final screen);
-    a numeric step must be <= the current step count. Missing or out-of-range
-    references make a ``satisfied`` verdict invalid → unknown (fail-closed).
+    ``final_screen`` is always valid (the judge is reading the final screen).
+    With ``allowed_steps`` — the step numbers that actually appear in the
+    judge's trajectory summary — a numeric reference must be a member of it:
+    a step inside the numeric range but absent from the summary is not
+    referenceable (Fix F). Without it the legacy range check
+    ``0 <= step <= current_step`` applies. Missing or out-of-range references
+    make a ``satisfied`` verdict invalid → unknown (fail-closed).
     """
 
     if evidence_step == "final_screen":
@@ -968,6 +974,8 @@ def _evidence_step_valid(evidence_step: Any, current_step: int | None) -> bool:
             step = int(str(evidence_step or "").strip().lstrip("sS"))
         except (TypeError, ValueError):
             return False
+    if allowed_steps is not None:
+        return step in allowed_steps
     if current_step is None:
         return step >= 0
     return 0 <= step <= int(current_step)
@@ -1012,9 +1020,9 @@ def fold_acceptance_verdicts(
     contract_id: str,
     screen_id: str,
     observation_epoch: int,
-    finish_claim_matched: list[str],
     judge_verdicts: list[dict[str, Any]] | None = None,
     current_step: int | None = None,
+    allowed_steps: set[int] | None = None,
 ) -> dict[str, Any]:
     """Stage-Sealing per-criterion fold (Phase C).
 
@@ -1028,7 +1036,9 @@ def fold_acceptance_verdicts(
        ``contradicted``); a ``satisfied`` verdict MUST carry a valid
        ``evidence_step`` reference (trajectory step number or
        ``final_screen``) — missing or out-of-range references degrade to
-       ``unknown`` (S3 form-only reference validation)
+       ``unknown`` (S3 form-only reference validation). When ``allowed_steps``
+       is provided (the steps present in the judge's trajectory summary), a
+       numeric reference must name one of them (Fix F: summary-existence).
     4. programmatic (self-observable) criteria: the current-observation
        device truth (verifier signals / app-foreground code check)
     5. otherwise → ``unknown``
@@ -1124,7 +1134,7 @@ def fold_acceptance_verdicts(
             if verdict is not None:
                 status = str(verdict.get("status") or "unknown")
                 if status == "satisfied" and not _evidence_step_valid(
-                    verdict.get("evidence_step"), current_step
+                    verdict.get("evidence_step"), current_step, allowed_steps
                 ):
                     per_criterion[name] = {
                         "status": "unknown",

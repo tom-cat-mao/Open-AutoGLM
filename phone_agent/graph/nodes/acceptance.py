@@ -21,7 +21,7 @@ Fail-closed throughout: `unknown` never becomes success.
 """
 
 import json
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from langchain_core.runnables import RunnableConfig
 
@@ -287,17 +287,15 @@ def _ledger_digest_for_judge(
     return str(safe or "")[:2000]
 
 
-def _trajectory_summary_for_judge(
-    ledger: list[dict], *, contract_id: str, lang: str, task_context: str | None
-) -> str:
-    """Bounded (~12-step) trajectory summary for the L3 judge (S3).
+def _trajectory_buckets(
+    ledger: list[dict], *, contract_id: str
+) -> dict[int, dict[str, Any]]:
+    """Per-step buckets of the judge's trajectory summary, form-only.
 
-    Code builds the FORM from ledger records — per step: action type →
-    reflect verdict (from effect events), and the model screen readings
-    (criterion=value from ``model_observation``). The judge uses this to
-    attribute causality (this-run behavior vs residual screen state); code
-    never interprets the values. All text was redacted on ledger write and is
-    re-sanitized before egress.
+    One bucket per step number present in the ledger; ``effect_event`` entries
+    fill ``actions`` and ``model_observation`` (observed) entries fill
+    ``observations``. Code never interprets the values (design philosophy:
+    code = form, model = content).
     """
 
     buckets: dict[int, dict[str, Any]] = {}
@@ -330,6 +328,37 @@ def _trajectory_summary_for_judge(
             bucket["observations"].append(
                 f"{criterion}={value}" if value else criterion
             )
+    return buckets
+
+
+def trajectory_summary_steps(
+    ledger: list[dict], *, contract_id: str
+) -> set[int]:
+    """The step numbers that actually appear in the judge's trajectory summary.
+
+    Fix F: ``_evidence_step_valid`` requires a numeric judge reference to be a
+    member of this set — a step inside the numeric range but absent from the
+    summary is not referenceable. Form-only membership; no content reading.
+    """
+
+    buckets = _trajectory_buckets(ledger, contract_id=contract_id)
+    return {step for step in sorted(buckets)[-12:]}
+
+
+def _trajectory_summary_for_judge(
+    ledger: list[dict], *, contract_id: str, lang: str, task_context: str | None
+) -> str:
+    """Bounded (~12-step) trajectory summary for the L3 judge (S3).
+
+    Code builds the FORM from ledger records — per step: action type →
+    reflect verdict (from effect events), and the model screen readings
+    (criterion=value from ``model_observation``). The judge uses this to
+    attribute causality (this-run behavior vs residual screen state); code
+    never interprets the values. All text was redacted on ledger write and is
+    re-sanitized before egress.
+    """
+
+    buckets = _trajectory_buckets(ledger, contract_id=contract_id)
     if not buckets:
         return ""
     lines: list[str] = []
@@ -762,7 +791,6 @@ def acceptance_node(state: "AgentState", config: RunnableConfig) -> dict:
         contract_id=runtime_contract_id,
         screen_id=after_observation.snapshot.screen_id,
         observation_epoch=after_observation.snapshot.observation_epoch,
-        finish_claim_matched=finish_claim_matched,
         current_step=state.get("step_count"),
     )
     # --- layer 3: semantic judgement, only for judge-eligible unknowns ---
@@ -773,9 +801,13 @@ def acceptance_node(state: "AgentState", config: RunnableConfig) -> dict:
         name for name in fold["unknown"] if not _is_self_observable(criteria_by_name[name])
     ]
     model_message = ""
+    trajectory_steps: set[int] = set()
     if judge_eligible_unknowns:
         digest = _ledger_digest_for_judge(
             ledger, contract_id=runtime_contract_id, lang=lang, task_context=task
+        )
+        trajectory_steps = trajectory_summary_steps(
+            ledger, contract_id=runtime_contract_id
         )
         verdicts, named_evidence, model_message = _run_semantic_judge(
             state=state,
@@ -827,9 +859,9 @@ def acceptance_node(state: "AgentState", config: RunnableConfig) -> dict:
             contract_id=runtime_contract_id,
             screen_id=after_observation.snapshot.screen_id,
             observation_epoch=after_observation.snapshot.observation_epoch,
-            finish_claim_matched=finish_claim_matched,
             judge_verdicts=merged_verdicts or None,
             current_step=state.get("step_count"),
+            allowed_steps=trajectory_steps,
         )
     elif fold["overall"] == "unknown" and _needs_semantic_judgement(goal_contract):
         emit_trace(

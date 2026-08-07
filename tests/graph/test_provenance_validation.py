@@ -187,9 +187,9 @@ def _fold(
     *,
     screen: str = "results",
     epoch: int = 9,
-    claim: list[str] | None = None,
     judge: list[dict] | None = None,
     step: int | None = None,
+    allowed_steps: set[int] | None = None,
 ) -> dict:
     return fold_acceptance_verdicts(
         contract=contract,
@@ -197,9 +197,9 @@ def _fold(
         contract_id=contract.task_hash,
         screen_id=screen,
         observation_epoch=epoch,
-        finish_claim_matched=claim or [c.name for c in contract.success_criteria],
         judge_verdicts=judge,
         current_step=step,
+        allowed_steps=allowed_steps,
     )
 
 
@@ -552,6 +552,82 @@ class TestFoldDecisionTable:
         fold = _fold(contract, ledger)
         assert fold["per_criterion"]["time_filter_confirmed"]["status"] == "contradicted"
         assert fold["overall"] == "contradicted"
+
+    # --- Fix F: the referenced step must exist in the trajectory summary ---
+
+    def test_judge_reference_must_exist_in_summary_steps(self) -> None:
+        """Fix F: a numeric evidence_step inside the range but absent from the
+        trajectory summary is not referenceable → unknown (fail-closed)."""
+        contract = _residual_contract()
+        fold = _fold(
+            contract,
+            [],
+            judge=[
+                {
+                    "criterion": "time_filter_confirmed",
+                    "status": "satisfied",
+                    "evidence_step": 3,
+                },
+                {
+                    "criterion": "flight_results",
+                    "status": "satisfied",
+                    "evidence_step": 5,
+                },
+            ],
+            step=9,
+            allowed_steps={3, 9},
+        )
+        verdict = fold["per_criterion"]["flight_results"]
+        assert verdict["status"] == "unknown"
+        assert verdict["reason"] == "judge_reference_missing_or_out_of_range"
+        assert fold["overall"] == "unknown"
+
+    def test_judge_reference_in_summary_steps_passes(self) -> None:
+        """Fix F: a step the summary actually exposes satisfies the form check."""
+        contract = _residual_contract()
+        fold = _fold(
+            contract,
+            [],
+            judge=[
+                {
+                    "criterion": "time_filter_confirmed",
+                    "status": "satisfied",
+                    "evidence_step": 3,
+                },
+                {
+                    "criterion": "flight_results",
+                    "status": "satisfied",
+                    "evidence_step": 5,
+                },
+            ],
+            step=9,
+            allowed_steps={3, 5, 9},
+        )
+        assert fold["overall"] == "satisfied"
+
+    def test_judge_final_screen_passes_with_allowed_steps(self) -> None:
+        """Fix F: the final_screen constant stays valid regardless of the
+        summary step set."""
+        contract = _residual_contract()
+        fold = _fold(
+            contract,
+            [],
+            judge=[
+                {
+                    "criterion": "time_filter_confirmed",
+                    "status": "satisfied",
+                    "evidence_step": "final_screen",
+                },
+                {
+                    "criterion": "flight_results",
+                    "status": "satisfied",
+                    "evidence_step": "final_screen",
+                },
+            ],
+            step=9,
+            allowed_steps={3, 9},
+        )
+        assert fold["overall"] == "satisfied"
 
 
 class TestSelfObservable:

@@ -17,7 +17,7 @@ last_planner_update: "PhoneAgent goal contract rebuild completed from RALPLAN-ap
 last_architect_review: "Architect and Critic approved GoalContract + GoalEvaluator + finish validation gate rewrite."
 last_critic_verdict: APPROVE
 approved_for_execution: true
-notes: "Declarative GoalContract compiled once by goal_node; finish requires matched_terminal_evidence naming criteria; GoalEvaluator applies fail-closed unknown→replan. Hybrid Accessibility + LocateAnything remains default grounding."
+notes: "Declarative GoalContract compiled once by goal_node; criterion evidence settles layer by layer from the ledger (seal > observed > judge reference), judge satisfied requires a valid evidence_step; GoalEvaluator applies fail-closed unknown→replan. Hybrid Accessibility + LocateAnything remains default grounding."
 ```
 
 # Roadmap
@@ -35,7 +35,7 @@ notes: "Declarative GoalContract compiled once by goal_node; finish requires mat
   - `GoalContractCompiler` (`goal_compiler.py`) 编译链：External（benchmark 注入）> LLM（step 0 一次结构化调用，有 `compile_retry`，失败回退）> Heuristic（永不失败的兜底，所有 criterion 为 `vlm_judge`，不驱动自动成功）。
   - `goal_node` 在拓扑 `START → goal_node → plan_node` 中编译一次；已编译非 `needs_recompile` 时 no-op；可选 `require_goal_approval` interrupt 让用户 Approve/Edit（与 confirm_node 同模式）。
   - `FinishActionDict` 新增 `matched_terminal_evidence: list[str]`，由 adapter 校验类型，由 `GoalEvaluator` 对照 `GoalContract.success_criteria` 核验每个 name。
-  - `GoalEvaluator` (`goal_evaluator.py`) 按 verification 分发：`accessibility_text_match`（sha256 stub+`_match_expected_text`）、`object_hash_match`/`object_rank_match`（读 `verifier_evidence.selected_object_signals`）、`app_or_activity_match`（复用 `_package_for_app_name`）、`focus_or_keyboard`（复用 `_focus_signals`）、`vlm_judge`（三段校验：finish 点名 + reflect JSON `named_evidence` 含 grounded `screen_reference` + 程序化反证优先）、`external_probe`（benchmark 注入 callable）。
+  - `GoalEvaluator` (`goal_evaluator.py`) 按 verification 分发：`accessibility_text_match`（sha256 stub+`_match_expected_text`）、`object_hash_match`/`object_rank_match`（读 `verifier_evidence.selected_object_signals`）、`app_or_activity_match`（复用 `_package_for_app_name`）、`focus_or_keyboard`（复用 `_focus_signals`）、`vlm_judge`（judge 的 satisfied 必须携带合法 evidence_step 引用；reflect JSON `named_evidence` 含 grounded `screen_reference` + 程序化反证优先；finish claim 命名门禁已退役）、`external_probe`（benchmark 注入 callable）。
   - status：所有 required matched 且无 required missing → success；任一 required 显式 missing → failure；无显式 missing 但未全覆盖 → unknown（**不自动升级 success**）。tentative `task_goal_contract.goal_type=="generic_task"` 的 `unknown→success` 后门已删除。
   - Reflect 增加 context 窗口管理：`select_reflect_context` + `build_reflect_context_block`（与 plan 同源更窄，注入最近 K=3 action_outcome 摘要作为 trajectory 记忆）；`goal_contract_block` 提到独立 message 块（不嵌入 dynamic user），利 prompt prefix cache。
 - PhoneAgent generalization Phase 1 已完成：
@@ -98,7 +98,7 @@ notes: "Declarative GoalContract compiled once by goal_node; finish requires mat
 - [x] Grounding failure fail-closed；多候选、无候选、越界、格式错不回退主 VLM 坐标。
 - [x] Tree-first: Accessibility Tree 为 hybrid 第一层；解析失败、hint 不匹配、provider 缺失不能回退到主 VLM raw coordinate。
 - [x] trace/checkpoint 不含 raw screenshot、raw hint、API key、raw response 或低熵语义摘要；metadata 只允许 code/count/bool/length/latency/model、屏幕绑定摘要和 opaque runtime reference，持久语义绑定只允许 keyed HMAC。
-- [x] `finish` 不是执行成功；必须经过 GoalContract `SuccessCriterion` evidence gate（`finish.matched_terminal_evidence` 点名 + `GoalEvaluator` 核验），未知或缺证据 fail-closed/replan；unknown 不自动升级 success。
+- [x] `finish` 不是执行成功；必须经过 GoalContract `SuccessCriterion` evidence gate（判据由账本逐层坐实：seal > 账本 observed > judge 引用；judge 的 satisfied 必须携带合法 evidence_step 引用），未坐实且无引用=unknown → fail-closed/replan；unknown 不自动升级 success。
 - [x] `evidence_scope` 决定 authority fold；existential absence 为 unknown，positive counter-observation 才能 contradicted。
 - [x] per-step verifier、finish acceptance、trajectory liveness 三问分属不同 owner；single-step verdict 不驱动 stuck/takeover。
 - [x] `bench_output/`、API key、runtime traces、真实截图数据默认不提交。

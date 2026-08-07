@@ -1,12 +1,13 @@
 from phone_agent.graph.goal_evidence import (
     append_evaluation_entries,
+    append_model_observations,
     fresh_observation_count,
     latest_status_by_criterion,
     target_app_entered,
     unattested_raw_text_bindings,
 )
 from phone_agent.graph.goal import GoalContract, SuccessCriterion
-from phone_agent.graph.goal_evaluator import PureGoalEvaluator
+from phone_agent.graph.goal_evaluator import PureGoalEvaluator, fold_acceptance_verdicts
 from phone_agent.graph.predicates import CORE_PREDICATE_CATALOG
 
 
@@ -518,3 +519,192 @@ def test_pure_goal_evaluator_rejects_unknown_finish_claim_ids() -> None:
 
     assert result.status == "failure"
     assert result.evidence["unknown_finish_claim_ids"] == ["invented_criterion"]
+
+
+# ----------------------------------------------------------------------
+# Fix B: per-criterion anchors survive FIFO observation eviction
+# ----------------------------------------------------------------------
+
+
+def _evict_observation(ledger: list[dict], contract_id: str = "c1") -> list[dict]:
+    """Fill the FIFO observation window with unrelated criteria so the
+    earliest per-criterion records crop out (MODEL_OBSERVATION_LIMIT=48)."""
+
+    for step in range(2, 10):
+        obs = [
+            {"criterion": f"x{i}", "status": "observed"} for i in range(6)
+        ]
+        ledger = append_model_observations(
+            ledger,
+            contract_id=contract_id,
+            observations=obs,
+            step=step,
+            screen_id=f"s{step}",
+            observation_epoch=step,
+        )
+    return ledger
+
+
+def _single_judge_contract() -> GoalContract:
+    return GoalContract(
+        task_hash="c1",
+        redacted_objective="target visible",
+        objective_length=15,
+        success_criteria=[
+            SuccessCriterion("target", "target visible", "vlm_judge")
+        ],
+        compile_status="compiled",
+    )
+
+
+def test_observation_anchor_upserts_one_per_criterion_and_never_evicts() -> None:
+    """Fix B: one anchor per (contract, criterion), same redacted shape as the
+    observation, NOT subject to the FIFO window (schema add-only)."""
+    ledger = append_model_observations(
+        [],
+        contract_id="c1",
+        observations=[
+            {"criterion": "c", "status": "observed", "observed_value": "v1"}
+        ],
+        step=1,
+        screen_id="s1",
+        observation_epoch=1,
+    )
+    ledger = append_model_observations(
+        ledger,
+        contract_id="c1",
+        observations=[
+            {"criterion": "c", "status": "observed", "observed_value": "v2"}
+        ],
+        step=2,
+        screen_id="s2",
+        observation_epoch=2,
+    )
+    anchors = [e for e in ledger if e.get("kind") == "observation_anchor"]
+    assert len(anchors) == 1
+    assert anchors[0]["criterion"] == "c"
+    assert anchors[0]["observed_value"] == "v2"
+    assert "kind" in anchors[0] and anchors[0]["kind"] == "observation_anchor"
+
+    # 49 windowed observations crop BOTH early c records; the anchor stays.
+    # Each criterion keeps exactly one anchor (upper bound = criterion count).
+    ledger = _evict_observation(ledger)
+    anchors = [e for e in ledger if e.get("kind") == "observation_anchor"]
+    assert len(anchors) == 7  # c + the six filler criteria
+    c_anchors = [e for e in anchors if e.get("criterion") == "c"]
+    assert len(c_anchors) == 1
+    assert c_anchors[0]["status"] == "observed"
+    windowed = [e for e in ledger if e.get("kind") == "model_observation"]
+    assert len(windowed) <= 48
+    assert all(e.get("step") != 1 for e in windowed)
+
+
+def test_fresh_observation_same_status_not_fresh_after_eviction() -> None:
+    """Fix B: eviction used to erase a criterion's only record, making the
+    next same-status read look first-ever (fresh=1 → the dead-loop guard
+    reset); the anchor keeps the previous status so the repeat stays
+    not-fresh."""
+    ledger = append_model_observations(
+        [],
+        contract_id="c1",
+        observations=[{"criterion": "c0", "status": "observed"}],
+        step=1,
+        screen_id="s1",
+        observation_epoch=1,
+    )
+    ledger = _evict_observation(ledger)  # c0's step-1 record is evicted
+    assert fresh_observation_count(
+        [{"criterion": "c0", "status": "observed"}],
+        ledger,
+        contract_id="c1",
+    ) == 0
+
+
+def test_fresh_observation_status_flip_after_eviction_is_fresh() -> None:
+    """Fix B: an anchor never masks a real status flip — a different status
+    after eviction still counts as fresh."""
+    ledger = append_model_observations(
+        [],
+        contract_id="c1",
+        observations=[{"criterion": "c0", "status": "observed"}],
+        step=1,
+        screen_id="s1",
+        observation_epoch=1,
+    )
+    ledger = _evict_observation(ledger)
+    assert fresh_observation_count(
+        [{"criterion": "c0", "status": "not_visible"}],
+        ledger,
+        contract_id="c1",
+    ) == 1
+
+
+def test_fold_tier2_observed_survives_eviction() -> None:
+    """Fix B long-task: an early observed read evicted from the FIFO window
+    still satisfies acceptance tier 2 via its anchor."""
+    contract = _single_judge_contract()
+    ledger = append_model_observations(
+        [],
+        contract_id="c1",
+        observations=[
+            {
+                "criterion": "target",
+                "status": "observed",
+                "observed_value": "x",
+            }
+        ],
+        step=1,
+        screen_id="s1",
+        observation_epoch=1,
+    )
+    ledger = _evict_observation(ledger)  # evicts the only observed record
+    fold = fold_acceptance_verdicts(
+        contract=contract,
+        ledger=ledger,
+        contract_id="c1",
+        screen_id="s9",
+        observation_epoch=9,
+        current_step=9,
+    )
+    assert fold["per_criterion"]["target"]["status"] == "satisfied"
+    assert fold["per_criterion"]["target"]["reason"] == "model_observed"
+    assert fold["overall"] == "satisfied"
+
+
+def test_contradicted_anchor_blocks_finish() -> None:
+    """Fix B: the anchor reflects the newest read — a final contradicted read
+    blocks the finish even when the positive read was long evicted."""
+    contract = _single_judge_contract()
+    ledger = append_model_observations(
+        [],
+        contract_id="c1",
+        observations=[
+            {
+                "criterion": "target",
+                "status": "observed",
+                "observed_value": "x",
+            }
+        ],
+        step=1,
+        screen_id="s1",
+        observation_epoch=1,
+    )
+    ledger = _evict_observation(ledger)
+    ledger = append_model_observations(
+        ledger,
+        contract_id="c1",
+        observations=[{"criterion": "target", "status": "contradicted"}],
+        step=9,
+        screen_id="s9",
+        observation_epoch=9,
+    )
+    fold = fold_acceptance_verdicts(
+        contract=contract,
+        ledger=ledger,
+        contract_id="c1",
+        screen_id="s9",
+        observation_epoch=9,
+        current_step=9,
+    )
+    assert fold["per_criterion"]["target"]["status"] == "contradicted"
+    assert fold["overall"] == "contradicted"

@@ -428,6 +428,14 @@ def append_model_observations(
 ) -> list[dict[str, Any]]:
     """Append one step's model screen reads; idempotent per
     (contract, screen, step, criterion). Returns the bounded ledger.
+
+    Fix B: each append also upserts the criterion's per-contract
+    ``observation_anchor`` — the newest read is kept OUTSIDE the FIFO
+    observation window, so freshness folds (``latest_status_by_criterion``)
+    and acceptance tier-2 (``latest_model_observation``) never lose early
+    evidence to long-run eviction. The anchor is a distinct ledger entry kind
+    (schema add-only), JSON-safe, never cropped by
+    :func:`bounded_evidence_ledger`, and per-contract like every other entry.
     """
 
     entries = list(existing or [])
@@ -443,46 +451,50 @@ def append_model_observations(
         observed_value = item.get("observed_value")
         if observed_value is not None and not isinstance(observed_value, str):
             observed_value = str(observed_value)
+        entry = model_observation_entry(
+            contract_id=contract_id,
+            criterion=criterion,
+            status=status,
+            observed_value=observed_value,
+            step=step,
+            screen_id=screen_id,
+            observation_epoch=observation_epoch,
+            semantic_key=((semantic_keys or {}).get(criterion) or None),
+        )
         key = (contract_id, screen_id, int(step or 0), criterion)
         replaced = False
-        for index, entry in enumerate(entries):
-            if entry.get("kind") != "model_observation":
+        for index, existing_entry in enumerate(entries):
+            if existing_entry.get("kind") != "model_observation":
                 continue
             if (
-                entry.get("contract_id") == key[0]
-                and entry.get("screen_id") == key[1]
-                and entry.get("step") == key[2]
-                and entry.get("criterion") == key[3]
+                existing_entry.get("contract_id") == key[0]
+                and existing_entry.get("screen_id") == key[1]
+                and existing_entry.get("step") == key[2]
+                and existing_entry.get("criterion") == key[3]
             ):
-                entries[index] = model_observation_entry(
-                    contract_id=contract_id,
-                    criterion=criterion,
-                    status=status,
-                    observed_value=observed_value,
-                    step=step,
-                    screen_id=screen_id,
-                    observation_epoch=observation_epoch,
-                    semantic_key=(
-                        (semantic_keys or {}).get(criterion) or None
-                    ),
-                )
+                entries[index] = entry
                 replaced = True
                 break
         if not replaced:
-            entries.append(
-                model_observation_entry(
-                    contract_id=contract_id,
-                    criterion=criterion,
-                    status=status,
-                    observed_value=observed_value,
-                    step=step,
-                    screen_id=screen_id,
-                    observation_epoch=observation_epoch,
-                    semantic_key=(
-                        (semantic_keys or {}).get(criterion) or None
-                    ),
-                )
-            )
+            entries.append(entry)
+        # Per-criterion anchor: same shape as the observation entry, separate
+        # kind so windowed crops and folds keep treating it as distinct. One
+        # anchor per (contract_id, criterion) — upper bound = criterion count.
+        anchor = dict(entry)
+        anchor["kind"] = "observation_anchor"
+        anchor_index = None
+        for index, existing_entry in enumerate(entries):
+            if (
+                existing_entry.get("kind") == "observation_anchor"
+                and existing_entry.get("contract_id") == contract_id
+                and existing_entry.get("criterion") == criterion
+            ):
+                anchor_index = index
+                break
+        if anchor_index is not None:
+            entries[anchor_index] = anchor
+        else:
+            entries.append(anchor)
     return bounded_evidence_ledger(entries, observation_limit=limit)
 
 
@@ -492,8 +504,25 @@ def latest_model_observation(
     contract_id: str,
     criterion: str,
 ) -> dict[str, Any] | None:
-    """Newest model screen-read for one criterion (append order wins)."""
+    """Newest model screen-read for one criterion (append order wins).
 
+    Fix B: reads the per-criterion ``observation_anchor`` first — anchors are
+    updated on every append and live OUTSIDE the FIFO observation window, so
+    an early ``observed`` read survives long-run eviction (freshness and fold
+    tier-2 never lose it). Hand-built ledgers without an anchor fall back to
+    the append-order scan.
+    """
+
+    for entry in ledger:
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("kind") != "observation_anchor":
+            continue
+        if entry.get("contract_id") != contract_id:
+            continue
+        if str(entry.get("criterion") or "") != criterion:
+            continue
+        return entry
     latest: dict[str, Any] | None = None
     for entry in ledger:
         if not isinstance(entry, dict):
@@ -514,14 +543,31 @@ def latest_status_by_criterion(
     """Map criterion name -> status of its latest ``model_observation`` entry.
 
     Pure form-level fold (F6): the observation *content* is never read — only
-    the ``status`` enum of each criterion's newest ledger record.
+    the ``status`` enum of each criterion's newest ledger record. Fix B: reads
+    the per-criterion anchors first (eviction-proof), then fills criteria
+    that only exist as plain windowed observations.
     """
 
     result: dict[str, str] = {}
+    # Windowed scan first: append-order "last wins" for criteria with no
+    # anchor (hand-built ledgers).
     for entry in ledger:
         if not isinstance(entry, dict):
             continue
         if entry.get("kind") != "model_observation":
+            continue
+        if entry.get("contract_id") != contract_id:
+            continue
+        criterion = str(entry.get("criterion") or "")
+        if criterion:
+            result[criterion] = str(entry.get("status") or "not_visible")
+    # Anchors last: each is the newest read written by
+    # ``append_model_observations`` (eviction-proof), so it overrides the
+    # windowed scan.
+    for entry in ledger:
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("kind") != "observation_anchor":
             continue
         if entry.get("contract_id") != contract_id:
             continue
@@ -1295,7 +1341,7 @@ def remap_ledger_for_contract(
                 named.append(item)
             new["named_evidence"] = named
             remapped.append(new)
-        elif kind == "model_observation":
+        elif kind in {"model_observation", "observation_anchor"}:
             new = dict(entry)
             stored_key = entry.get("semantic_key")
             if stored_key and stored_key in key_to_name:

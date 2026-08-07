@@ -102,7 +102,9 @@ def test_object_rank_match_states(
 @pytest.mark.parametrize(
     ("finish_matched", "reflect", "expected_status"),
     (
-        ([], None, "failure"),
+        # Finish-claim naming retired (Fix A): an unnamed criterion is not
+        # missing; with the VLM unconsulted it stays unknown (fail-closed).
+        ([], None, "unknown"),
         (["c"], None, "unknown"),
         (["c"], [], "failure"),
         (["c"], [{"criterion": "c", "screen_reference": "mark_id=player"}], "success"),
@@ -111,9 +113,9 @@ def test_object_rank_match_states(
 def test_vlm_judge_three_part_check(
     finish_matched, reflect, expected_status
 ) -> None:
-    """The vlm_judge three-part check: named-in-finish / VLM consulted /
-    grounded evidence. Each state (missing / unknown / failure / success) is a
-    distinct case of the same evaluate_finish_claim path."""
+    """The vlm_judge check: VLM consulted / grounded evidence. Finish-claim
+    naming no longer gates (Fix A); each state (unknown / failure / success)
+    is a distinct case of the same evaluate_finish_claim path."""
     contract = _contract([
         SuccessCriterion(name="c", description="visible", verification="vlm_judge"),
     ])
@@ -510,3 +512,72 @@ def test_only_raw_text_criteria_need_model_judgement() -> None:
             predicate=CORE_PREDICATE_CATALOG.create_spec(predicate_id, value),
         )
         assert _is_self_observable(criterion), verification
+
+
+# ----------------------------------------------------------------------
+# Fix A: finish-claim naming retired — the ledger is the evidence authority
+# ----------------------------------------------------------------------
+
+
+def test_vlm_judge_unnamed_but_grounded_evidence_satisfies() -> None:
+    """Fix A: a vlm_judge criterion is satisfied by grounded reflect evidence
+    even when the finish claim never named it (naming gate retired)."""
+    contract = _contract([
+        SuccessCriterion(name="c", description="visible", verification="vlm_judge"),
+    ])
+    result = evaluate_finish_claim(
+        contract=contract,
+        finish_claim_matched=[],
+        reflect_named_evidence=[
+            {"criterion": "c", "screen_reference": "mark_id=player"}
+        ],
+    )
+    assert result.status == "success"
+    assert "c" in result.matched
+
+
+def test_pure_evaluator_unnamed_observed_matches() -> None:
+    """Fix A: PureGoalEvaluator no longer marks an unnamed criterion missing —
+    the typed ledger evidence settles it."""
+    from phone_agent.graph.goal_evaluator import PureGoalEvaluator
+    from phone_agent.graph.predicates import CORE_PREDICATE_CATALOG
+
+    contract = GoalContract(
+        task_hash="c1",
+        redacted_objective="open app",
+        objective_length=8,
+        success_criteria=[
+            SuccessCriterion(
+                name="app",
+                description="app foreground",
+                verification="app_or_activity_match",
+                predicate=CORE_PREDICATE_CATALOG.create_spec(
+                    "app.foreground_identity", "settings"
+                ),
+            )
+        ],
+        compile_status="compiled",
+    )
+    ledger = [
+        {
+            "criterion_id": "app",
+            "predicate_id": "app.foreground_identity",
+            "status": "matched",
+            "reason_code": "values_match",
+            "source_kind": "device",
+            "confidence_bucket": "high",
+            "contract_id": "c1",
+            "screen_id": "screen-1",
+            "observation_epoch": 2,
+        }
+    ]
+    result = PureGoalEvaluator().evaluate(
+        contract=contract,
+        contract_id=contract.task_hash,
+        evidence_ledger=ledger,
+        finish_claim_matched=[],  # naming retired (Fix A)
+        screen_id="screen-1",
+        observation_epoch=2,
+    )
+    assert result.status == "success"
+    assert "app" in result.matched
