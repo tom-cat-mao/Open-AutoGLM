@@ -335,7 +335,13 @@ def verify_action_outcome(
                 **evidence["weak_signals"],
                 "ui_tree_changed": True,
             }
-    before_hash = before_state.get("screen_hash") or before_state.get("screen_id")
+    # H2 Fix D: compare like-for-like. before_state["screen_id"] is the plan
+    # frame's build_screen_id output (semantic identity, same algorithm as
+    # after_hash), while before_state["screen_hash"] is the raw sha256 of the
+    # screenshot — mixing the two made screen_changed always true and
+    # content_shifted permanently unknown. Raw hash stays as a fallback only
+    # for states that never wrote a top-level screen_id.
+    before_hash = before_state.get("screen_id") or before_state.get("screen_hash")
     after_hash = build_screen_id(
         current_app=after_app,
         screenshot_b64=getattr(after_screenshot, "base64_data", None),
