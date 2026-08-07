@@ -975,14 +975,20 @@ def execute_node(state: "AgentState", config: RunnableConfig) -> dict:
             target = grounding_result.get("target")
             if isinstance(target, dict):
                 grounded_mark_id = target.get("mark_id")
-        needs_mark_check = (
-            bool(grounded_mark_id)
-            and registry is not None
-            and bool(registry.raw_screenshot_hash)
-        )
+        needs_mark_check = bool(grounded_mark_id) and registry is not None
         if needs_mark_check:
             fresh_hash = _fresh_screen_hash(device_factory, device_id)
-            if fresh_hash is None or fresh_hash != registry.raw_screenshot_hash:
+            # Fail-closed (P0 #9): a mark-grounded action can only dispatch
+            # when the registry hash is present AND matches the fresh frame.
+            # A missing registry hash (old checkpoint / hand-built state) is
+            # "unverifiable", not "fresh" — it takes the same stale branch as
+            # a mismatch so nothing dispatches on unverifiable coordinates.
+            hash_unverifiable = not bool(registry.raw_screenshot_hash)
+            if (
+                hash_unverifiable
+                or fresh_hash is None
+                or fresh_hash != registry.raw_screenshot_hash
+            ):
                 stale_result = ActionResult(
                     success=False,
                     should_finish=False,
@@ -1015,8 +1021,12 @@ def execute_node(state: "AgentState", config: RunnableConfig) -> dict:
                     {
                         "action": action_parsed.get("action"),
                         "mark_id": grounded_mark_id,
-                        "screen_changed": fresh_hash is not None
-                        and fresh_hash != registry.raw_screenshot_hash,
+                        "hash_unverifiable": hash_unverifiable,
+                        "screen_changed": (
+                            not hash_unverifiable
+                            and fresh_hash is not None
+                            and fresh_hash != registry.raw_screenshot_hash
+                        ),
                         "fresh_screenshot_available": fresh_hash is not None,
                     },
                 )
@@ -1183,6 +1193,10 @@ def execute_node(state: "AgentState", config: RunnableConfig) -> dict:
             "interrupt_message": action_parsed.get(
                 "message", "User intervention required"
             ),
+            # Pending hygiene (P0 #5): never leave a stale pending_execute /
+            # interrupt_result that could misroute a later resume (defense).
+            "pending_execute": False,
+            "interrupt_result": None,
             "hitl_count": state.get("hitl_count", 0) + 1,
             "context_mode": context_mode,
             **_context_update(
@@ -1302,6 +1316,10 @@ def execute_node(state: "AgentState", config: RunnableConfig) -> dict:
             "messages": messages,
             "pending_interrupt": capability.hitl_policy_id or "takeover",
             "interrupt_message": result.message,
+            # Pending hygiene (P0 #5): never leave a stale pending_execute /
+            # interrupt_result that could misroute a later resume (defense).
+            "pending_execute": False,
+            "interrupt_result": None,
             "hitl_count": state.get("hitl_count", 0) + 1,
             "context_mode": context_mode,
             **_context_update(

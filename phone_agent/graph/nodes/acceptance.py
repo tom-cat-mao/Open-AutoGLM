@@ -292,8 +292,11 @@ def _trajectory_buckets(
 ) -> dict[int, dict[str, Any]]:
     """Per-step buckets of the judge's trajectory summary, form-only.
 
-    One bucket per step number present in the ledger; ``effect_event`` entries
-    fill ``actions`` and ``model_observation`` (observed) entries fill
+    One bucket per step number with a renderable entry; only
+    ``effect_event`` and ``model_observation`` entries create buckets —
+    anchors/seals/digest rows never produce empty ``sN: ?`` lines and never
+    widen the referenceable step set (item 6b). ``effect_event`` entries fill
+    ``actions`` and ``model_observation`` (observed) entries fill
     ``observations``. Code never interprets the values (design philosophy:
     code = form, model = content).
     """
@@ -303,6 +306,8 @@ def _trajectory_buckets(
         if not isinstance(entry, dict) or entry.get("contract_id") != contract_id:
             continue
         kind = entry.get("kind")
+        if kind not in {"effect_event", "model_observation"}:
+            continue
         try:
             step = int(entry.get("step") or 0)
         except (TypeError, ValueError):
@@ -331,18 +336,68 @@ def _trajectory_buckets(
     return buckets
 
 
+_TRAJECTORY_SUMMARY_LIMIT = 2000
+
+
+def _judge_trajectory_prefix(*, lang: str) -> str:
+    return (
+        "Trajectory summary (action -> reflection verdict; observation = model screen reads; "
+        "your only source for causality):"
+        if lang == "en"
+        else "轨迹摘要（动作 -> 反思结论；观察 = 模型读屏结果；判断因果的唯一来源）："
+    )
+
+
+def _render_trajectory_lines(
+    buckets: dict[int, dict[str, Any]], *, lang: str
+) -> tuple[str, set[int]]:
+    """Render the bounded trajectory summary and its exact step set.
+
+    Lines are appended one at a time against the shared 2000-char budget
+    (prefix + newline-aware); a line that does not fit is dropped whole, so
+    ``rendered_steps`` is strictly the set of steps whose rows actually reach
+    the judge — a judge reference can only point at a step it saw (item 6a).
+    Returns ``("", set())`` when there is nothing to render.
+    """
+
+    if not buckets:
+        return "", set()
+    prefix = _judge_trajectory_prefix(lang=lang)
+    lines: list[str] = []
+    rendered_steps: set[int] = set()
+    budget = _TRAJECTORY_SUMMARY_LIMIT - len(prefix)
+    for step in sorted(buckets)[-12:]:
+        bucket = buckets[step]
+        action_text = "; ".join(bucket["actions"]) if bucket["actions"] else "?"
+        line = f"s{step}: {action_text}"
+        if bucket["observations"]:
+            line += f"; \u89c2\u5bdf: {', '.join(bucket['observations'])}"
+        line_budget = len(line) + 1  # trailing newline
+        if budget < line_budget:
+            break
+        budget -= line_budget
+        lines.append(line)
+        rendered_steps.add(step)
+    summary_text = prefix + "\n" + "\n".join(lines)
+    return summary_text, rendered_steps
+
+
 def trajectory_summary_steps(
-    ledger: list[dict], *, contract_id: str
+    ledger: list[dict], *, contract_id: str, lang: str = "en"
 ) -> set[int]:
     """The step numbers that actually appear in the judge's trajectory summary.
 
     Fix F: ``_evidence_step_valid`` requires a numeric judge reference to be a
     member of this set — a step inside the numeric range but absent from the
-    summary is not referenceable. Form-only membership; no content reading.
+    summary is not referenceable. Same-source with the summary renderer:
+    truncation drops whole lines, so the set is exactly the rendered rows
+    (a step inside the budget is never listed unless its row was rendered).
+    Form-only membership; no content reading.
     """
 
     buckets = _trajectory_buckets(ledger, contract_id=contract_id)
-    return {step for step in sorted(buckets)[-12:]}
+    _, rendered_steps = _render_trajectory_lines(buckets, lang=lang)
+    return rendered_steps
 
 
 def _trajectory_summary_for_judge(
@@ -359,27 +414,13 @@ def _trajectory_summary_for_judge(
     """
 
     buckets = _trajectory_buckets(ledger, contract_id=contract_id)
-    if not buckets:
+    summary_text, _ = _render_trajectory_lines(buckets, lang=lang)
+    if not summary_text:
         return ""
-    lines: list[str] = []
-    for step in sorted(buckets)[-12:]:
-        bucket = buckets[step]
-        action_text = "; ".join(bucket["actions"]) if bucket["actions"] else "?"
-        line = f"s{step}: {action_text}"
-        if bucket["observations"]:
-            line += f"; \u89c2\u5bdf: {', '.join(bucket['observations'])}"
-        lines.append(line)
-    prefix = (
-        "Trajectory summary (action -> reflection verdict; observation = model screen reads; "
-        "your only source for causality):"
-        if lang == "en"
-        else "轨迹摘要（动作 -> 反思结论；观察 = 模型读屏结果；判断因果的唯一来源）："
-    )
-    summary_text = prefix + "\n" + "\n".join(lines)
     safe = sanitize_context_payload(
         summary_text, consumer="reflect_prompt", task_context=task_context
     )
-    return str(safe or "")[:2000]
+    return str(safe or "")[: _TRAJECTORY_SUMMARY_LIMIT]
 
 
 
@@ -807,7 +848,7 @@ def acceptance_node(state: "AgentState", config: RunnableConfig) -> dict:
             ledger, contract_id=runtime_contract_id, lang=lang, task_context=task
         )
         trajectory_steps = trajectory_summary_steps(
-            ledger, contract_id=runtime_contract_id
+            ledger, contract_id=runtime_contract_id, lang=lang
         )
         verdicts, named_evidence, model_message = _run_semantic_judge(
             state=state,

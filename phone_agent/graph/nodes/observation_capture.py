@@ -356,6 +356,13 @@ def verifier_observation_payload(
             "mark_id": mark.mark_id,
             "role": mark.role,
             "text_summary": mark.text_summary or "",
+            # Topology fields so the verifier's after-side build_screen_id can
+            # reproduce the plan frame's screen_id (observation.py projects
+            # accessibility-origin marks into the topology digest; without
+            # bbox/source the after digest would be structurally unequal and
+            # screen_changed would fire on every step again).
+            "bbox": list(mark.bbox),
+            "source": mark.source,
         }
         marks.append(row)
     return {

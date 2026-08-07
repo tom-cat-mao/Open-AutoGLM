@@ -70,6 +70,8 @@ def test_confirm_accept_fresh_mark_dispatches(base_state, fake_device) -> None:
     assert result["pending_interrupt"] is None
     assert result["interrupt_result"] is None
     assert fake_device.calls[-1][0] == "tap"
+    # 新鲜度校验恰好消耗一张截图（不重复抓帧）
+    assert [call[0] for call in fake_device.calls].count("get_screenshot") == 1
     # messages 仍是 confirm 首轮瘦行（无二次 append）
     assert result["messages"][-1]["role"] == "user"
 
@@ -134,6 +136,8 @@ def test_confirm_accept_without_mark_skips_freshness_check(
 
     assert result["action_confirmed"] is True
     assert fake_device.calls[-1][0] == "back"
+    # 无 mark 绑定 → 新鲜度校验整体跳过：不得调用 get_screenshot
+    assert "get_screenshot" not in [call[0] for call in fake_device.calls]
 
 
 class _BrokenScreenshotFactory:
@@ -166,6 +170,33 @@ def test_confirm_accept_screenshot_failure_fails_closed(base_state) -> None:
     assert result["pending_interrupt"] is None
     assert result["interrupt_result"] is None
     assert result["repeat_rejected"] is True
+    assert result["failure_cause"] == "confirm_stale_reobserve"
+    last_user = [m for m in result["messages"] if m.get("role") == "user"][-1]
+    assert "屏幕已变化，需重新观察" in last_user["content"][0]["text"]
+
+
+def test_confirm_accept_registry_without_hash_fails_closed(
+    base_state, fake_device
+) -> None:
+    """Registry carries no raw_screenshot_hash (old checkpoint / hand-built
+    state) → the freshness state is unverifiable, which is never "fresh":
+    no dispatch and replan via repeat_rejected (P0 #9 fail-closed)."""
+    state = _mark_grounded_pending_state(base_state, registry_hash="")
+
+    result = execute_node(
+        state, {"configurable": {"device_factory": fake_device, "verbose": False}}
+    )
+
+    assert not any(  # 只允许截图/前台探测调用，绝无执行调用
+        call[0] not in {"get_screenshot", "get_current_app"}
+        for call in fake_device.calls
+    )
+    assert "tap" not in [call[0] for call in fake_device.calls]
+    assert result["pending_execute"] is False
+    assert result["pending_interrupt"] is None
+    assert result["interrupt_result"] is None
+    assert result["action_confirmed"] is False
+    assert result["repeat_rejected"] is True  # → after_execute "replan"
     assert result["failure_cause"] == "confirm_stale_reobserve"
     last_user = [m for m in result["messages"] if m.get("role") == "user"][-1]
     assert "屏幕已变化，需重新观察" in last_user["content"][0]["text"]

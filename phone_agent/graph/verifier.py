@@ -11,7 +11,7 @@ from phone_agent.config.apps import APP_PACKAGES, get_package_name, normalize_ap
 from phone_agent.config.policy import DEFAULT_VERIFICATION_POLICY
 from phone_agent.graph.compatibility_adapters import PageSignalAdapter
 from phone_agent.graph.expected_outcome import normalize_expected_outcome
-from phone_agent.graph.marks import build_screen_id
+from phone_agent.graph.marks import ACCESSIBILITY_MARK_SOURCES, build_screen_id
 
 SELECTED_OBJECT_TEXT_MATCH_CONFIDENCE = DEFAULT_VERIFICATION_POLICY.value(
     "selected_object_text_match_confidence"
@@ -340,13 +340,18 @@ def verify_action_outcome(
     # after_hash), while before_state["screen_hash"] is the raw sha256 of the
     # screenshot — mixing the two made screen_changed always true and
     # content_shifted permanently unknown. Raw hash stays as a fallback only
-    # for states that never wrote a top-level screen_id.
+    # for states that never wrote a top-level screen_id. The after side passes
+    # the current frame's accessibility-origin marks (same projection as
+    # observation.build_observation's ax_topology_marks) so the topology digest
+    # is symmetric: same screen with unchanged marks → same screen_id, while a
+    # page flip or a marks-topology change still flips the digest.
     before_hash = before_state.get("screen_id") or before_state.get("screen_hash")
     after_hash = build_screen_id(
         current_app=after_app,
         screenshot_b64=getattr(after_screenshot, "base64_data", None),
         width=int(getattr(after_screenshot, "width", 0) or 0),
         height=int(getattr(after_screenshot, "height", 0) or 0),
+        marks=_ax_topology_marks(after_observation),
     )
     if before_hash and after_hash and str(before_hash) != after_hash:
         evidence["weak_signals"] = {"screen_changed": True}
@@ -371,6 +376,31 @@ def verify_action_outcome(
     return VerifierResult(
         status="unknown", confidence=0.0, signals=signals, evidence=evidence
     )
+
+
+def _ax_topology_marks(
+    observation: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
+    """Project the accessibility-origin marks from an observation payload.
+
+    Mirrors ``observation.build_observation``'s ``ax_topology_marks`` filter:
+    only uiautomator/accessibility_tree marks feed the screen_id topology
+    digest, so the verifier's after side must apply the same projection for a
+    like-for-like comparison against the plan frame's ``screen_id``. Provider /
+    locate marks (la_*, locate_N, fake, ...) never enter screen identity.
+    """
+
+    if not isinstance(observation, dict):
+        return []
+    marks = observation.get("marks")
+    if not isinstance(marks, list):
+        return []
+    return [
+        mark
+        for mark in marks
+        if isinstance(mark, dict)
+        and str(mark.get("source") or "") in ACCESSIBILITY_MARK_SOURCES
+    ]
 
 
 def merge_verifier_with_reflection(

@@ -282,9 +282,11 @@ class PureGoalEvaluator:
                 unknown.append(criterion.name)
 
         required = {item.name for item in contract.success_criteria if item.required}
-        if unknown_claim_ids:
-            overall = "failure"
-        elif required.intersection(missing):
+        # unknown_claim_ids (finish claim naming outside the contract) is
+        # diagnostic only — recorded in evidence, never a verdict. The
+        # declarative evaluator already whitelists names before they can
+        # satisfy anything, so a stray name changes nothing about the ledger.
+        if required.intersection(missing):
             overall: Literal["success", "failure", "unknown"] = "failure"
         elif required and required.issubset(matched):
             overall = "success"

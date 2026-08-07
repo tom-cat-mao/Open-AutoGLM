@@ -477,7 +477,11 @@ def test_pure_goal_evaluator_folds_only_current_bound_ledger() -> None:
     assert stale.evidence["per_criterion"]["app"]["status"] == "stale"
 
 
-def test_pure_goal_evaluator_rejects_unknown_finish_claim_ids() -> None:
+def test_pure_goal_evaluator_records_unknown_finish_claim_ids_diagnostically() -> None:
+    """A finish claim naming outside the contract is diagnostic only: recorded
+    in evidence but never changes the verdict. With the required criterion
+    matched on the ledger, an extra invented claim id cannot force failure
+    (the declarative evaluator whitelists names before they can satisfy)."""
     contract = GoalContract(
         task_hash="contract-1",
         redacted_objective="open app",
@@ -517,7 +521,10 @@ def test_pure_goal_evaluator_rejects_unknown_finish_claim_ids() -> None:
         observation_epoch=2,
     )
 
-    assert result.status == "failure"
+    # Ledger says app matched → success despite the stray claim name.
+    assert result.status == "success"
+    assert result.matched == ["app"]
+    # Still recorded for trace diagnosis.
     assert result.evidence["unknown_finish_claim_ids"] == ["invented_criterion"]
 
 
