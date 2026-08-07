@@ -4,8 +4,11 @@ The device is the fact source: an installed app is launchable even when the
 static registry has never heard of it. Resolution order (see
 ``LaunchTargetResolver.resolve``): static registry alias -> per-run learned
 mapping -> device inventory substring match against ``package_candidates``.
-A successful launch records the mapping (user term -> package) in the per-run
-learning context so later verifier/plan steps and launch calls reuse it.
+The resolved (user term -> package) mapping is NOT recorded here (F7): an
+``am start`` command-level success does not prove the app came to the
+foreground, so learning is recorded by the reflect step only after the
+verifier confirms the foreground package matches; the resolved mapping is
+carried out as add-only result metadata for that check.
 """
 
 from langchain_core.tools import tool
@@ -89,11 +92,17 @@ def launch(
         device_id,
         package_candidates=package_candidates,
         learning=learning,
+        inventory=inventory,
     )
     if success:
-        if learning is not None:
-            learning.record(app, target.package_name)
-        return ActionResult(success=True, should_finish=False).__dict__
+        # F7: never learn from an `am start` command-level success alone — the
+        # mapping is only recorded by the reflect step after the verifier
+        # confirms the foreground package matches. The resolved mapping is
+        # carried out as add-only result metadata for that verification.
+        result = ActionResult(success=True, should_finish=False).__dict__
+        result["launch_app_term"] = app
+        result["launch_resolved_package"] = target.package_name
+        return result
     return ActionResult(
         success=False, should_finish=False, message=f"App launch failed: {app}"
     ).__dict__

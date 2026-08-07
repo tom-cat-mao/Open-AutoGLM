@@ -494,7 +494,14 @@ class LaunchTargetResolver:
 def _match_candidates_to_inventory(
     candidates: Iterable[str], inventory: InstalledAppInventory
 ) -> frozenset[str]:
-    """Case-insensitive substring match of candidate terms against packages."""
+    """Case-insensitive substring match of candidate terms against packages.
+
+    F9: a normalized needle shorter than 4 chars is skipped — on a sparse
+    device a one/two/three-char needle like "a" or "com" can uniquely match a
+    system package and falsely resolve a launch. Legitimate package fragments
+    ("tongcheng", "12306") are all >= 4 chars after normalization, so nothing
+    real is lost.
+    """
 
     matches: set[str] = set()
     normalized_packages = {
@@ -502,7 +509,7 @@ def _match_candidates_to_inventory(
     }
     for candidate in candidates:
         needle = normalize_app_term(str(candidate or ""))
-        if not needle:
+        if not needle or len(needle) < 4:
             continue
         for normalized_package, package in normalized_packages.items():
             if needle in normalized_package:

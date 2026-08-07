@@ -801,8 +801,39 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
         page_signal_adapter=None,
         learning=configurable.get("app_learning_context"),
     )
+    # F7: learn (user term -> resolved package) only after the verifier
+    # confirms the foreground matches this step's launch — am-start success
+    # alone never records (the old launch-tool record could learn a wrong
+    # mapping and self-certify the launch in this same run). The resolved
+    # mapping is carried in action_result metadata by the Launch tool.
+    if (
+        isinstance(action_parsed, dict)
+        and str(action_parsed.get("action") or "") == "Launch"
+        and isinstance(getattr(verifier_result, "signals", None), dict)
+        and verifier_result.signals.get("launch_matched") is True
+        and isinstance(action_result, dict)
+    ):
+        launch_metadata = action_result.get("metadata")
+        term = (
+            launch_metadata.get("launch_app_term")
+            if isinstance(launch_metadata, dict)
+            else None
+        )
+        package = (
+            launch_metadata.get("launch_resolved_package")
+            if isinstance(launch_metadata, dict)
+            else None
+        )
+        app_learning = configurable.get("app_learning_context")
+        if term and package and app_learning is not None:
+            app_learning.record(str(term), str(package))
     runtime_contract_id = goal_runtime_reference(state)
     ledger = list(state.get("goal_evidence_ledger") or [])
+    # F6: snapshot the ledger before this step's model screen-reads are
+    # appended, so the per-step "fresh observation" signal compares each read
+    # against the criterion's PREVIOUS record (status change), not against
+    # this step's own appended entries.
+    ledger_before_step = list(ledger)
     goal_contract = ensure_goal_contract(state, config)
     # S6: the fact-provider evidence path is retired — the model screen-read
     # (criteria_observations) is the only content sensor. The app-foreground
@@ -1512,17 +1543,26 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
         # Effect-guards: the authoritative per-step effect signal for the
         # tried_actions entry. Reflect judges from the signals it already owns:
         # before/after screen hash (previous observation vs this capture), the
-        # number of fresh model screen-reads appended to the ledger this step,
-        # and the verdict. A productive step resets the same-key
+        # number of FRESH model screen-reads appended to the ledger this step
+        # (status changed vs the criterion's previous record — a raw count
+        # would be nearly always > 0 with a goal contract, see F6), and the
+        # verdict. A productive step resets the same-key
         # consecutive-no-effect streak; a dead loop keeps it rising.
-        before_screen_hash = None
-        previous_observation = state.get("observation")
-        if isinstance(previous_observation, dict):
-            before_screen_hash = previous_observation.get("screen_hash")
+        # The before-frame hash lives at the state top level: plan writes
+        # state["screen_hash"] as the pre-action frame every step, while
+        # Observation.to_dict() has no top-level screen_hash (it nests under
+        # ["snapshot"]["screen_hash"]) — reading the observation dict here
+        # would always see None in real flights.
+        before_screen_hash = state.get("screen_hash")
+        fresh_observation_count = goal_evidence.fresh_observation_count(
+            parsed_reflection.criteria_observations,
+            ledger_before_step,
+            contract_id=runtime_contract_id,
+        )
         had_effect = action_had_effect(
             before_screen_hash=before_screen_hash,
             after_screen_hash=after_observation.snapshot.screen_hash,
-            new_observation_count=len(parsed_reflection.criteria_observations or []),
+            new_observation_count=fresh_observation_count,
             verdict=final_verdict,
         )
         context_updates["gui_memory"] = update_gui_memory(

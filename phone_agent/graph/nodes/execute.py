@@ -86,6 +86,51 @@ def _skinny_for_step(
     )
 
 
+def _strip_think_block(content: str) -> str:
+    """Remove one ``<think>...</think>`` (or the historical ``<think...>...``
+    placeholder) section from an assistant message.
+
+    F10: form-level text processing, same spirit as P0 #3's image stripping —
+    called right before the new assistant message is appended, so every
+    existing assistant row is reduced to its ``<answer>`` part and history
+    stays bounded; the just-appended assistant keeps its think block (its
+    reasoning is visible to the model for exactly one plan step). No think
+    block → returned byte-for-byte unchanged; the answer part is never
+    touched. A side benefit: sensitive content that was only inside
+    historical thinking also disappears from subsequent requests.
+    """
+
+    for open_tag, close_tag in (
+        ("<think...>", "</think...>"),
+        ("<think>", "</think>"),
+    ):
+        start = content.find(open_tag)
+        if start < 0:
+            continue
+        end = content.find(close_tag, start + len(open_tag))
+        if end >= 0:
+            return content[:start] + content[end + len(close_tag):]
+    return content
+
+def _strip_think_from_history(messages: list[dict]) -> None:
+    """In-place: drop think blocks from every existing assistant message.
+
+    F10: this runs right before the new assistant message is appended, so the
+    "newest" assistant (which keeps its think block) is not in ``messages``
+    yet — every historical assistant row is reduced to its answer part.
+    """
+
+    for index, message in enumerate(messages):
+        if message.get("role") != "assistant":
+            continue
+        content = message.get("content")
+        if not isinstance(content, str):
+            continue
+        stripped = _strip_think_block(content)
+        if stripped != content:
+            messages[index] = {**message, "content": stripped}
+
+
 def _strip_and_append(
     messages: list[dict],
     thinking: str,
@@ -104,6 +149,10 @@ def _strip_and_append(
     replaced by its one-line trajectory record (the image is dropped with it,
     which is P0 #3's stronger form); otherwise the historical image is simply
     stripped as before.
+
+    F10: on the full-rebuild path every historical assistant message (except
+    the one appended here) loses its ``<think>...</think>`` section — only the
+    answer text remains — so assistant history stays bounded across long runs.
     """
     if messages:
         if skinny_line is not None:
@@ -116,6 +165,7 @@ def _strip_and_append(
         assistant_content = (
             f"<think...>{thinking}</think...>\n<answer>{action_raw}</answer>"
         )
+    _strip_think_from_history(messages)
     messages.append(
         MessageBuilder.create_assistant_message(assistant_content)
     )
@@ -333,6 +383,10 @@ def execute_node(state: "AgentState", config: RunnableConfig) -> dict:
         # sanitized hint digest, so repeated locate queries on one surface are
         # counted by the same guard.
         "hint_digest": locate_hint_digest(action_parsed.get("target_text_hint")),
+        # F4: Launch has no target center either; the repeat identity comes
+        # from the sanitized app digest (see _launch_repeat_key), written at
+        # digest time so raw terms never enter state (P0 #10).
+        "app": locate_hint_digest(action_parsed.get("app")),
         # Swipe geometry (P3 #3): Swipe has no target center, so the repeat
         # guard keys on start/end instead of center.
         "start": action_point(action_parsed.get("start")),

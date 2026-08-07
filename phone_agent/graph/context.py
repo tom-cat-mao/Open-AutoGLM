@@ -682,8 +682,10 @@ def action_had_effect(
 
     * screen change (``screen_hash`` differs before vs after) — the surface
       moved;
-    * new criterion observation (``model_observation`` ledger entry this step)
-      — the model screen-read produced fresh evidence;
+    * fresh criterion observation (``new_observation_count``) — the number of
+      this step's model screen-reads whose status differs from the criterion's
+      previous ledger record (status-changed fresh observations, F6); a raw
+      count would be nearly always > 0 whenever a goal contract is present;
     * reflect verdict ``succeeded`` — the step verified.
 
     Any one of the three is productive; ``verdict`` is deliberately strict
@@ -1269,6 +1271,12 @@ def repeated_action_key(item: dict[str, Any]) -> tuple[Any, ...] | None:
         # H4: Locate has no target center; repeat identity comes from the
         # (sanitized, digested) query hint on the same surface.
         return _locate_repeat_key(item, surface)
+    if str(action) == "Launch":
+        # F4: Launch has no target center; repeat identity comes from the
+        # (sanitized, digested) app term on the same surface. Without this
+        # branch the guard's key was always None for Launch — repeated
+        # launches of the same unknown app were never counted.
+        return _launch_repeat_key(item, surface)
     center = item.get("target_center")
     if str(action) == "Swipe" and not (
         isinstance(center, (list, tuple)) and len(center) == 2
@@ -1297,6 +1305,18 @@ def _locate_repeat_key(
     if not isinstance(digest, str) or not digest:
         return None
     return (str(item.get("action")), surface, digest)
+
+
+def _launch_repeat_key(
+    item: dict[str, Any], surface: str
+) -> tuple[Any, ...] | None:
+    app = item.get("app")
+    # F4: the app identity is already a sanitized digest at write time (both
+    # execute's candidate_repeat and update_gui_memory digest before storing,
+    # P0 #10), so no further sanitization happens here.
+    if not isinstance(app, str) or not app:
+        return None
+    return (str(item.get("action")), app, surface)
 
 
 def _geometry_bucket(value: Any, *, size: float = TAP_GEOMETRY_BUCKET_SIZE) -> tuple[int, int]:
@@ -1442,6 +1462,11 @@ def update_gui_memory(
                 # H4: locate repeat identity (sanitized hint digest), never the
                 # raw query text.
                 "hint_digest": locate_hint_digest(action.get("target_text_hint")),
+                # F4: launch repeat identity source — stored as a sanitized
+                # digest at write time (P0 #10, same as the locate hint): the
+                # raw app term never lands in tried_actions, and the repeat
+                # key compares digests directly.
+                "app": locate_hint_digest(action.get("app")),
                 # Effect-guards: per-step productivity signal consumed by the
                 # consecutive-no-effect repeat guard. Reflect writes the
                 # action_had_effect verdict; execute rejection/failure paths

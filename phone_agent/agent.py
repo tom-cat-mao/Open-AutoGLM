@@ -177,14 +177,17 @@ def interrupt_payload(
     return message, interrupt_type
 
 
-def extract_interrupt(result: Any) -> tuple[str, str] | None:
-    """Extract (message, type) from a ``__interrupt__`` marker in a result dict.
+def extract_interrupt(result: Any) -> tuple[str, str, str | None] | None:
+    """Extract ``(message, type, prompt)`` from a ``__interrupt__`` marker.
 
     langgraph >= 1.x returns the pending interrupt in the invoke result under
     the ``__interrupt__`` key (a list of ``Interrupt`` objects) instead of
     raising ``GraphInterrupt`` once a checkpointer is attached; callers that
     want to resume must read the marker. Returns None when no interrupt is
-    pending.
+    pending. ``prompt`` is the payload's own prompt string (e.g.
+    confirm_node's "Confirm? (Y/N): " or goal_node's approval prompt) when the
+    interrupt payload carries one, else None — callers fall back to their own
+    assembled prompt.
     """
 
     if not isinstance(result, dict):
@@ -195,9 +198,13 @@ def extract_interrupt(result: Any) -> tuple[str, str] | None:
     for item in marker:
         value = getattr(item, "value", None)
         if isinstance(value, dict):
+            message = str(value.get("message") or "User intervention required")
+            interrupt_type = str(value.get("type") or "takeover")
+            prompt = value.get("prompt")
             return (
-                str(value.get("message") or "User intervention required"),
-                str(value.get("type") or "takeover"),
+                message,
+                interrupt_type,
+                str(prompt) if prompt else None,
             )
     return None
 
@@ -363,6 +370,39 @@ class PhoneAgent:
                 prompt_version=self.agent_config.prompt_version,
             )
 
+        # F2.0a: langgraph >= 1.x returns a pending interrupt as a
+        # ``__interrupt__`` marker in the invoke result even without a
+        # checkpointer (verified on langgraph 1.2.2) — the GraphInterrupt
+        # catch above only fires on older versions. Without this check the
+        # real batch path fell through to _state_to_run_result and misreported
+        # the HITL stop as a "Max steps reached" run (finished=False,
+        # hitl_count=0, no run_interrupted trace). Attribute it exactly like
+        # the exception path: clean terminal, never run_error.
+        pending = extract_interrupt(result)
+        if pending is not None:
+            message, interrupt_type, _prompt = pending
+            if trace_writer:
+                trace_writer.emit(
+                    "agent",
+                    "run_interrupted",
+                    0,
+                    {"type": interrupt_type, "message": message},
+                )
+            return RunResult(
+                success=False,
+                finished=True,
+                steps=int(result.get("step_count") or 0),
+                duration=time.perf_counter() - started_at,
+                final_message=message,
+                error=None,
+                failure_cause=interrupt_type,
+                hitl_count=1,
+                trace_id=trace_id,
+                trace_path=str(trace_writer.path) if trace_writer else None,
+                context_mode=self.agent_config.context_mode,
+                prompt_version=self.agent_config.prompt_version,
+            )
+
         run_result = self._state_to_run_result(
             result,
             time.perf_counter() - started_at,
@@ -382,21 +422,31 @@ class PhoneAgent:
     ) -> RunResult:
         """Run the agent interactively, resuming in place after HITL interrupts.
 
-        Requires ``AgentConfig(enable_hitl_resume=True)``: the graph is compiled
-        with a process-local checkpointer, so ``interrupt()`` in the
-        confirm/takeover nodes pauses the run and returns a ``__interrupt__``
-        marker in the invoke result instead of ending it. For every interrupt
-        the loop calls ``resume_input(prompt)`` (defaults to ``input()``) and
-        resumes the graph with ``Command(resume=answer)`` — takeover passes the
-        answer through (the node ignores its content and continues), confirm
-        feeds the string to its Y/N parser.
+        Requires ``AgentConfig(enable_hitl_resume=True)``: the graph is
+        compiled with a process-local checkpointer, so
+        ``interrupt()`` in the confirm/takeover nodes pauses the run and
+        returns a ``__interrupt__`` marker in the invoke result instead of
+        ending it. For every interrupt the loop calls
+        ``resume_input(prompt)`` (defaults to ``input()``) and resumes the
+        graph with ``Command(resume=...)``.
 
-        Entering ``n``/``no`` (or ``None``) aborts: the run ends as a terminal
-        ``RunResult`` with ``failure_cause`` = interrupt type, matching the
-        structured-run interrupt attribution. An empty answer (plain Enter)
-        resumes immediately. ``hitl_count`` accumulates across the loop. Trace
-        is add-only: ``run_interrupted`` / ``run_resumed`` events are emitted
-        per round.
+        Per-interrupt-type semantics (F3):
+        - ``takeover``: passes the answer through; Enter continues, ``n``/``no``
+          aborts the run as a terminal ``RunResult`` with ``failure_cause`` =
+          interrupt type (matching the structured-run attribution). An empty
+          answer (plain Enter) resumes immediately.
+        - ``confirmation``: the payload's own ``prompt`` (confirm_node's
+          "Confirm? (Y/N): ") is used when present. Only an explicit
+          ``y``/``yes`` resumes as ``"Y"``; every other input — empty Enter,
+          ``n``, anything else — resumes as ``"N"`` (fail-closed), so
+          confirm_node records ``finished=True`` and the graph terminates
+          cleanly with the full trace.
+        - ``goal_approval``: the payload's approval prompt is shown; ``y``/``yes``
+          resumes as ``"Y"`` (approve), anything else as ``"N"`` (reject —
+          goal_node falls back to the heuristic weak contract and continues).
+
+        ``hitl_count`` accumulates across the loop. Trace is add-only:
+        ``run_interrupted`` / ``run_resumed`` events are emitted per round.
         """
 
         if not self.agent_config.enable_hitl_resume:
@@ -441,7 +491,7 @@ class PhoneAgent:
                 pending = extract_interrupt(result)
                 if pending is None:
                     break
-                message, interrupt_type = pending
+                message, interrupt_type, payload_prompt = pending
                 hitl_count += 1
                 if trace_writer:
                     trace_writer.emit(
@@ -450,17 +500,58 @@ class PhoneAgent:
                         0,
                         {"type": interrupt_type, "message": message},
                     )
-                prompt = f"{message}\n完成后按回车继续（输入 n 终止）: "
-                answer = resume_input(prompt)
-                if answer is None or str(answer).strip().lower() in ("n", "no"):
-                    return _terminal(
-                        message, interrupt_type, int(result.get("step_count") or 0)
+                # F3: confirmation resumes are fail-closed per the node's own
+                # semantics — only an explicit y/yes resumes as "Y"; an empty
+                # Enter, "n", or any other input resumes as "N", so
+                # confirm_node sets finished=True and the graph terminates
+                # cleanly with full trace. We never return early here: the
+                # graph itself ends the run.
+                if interrupt_type == "confirmation":
+                    prompt = payload_prompt or (
+                        f"{message}\nConfirm? (Y/N): "
+                        if initial_state.get("lang") == "en"
+                        else f"{message}\n确认操作？(Y/N): "
                     )
+                    answer = resume_input(prompt)
+                    resume_value = (
+                        "Y"
+                        if str(answer or "").strip().lower() in ("y", "yes")
+                        else "N"
+                    )
+                elif interrupt_type == "goal_approval":
+                    # goal_node parses the resume itself: "N"/"NO"/"EDIT"
+                    # rejects the contract (heuristic fallback, node continues),
+                    # anything else approves. y/yes approves; every other input
+                    # (empty Enter included) rejects fail-closed.
+                    prompt = payload_prompt or (
+                        f"{message}\nApprove the goal contract? (Y/N): "
+                        if initial_state.get("lang") == "en"
+                        else f"{message}\n批准目标契约？(Y/N): "
+                    )
+                    answer = resume_input(prompt)
+                    resume_value = (
+                        "Y"
+                        if str(answer or "").strip().lower() in ("y", "yes")
+                        else "N"
+                    )
+                else:
+                    # takeover: unchanged semantics — Enter continues, n aborts.
+                    prompt = payload_prompt or (
+                        f"{message}\n完成后按回车继续（输入 n 终止）: "
+                    )
+                    answer = resume_input(prompt)
+                    if answer is None or str(answer).strip().lower() in ("n", "no"):
+                        return _terminal(
+                            message,
+                            interrupt_type,
+                            int(result.get("step_count") or 0),
+                        )
+                    resume_value = answer
                 if trace_writer:
                     trace_writer.emit(
                         "agent", "run_resumed", 0, {"type": interrupt_type}
                     )
-                result = self._graph.invoke(Command(resume=answer), config)
+                result = self._graph.invoke(Command(resume=resume_value), config)
         except GraphInterrupt as interrupt:
             # Defensive: only reachable when the graph was compiled without a
             # checkpointer (older langgraph raised instead of returning the
@@ -498,6 +589,11 @@ class PhoneAgent:
             trace_id,
             str(trace_writer.path) if trace_writer else None,
         )
+        # F3: hitl_count consistency — the normal-completion path reads the
+        # state counter, but the goal_approval interrupt never writes
+        # state["hitl_count"] (only confirm/takeover nodes do), so the local
+        # loop counter is the authoritative total when it is higher.
+        run_result.hitl_count = max(run_result.hitl_count, hitl_count)
         if trace_writer:
             trace_writer.emit("agent", "run_end", run_result.steps, run_result.to_dict())
         return run_result

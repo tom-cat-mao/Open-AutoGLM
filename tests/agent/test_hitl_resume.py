@@ -184,13 +184,33 @@ def test_redacting_serializer_stubs_checkpoint_metadata_versions() -> None:
 
 def test_extract_interrupt_reads_marker_and_ignores_normal_result() -> None:
     result = {"step_count": 2, "__interrupt__": _takeover_marker("请登录")}
-    assert extract_interrupt(result) == ("请登录", "takeover")
+    assert extract_interrupt(result) == ("请登录", "takeover", None)
 
     result2 = {"step_count": 2, "__interrupt__": [Interrupt(value="plain string")]}
     assert extract_interrupt(result2) is None
 
     assert extract_interrupt({"step_count": 2}) is None
     assert extract_interrupt(None) is None
+
+
+def test_extract_interrupt_carries_payload_prompt() -> None:
+    """The confirmation/goal-approval payloads carry their own prompt; it is
+    surfaced so run_live can show node-authored text instead of the generic
+    takeover prompt (F3)."""
+    marker = [
+        Interrupt(
+            value={
+                "type": "confirmation",
+                "message": "敏感操作",
+                "prompt": "Sensitive operation: 敏感操作\nConfirm? (Y/N): ",
+            }
+        )
+    ]
+    assert extract_interrupt({"__interrupt__": marker}) == (
+        "敏感操作",
+        "confirmation",
+        "Sensitive operation: 敏感操作\nConfirm? (Y/N): ",
+    )
 
 
 def test_interrupt_payload_extracts_from_exception() -> None:
@@ -308,6 +328,169 @@ def test_run_live_multiple_interrupts_accumulate_hitl_count(
     assert events.count("run_resumed") == 2
 
 
+def _confirmation_marker(message: str = "敏感操作") -> list:
+    return [
+        Interrupt(
+            value={
+                "type": "confirmation",
+                "message": message,
+                "prompt": f"Sensitive operation: {message}\nConfirm? (Y/N): ",
+            }
+        )
+    ]
+
+
+def test_run_live_confirmation_empty_enter_is_fail_closed_reject(
+    monkeypatch, tmp_path
+) -> None:
+    """F3: an empty Enter on a confirmation interrupt resumes as "N" (the
+    node then records finished=True and the graph terminates cleanly) — never
+    the old takeover-style "Enter continues". The payload's own prompt is
+    shown."""
+    _fake_device_factory(monkeypatch)
+    prompts: list[str] = []
+    agent = PhoneAgent(
+        agent_config=AgentConfig(
+            enable_hitl_resume=True, trace_dir=str(tmp_path), max_steps=3
+        )
+    )
+    agent._graph = _MarkerThenFinalGraph(
+        _confirmation_marker(),
+        _final_state(
+            hitl_count=1,
+            finished=True,
+            action_result={
+                "success": False,
+                "should_finish": True,
+                "message": "User cancelled sensitive operation",
+            },
+        ),
+    )
+
+    result = agent.run_live(
+        "任务", resume_input=lambda prompt: prompts.append(prompt) or ""
+    )
+
+    assert agent._graph.resumes == ["N"]
+    assert "Confirm? (Y/N)" in prompts[0]
+    assert result.finished is True
+    assert result.success is False  # node cancelled -> finished without success
+    events = [
+        json.loads(line)["event"]
+        for line in open(result.trace_path, encoding="utf-8")
+    ]
+    assert "run_interrupted" in events
+    assert "run_resumed" in events
+    assert "run_end" in events
+
+
+def test_run_live_confirmation_yes_resumes_y(monkeypatch, tmp_path) -> None:
+    """F3: an explicit y/yes on a confirmation interrupt resumes as "Y" so the
+    pending action dispatches."""
+    _fake_device_factory(monkeypatch)
+    prompts: list[str] = []
+    agent = PhoneAgent(
+        agent_config=AgentConfig(
+            enable_hitl_resume=True, trace_dir=str(tmp_path), max_steps=3
+        )
+    )
+    agent._graph = _MarkerThenFinalGraph(
+        _confirmation_marker(), _final_state(hitl_count=1, success=True)
+    )
+
+    result = agent.run_live(
+        "任务", resume_input=lambda prompt: prompts.append(prompt) or "y"
+    )
+
+    assert agent._graph.resumes == ["Y"]
+    assert "Confirm? (Y/N)" in prompts[0]
+    assert result.success is True
+
+
+def test_run_live_confirmation_without_payload_prompt_uses_fallback(
+    monkeypatch, tmp_path
+) -> None:
+    """F3 regression: a confirmation payload without a ``prompt`` field must
+    fall back to the assembled Y/N prompt (and must not crash — the fallback
+    reads lang from the initial state, not from an undefined local)."""
+    _fake_device_factory(monkeypatch)
+    prompts: list[str] = []
+    agent = PhoneAgent(
+        agent_config=AgentConfig(
+            enable_hitl_resume=True, trace_dir=str(tmp_path), max_steps=3,
+            lang="cn",
+        )
+    )
+    marker = [Interrupt(value={"type": "confirmation", "message": "敏感操作"})]
+    agent._graph = _MarkerThenFinalGraph(
+        marker, _final_state(hitl_count=1, finished=True)
+    )
+
+    result = agent.run_live(
+        "任务", resume_input=lambda prompt: prompts.append(prompt) or ""
+    )
+
+    assert agent._graph.resumes == ["N"]
+    assert "确认操作？(Y/N)" in prompts[0]
+    assert result.error is None  # the fallback branch did not raise
+
+
+def test_run_live_confirmation_n_resumes_n_not_abort(
+    monkeypatch, tmp_path
+) -> None:
+    """F3: "n" on a confirmation resumes as "N" (fail-closed, graph
+    terminates itself) instead of the takeover-style early return — the
+    graph stub never sees an early return and the resume list stays exact."""
+    _fake_device_factory(monkeypatch)
+    agent = PhoneAgent(
+        agent_config=AgentConfig(
+            enable_hitl_resume=True, trace_dir=str(tmp_path), max_steps=3
+        )
+    )
+    agent._graph = _MarkerThenFinalGraph(
+        _confirmation_marker(), _final_state(hitl_count=1, finished=True)
+    )
+
+    result = agent.run_live("任务", resume_input=lambda prompt: "n")
+
+    assert agent._graph.resumes == ["N"]
+    assert result.finished is True
+
+
+def test_run_live_goal_approval_resumes_y_or_n(monkeypatch, tmp_path) -> None:
+    """F3: goal_approval shows the payload approval prompt and maps y -> "Y"
+    (approve), anything else (empty Enter included) -> "N" (reject, the node
+    falls back to the heuristic weak contract and continues)."""
+    _fake_device_factory(monkeypatch)
+    prompts: list[str] = []
+    agent = PhoneAgent(
+        agent_config=AgentConfig(
+            enable_hitl_resume=True, trace_dir=str(tmp_path), max_steps=3
+        )
+    )
+    marker = [
+        Interrupt(
+            value={
+                "type": "goal_approval",
+                "goal_contract": {"redacted_objective": "task"},
+                "prompt": "Approve the goal contract? (Y/N/Edit): ",
+            }
+        )
+    ]
+    agent._graph = _MarkerThenFinalGraph(marker, _final_state(hitl_count=0))
+
+    yes = agent.run_live(
+        "任务", resume_input=lambda prompt: prompts.append(prompt) or "y"
+    )
+    assert agent._graph.resumes == ["Y"]
+    assert "Approve the goal contract" in prompts[0]
+
+    no = agent.run_live(
+        "任务", resume_input=lambda prompt: prompts.append(prompt) or ""
+    )
+    assert agent._graph.resumes == ["Y", "N"]
+
+
 def test_run_live_defensive_graph_interrupt_exception_path(
     monkeypatch, tmp_path
 ) -> None:
@@ -400,20 +583,48 @@ def test_phone_agent_compiles_graph_with_checkpointer_when_enabled() -> None:
 
 
 # ----------------------------------------------------------------------
-# batch semantics regression (run_structured untouched)
+# batch semantics regression (run_structured: real compiled mini-graph)
 # ----------------------------------------------------------------------
 
 
+def _interrupt_mini_graph(
+    message: str = "need human",
+    type_: str = "takeover",
+    prompt: str | None = None,
+):
+    """A real compiled StateGraph whose single node interrupts immediately.
+
+    No checkpointer: on langgraph >= 1.x ``invoke`` returns
+    ``{'x': 0, '__interrupt__': [Interrupt(...)]}`` instead of raising
+    GraphInterrupt — the exact real-flight shape that made the old
+    ``_RaisingGraph`` stubs self-deceiving (the exception path they protected
+    never fires).
+    """
+
+    class S(TypedDict, total=False):
+        x: int
+
+    payload: dict = {"message": message, "type": type_}
+    if prompt:
+        payload["prompt"] = prompt
+
+    def node(state: S) -> dict:
+        interrupt(payload)
+        return {"x": 1}
+
+    b = StateGraph(S)
+    b.add_node("n", node)
+    b.set_entry_point("n")
+    return b.compile()
+
+
 def test_run_structured_semantics_unchanged_with_flag_off(monkeypatch) -> None:
-    """The structured path keeps its interrupt terminal attribution when the
-    graph raises GraphInterrupt (e.g. langgraph <1.x or stubbed graphs)."""
+    """The structured path attributes a marker-returning HITL interrupt as a
+    clean terminal (takeover), not as a max-steps run — driven by a real
+    compiled mini-graph, not a fake graph that raises."""
     _fake_device_factory(monkeypatch)
     agent = PhoneAgent(agent_config=AgentConfig(max_steps=3, device_id="device-1"))
-    agent._graph = _RaisingGraph(
-        GraphInterrupt(
-            interrupts=(Interrupt(value={"type": "takeover", "message": "需要登录或验证码"}),)
-        )
-    )
+    agent._graph = _interrupt_mini_graph("需要登录或验证码")
 
     result = agent.run_structured("登录测试任务")
 
@@ -423,26 +634,60 @@ def test_run_structured_semantics_unchanged_with_flag_off(monkeypatch) -> None:
     assert result.failure_cause == "takeover"
     assert result.final_message == "需要登录或验证码"
     assert result.hitl_count == 1
+    assert result.steps == 0  # the mini-graph has no step_count channel
 
 
 def test_run_structured_semantics_unchanged_with_flag_on(monkeypatch) -> None:
     """Even with enable_hitl_resume=True the structured path is not the live
-    loop: a GraphInterrupt still terminates with the batch attribution."""
+    loop: a marker-returning interrupt still terminates with the batch
+    attribution."""
     _fake_device_factory(monkeypatch)
     agent = PhoneAgent(
         agent_config=AgentConfig(enable_hitl_resume=True, max_steps=3)
     )
-    agent._graph = _RaisingGraph(
-        GraphInterrupt(
-            interrupts=(Interrupt(value={"type": "takeover", "message": "验证码"}),)
-        )
-    )
+    agent._graph = _interrupt_mini_graph("验证码")
 
     result = agent.run_structured("登录")
 
     assert result.failure_cause == "takeover"
     assert result.hitl_count == 1
     assert result.final_message == "验证码"
+
+
+def test_run_structured_interrupt_emits_run_interrupted_trace(
+    monkeypatch, tmp_path
+) -> None:
+    """The marker path emits the run_interrupted trace event (the pre-fix
+    batch path fell through to run_end with a misleading max-steps message and
+    no interrupt trace at all)."""
+    _fake_device_factory(monkeypatch)
+    agent = PhoneAgent(
+        agent_config=AgentConfig(
+            enable_hitl_resume=True, trace_dir=str(tmp_path), max_steps=3
+        )
+    )
+    agent._graph = _interrupt_mini_graph(
+        "需要登录", type_="confirmation", prompt="Confirm? (Y/N): "
+    )
+
+    result = agent.run_structured("登录")
+
+    assert result.failure_cause == "confirmation"
+    events = [
+        json.loads(line)["event"]
+        for line in open(result.trace_path, encoding="utf-8")
+    ]
+    assert "run_interrupted" in events
+    assert "run_error" not in events
+    interrupted = next(
+        json.loads(line)["payload"]
+        for line in open(result.trace_path, encoding="utf-8")
+        if json.loads(line)["event"] == "run_interrupted"
+    )
+    assert interrupted["type"] == "confirmation"
+    # P0 #10: the trace redacts the message text at egress — only the stable
+    # type attribution is asserted.
+    assert "message" in interrupted
 
 
 # ----------------------------------------------------------------------
@@ -519,3 +764,61 @@ def test_run_diagnosis_live_path_uses_run_live_with_checkpointer(
     assert command_result.returncode == 0
     assert (run_dir / "run_output.log").exists()
     assert (run_dir / "status.json").exists()
+
+
+def test_run_diagnosis_live_dry_run_conflict_checked_before_device_ops(
+    monkeypatch, tmp_path
+) -> None:
+    """F11: --live --dry-run bails with code 2 BEFORE any device operation —
+    collect_preflight and reset_app_on_device (a real `adb shell pm clear`)
+    must never run for the conflicting flag combination."""
+    import importlib.util
+    from pathlib import Path
+
+    script = (
+        Path(__file__).resolve().parents[2]
+        / ".agents"
+        / "skills"
+        / "phone-agent-live-diagnosis"
+        / "scripts"
+        / "run_diagnosis.py"
+    )
+    spec = importlib.util.spec_from_file_location("run_diagnosis_module", script)
+    assert spec is not None and spec.loader is not None
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["run_diagnosis_module"] = mod
+    spec.loader.exec_module(mod)
+
+    preflight_calls = {"count": 0}
+    reset_calls = {"count": 0}
+    original_preflight = mod.collect_preflight
+    original_reset = mod.reset_app_on_device
+
+    def _counting_preflight(args):
+        preflight_calls["count"] += 1
+        return original_preflight(args)
+
+    def _counting_reset(args):
+        reset_calls["count"] += 1
+        return original_reset(args)
+
+    monkeypatch.setattr(mod, "collect_preflight", _counting_preflight)
+    monkeypatch.setattr(mod, "reset_app_on_device", _counting_reset)
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "run_diagnosis.py",
+            "--live",
+            "登录并支付",
+            "--dry-run",
+            "--output-dir",
+            str(tmp_path / "conflict"),
+        ],
+    )
+
+    code = mod.main()
+
+    assert code == 2
+    assert preflight_calls["count"] == 0
+    assert reset_calls["count"] == 0
+    assert not (tmp_path / "conflict").exists()

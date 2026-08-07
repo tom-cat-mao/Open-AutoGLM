@@ -237,6 +237,35 @@ def test_resolver_candidates_zero_hit_is_unknown() -> None:
     assert target.package_name is None
 
 
+def test_resolver_short_needles_never_match() -> None:
+    """F9: "a" / "com" are legal needles that would uniquely match a system
+    package on a sparse device — sub-4-char normalized needles are skipped, so
+    they can never falsely resolve a launch."""
+    resolver = LaunchTargetResolver(DEFAULT_APP_REGISTRY, DEFAULT_LAUNCH_POLICY)
+    inventory = InstalledAppInventory(
+        frozenset({"com.android.settings", "com.example.installed"}),
+        device_id="serial",
+    )
+
+    for needle in ("a", "com", "安"):
+        target = resolver.resolve(
+            "某新应用",
+            inventory=inventory,
+            candidates=[needle],
+        )
+        assert target.status == "unknown", needle
+        assert target.package_name is None, needle
+
+    # the same inventory still resolves a real >= 4-char fragment
+    target = resolver.resolve(
+        "某新应用",
+        inventory=inventory,
+        candidates=["settings"],
+    )
+    assert target.status == "resolved"
+    assert target.package_name == "com.android.settings"
+
+
 def test_resolver_candidates_without_inventory_fail_closed_unknown() -> None:
     resolver = LaunchTargetResolver(DEFAULT_APP_REGISTRY, DEFAULT_LAUNCH_POLICY)
 

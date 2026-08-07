@@ -5,7 +5,7 @@ replan loops, it is a no-op (returns ``{}``) when the contract is already
 compiled and no recompilation is requested.
 """
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from langgraph.types import interrupt
 from langchain_core.runnables import RunnableConfig
@@ -307,6 +307,17 @@ def goal_node(state: "AgentState", config: RunnableConfig) -> dict:
         "contract_adequacy_status": adequacy.status,
         "contract_adequacy_reasons": list(adequacy.reason_codes),
         "needs_recompile": False,
+        # F5: a successful recompile must also refresh the contract block in
+        # the plan-message prefix — otherwise the model keeps reading the
+        # stale contract forever. The first compile never applies (messages
+        # has no contract block yet at step 0).
+        **(
+            _refresh_contract_message(
+                state, contract, lang=str(state.get("lang") or "cn")
+            )
+            if needs_recompile
+            else {}
+        ),
         # P3: when this compile was a recompile (needs_recompile came in True),
         # the stall counter restarts from zero and the next K reflect windows
         # are immune to stage-stall recompiles (debounce). The initial compile
@@ -326,6 +337,54 @@ def _ensure_runtime_goal(state: "AgentState", config: RunnableConfig) -> bool:
     from phone_agent.graph.goal import ensure_goal_contract
 
     return ensure_goal_contract(state, config) is not None
+
+
+def _refresh_contract_message(
+    state: "AgentState", contract: Any, *, lang: str
+) -> dict:
+    """Replace the plan-history goal-contract block after a successful recompile.
+
+    F5: the contract block is only appended into ``messages`` at
+    ``step_count == 0`` (plan prefix), so a goal_node recompile (stage-stall
+    etc.) updated the state contract but the model kept reading the stale
+    prefix forever. On a recompile we return a full rebuilt ``messages`` list
+    (replace semantics, P0 #6) where the user message whose text starts with
+    the contract-block marker carries the fresh block text. The first compile
+    never calls this (messages has no contract block yet). When no contract
+    block is found, messages are left untouched (returns {}).
+
+    A recompile legitimately invalidates the prompt cache once; afterwards the
+    prefix is byte-stable again — that is the intended behavior.
+    """
+
+    messages = list(state.get("messages") or [])
+    block = contract.to_prompt_block(lang=lang) if contract is not None else None
+    if not block:
+        return {}
+    marker = (
+        "** Task Goal Contract"
+        if lang == "en"
+        else "** 任务目标契约"
+    )
+    for index, message in enumerate(messages):
+        if message.get("role") != "user":
+            continue
+        content = message.get("content")
+        text = None
+        if isinstance(content, str):
+            text = content
+        elif isinstance(content, list):
+            for item in content:
+                if isinstance(item, dict) and item.get("type") == "text":
+                    text = str(item.get("text") or "")
+                    break
+        if text is not None and text.strip().startswith(marker):
+            messages[index] = {
+                "role": "user",
+                "content": [{"type": "text", "text": block}],
+            }
+            return {"messages": messages}
+    return {}
 
 
 def _runtime_goal_failure(code: str) -> dict:

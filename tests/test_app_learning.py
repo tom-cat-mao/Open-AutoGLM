@@ -69,7 +69,12 @@ def test_learning_context_is_not_serializable() -> None:
         learning.__getstate__()
 
 
-def test_launch_tool_records_learning_after_candidate_success(fake_device) -> None:
+def test_launch_tool_does_not_record_learning_but_carries_metadata(
+    fake_device,
+) -> None:
+    """F7: an `am start` command-level success never learns — the mapping is
+    only recorded by the reflect step after foreground verification. The
+    resolved (term, package) rides out as add-only result metadata instead."""
     learning = RuntimeAppLearningContext()
     result = _dispatch_with_learning(
         {
@@ -83,7 +88,12 @@ def test_launch_tool_records_learning_after_candidate_success(fake_device) -> No
     )
 
     assert result.success is True
-    assert learning.lookup("易车") == "com.yiche.app"
+    assert learning.lookup("易车") is None
+    assert learning.snapshot() == {}
+    assert result.metadata == {
+        "launch_app_term": "易车",
+        "launch_resolved_package": "com.yiche.app",
+    }
     assert [call[0] for call in fake_device.calls] == [
         "get_installed_app_inventory",
         "launch_app",
@@ -233,3 +243,134 @@ def test_execute_node_emits_launch_decision_trace(
     assert len(decisions) == 1
     assert decisions[0]["payload"]["status"] == "resolved"
     assert decisions[0]["payload"]["package_name"] == "com.yiche.app"
+
+
+def test_launch_fetches_inventory_once_and_passes_it_to_launch_app(
+    fake_device,
+) -> None:
+    """F8: one launch = one `pm list packages`. The tool fetches the inventory
+    once and hands it to device.launch_app, which must not re-fetch it."""
+    captured: dict = {}
+    original = fake_device.launch_app
+
+    def spy(app, device_id=None, **kwargs):
+        captured["inventory_passed"] = kwargs.get("inventory") is not None
+        return original(app, device_id, **kwargs)
+
+    fake_device.launch_app = spy  # type: ignore[method-assign]
+    learning = RuntimeAppLearningContext()
+
+    result = _dispatch_with_learning(
+        {
+            "_metadata": "do",
+            "action": "Launch",
+            "app": "易车",
+            "package_candidates": ["com.yiche.app"],
+        },
+        fake_device,
+        learning,
+    )
+
+    assert result.success is True
+    inventory_calls = [
+        call[0] for call in fake_device.calls if call[0] == "get_installed_app_inventory"
+    ]
+    assert len(inventory_calls) == 1
+    assert captured["inventory_passed"] is True
+
+
+# ----------------------------------------------------------------------
+# F7: learning is recorded by reflect only after foreground verification
+# ----------------------------------------------------------------------
+
+
+def _reflect_config_with_learning(model, device, learning) -> dict:
+    return {
+        "configurable": {
+            "model_client": model,
+            "device_factory": device,
+            "verbose": False,
+            "grounding_provider_name": "off",
+            "app_learning_context": learning,
+        }
+    }
+
+
+def _launch_action_result(term: str = "FakeApp", package: str = "com.fake.app") -> dict:
+    return {
+        "success": True,
+        "should_finish": False,
+        "metadata": {
+            "launch_app_term": term,
+            "launch_resolved_package": package,
+        },
+    }
+
+
+def test_reflect_does_not_record_when_foreground_mismatches(base_state, fake_device) -> None:
+    """F7: am start succeeded but the foreground app differs from the launch
+    target → the verifier reports launch_matched=False and nothing is learned
+    (the wrong-mapping self-certification is impossible this run)."""
+    from phone_agent.graph.nodes.reflect import reflect_node
+    from tests.graph.test_p5_reflect_skip import (
+        CountingModelClient,
+        _launch_state,
+        _programmatic_contract,
+    )
+
+    fake_device.get_current_app = lambda device_id=None: "OtherApp"  # type: ignore[method-assign]
+    learning = RuntimeAppLearningContext()
+    state = _launch_state(base_state, _programmatic_contract())
+    state["action_result"] = _launch_action_result()
+
+    reflect_node(
+        state, _reflect_config_with_learning(CountingModelClient(), fake_device, learning)
+    )
+
+    assert learning.snapshot() == {}
+
+
+def test_reflect_records_learning_after_foreground_match(base_state, fake_device) -> None:
+    """F7: the verifier confirms the foreground matches the launch target →
+    the resolved (term, package) from action_result metadata is recorded."""
+    from phone_agent.graph.nodes.reflect import reflect_node
+    from tests.graph.test_p5_reflect_skip import (
+        CountingModelClient,
+        _launch_state,
+        _programmatic_contract,
+    )
+
+    learning = RuntimeAppLearningContext()
+    state = _launch_state(base_state, _programmatic_contract())
+    state["action_result"] = _launch_action_result()
+
+    result = reflect_node(
+        state, _reflect_config_with_learning(CountingModelClient(), fake_device, learning)
+    )
+
+    assert result["verifier_status"] == "success"
+    assert learning.lookup("FakeApp") == "com.fake.app"
+
+
+def test_learned_mapping_backs_resolver_after_foreground_verify() -> None:
+    """F7: once a mapping is learned (post-verification), the resolver takes
+    the learned path on later launches — the fast path the verifier also
+    reads first."""
+    from phone_agent.config.apps import (
+        DEFAULT_APP_REGISTRY,
+        DEFAULT_LAUNCH_POLICY,
+    )
+    from phone_agent.config.app_registry import LaunchTargetResolver
+
+    learning = RuntimeAppLearningContext()
+    learning.record("同程", "com.tongcheng.android")
+    inventory = InstalledAppInventory(
+        frozenset({"com.tongcheng.android"}), device_id="serial"
+    )
+
+    target = LaunchTargetResolver(
+        DEFAULT_APP_REGISTRY, DEFAULT_LAUNCH_POLICY
+    ).resolve("同程", inventory=inventory, learning=learning)
+
+    assert target.status == "resolved"
+    assert target.package_name == "com.tongcheng.android"

@@ -375,6 +375,204 @@ def test_plan_stepN_returns_only_new_tail(base_state, fake_device) -> None:
     assert "** Screen Info **" in result["messages"][0]["content"][-1]["text"]
 
 
+def _recompile_contract(criterion_name: str) -> Any:
+    from phone_agent.graph.goal import CriterionSpec, GoalContract
+
+    return GoalContract(
+        task_hash="recompile-test",
+        redacted_objective="打开设置页",
+        objective_length=5,
+        compile_status="compiled",
+        success_criteria=[
+            CriterionSpec(
+                name=criterion_name,
+                description=f"新判据：{criterion_name}",
+                verification="app_or_activity_match",
+                required=True,
+            )
+        ],
+    )
+
+
+def test_recompile_refreshes_contract_block_still_once(
+    base_state, fake_device
+) -> None:
+    """F5: after a goal recompile the contract block is replaced in place by
+    the fresh contract — still exactly once in history (never duplicated), but
+    with the new criterion text the model must now see."""
+    from phone_agent.graph.nodes import goal_node
+
+    old_contract = _recompile_contract("旧判据")
+    new_contract = _recompile_contract("新判据")
+    state = {
+        **base_state,
+        "lang": "cn",
+        "needs_recompile": True,
+        "goal_contract": old_contract,
+        "goal_contract_status": "compiled",
+        "messages": [
+            {"role": "system", "content": "sys"},
+            _user_text(old_contract.to_prompt_block(lang="cn")),
+            _user_text("测试任务"),
+            _user_text("s0: Tap → ok"),
+            _assistant(),
+        ],
+    }
+
+    refreshed = goal_node._refresh_contract_message(
+        state, new_contract, lang="cn"
+    )
+
+    assert "messages" in refreshed
+    messages = refreshed["messages"]
+    joined = _texts(messages)
+    # still exactly once (the replace never duplicates the prefix block)
+    assert joined.count("任务目标契约") == 1
+    assert "旧判据" not in joined
+    assert "新判据" in joined
+    contract_msg = next(
+        message
+        for message in messages
+        if message.get("role") == "user"
+        and "任务目标契约" in _texts([message])
+    )
+    assert contract_msg["content"] == [
+        {"type": "text", "text": new_contract.to_prompt_block(lang="cn")}
+    ]
+
+
+def test_recompile_without_contract_block_leaves_messages_untouched(
+    base_state,
+) -> None:
+    """F5: when no contract block exists in history (first compile / resume
+    paths), a recompile must not fabricate or touch messages."""
+    from phone_agent.graph.nodes import goal_node
+
+    state = {
+        **base_state,
+        "lang": "cn",
+        "needs_recompile": True,
+        "messages": [
+            {"role": "system", "content": "sys"},
+            _user_text("测试任务"),
+            _user_text("s0: Tap → ok"),
+        ],
+    }
+    refreshed = goal_node._refresh_contract_message(
+        state, _recompile_contract("新判据"), lang="cn"
+    )
+    assert refreshed == {}
+
+
+def test_recompile_refreshed_messages_survive_reducer_replace(
+    base_state,
+) -> None:
+    """F5: the rebuilt list returned by goal_node is a full replace (P0 #6),
+    so the reducer swaps the whole channel instead of appending a duplicate
+    contract block."""
+    from phone_agent.graph.nodes import goal_node
+
+    old_contract = _recompile_contract("旧判据")
+    new_contract = _recompile_contract("新判据")
+    existing = [
+        {"role": "system", "content": "sys"},
+        _user_text(old_contract.to_prompt_block(lang="cn")),
+        _user_text("测试任务"),
+    ]
+    refreshed = goal_node._refresh_contract_message(
+        {**base_state, "messages": existing, "lang": "cn"},
+        new_contract,
+        lang="cn",
+    )
+    rebuilt = refreshed["messages"]
+    reduced = messages_reducer(existing, rebuilt)
+    assert reduced == rebuilt
+    assert _texts(reduced).count("任务目标契约") == 1
+
+
+# ---------------------------------------------------------------------------
+# F10: historical assistant think blocks are stripped on the execute rebuild
+# ---------------------------------------------------------------------------
+
+
+def _think_answer(step: int, think_len: int = 300) -> dict[str, Any]:
+    return {
+        "role": "assistant",
+        "content": (
+            f"<think>{'t' * think_len}</think>\n"
+            f"<answer>{{\"action\":\"Tap\",\"step\":{step}}}</answer>"
+        ),
+    }
+
+
+def test_execute_rebuild_strips_historical_think_blocks(
+    base_state, fake_device
+) -> None:
+    """F10: on the execute full-rebuild path every historical assistant
+    message loses its <think> section (only the newest keeps it), so 20 steps
+    of thinking stay bounded; the answer text is preserved byte-for-byte."""
+    from phone_agent.graph.nodes.execute import execute_node
+
+    history: list[dict[str, Any]] = []
+    for step in range(20):
+        history.append(_user_text(f"s{step}: Tap @{step},1 → ok"))
+        history.append(_think_answer(step))
+    base_state["messages"] = history
+    base_state["action_parsed"] = {
+        "_metadata": "do",
+        "action": "Tap",
+        "element": [500, 500],
+    }
+    base_state["thinking"] = "current-think"
+    base_state["action_raw"] = '{"action":"Tap","step":99}'
+    base_state["step_count"] = 20
+
+    result = execute_node(
+        base_state,
+        {"configurable": {"device_factory": fake_device, "verbose": False}},
+    )
+
+    messages = result["messages"]
+    assistants = [
+        message for message in messages if message.get("role") == "assistant"
+    ]
+    assert len(assistants) == 21  # 20 historical + 1 appended this step
+    # every historical assistant is reduced to its answer
+    for message in assistants[:-1]:
+        assert "<think>" not in message["content"]
+        assert "<answer>" in message["content"]
+        assert message["content"].count("<answer>") == 1
+    # the newest assistant keeps its think block
+    assert "<think>current-think</think>" in assistants[-1]["content"]
+    # answer text is byte-for-byte unchanged
+    assert assistants[-1]["content"].endswith(
+        '<answer>{"action":"Tap","step":99}</answer>'
+    )
+    assert '{"action":"Tap","step":0}' in assistants[0]["content"]
+    # bounded: 20 * 300-char thinks would be ~6000 chars; stripped history is small
+    total = sum(len(message["content"]) for message in assistants[:-1])
+    assert total < 1500
+
+
+def test_strip_think_block_preserves_answer_and_placeholder_format() -> None:
+    """F10 unit: the form-level strip handles both the real <think> form and
+    the historical <think...> placeholder, and leaves answer bytes untouched."""
+    from phone_agent.graph.nodes.execute import _strip_think_block
+
+    real = "<think>reasoning here</think>\n<answer>payload</answer>"
+    assert _strip_think_block(real) == "\n<answer>payload</answer>"
+
+    placeholder = "<think...>reasoning</think...>\n<answer>payload</answer>"
+    assert _strip_think_block(placeholder) == "\n<answer>payload</answer>"
+
+    no_think = "\n<answer>payload</answer>"
+    assert _strip_think_block(no_think) == no_think
+
+    answer_only = "<answer>contains <think> inside</answer>"
+    # no closing tag after the opening -> untouched
+    assert _strip_think_block(answer_only) == answer_only
+
+
 def _call_plan(base_state, fake_device, model) -> dict[str, Any]:
     from phone_agent.graph.nodes.plan import plan_node
 

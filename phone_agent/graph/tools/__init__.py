@@ -170,9 +170,31 @@ def dispatch_tool(
 
     # Tool functions return ActionResult.__dict__, convert back
     if isinstance(result_dict, dict):
+        # F7: add-only metadata passthrough — tools may attach machine keys
+        # (e.g. launch_resolved_package) that must survive dispatch into
+        # action_result for the reflect step. The ``metadata`` key passes
+        # through verbatim; any other non-canonical keys are collected under
+        # ``metadata``.
+        metadata = result_dict.get("metadata")
+        extra = {
+            key: value
+            for key, value in result_dict.items()
+            if key
+            not in (
+                "success",
+                "should_finish",
+                "message",
+                "requires_confirmation",
+                "metadata",
+            )
+        }
         return ActionResult(
             success=result_dict.get("success", True),
             should_finish=result_dict.get("should_finish", False),
             message=result_dict.get("message"),
+            requires_confirmation=bool(
+                result_dict.get("requires_confirmation", False)
+            ),
+            metadata=metadata if isinstance(metadata, dict) else (extra or None),
         )
     return result_dict

@@ -1,11 +1,89 @@
 from phone_agent.graph.goal_evidence import (
     append_evaluation_entries,
+    fresh_observation_count,
+    latest_status_by_criterion,
     target_app_entered,
     unattested_raw_text_bindings,
 )
 from phone_agent.graph.goal import GoalContract, SuccessCriterion
 from phone_agent.graph.goal_evaluator import PureGoalEvaluator
 from phone_agent.graph.predicates import CORE_PREDICATE_CATALOG
+
+
+def _obs(criterion: str, status: str, step: int) -> dict:
+    return {
+        "kind": "model_observation",
+        "contract_id": "c1",
+        "criterion": criterion,
+        "status": status,
+        "observed_value": None,
+        "step": step,
+    }
+
+
+def test_fresh_observation_same_status_repeat_is_not_fresh() -> None:
+    """F6: repeating the same status for a criterion is NOT fresh — the old
+    raw-count signal was nearly always > 0 with a goal contract (fail-open)."""
+    ledger = [_obs("a", "observed", 1)]
+    assert (
+        fresh_observation_count(
+            [{"criterion": "a", "status": "observed"}],
+            ledger,
+            contract_id="c1",
+        )
+        == 0
+    )
+
+
+def test_fresh_observation_status_flip_is_fresh() -> None:
+    ledger = [_obs("a", "not_visible", 1), _obs("b", "observed", 1)]
+    assert (
+        fresh_observation_count(
+            [
+                {"criterion": "a", "status": "observed"},
+                {"criterion": "b", "status": "observed"},
+            ],
+            ledger,
+            contract_id="c1",
+        )
+        == 1  # only "a" flipped; "b" repeated its status
+    )
+
+
+def test_fresh_observation_first_ever_is_fresh() -> None:
+    """首见即新鲜: no prior record for the criterion → any observation counts."""
+    assert (
+        fresh_observation_count(
+            [{"criterion": "a", "status": "not_visible"}],
+            [],
+            contract_id="c1",
+        )
+        == 1
+    )
+
+
+def test_latest_status_by_criterion_last_record_wins() -> None:
+    ledger = [
+        _obs("a", "not_visible", 1),
+        _obs("a", "observed", 2),
+        _obs("b", "observed", 2),
+        {"kind": "effect_event", "contract_id": "c1", "criterion_id": "a"},
+    ]
+    statuses = latest_status_by_criterion(ledger, contract_id="c1")
+    assert statuses == {"a": "observed", "b": "observed"}
+
+
+def test_fresh_observation_ignores_other_contracts() -> None:
+    ledger = [_obs("a", "observed", 1)]
+    ledger[0]["contract_id"] = "other"
+    assert (
+        fresh_observation_count(
+            [{"criterion": "a", "status": "observed"}],
+            ledger,
+            contract_id="c1",
+        )
+        == 1  # no prior record under c1 -> first-ever fresh
+    )
 
 
 def test_evidence_ledger_is_bounded_and_excludes_runtime_values() -> None:

@@ -353,6 +353,17 @@ class CommandResult:
 def main() -> int:
     load_project_env()
     args = parse_args()
+    # F11: the --live / --dry-run conflict is checked before ANY device
+    # operation — previously collect_preflight + reset_app_on_device (a real
+    # `adb shell pm clear`) ran first, then the check bailed with code 2.
+    # This also runs before --status: the conflicting flag combination is a
+    # usage error and wins over the status read (fail-closed).
+    if getattr(args, "live", False) and getattr(args, "dry_run", False):
+        print(
+            "--live requires a real device/model; incompatible with --dry-run",
+            file=sys.stderr,
+        )
+        return 2
     if getattr(args, "status", None):
         print(json.dumps(read_status(Path(args.status)), ensure_ascii=False, indent=2))
         return 0
@@ -377,9 +388,6 @@ def main() -> int:
 
     cmd = build_eval_command(args, task_path, trace_dir)
     if args.live:
-        if args.dry_run:
-            print("--live requires a real device/model; incompatible with --dry-run", file=sys.stderr)
-            return 2
         command_result, result = run_live_agent(args, run_dir=run_dir, trace_dir=trace_dir)
         cmd = ["run_diagnosis.py", "--live", args.target]
     else:

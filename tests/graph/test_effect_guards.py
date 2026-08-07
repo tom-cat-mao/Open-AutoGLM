@@ -13,6 +13,7 @@ from phone_agent.graph.context import (
     build_plan_context_block,
     consecutive_no_effect_count,
     detect_repeated_action,
+    locate_hint_digest,
     repeated_action_key,
     update_gui_memory,
 )
@@ -488,10 +489,15 @@ def test_reflect_tail_writes_had_effect_true_on_screen_change(
 
     # Dead-loop shaped second run: before hash equals after hash, model
     # verdict partial → no screen change, no observation, no succeeded →
-    # had_effect=False (the streak keeps rising).
+    # had_effect=False (the streak keeps rising). Real state shape: the
+    # before-frame hash lives at the state top level (plan writes
+    # state["screen_hash"]); Observation.to_dict() has no top-level
+    # screen_hash — putting one under "observation" would be a shape that
+    # never exists in real flights.
     state2 = {
         **state,
-        "observation": {"screen_hash": after_hash, "snapshot": {}},
+        "screen_hash": after_hash,
+        "observation": {"snapshot": {}},
         "gui_memory": first["gui_memory"],
     }
     second = reflect_node(
@@ -509,7 +515,7 @@ def test_reflect_tail_writes_had_effect_true_on_screen_change(
     # partial verdict now reports had_effect=True.
     state3 = {
         **state2,
-        "observation": {"screen_hash": "other-hash", "snapshot": {}},
+        "screen_hash": "other-hash",
         "gui_memory": second["gui_memory"],
     }
     third = reflect_node(
@@ -522,6 +528,108 @@ def test_reflect_tail_writes_had_effect_true_on_screen_change(
     )
     assert third["reflection_verdict"] == "partial"
     assert third["gui_memory"]["tried_actions"][-1]["had_effect"] is True
+
+
+# ----------------------------------------------------------------------
+# Launch repeat identity (F4): digested app term on the same surface
+# ----------------------------------------------------------------------
+
+
+def test_launch_repeat_key_digests_app_term() -> None:
+    """Launch keys on (action, sanitized app digest, surface): same app +
+    same surface → same key; a different app → a different key; the raw app
+    term never appears in the key. The digest is produced at write time (both
+    execute's candidate_repeat and update_gui_memory digest the app term)."""
+    key = repeated_action_key(
+        {"action": "Launch", "app": locate_hint_digest("未知应用"), "surface": _SURFACE}
+    )
+    assert key == ("Launch", locate_hint_digest("未知应用"), _SURFACE)
+    other = repeated_action_key(
+        {"action": "Launch", "app": locate_hint_digest("另一个应用"), "surface": _SURFACE}
+    )
+    assert other != key
+    same_surface_other_app = repeated_action_key(
+        {
+            "action": "Launch",
+            "app": locate_hint_digest("未知应用"),
+            "surface": "com.other/.Activity",
+        }
+    )
+    assert same_surface_other_app != key
+    assert "未知应用" not in str(key)
+    # no digest (missing/empty app) -> no repeat key, guard stays blind-safe
+    assert repeated_action_key({"action": "Launch", "surface": _SURFACE}) is None
+
+
+def test_execute_launch_loop_blocked_by_no_effect_guard(
+    base_state, fake_device
+) -> None:
+    """Two no-effect launches of the same unknown app on the same surface →
+    the third is rejected by the consecutive-no-effect guard (before F4 the
+    Launch key was always None, so the guard never counted it). tried_actions
+    carries the digest (P0 #10), matching what update_gui_memory writes."""
+    surface = _SURFACE
+    base_state["observation"] = {"snapshot": {"foreground_activity": surface}}
+    base_state["gui_memory"]["tried_actions"] = [
+        {
+            "action": "Launch",
+            "app": locate_hint_digest("未知应用"),
+            "surface": surface,
+            "had_effect": False,
+        },
+        {
+            "action": "Launch",
+            "app": locate_hint_digest("未知应用"),
+            "surface": surface,
+            "had_effect": False,
+        },
+    ]
+    base_state["action_parsed"] = {
+        "_metadata": "do",
+        "action": "Launch",
+        "app": "未知应用",
+        "package_candidates": ["com.example.unknown.app"],
+    }
+
+    result = execute_node(base_state, _config(fake_device))
+
+    assert result["action_result"]["success"] is False
+    assert result["failure_cause"] == "repeated_action"
+    assert result["repeat_rejected"] is True
+    assert fake_device.calls == []
+
+
+def test_execute_launch_different_app_not_blocked(base_state, fake_device) -> None:
+    """Launching a different app on the same surface is progress — the repeat
+    guard never counts cross-app attempts against each other."""
+    surface = _SURFACE
+    base_state["observation"] = {"snapshot": {"foreground_activity": surface}}
+    base_state["gui_memory"]["tried_actions"] = [
+        {
+            "action": "Launch",
+            "app": locate_hint_digest("未知应用"),
+            "surface": surface,
+            "had_effect": False,
+        },
+        {
+            "action": "Launch",
+            "app": locate_hint_digest("未知应用"),
+            "surface": surface,
+            "had_effect": False,
+        },
+    ]
+    base_state["action_parsed"] = {
+        "_metadata": "do",
+        "action": "Launch",
+        "app": "另一个应用",
+        "package_candidates": ["com.example.unknown.app"],
+    }
+
+    result = execute_node(base_state, _config(fake_device))
+
+    assert result["action_result"]["success"] is True
+    assert result.get("repeat_rejected") is not True
+    assert any(call[0] == "launch_app" for call in fake_device.calls)
 
 
 # ----------------------------------------------------------------------

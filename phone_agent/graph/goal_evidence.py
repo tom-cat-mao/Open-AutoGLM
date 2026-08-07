@@ -508,6 +508,61 @@ def latest_model_observation(
     return latest
 
 
+def latest_status_by_criterion(
+    ledger: list[dict[str, Any]], *, contract_id: str
+) -> dict[str, str]:
+    """Map criterion name -> status of its latest ``model_observation`` entry.
+
+    Pure form-level fold (F6): the observation *content* is never read — only
+    the ``status`` enum of each criterion's newest ledger record.
+    """
+
+    result: dict[str, str] = {}
+    for entry in ledger:
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("kind") != "model_observation":
+            continue
+        if entry.get("contract_id") != contract_id:
+            continue
+        criterion = str(entry.get("criterion") or "")
+        if criterion:
+            result[criterion] = str(entry.get("status") or "not_visible")
+    return result
+
+
+def fresh_observation_count(
+    observations: list[dict[str, Any]] | None,
+    ledger: list[dict[str, Any]],
+    *,
+    contract_id: str,
+) -> int:
+    """Count this step's screen-reads whose status differs from the criterion's
+    previous ledger record (F6).
+
+    ``new_observation_count`` consumed by :func:`action_had_effect` must mean
+    *fresh* evidence, not mere count: with a goal contract the reflect step
+    emits criteria_observations every round, so a raw count is nearly always
+    > 0 (fail-open — the dead-loop signal never fired). Here a read is fresh
+    when its ``status`` enum differs from the criterion's latest record;
+    first-ever observations count as fresh (首见即新鲜). When there is no
+    contract / no prior record, any observation this step is fresh.
+    """
+
+    previous = latest_status_by_criterion(ledger, contract_id=contract_id)
+    count = 0
+    for item in observations or []:
+        if not isinstance(item, dict):
+            continue
+        criterion = str(item.get("criterion") or "")
+        if not criterion:
+            continue
+        status = str(item.get("status") or "not_visible")
+        if previous.get(criterion) != status:
+            count += 1
+    return count
+
+
 def criterion_observed_in_ledger(
     ledger: list[dict[str, Any]],
     *,
