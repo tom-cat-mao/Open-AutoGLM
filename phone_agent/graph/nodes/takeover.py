@@ -32,7 +32,10 @@ def takeover_node(state: "AgentState", config: RunnableConfig) -> dict:
     )
     emit_trace(config, state, "takeover", "takeover_result", {"completed": True})
     # Clear interrupt state
+    # H2 Fix E: also clear interrupt_result so a stale resume value can never
+    # leak into the next execute pass (add-only: existing keys untouched).
     return {
         "pending_interrupt": None,
         "interrupt_message": None,
+        "interrupt_result": None,
     }

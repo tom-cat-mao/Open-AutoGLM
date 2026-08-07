@@ -31,8 +31,15 @@ def test_takeover_clears_interrupt_state(base_state, monkeypatch) -> None:
         takeover_module, "interrupt", lambda payload: payloads.append(payload)
     )
     base_state["interrupt_message"] = "请登录"
+    base_state["interrupt_result"] = None
 
     result = takeover_module.takeover_node(base_state, {})
 
     assert payloads[0]["type"] == "takeover"
-    assert result == {"pending_interrupt": None, "interrupt_message": None}
+    # H2 Fix E: the full pending HITL set is cleared, including interrupt_result
+    # (a stale resume value must never leak into the next execute pass).
+    assert result == {
+        "pending_interrupt": None,
+        "interrupt_message": None,
+        "interrupt_result": None,
+    }

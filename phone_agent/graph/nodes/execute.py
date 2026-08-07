@@ -22,12 +22,14 @@ from phone_agent.graph.context import (
     context_enabled,
     get_context_mode,
     locate_hint_digest,
+    replace_fat_tails_with_skinny,
     sanitize_context_payload,
     repeated_action_key,
     state_surface_identity,
     _trajectory_step_index,
     update_gui_memory,
 )
+from phone_agent.graph.device_observation import capture_device_observation
 from phone_agent.graph.tools import dispatch_tool
 from phone_agent.graph.tools.locate import locate_target, trace_safe_payload
 from phone_agent.graph.tools.runtime import (
@@ -37,7 +39,8 @@ from phone_agent.graph.tools.runtime import (
     set_tool_trace_emitter,
 )
 from phone_agent.graph.goal import finish_claim_summary
-from phone_agent.graph.marks import MarkRegistry
+from phone_agent.graph.marks import MarkRegistry, compute_raw_screenshot_hash
+from phone_agent.graph.screenshot_status import screenshot_failure_code
 from phone_agent.graph.trace import emit_trace
 from phone_agent.model.client import MessageBuilder
 
@@ -112,12 +115,27 @@ def _strip_think_block(content: str) -> str:
             return content[:start] + content[end + len(close_tag):]
     return content
 
-def _strip_think_from_history(messages: list[dict]) -> None:
-    """In-place: drop think blocks from every existing assistant message.
+# H2 Fix H: historical assistant answers beyond this size are truncated with an
+# ellipsis marker, same form-level mechanism as the skinny trajectory row's
+# 200-char cap. Truncating historical JSON is safe — the adapter only parses
+# the latest response; history is pure context for the model.
+ANSWER_TRUNCATION_LIMIT = 500
+ANSWER_TRUNCATION_MARKER = "…[truncated]"
 
-    F10: this runs right before the new assistant message is appended, so the
-    "newest" assistant (which keeps its think block) is not in ``messages``
-    yet — every historical assistant row is reduced to its answer part.
+
+def _strip_think_from_history(messages: list[dict]) -> None:
+    """In-place: drop think blocks and cap oversized answers from every
+    historical assistant message.
+
+    F10 + H2 Fix H: this runs right before the new assistant message is
+    appended, so the "newest" assistant (which keeps its think block and its
+    full answer) is not in ``messages`` yet — every historical assistant row
+    is reduced to its answer part, and answers longer than
+    ``ANSWER_TRUNCATION_LIMIT`` chars are truncated with an ellipsis marker.
+    The same idea as the skinny trajectory row's 200-char cap: history stays
+    bounded across long runs (a task's only remaining unbounded growth source
+    was the model's raw action JSON, 200-800+ chars per step with no cap).
+    Messages without a think block and under the cap pass through byte-for-byte.
     """
 
     for index, message in enumerate(messages):
@@ -127,6 +145,8 @@ def _strip_think_from_history(messages: list[dict]) -> None:
         if not isinstance(content, str):
             continue
         stripped = _strip_think_block(content)
+        if len(stripped) > ANSWER_TRUNCATION_LIMIT:
+            stripped = stripped[:ANSWER_TRUNCATION_LIMIT] + ANSWER_TRUNCATION_MARKER
         if stripped != content:
             messages[index] = {**message, "content": stripped}
 
@@ -172,6 +192,52 @@ def _strip_and_append(
     return messages
 
 
+def _failed_skinny_line(state: "AgentState", error_code: str | None) -> str:
+    """Build the terminal failure row ``sN: <action|unknown> → failed: <code>``.
+
+    H2 Fix G: the row is derived from the same step-index source as the
+    success path (assistant rows before the last user message), so the number
+    stays correct on resume/confirm paths. ``error_code`` is the layered
+    error code written by ``_layered_error``.
+    """
+
+    messages = list(state.get("messages") or [])
+    action = state.get("action_parsed")
+    action_type = (
+        str(action.get("action") or action.get("_metadata") or "unknown")
+        if isinstance(action, dict)
+        else "unknown"
+    )
+    row = f"s{_trajectory_step_index(messages)}: {action_type} → failed: {error_code or 'unknown'}"
+    safe = sanitize_context_payload(row, consumer="inject")
+    return str(safe) if isinstance(safe, str) and safe else row
+
+
+def _terminal_messages(state: "AgentState", skinny_line: str) -> list[dict]:
+    """Build the terminal-state message list: replace fat tails with skinny
+    rows and ensure the terminal failure row is the last user message.
+
+    H2 Fix G: plan's four failure paths leave a ~13-16K-char observation tail
+    in state that execute's passthrough never slimmed, and a resume re-plan
+    then mis-replaced every stale tail with the same ``sN: unknown → failed``
+    row. Execute owns the replace right (P0 #6), so terminal branches rebuild
+    the list here: every historical fat tail becomes a skinny row, and the
+    current step's row is the failure line (``sN: <action|unknown> → failed:
+    <error_code>``). Non-terminal paths never call this.
+    """
+
+    messages, _replaced = replace_fat_tails_with_skinny(
+        list(state.get("messages") or []), state
+    )
+    if skinny_line:
+        _replace_last_user_message(messages, skinny_line)
+        if not any(message.get("role") == "user" for message in messages):
+            messages.append(
+                {"role": "user", "content": [{"type": "text", "text": skinny_line}]}
+            )
+    return messages
+
+
 def _layered_error(layer: str, code: str, *, recoverable: bool = False, retry_policy: str = "none") -> dict:
     """Build stable layered error fields for terminal execute failures."""
 
@@ -198,6 +264,29 @@ def _receipt_for_result(
         correlation_id=correlation_id,
         side_effect_receipt={"tool_dispatch_status": dispatch_status},
     )
+
+
+def _fresh_screen_hash(device_factory: object | None, device_id: str | None) -> str | None:
+    """Capture one fresh screenshot frame and return its raw sha256 (16 hex).
+
+    H2 Fix C: reuse the same hash source as the grounding/mark binding path
+    (``compute_raw_screenshot_hash``, compare locate.py's
+    ``observation_drifted``) so the comparison is like-for-like with
+    ``MarkRegistry.raw_screenshot_hash``. Returns None (fail-closed) when the
+    device factory is missing or the frame cannot be captured/decoded — a
+    caller must treat None as "cannot verify freshness", never as "fresh".
+    """
+
+    if device_factory is None:
+        return None
+    try:
+        captured = capture_device_observation(device_factory, device_id)
+    except Exception:
+        return None
+    screenshot = getattr(captured, "screenshot", None)
+    if screenshot is None or screenshot_failure_code(screenshot) is not None:
+        return None
+    return compute_raw_screenshot_hash(getattr(screenshot, "base64_data", None))
 
 
 def _dispatch_with_receipt(
@@ -326,6 +415,9 @@ def execute_node(state: "AgentState", config: RunnableConfig) -> dict:
         )
         return {
             "action_result": result_dict,
+            "messages": _terminal_messages(
+                state, _failed_skinny_line(state, state.get("error_code"))
+            ),
             "finished": True,
             "error": state.get("error"),
             "failure_cause": state.get("failure_cause"),
@@ -366,7 +458,9 @@ def execute_node(state: "AgentState", config: RunnableConfig) -> dict:
         )
         return {
             "action_result": result.__dict__,
-            "messages": messages,
+            "messages": _terminal_messages(
+                state, _failed_skinny_line(state, exc.code)
+            ),
             "finished": True,
             "error": result.message,
             "failure_cause": "action_validation_failed",
@@ -480,6 +574,12 @@ def execute_node(state: "AgentState", config: RunnableConfig) -> dict:
             "failure_cause": "repeated_action",
             "repeated_action_detected": True,
             "repeat_rejected": True,
+            # H2 Fix E: a reject is a system decision that routes straight back
+            # to plan — clear any stale pending HITL state so it can never
+            # route to confirm/takeover on a later resume (P0 #5).
+            "pending_execute": False,
+            "pending_interrupt": None,
+            "interrupt_result": None,
             **_context_update(
                 result.__dict__,
                 {
@@ -534,7 +634,9 @@ def execute_node(state: "AgentState", config: RunnableConfig) -> dict:
                 if receipt
                 else {}
             ),
-            "messages": messages,
+            "messages": _terminal_messages(
+                state, _failed_skinny_line(state, "action_safety_rejected")
+            ),
             "finished": True,
             "error": result.message,
             "failure_cause": "action_safety_rejected",
@@ -848,11 +950,100 @@ def execute_node(state: "AgentState", config: RunnableConfig) -> dict:
                 "error": result.message,
                 "pending_execute": False,
                 "action_confirmed": False,
+                # H2 Fix E: terminal rejection clears the full pending HITL
+                # set — a stale pending_interrupt/interrupt_result must never
+                # route to confirm/takeover after this point (P0 #5).
+                "pending_interrupt": None,
+                "interrupt_result": None,
                 "failure_cause": "confirmation_required",
                 **_layered_error("safety", "confirmation_required", recoverable=True, retry_policy="takeover"),
                 **_context_update(result.__dict__),
             }
         # CRITICAL-1: do NOT call _strip_and_append again (images already stripped on first pass)
+        # H2 Fix C: the confirm interrupt can insert an arbitrarily long human
+        # delay; on resume the plan-frame mark_registry may point at a screen
+        # that is no longer current, so dispatching its coordinates blindly is
+        # unsafe (P0 #9 spirit). Capture one fresh frame and compare its raw
+        # hash against the registry's bound hash — same hash source and
+        # comparison as the grounding/mark binding path. Actions that carry no
+        # mark (Launch/Back/Wait…) never depend on mark coordinates and skip
+        # the check; a missing/unverifiable frame fails closed.
+        registry = MarkRegistry.from_dict(state.get("mark_registry"))
+        grounding_result = state.get("grounding_result")
+        grounded_mark_id = None
+        if isinstance(grounding_result, dict):
+            target = grounding_result.get("target")
+            if isinstance(target, dict):
+                grounded_mark_id = target.get("mark_id")
+        needs_mark_check = (
+            bool(grounded_mark_id)
+            and registry is not None
+            and bool(registry.raw_screenshot_hash)
+        )
+        if needs_mark_check:
+            fresh_hash = _fresh_screen_hash(device_factory, device_id)
+            if fresh_hash is None or fresh_hash != registry.raw_screenshot_hash:
+                stale_result = ActionResult(
+                    success=False,
+                    should_finish=False,
+                    message=(
+                        "Screen changed after confirmation; re-observe required"
+                        if state.get("lang") == "en"
+                        else "屏幕已变化，需重新观察"
+                    ),
+                )
+                skinny_line = _skinny_for_step(state, stale_result.__dict__)
+                messages = list(state.get("messages") or [])
+                _replaced_last_user = False
+                for index in range(len(messages) - 1, -1, -1):
+                    if messages[index].get("role") == "user":
+                        messages[index] = {
+                            "role": "user",
+                            "content": [{"type": "text", "text": skinny_line}],
+                        }
+                        _replaced_last_user = True
+                        break
+                if not _replaced_last_user:
+                    messages.append(
+                        {"role": "user", "content": [{"type": "text", "text": skinny_line}]}
+                    )
+                emit_trace(
+                    config,
+                    state,
+                    "execute",
+                    "confirm_stale_reobserve",
+                    {
+                        "action": action_parsed.get("action"),
+                        "mark_id": grounded_mark_id,
+                        "screen_changed": fresh_hash is not None
+                        and fresh_hash != registry.raw_screenshot_hash,
+                        "fresh_screenshot_available": fresh_hash is not None,
+                    },
+                )
+                # Fail-closed: never dispatch. Route straight back to plan for
+                # a fresh observation (same route as the repeat-reject branch:
+                # finished=False + repeat_rejected=True → after_execute "replan").
+                # The action never executed, so no gui_memory.tried_actions entry
+                # is written (that counter is the repeat guard's attempt ledger);
+                # the confirm row is replaced in place, no second append.
+                return {
+                    "action_result": stale_result.__dict__,
+                    "messages": messages,
+                    "pending_execute": False,
+                    "pending_interrupt": None,
+                    "interrupt_result": None,
+                    "action_confirmed": False,
+                    "repeat_rejected": True,
+                    "finished": False,
+                    "failure_cause": "confirm_stale_reobserve",
+                    "suggested_strategy": "reobserve",
+                    "gui_memory": state.get("gui_memory"),
+                    "context_mode": context_mode,
+                    **_context_update(
+                        stale_result.__dict__,
+                        {"failure_cause": "confirm_stale_reobserve"},
+                    ),
+                }
         capability = get_tool_capability(str(action_parsed.get("action")))
         if capability is None or capability.implementation_status != "implemented":
             code = "capability_missing" if capability is None else "capability_unavailable"
@@ -1036,7 +1227,9 @@ def execute_node(state: "AgentState", config: RunnableConfig) -> dict:
         return {
             "action_result": result.__dict__,
             "action_receipt": None,
-            "messages": messages,
+            "messages": _terminal_messages(
+                state, _failed_skinny_line(state, "capability_missing")
+            ),
             "finished": True,
             "error": result.message,
             "failure_cause": "capability_missing",
