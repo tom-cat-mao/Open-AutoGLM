@@ -21,6 +21,22 @@ def after_goal(state: AgentState) -> Literal["plan", "end", "takeover"]:
     return "plan"
 
 
+def after_plan(state: AgentState) -> Literal["execute", "replan"]:
+    """Route validation/adapter guidance replans without executing a null action."""
+
+    failure = state.get("parse_failure")
+    if (
+        not state.get("finished")
+        and not state.get("error")
+        and not state.get("action_parsed")
+        and isinstance(failure, dict)
+        and failure.get("layer") in {"adapter", "validation"}
+        and int(state.get("validation_replan_count") or 0) > 0
+    ):
+        return "replan"
+    return "execute"
+
+
 def should_continue(
     state: AgentState,
 ) -> Literal["end", "replan", "takeover", "acceptance"]:

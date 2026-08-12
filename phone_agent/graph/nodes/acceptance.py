@@ -1023,6 +1023,7 @@ def acceptance_node(state: "AgentState", config: RunnableConfig) -> dict:
         "finish_validation_status": evaluation.status,
         "finish_validation_evidence": evaluation.to_dict(),
         "goal_evidence_ledger": ledger,
+        "acceptance_verdicts": {},
         "observation_retry_count": 0,
         "action_succeeded": True,
         "reflection_verdict": "succeeded",
@@ -1158,6 +1159,9 @@ def _rejected(
             else message
         ),
         "acceptance_round_count": acceptance_round_count,
+        "acceptance_verdicts": _project_acceptance_verdicts(
+            evaluation.to_dict(), task_context=task_context
+        ),
         "context_mode": context_mode,
     }
     if feedback is not None:
@@ -1172,6 +1176,37 @@ def _rejected(
     if extra_update:
         update.update(extra_update)
     return update
+
+
+def _project_acceptance_verdicts(
+    evaluation: dict[str, Any], *, task_context: str | None
+) -> dict[str, dict[str, str]]:
+    evidence = evaluation.get("evidence") if isinstance(evaluation, dict) else None
+    per_criterion = (
+        evidence.get("per_criterion")
+        if isinstance(evidence, dict)
+        else None
+    )
+    if not isinstance(per_criterion, dict):
+        return {}
+    projected: dict[str, dict[str, str]] = {}
+    for criterion, result in per_criterion.items():
+        if not isinstance(result, dict):
+            continue
+        status = str(result.get("status") or "unknown")
+        if status not in {"unknown", "contradicted"}:
+            continue
+        projected[str(criterion)] = {
+            "status": status,
+            "reason": str(result.get("reason") or "unknown")[:128],
+        }
+    sanitized = sanitize_context_payload(
+        projected,
+        "acceptance_verdicts",
+        consumer="inject",
+        task_context=task_context,
+    )
+    return sanitized if isinstance(sanitized, dict) else {}
 
 
 def _run_semantic_judge(

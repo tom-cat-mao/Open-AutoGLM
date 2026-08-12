@@ -333,12 +333,15 @@ def test_plan_node_parse_failure_fails_closed_without_finish_action(
         },
     )
 
-    assert result["finished"] is True
+    assert result["finished"] is False
     assert result["action_parsed"] is None
     assert result["action_result"]["success"] is False
+    assert result["action_result"]["should_finish"] is False
     assert result["failure_cause"] == "action_adapter_failed"
     assert result["error_layer"] == "adapter"
-    assert "Model parse failed" in result["error"]
+    assert result["error"] is None
+    assert result["validation_replan_count"] == 1
+    assert result["parse_failure"]["code"] == "invalid_json"
     assert model.calls == 2
 
 
@@ -467,7 +470,9 @@ def test_plan_node_rejects_structured_coordinate_tap_without_mark_intent(
     assert result["action_parsed"] is None
     assert result["grounding_error"] is None
     assert result["parse_metadata"]["parse_error_code"] == "mark_required"
-    assert result["finished"] is True
+    assert result["finished"] is False
+    assert result["validation_replan_count"] == 1
+    assert result["parse_failure"]["layer"] == "adapter"
 
 
 def test_plan_node_grounds_known_mark_intent_to_tap(base_state, fake_device) -> None:
@@ -556,7 +561,9 @@ def test_auto_json_coordinate_tap_requires_mark_even_without_adapter_metadata(
     assert result["action_parsed"] is None
     assert result["grounding_error"] is None
     assert result["parse_metadata"]["parse_error_code"] == "mark_required"
-    assert result["finished"] is True
+    assert result["finished"] is False
+    assert result["validation_replan_count"] == 1
+    assert result["parse_failure"]["layer"] == "adapter"
 
 
 def test_plan_node_rejects_removed_text_dsl_output_mode(
@@ -848,12 +855,14 @@ def test_plan_node_validator_rejects_dangerous_structured_field(
         },
     )
 
-    assert result["finished"] is True
+    assert result["finished"] is False
     assert result["action_parsed"] is None
     assert result["action_result"]["success"] is False
-    assert result["failure_cause"] == "action_validation_failed"
-    assert result["error_layer"] == "validation"
+    assert result["action_result"]["should_finish"] is False
+    assert result["failure_cause"] == "action_adapter_failed"
+    assert result["error_layer"] == "adapter"
     assert result["parse_metadata"]["parse_error_code"] == "unsafe_value"
+    assert result["validation_replan_count"] == 1
 
 
 def test_plan_node_rejects_json_action_with_dangerous_provider_field(
@@ -878,10 +887,12 @@ def test_plan_node_rejects_json_action_with_dangerous_provider_field(
         },
     )
 
-    assert result["finished"] is True
+    assert result["finished"] is False
     assert result["action_parsed"] is None
     assert result["action_result"]["success"] is False
+    assert result["action_result"]["should_finish"] is False
     assert result["parse_metadata"]["parse_error_code"] == "unsafe_value"
+    assert result["validation_replan_count"] == 1
 
 
 def test_json_sensitive_mark_tap_preserves_confirmation_message(

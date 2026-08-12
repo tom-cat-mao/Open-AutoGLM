@@ -124,6 +124,9 @@ class AgentState(TypedDict):
     expected_transition: Optional[
         dict
     ]  # privacy-safe typed shadow; runtime values omitted
+    parse_failure: Optional[dict]  # J1 guidance failure contract, Plan-owned
+    mechanism_suggestion: Optional[str]  # J1 mechanism-only advisory, Plan-owned
+    validation_replan_count: int  # J1 adapter/validation one-shot guidance replan count
 
     # === Layered error taxonomy ===
     error_layer: Optional[
@@ -176,6 +179,7 @@ class AgentState(TypedDict):
     acceptance_rejection_feedback: Optional[
         dict
     ]  # Stage-Sealing: structured rejection feedback {missing:[{criterion, stage_id, hint}]} for the next plan
+    acceptance_verdicts: dict | None  # J1 projected acceptance verdicts, Acceptance-owned
 
     # === Context & Observability Harness (Phase 11) ===
     context_mode: str  # off / observe / inject

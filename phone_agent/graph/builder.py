@@ -15,6 +15,7 @@ from phone_agent.graph.edges import (
     after_execute,
     after_goal,
     after_interrupt,
+    after_plan,
     should_continue,
 )
 
@@ -58,7 +59,11 @@ def create_agent_graph(checkpointer=None):
         after_goal,
         {"plan": "plan", "takeover": "takeover", "end": END},
     )
-    graph.add_edge("plan", "execute")
+    graph.add_conditional_edges(
+        "plan",
+        after_plan,
+        {"execute": "execute", "replan": "plan"},
+    )
     graph.add_conditional_edges(
         "execute",
         after_execute,

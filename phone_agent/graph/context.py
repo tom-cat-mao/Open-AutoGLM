@@ -54,11 +54,15 @@ DEFAULT_CONTEXT_BUDGET: dict[str, int] = {
     "visited_screen_items": 6,
     "task_plan_status_chars": 500,
     "acceptance_rejection_chars": 400,
+    "last_action_outcome_chars": 900,
+    "system_guidance_chars": 160,
 }
 _SECTION_BUDGETS = {
     "goal_agenda": 800,
     "acceptance_rejection": 400,
     "criterion_gap_list": 900,
+    "last_action_outcome": 900,
+    "system_guidance": 160,
 }
 DEFAULT_PROMPT_VERSION = "context_harness_v1"
 CONTEXT_SECTION_IDS = (
@@ -72,6 +76,7 @@ CONTEXT_SECTION_IDS = (
     "gui_memory.task_progress",
     "grounding_observation",
     "task_plan_status",
+    "system_guidance",
 )
 FAILURE_TAXONOMY = {
     "none",
@@ -187,6 +192,11 @@ class ContextSelectionResult:
             data.pop("context_block", None)
         data["selected_sections"] = list(self.selected_sections or [])
         return data
+
+
+@dataclass(frozen=True)
+class _RenderedContextSection:
+    text: str
 
 
 def normalize_context_mode(value: str | None) -> str:
@@ -393,6 +403,119 @@ def trim_text(text: str, max_chars: int) -> tuple[str, bool]:
     return text[: max(0, max_chars - 20)] + "...<truncated>", True
 
 
+_FOUND_ALLOWED_KEYS = {"field", "type", "range", "value", "mark_id", "action", "app"}
+_FOUND_VALUE_PRIVATE_FIELDS = {
+    "text",
+    "message",
+    "hint",
+    "answer",
+    "label",
+    "title",
+    "subtitle",
+    "address",
+    "captcha",
+    "verification_code",
+    "account",
+    "payment_info",
+}
+_ACCEPTANCE_REJECTION_STATUSES = {
+    "failure",
+    "failed",
+    "unknown",
+    "rejected",
+    "contradicted",
+    "goal_not_satisfied",
+}
+
+
+def _compact_json(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+
+def _private_stub_for_value(value: Any) -> dict[str, Any]:
+    return {"redacted": True, "length": len(str(value))}
+
+
+def _found_field_names_private(found: dict[str, Any]) -> bool:
+    field = found.get("field")
+    if field is None:
+        return False
+    normalized = str(field).lower()
+    return any(token in normalized for token in _FOUND_VALUE_PRIVATE_FIELDS)
+
+
+def _found_string_value_allowed(found: dict[str, Any]) -> bool:
+    field = str(found.get("field") or "").lower()
+    return any(token in field for token in {"mark_id", "action", "app", "type", "range"})
+
+
+def _sanitize_parse_failure_found(found: Any) -> Any:
+    if found is None:
+        return None
+    if not isinstance(found, dict):
+        return _private_stub_for_value(found)
+    private_keys = PRIVATE_CONTEXT_TEXT_KEYS - {"value"}
+    if any(str(key).lower() in private_keys for key in found):
+        return _private_stub_for_value(_compact_json(found))
+    private_value_field = _found_field_names_private(found)
+    safe: dict[str, Any] = {}
+    for key, value in found.items():
+        normalized_key = str(key).lower()
+        if normalized_key not in _FOUND_ALLOWED_KEYS:
+            continue
+        if normalized_key == "value" and isinstance(value, str) and (
+            private_value_field or not _found_string_value_allowed(found)
+        ):
+            safe[str(key)] = _private_stub_for_value(value)
+            continue
+        if isinstance(value, str):
+            safe[str(key)] = sanitize_context_text_regex(value)
+        elif isinstance(value, (list, tuple)):
+            safe[str(key)] = [
+                item
+                if isinstance(item, (int, float)) or item is None
+                else sanitize_context_text_regex(str(item))
+                for item in value
+            ]
+        else:
+            safe[str(key)] = value
+    return safe
+
+
+def _sanitize_parse_failure_expected(expected: Any) -> Any:
+    if expected is None:
+        return None
+    if not isinstance(expected, dict):
+        return sanitize_context_payload(expected, consumer="inject")
+    safe: dict[str, Any] = {}
+    for key, value in expected.items():
+        normalized_key = str(key).lower()
+        if normalized_key not in _FOUND_ALLOWED_KEYS:
+            continue
+        safe[str(key)] = sanitize_context_payload(
+            value, str(key), consumer="inject"
+        )
+    return safe
+
+
+def _render_parse_failure_line(state: dict[str, Any]) -> str:
+    failure = state.get("parse_failure")
+    if not isinstance(failure, dict) or not failure:
+        return ""
+    layer = sanitize_context_payload(
+        str(failure.get("layer") or "unknown"), consumer="inject"
+    )
+    code = sanitize_context_payload(
+        str(failure.get("code") or "unknown"), consumer="inject"
+    )
+    expected = _sanitize_parse_failure_expected(failure.get("expected"))
+    found = _sanitize_parse_failure_found(failure.get("found"))
+    return (
+        f"parse_failure: layer={layer} code={code} "
+        f"expected={_compact_json(expected)} found={_compact_json(found)}"
+    )
+
+
 def build_screen_belief(
     *,
     current_app: str,
@@ -475,6 +598,8 @@ def build_action_outcome_summary(state: dict[str, Any]) -> dict[str, Any]:
         "failure_code": state.get("grounding_failure_code") or state.get("failure_cause"),
         "locate_count": int(state.get("locate_count") or 0),
         "suggested_strategy": state.get("suggested_strategy"),
+        "error_layer": state.get("error_layer"),
+        "retry_policy": state.get("retry_policy"),
     }
 
 
@@ -1557,6 +1682,7 @@ def build_plan_context_block(
     action_parsed = state.get("action_parsed") or {}
     action_result = state.get("action_result") or {}
     action_receipt = state.get("action_receipt") or {}
+    action_outcome_summary = state.get("action_outcome_summary") or {}
     raw_action = (
         action_parsed.get("action") if isinstance(action_parsed, dict) else None
     )
@@ -1605,8 +1731,37 @@ def build_plan_context_block(
         "locate_count": int(state.get("locate_count") or 0),
         "suggested_strategy": plan_safe_strategy,
     }
-    raw_advisory = (state.get("action_outcome_summary") or {}).get(
-        "verifier_advisory"
+    error_layer = (
+        state.get("error_layer")
+        or (
+            action_outcome_summary.get("error_layer")
+            if isinstance(action_outcome_summary, dict)
+            else None
+        )
+    )
+    if error_layer:
+        outcome["error_layer"] = sanitize_context_payload(
+            str(error_layer), "error_layer", consumer=consumer, task_context=task_context
+        )
+    retry_policy = (
+        state.get("retry_policy")
+        or (
+            action_outcome_summary.get("retry_policy")
+            if isinstance(action_outcome_summary, dict)
+            else None
+        )
+    )
+    if retry_policy:
+        outcome["retry_policy"] = sanitize_context_payload(
+            str(retry_policy),
+            "retry_policy",
+            consumer=consumer,
+            task_context=task_context,
+        )
+    raw_advisory = (
+        action_outcome_summary.get("verifier_advisory")
+        if isinstance(action_outcome_summary, dict)
+        else None
     )
     if isinstance(raw_advisory, dict) and raw_advisory:
         outcome["verifier_advisory"] = sanitize_context_payload(
@@ -1669,6 +1824,12 @@ def build_plan_context_block(
     criterion_gap_list = _render_criterion_gap_list(
         state, lang=lang, consumer=consumer, task_context=task_context
     )
+    last_action_outcome = _render_last_action_outcome(
+        state, outcome, consumer=consumer, task_context=task_context
+    )
+    system_guidance = _render_system_guidance(
+        state, consumer=consumer, task_context=task_context
+    )
 
     parts = []
     # Each section is trimmed against its own allowance. Trimming the concatenated
@@ -1704,15 +1865,40 @@ def build_plan_context_block(
         ),
         ("budget", budget_section, None),
         ("liveness_note", liveness_note, None),
-        ("last_action_outcome", outcome, None),
+        (
+            "last_action_outcome",
+            last_action_outcome,
+            budget.get(
+                "last_action_outcome_chars",
+                _SECTION_BUDGETS["last_action_outcome"],
+            ),
+        ),
         ("failure_memory", failure_memory_block, None),
         ("avoid_repeating", avoid_repeating, budget.get("avoid_repeating_chars")),
         ("gui_memory", gui_memory, budget.get("gui_memory_chars")),
         ("grounding_observation", grounding_obs, None),
+        (
+            "system_guidance",
+            system_guidance,
+            min(
+                160,
+                int(
+                    budget.get(
+                        "system_guidance_chars",
+                        _SECTION_BUDGETS["system_guidance"],
+                    )
+                    or _SECTION_BUDGETS["system_guidance"]
+                ),
+            ),
+        ),
     ):
         if not _context_block_value_is_informative(label, value):
             continue
-        rendered = f"{label}: {json.dumps(value, ensure_ascii=False)}"
+        rendered = (
+            value.text
+            if isinstance(value, _RenderedContextSection)
+            else f"{label}: {json.dumps(value, ensure_ascii=False)}"
+        )
         if section_budget and len(rendered) > section_budget:
             rendered, section_truncated = trim_text(rendered, section_budget)
             component_truncated = component_truncated or section_truncated
@@ -1971,42 +2157,159 @@ def _render_acceptance_rejection(
     lang: str,
     consumer: ContextConsumer,
     task_context: str | None,
-) -> str:
+) -> _RenderedContextSection | str:
     """Render the Stage-Sealing structured rejection feedback for the next plan.
 
     The feedback dict (criterion names + stage ids + neutral hints) is already
     inject-sanitized at state write; this pass re-sanitizes defensively.
     """
 
-    feedback = state.get("acceptance_rejection_feedback")
-    if not isinstance(feedback, dict) or not isinstance(feedback.get("missing"), list):
-        return ""
     rows: list[str] = []
-    for item in feedback["missing"]:
-        if not isinstance(item, dict):
-            continue
-        criterion = sanitize_context_payload(
-            str(item.get("criterion") or ""),
-            consumer=consumer,
-            task_context=task_context,
+    feedback = state.get("acceptance_rejection_feedback")
+    if isinstance(feedback, dict) and isinstance(feedback.get("missing"), list):
+        for item in feedback["missing"]:
+            if not isinstance(item, dict):
+                continue
+            criterion = sanitize_context_payload(
+                str(item.get("criterion") or ""),
+                consumer=consumer,
+                task_context=task_context,
+            )
+            stage_id = sanitize_context_payload(
+                str(item.get("stage_id") or "terminal"),
+                consumer=consumer,
+                task_context=task_context,
+            )
+            hint = sanitize_context_payload(
+                str(item.get("hint") or ""),
+                consumer=consumer,
+                task_context=task_context,
+            )
+            if not criterion or not hint:
+                continue
+            rows.append(f"{criterion} [{stage_id}]: {hint}")
+    rows.extend(
+        _render_acceptance_verdict_lines(
+            state, consumer=consumer, task_context=task_context
         )
-        stage_id = sanitize_context_payload(
-            str(item.get("stage_id") or "terminal"),
-            consumer=consumer,
-            task_context=task_context,
-        )
-        hint = sanitize_context_payload(
-            str(item.get("hint") or ""),
-            consumer=consumer,
-            task_context=task_context,
-        )
-        if not criterion or not hint:
-            continue
-        rows.append(f"{criterion} [{stage_id}]: {hint}")
+    )
+    judge = _render_acceptance_judge_line(
+        state, consumer=consumer, task_context=task_context
+    )
+    if judge and rows:
+        rows.append(judge)
     if not rows:
         return ""
     title = "Acceptance rejection guidance (evidence-driven, do not repeat the same claim)" if lang == "en" else "验收拒绝指引（按证据取证，勿重复同一条 finish 声明）"
-    return "\n".join([title, *rows])
+    return _RenderedContextSection("\n".join(["acceptance_rejection:", title, *rows]))
+
+
+def _criterion_count_for_verdict_budget(state: dict[str, Any], verdicts: dict) -> int:
+    agenda = state.get("goal_agenda")
+    if isinstance(agenda, list) and agenda:
+        return len(agenda)
+    contract = state.get("goal_contract")
+    if isinstance(contract, dict):
+        criteria = contract.get("success_criteria")
+        if isinstance(criteria, list) and criteria:
+            return len(criteria)
+    criteria = getattr(contract, "success_criteria", None)
+    if criteria:
+        try:
+            return len(criteria)
+        except TypeError:
+            return len(verdicts)
+    return len(verdicts)
+
+
+def _render_acceptance_verdict_lines(
+    state: dict[str, Any],
+    *,
+    consumer: ContextConsumer,
+    task_context: str | None,
+) -> list[str]:
+    verdicts = state.get("acceptance_verdicts")
+    if not isinstance(verdicts, dict) or not verdicts:
+        return []
+    limit = max(0, _criterion_count_for_verdict_budget(state, verdicts))
+    rows: list[str] = []
+    for criterion, verdict in list(verdicts.items())[:limit]:
+        if not isinstance(verdict, dict):
+            continue
+        status = str(verdict.get("status") or "unknown").lower()
+        if status not in {"unknown", "contradicted"}:
+            status = "unknown"
+        safe_criterion = sanitize_context_payload(
+            str(criterion), consumer=consumer, task_context=task_context
+        )
+        reason = sanitize_context_payload(
+            str(verdict.get("reason") or "unspecified"),
+            consumer=consumer,
+            task_context=task_context,
+        )
+        rows.append(f"verdict: {safe_criterion} status={status} reason={reason}")
+    return rows
+
+
+def _finish_validation_is_rejection(state: dict[str, Any]) -> bool:
+    status = str(state.get("finish_validation_status") or "").strip().lower()
+    return status in _ACCEPTANCE_REJECTION_STATUSES
+
+
+def _render_acceptance_judge_line(
+    state: dict[str, Any],
+    *,
+    consumer: ContextConsumer,
+    task_context: str | None,
+) -> str:
+    if not _finish_validation_is_rejection(state):
+        return ""
+    reflection = state.get("reflection")
+    if reflection in {None, ""}:
+        return ""
+    safe = sanitize_context_payload(
+        str(reflection), "reflection", consumer=consumer, task_context=task_context
+    )
+    text, _ = trim_text(str(safe), 100)
+    return f"judge: {text}"
+
+
+def _render_last_action_outcome(
+    state: dict[str, Any],
+    outcome: dict[str, Any],
+    *,
+    consumer: ContextConsumer,
+    task_context: str | None,
+) -> _RenderedContextSection | str:
+    parse_failure = _render_parse_failure_line(state)
+    if not _is_informative_outcome(outcome) and not parse_failure:
+        return ""
+    safe_outcome = sanitize_context_payload(
+        outcome, "last_action_outcome", consumer=consumer, task_context=task_context
+    )
+    lines = [f"last_action_outcome: {json.dumps(safe_outcome, ensure_ascii=False)}"]
+    if parse_failure:
+        lines.append(parse_failure)
+    return _RenderedContextSection("\n".join(lines))
+
+
+def _render_system_guidance(
+    state: dict[str, Any],
+    *,
+    consumer: ContextConsumer,
+    task_context: str | None,
+) -> _RenderedContextSection | str:
+    suggestion = state.get("mechanism_suggestion")
+    if not isinstance(suggestion, str) or not suggestion.strip():
+        return ""
+    safe = sanitize_context_payload(
+        suggestion.strip(),
+        "mechanism_suggestion",
+        consumer=consumer,
+        task_context=task_context,
+    )
+    rendered = f"[system_guidance] (mechanism-level hint, advisory only): {safe}"
+    return _RenderedContextSection(rendered)
 
 
 def _build_avoid_repeating(state: dict[str, Any]) -> dict[str, Any]:
@@ -2059,6 +2362,8 @@ def _build_avoid_repeating(state: dict[str, Any]) -> dict[str, Any]:
 
 
 def _context_block_value_is_informative(label: str, value: Any) -> bool:
+    if isinstance(value, _RenderedContextSection):
+        return bool(value.text)
     if not value:
         return False
     if label == "last_action_outcome" and isinstance(value, dict):
@@ -2176,6 +2481,8 @@ def _is_informative_outcome(value: dict[str, Any]) -> bool:
             "reflection_verdict",
             "failure_cause",
             "suggested_strategy",
+            "error_layer",
+            "retry_policy",
         )
     )
 
@@ -2749,6 +3056,8 @@ def _section_has_value(state: dict[str, Any], section: str) -> bool:
             }
         )
     if section == "last_action_outcome":
+        if isinstance(state.get("parse_failure"), dict) and state.get("parse_failure"):
+            return True
         summary = state.get("action_outcome_summary")
         if isinstance(summary, dict) and _is_informative_outcome(
             {
@@ -2758,6 +3067,8 @@ def _section_has_value(state: dict[str, Any], section: str) -> bool:
                 "reflection_verdict": summary.get("reflection_verdict"),
                 "failure_cause": summary.get("failure_cause"),
                 "suggested_strategy": summary.get("suggested_strategy"),
+                "error_layer": summary.get("error_layer"),
+                "retry_policy": summary.get("retry_policy"),
             }
         ):
             return True
@@ -2775,6 +3086,8 @@ def _section_has_value(state: dict[str, Any], section: str) -> bool:
                 "reflection_verdict": state.get("reflection_verdict"),
                 "failure_cause": state.get("failure_cause"),
                 "suggested_strategy": state.get("suggested_strategy"),
+                "error_layer": state.get("error_layer"),
+                "retry_policy": state.get("retry_policy"),
             }
         )
     if section == "failure_memory":
@@ -2788,6 +3101,11 @@ def _section_has_value(state: dict[str, Any], section: str) -> bool:
         return bool(
             isinstance(state.get("task_plan_status"), dict)
             and _task_plan_stages(state)
+        )
+    if section == "system_guidance":
+        return bool(
+            isinstance(state.get("mechanism_suggestion"), str)
+            and state.get("mechanism_suggestion").strip()
         )
     return False
 

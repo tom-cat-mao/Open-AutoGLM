@@ -10,7 +10,11 @@ from phone_agent.actions.adapter import ActionAdapterError, adapt_json_action
 from phone_agent.actions.grounding import GroundingError, ground_intent_to_action
 from phone_agent.actions.ir import is_intent_dict
 from phone_agent.actions.repair import ActionRepairError, repair_action
-from phone_agent.actions.validator import ActionValidationError, validate_action
+from phone_agent.actions.validator import (
+    ActionValidationError,
+    _whitelist_found,
+    validate_action,
+)
 from phone_agent.config import get_prompt_version, get_system_prompt
 from phone_agent.config.apps import get_app_registry_summary
 from phone_agent.device_factory import ObservationCaptureError
@@ -30,6 +34,11 @@ from phone_agent.graph.expected_outcome import (
     runtime_expected_outcome_dict,
 )
 from phone_agent.graph.device_observation import capture_device_observation
+from phone_agent.graph.guidance import (
+    mechanism_suggestion_for,
+    retry_policy_for_layer,
+    screenshot_error_fields,
+)
 from phone_agent.graph.observation import build_mark_provider_hints, build_observation
 from phone_agent.graph.screenshot_status import (
     screenshot_failure_code,
@@ -123,8 +132,11 @@ def _validate_with_limited_repair(
     except ActionValidationError as validation_exc:
         repair_metadata = {
             **parse_metadata,
+            "error_layer": "validation",
             "validation_success": False,
             "validation_error_code": validation_exc.code,
+            "expected": validation_exc.expected,
+            "found": validation_exc.found,
             "repair_attempted": True,
         }
         try:
@@ -160,6 +172,8 @@ def _validate_with_limited_repair(
                     "repair_success": True,
                     "second_validation_success": False,
                     "second_validation_error_code": second_validation_exc.code,
+                    "expected": second_validation_exc.expected,
+                    "found": second_validation_exc.found,
                     "parse_success": False,
                     "parse_error_code": second_validation_exc.code,
                 },
@@ -194,10 +208,12 @@ def _safe_request(
 def _build_parse_retry_messages(messages: list[dict], parse_error: str) -> list[dict]:
     """Append a trace-safe format-only retry instruction."""
 
+    error_message = str(parse_error or "")[:300]
     retry_text = (
         "Previous response failed format/schema parsing. Retry once and only fix the "
         "output format. Do not invent coordinates, marks, private text, or new action semantics. "
-        f"Error class: {parse_error.split(':', 1)[0]}"
+        f"Error class: {error_message.split(':', 1)[0]}. "
+        f"Validator message: {error_message}"
     )
     return list(messages) + [MessageBuilder.create_user_message(text=retry_text)]
 
@@ -362,6 +378,7 @@ VALIDATION_ERROR_CODES = {
     "unknown_action",
     "unknown_app",
     "unsafe_value",
+    "capability_missing",
 }
 
 
@@ -376,11 +393,7 @@ def _layer_for_error(code: str | None, grounding_error: str | None = None) -> st
 
 
 def _retry_policy_for_layer(layer: str) -> str:
-    if layer in {"parse", "adapter"}:
-        return "parse_retry"
-    if layer == "grounding":
-        return "reobserve"
-    return "none"
+    return retry_policy_for_layer(layer)
 
 
 def _error_fields(code: str | None, grounding_error: str | None = None) -> dict:
@@ -390,6 +403,73 @@ def _error_fields(code: str | None, grounding_error: str | None = None) -> dict:
         "error_code": grounding_error or code or "unknown",
         "recoverable": layer in {"parse", "adapter", "grounding"},
         "retry_policy": _retry_policy_for_layer(layer),
+    }
+
+
+def _contract_parse_failure(error_fields: dict, parse_metadata: dict) -> dict:
+    code = str(error_fields.get("error_code") or "unknown")
+    layer = str(parse_metadata.get("error_layer") or error_fields.get("error_layer") or "parse")
+    expected = parse_metadata.get("expected")
+    found = parse_metadata.get("found")
+    if expected is None and layer == "grounding":
+        if code in {"unknown_mark", "mark_unavailable", "stale_mark"}:
+            expected = {"field": "target_mark_id", "type": "current_screen_mark_id"}
+        elif code == "mark_required":
+            expected = {"field": "target_mark_id", "type": "mark_id_or_object_selector"}
+        elif code in {"missing_hint", "grounding_no_candidate"}:
+            expected = {"field": "target_text_hint", "type": "mechanism_hint"}
+        else:
+            expected = {"field": "grounding", "type": "current_screen_binding"}
+    if found is None and code == "unknown_mark":
+        missing_mark = _missing_mark_id_from_error(str(parse_metadata.get("parse_error_message") or ""))
+        found = {"mark_id": missing_mark} if missing_mark else None
+    return {
+        "code": code,
+        "layer": layer,
+        "expected": expected,
+        "found": _whitelist_found(found),
+    }
+
+
+def _mechanism_suggestion(error_fields: dict) -> str | None:
+    return mechanism_suggestion_for(
+        str(error_fields.get("error_code") or ""),
+        str(error_fields.get("error_layer") or ""),
+    )
+
+
+def _failed_action_result(message: str, error_fields: dict, *, should_finish: bool) -> dict:
+    return {
+        "success": False,
+        "should_finish": should_finish,
+        "message": message,
+        "error_layer": error_fields.get("error_layer"),
+        "retry_policy": error_fields.get("retry_policy"),
+    }
+
+
+def _should_validation_replan(state: "AgentState", error_fields: dict) -> bool:
+    return (
+        error_fields.get("error_layer") in {"adapter", "validation"}
+        and error_fields.get("error_code") != "model_request_failed"
+        and int(state.get("validation_replan_count") or 0) == 0
+    )
+
+
+def _validation_replan_update(state: "AgentState", error_fields: dict) -> dict:
+    if not _should_validation_replan(state, error_fields):
+        return {}
+    return {
+        "validation_replan_count": int(state.get("validation_replan_count") or 0) + 1,
+        "finished": False,
+        "error": None,
+    }
+
+
+def _guidance_failure_update(error_fields: dict, parse_metadata: dict) -> dict:
+    return {
+        "parse_failure": _contract_parse_failure(error_fields, parse_metadata),
+        "mechanism_suggestion": _mechanism_suggestion(error_fields),
     }
 
 
@@ -409,16 +489,7 @@ def _failure_cause_for_layer(error_fields: dict, parse_error: str | None) -> str
 
 
 def _screenshot_error_fields(code: str, sensitive: bool = False) -> dict:
-    return {
-        "error_layer": "grounding",
-        "error_code": code,
-        "recoverable": True,
-        "retry_policy": (
-            "takeover"
-            if sensitive or code == "secure_screenshot_blocked"
-            else "reobserve"
-        ),
-    }
+    return screenshot_error_fields(code, sensitive=sensitive)
 
 
 def _failure_cause_for_screenshot(code: str, sensitive: bool = False) -> str:
@@ -459,30 +530,39 @@ def _parse_and_ground_response(
             raise ActionAdapterError(
                 "invalid_json",
                 "structured action execution requires JSON or provider tool_calls",
+                expected={"type": "structured_json_or_tool_calls"},
             )
     except json.JSONDecodeError:
         action_parsed = None
         parse_error = "Model parse failed: invalid_json: payload is not valid JSON"
         parse_metadata = {
             **parse_metadata,
+            "error_layer": "adapter",
             "parse_success": False,
             "parse_error_code": "invalid_json",
+            "parse_error_message": parse_error,
         }
     except ActionAdapterError as exc:
         action_parsed = None
         parse_error = f"Model parse failed: {exc.code}: {exc}"
         parse_metadata = {
             **parse_metadata,
+            "error_layer": "adapter",
             "parse_success": False,
             "parse_error_code": exc.code,
+            "expected": exc.expected,
+            "found": exc.found,
+            "parse_error_message": parse_error,
         }
     except ValueError as exc:
         action_parsed = None
         parse_error = f"Model parse failed: {exc}"
         parse_metadata = {
             **parse_metadata,
+            "error_layer": "parse",
             "parse_success": False,
             "parse_error_code": "parse_error",
+            "parse_error_message": parse_error,
         }
 
     if action_parsed is not None and is_intent_dict(action_parsed):
@@ -514,11 +594,15 @@ def _parse_and_ground_response(
             parse_metadata = {
                 **parse_metadata,
                 "intent_detected": True,
+                "error_layer": "grounding",
                 "grounding_success": False,
                 "grounding_error_code": exc.code,
                 "grounding_observation": grounding_observation,
                 "parse_success": False,
                 "parse_error_code": exc.code,
+                "expected": getattr(exc, "expected", None),
+                "found": _whitelist_found(getattr(exc, "found", None)),
+                "parse_error_message": parse_error,
             }
 
     if (
@@ -538,9 +622,13 @@ def _parse_and_ground_response(
         parse_metadata = {
             **parse_metadata,
             "grounding_success": False,
+            "error_layer": "grounding",
             "grounding_error_code": "mark_required",
             "parse_success": False,
             "parse_error_code": "mark_required",
+            "expected": {"field": "target_mark_id", "type": "mark_id_or_object_selector"},
+            "found": {"action": action_parsed.get("action")},
+            "parse_error_message": parse_error,
         }
 
     if action_parsed is not None:
@@ -717,6 +805,8 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
         )
     except ObservationCaptureError as exc:
         error_message = f"Observation unavailable: {exc.code}"
+        error_fields = _screenshot_error_fields(exc.code)
+        parse_metadata = {"parse_error_code": exc.code}
         emit_trace(
             config,
             state,
@@ -726,6 +816,7 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
                 "failure_cause": "context_lost",
                 "error_code": exc.code,
                 "attempts": exc.attempts,
+                **error_fields,
             },
         )
         return {
@@ -735,14 +826,14 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
             "thinking": "",
             "action_raw": "",
             "action_parsed": None,
-            "action_result": {
-                "success": False,
-                "should_finish": True,
-                "message": error_message,
-            },
+            "action_result": _failed_action_result(
+                error_message, error_fields, should_finish=True
+            ),
             "failure_cause": "context_lost",
             "grounding_error": exc.code,
             "grounding_failure_code": exc.code,
+            **error_fields,
+            **_guidance_failure_update(error_fields, parse_metadata),
             "error": error_message,
             "finished": True,
             "action_receipt": None,
@@ -761,6 +852,7 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
         failure_message = screenshot_failure_message(screenshot)
         error_message = f"Screenshot unavailable: {screenshot_error}"
         error_fields = _screenshot_error_fields(screenshot_error, sensitive=sensitive)
+        parse_metadata = {"parse_error_code": screenshot_error}
         failure_cause = _failure_cause_for_screenshot(
             screenshot_error, sensitive=sensitive
         )
@@ -818,14 +910,13 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
             "grounding_provider": "screenshot",
             "grounding_failure_code": screenshot_error,
             "grounding_observation": grounding_observation,
-            "action_result": {
-                "success": False,
-                "should_finish": True,
-                "message": error_message,
-            },
+            "action_result": _failed_action_result(
+                error_message, error_fields, should_finish=True
+            ),
             "error": error_message,
             "failure_cause": failure_cause,
             **error_fields,
+            **_guidance_failure_update(error_fields, parse_metadata),
             "finished": True,
             "action_receipt": None,
             "action_succeeded": False,
@@ -1167,6 +1258,7 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
                         **context_metrics,
                     },
                 )
+                replan_update = _validation_replan_update(state, error_fields)
                 return {
                     "repeat_rejected": False,
                     "messages": state_messages,
@@ -1183,19 +1275,21 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
                     "thinking": "",
                     "action_raw": "",
                     "action_parsed": None,
-                    "action_result": {
-                        "success": False,
-                        "should_finish": True,
-                        "message": error_message,
-                    },
-                    "error": error_message,
+                    "action_result": _failed_action_result(
+                        error_message,
+                        error_fields,
+                        should_finish=not bool(replan_update),
+                    ),
+                    "error": None if replan_update else error_message,
                     "failure_cause": "model_parse_failed",
                     **error_fields,
+                    **_guidance_failure_update(error_fields, parse_metadata),
                     "parse_metadata": parse_metadata,
-                    "finished": True,
+                    "finished": False if replan_update else True,
                     "action_receipt": None,
                     "action_succeeded": False,
                     "action_confirmed": False,
+                    **replan_update,
                     "context_mode": context_mode,
                     **context_metrics,
                 }
@@ -1219,6 +1313,7 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
                     **context_metrics,
                 },
             )
+            replan_update = _validation_replan_update(state, error_fields)
             return {
                 "repeat_rejected": False,
                 "messages": state_messages,
@@ -1235,19 +1330,21 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
                 "thinking": "",
                 "action_raw": "",
                 "action_parsed": None,
-                "action_result": {
-                    "success": False,
-                    "should_finish": True,
-                    "message": error_message,
-                },
-                "error": error_message,
+                "action_result": _failed_action_result(
+                    error_message,
+                    error_fields,
+                    should_finish=not bool(replan_update),
+                ),
+                "error": None if replan_update else error_message,
                 "failure_cause": "model_parse_failed",
                 **error_fields,
+                **_guidance_failure_update(error_fields, parse_metadata),
                 "parse_metadata": parse_metadata,
-                "finished": True,
+                "finished": False if replan_update else True,
                 "action_receipt": None,
                 "action_succeeded": False,
                 "action_confirmed": False,
+                **replan_update,
                 "context_mode": context_mode,
                 **context_metrics,
             }
@@ -1294,6 +1391,7 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
                 **context_metrics,
             },
         )
+        replan_update = _validation_replan_update(state, error_fields)
         return {
             "repeat_rejected": False,
             "messages": state_messages,
@@ -1310,19 +1408,21 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
             "thinking": "",
             "action_raw": "",
             "action_parsed": None,
-            "action_result": {
-                "success": False,
-                "should_finish": True,
-                "message": error_message,
-            },
-            "error": error_message,
+            "action_result": _failed_action_result(
+                error_message,
+                error_fields,
+                should_finish=not bool(replan_update),
+            ),
+            "error": None if replan_update else error_message,
             "failure_cause": "model_parse_failed",
             **error_fields,
+            **_guidance_failure_update(error_fields, parse_metadata),
             "parse_metadata": parse_metadata,
-            "finished": True,
+            "finished": False if replan_update else True,
             "action_receipt": None,
             "action_succeeded": False,
             "action_confirmed": False,
+            **replan_update,
             "context_mode": context_mode,
             **context_metrics,
         }
@@ -1434,6 +1534,14 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
             "retry_policy": None,
         }
     )
+    metadata_layer = parse_metadata.get("error_layer")
+    if parse_error and metadata_layer in {"parse", "adapter", "validation", "grounding"}:
+        error_fields = {
+            **error_fields,
+            "error_layer": metadata_layer,
+            "recoverable": metadata_layer in {"parse", "adapter", "grounding"},
+            "retry_policy": _retry_policy_for_layer(metadata_layer),
+        }
     grounding_candidates = grounding_observation.get("candidates") or []
     grounding_candidate_count = int(
         grounding_observation.get("candidate_count") or len(grounding_candidates) or 0
@@ -1540,11 +1648,12 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
     if parse_error:
         recovery_action = _recovery_action_for_parse_failure(state, parse_metadata)
         if recovery_action is not None:
+            recovery_code = str(parse_metadata.get("parse_error_code") or "unknown")
             recovery_raw = json.dumps(
                 {
                     "action": recovery_action,
                     "parse_success": False,
-                    "recovery_from": parse_metadata.get("parse_error_code"),
+                    "recovery_from": recovery_code,
                 },
                 ensure_ascii=False,
             )
@@ -1581,8 +1690,14 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
                 "selected_grounding_candidate_id": selected_grounding_candidate_id,
                 "expected_outcome": expected_outcome,
                 "expected_transition": expected_transition,
+                "action_result": _failed_action_result(
+                    f"recovery_from:{recovery_code}",
+                    error_fields,
+                    should_finish=False,
+                ),
                 "failure_cause": "model_parse_failed",
                 **error_fields,
+                **_guidance_failure_update(error_fields, parse_metadata),
                 "parse_metadata": {
                     **parse_metadata,
                     "deterministic_recovery_action": "Back",
@@ -1596,6 +1711,7 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
                 "context_mode": context_mode,
                 **context_metrics,
             }
+        replan_update = _validation_replan_update(state, error_fields)
         return {
             "repeat_rejected": False,
             "messages": state_messages,
@@ -1627,19 +1743,21 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
             "selected_grounding_candidate_id": selected_grounding_candidate_id,
             "expected_outcome": expected_outcome,
             "expected_transition": expected_transition,
-            "action_result": {
-                "success": False,
-                "should_finish": True,
-                "message": parse_error,
-            },
-            "error": parse_error,
+            "action_result": _failed_action_result(
+                parse_error,
+                error_fields,
+                should_finish=not bool(replan_update),
+            ),
+            "error": None if replan_update else parse_error,
             "failure_cause": _failure_cause_for_layer(error_fields, parse_error),
             **error_fields,
+            **_guidance_failure_update(error_fields, parse_metadata),
             "parse_metadata": parse_metadata,
-            "finished": True,
+            "finished": False if replan_update else True,
             "action_receipt": None,
             "action_succeeded": False,
             "action_confirmed": False,
+            **replan_update,
             "context_mode": context_mode,
             **context_metrics,
         }
@@ -1679,6 +1797,8 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
         "action_receipt": None,
         "action_succeeded": False,
         **error_fields,
+        "parse_failure": None,
+        "mechanism_suggestion": None,
         "action_confirmed": False,
         "context_mode": context_mode,
         **context_metrics,
