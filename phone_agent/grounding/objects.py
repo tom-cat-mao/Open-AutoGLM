@@ -7,9 +7,9 @@ import hashlib
 from typing import Any
 
 from phone_agent.config.policy import DEFAULT_SAFETY_POLICY
-from phone_agent.graph.context import sanitize_context_payload
-from phone_agent.graph.marks import Mark, MarkRegistry
-from phone_agent.graph.marks import MARK_CONFIDENCE_THRESHOLD
+from phone_agent.config.redact import sanitize_context_payload
+from phone_agent.grounding.marks import Mark, MarkRegistry
+from phone_agent.grounding.marks import MARK_CONFIDENCE_THRESHOLD
 
 
 OBJECT_FAILURE_CODES = {

@@ -9,7 +9,7 @@ from dataclasses import asdict, dataclass, field, replace
 from io import BytesIO
 from typing import Any
 
-from phone_agent.graph.context import sanitize_context_payload
+from phone_agent.config.redact import sanitize_context_payload
 from phone_agent.config.policy import (
     DEFAULT_VERIFICATION_POLICY,
     LOCATE_INHERIT_PHASH_MAX_DISTANCE,

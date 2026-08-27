@@ -8,8 +8,8 @@ import time
 import xml.etree.ElementTree as ET
 from typing import Any
 
-from phone_agent.graph.context import sanitize_context_payload
-from phone_agent.graph.objects import ScreenStructure, StructureNode, build_structure_topology_digest
+from phone_agent.config.redact import sanitize_context_payload
+from phone_agent.grounding.objects import ScreenStructure, StructureNode, build_structure_topology_digest
 from phone_agent.grounding.provider import MarkCandidate, MarkProviderHint, MarkProviderResult, ScreenBinding
 
 

@@ -151,27 +151,6 @@ def test_resolver_static_alias_hit_is_first_stage() -> None:
     assert target.package_name == APP_PACKAGES["Chrome"]
 
 
-def test_resolver_learning_cache_hit_is_second_stage() -> None:
-    from phone_agent.graph.runtime_app_learning import RuntimeAppLearningContext
-
-    resolver = LaunchTargetResolver(DEFAULT_APP_REGISTRY, DEFAULT_LAUNCH_POLICY)
-    learning = RuntimeAppLearningContext()
-    learning.record("某新应用", "com.example.learned")
-    inventory = InstalledAppInventory(
-        frozenset({"com.example.learned"}), device_id="serial"
-    )
-
-    target = resolver.resolve(
-        "某新应用",
-        inventory=inventory,
-        candidates=["com.example.other"],
-        learning=learning,
-    )
-
-    assert target.status == "resolved"
-    assert target.package_name == "com.example.learned"
-    assert target.identity is None
-
 
 def test_resolver_candidates_unique_hit_is_third_stage() -> None:
     resolver = LaunchTargetResolver(DEFAULT_APP_REGISTRY, DEFAULT_LAUNCH_POLICY)
@@ -333,23 +312,3 @@ def test_policy_observation_only_identity_always_denied() -> None:
     assert resolver.resolve("com.android.launcher3", inventory=inventory).status == "denied"
 
 
-def test_learning_cache_resolves_same_term_after_launch() -> None:
-    from phone_agent.graph.runtime_app_learning import RuntimeAppLearningContext
-
-    resolver = LaunchTargetResolver(DEFAULT_APP_REGISTRY, DEFAULT_LAUNCH_POLICY)
-    learning = RuntimeAppLearningContext()
-    inventory = InstalledAppInventory(
-        frozenset({"com.example.learned"}), device_id="serial"
-    )
-
-    before = resolver.resolve(
-        "某新应用", inventory=inventory, candidates=["com.example.learned"]
-    )
-    assert before.status == "resolved"
-    assert before.package_name == "com.example.learned"
-    learning.record("某新应用", before.package_name)
-
-    after = resolver.resolve("某新应用", inventory=inventory, learning=learning)
-
-    assert after.status == "resolved"
-    assert after.package_name == "com.example.learned"

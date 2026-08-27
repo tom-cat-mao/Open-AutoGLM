@@ -6,7 +6,7 @@ import re
 import time
 from typing import Any
 
-from phone_agent.graph.context import sanitize_context_payload
+from phone_agent.config.redact import sanitize_context_payload
 from phone_agent.grounding.locateanything import LocateAnythingMLXProvider
 from phone_agent.grounding.provider import MarkProvider, MarkProviderHint, MarkProviderResult, ScreenBinding
 

@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from typing import Any, Protocol
 
-from phone_agent.graph.context import sanitize_context_payload
+from phone_agent.config.redact import sanitize_context_payload
 
 
 @dataclass(frozen=True)
