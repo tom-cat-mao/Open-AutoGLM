@@ -95,6 +95,7 @@ security issues. The binding architecture contract is `docs/refactor-thin-loop-v
 | 8 | **Config via V2Config** | All configuration resolves only through `V2Config` three-level resolution: CLI override > shell env > `.env` (`PHONE_AGENT_` prefix, non-overriding) > default. |
 | 9 | **No Force Push** | Never `git push --force` to `main` or `feature/thin-loop-v2`. |
 | 10 | **No Auto-Commit** | Don't create commits unless explicitly requested. |
+| 11 | **TaskDoc Board** | The task board's `goal_base` is seeded **only** by the harness at run start; the model writes the board **exclusively** via `update_task_doc` (it can never alter `goal_base`). The rendered `[TASK_DOC]` block is pinned into context before every model call (compression-immune), and `finish` is fail-closed while the route still has open items. |
 
 ## Doc & Skill Routing (Load on Demand)
 

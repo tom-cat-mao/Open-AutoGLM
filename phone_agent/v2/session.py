@@ -28,6 +28,7 @@ if TYPE_CHECKING:
     from phone_agent.adb.screenshot import Screenshot
     from phone_agent.grounding.provider import MarkProvider
     from phone_agent.v2.config import V2Config
+    from phone_agent.v2.taskdoc import TaskDoc
 
 
 class ScreenshotError(RuntimeError):
@@ -73,6 +74,12 @@ class PhoneSession:
         self.finished: bool = False
         self.finish_summary: str | None = None
         self.takeover_reason: str | None = None
+        # TaskDoc (task board) state: doc is harness-seeded at run start (agent.py);
+        # seen_states tracks (current_app, screen_hash) tuples for stagnation
+        # detection; nudged fires the stagnation hint at most once per run.
+        self.task_doc: "TaskDoc | None" = None
+        self.seen_states: set[tuple[str, str]] = set()
+        self.nudged: bool = False
         # lazy visual locate provider (singleton per session)
         self._locate_provider: "MarkProvider | None" = None
         self._locate_provider_built: bool = False
@@ -130,6 +137,12 @@ class PhoneSession:
         current_app = self._foreground_label()
         self.screen_seq += 1
         self.marks = {mark.mark_id: mark for mark in marks}
+        # Record (current_app, screen_hash) for TaskDoc stagnation detection.
+        # screen_hash is a short sha256 of the screenshot base64 payload.
+        screen_hash = hashlib.sha256(
+            (shot.base64_data or "").encode("utf-8")
+        ).hexdigest()[:16]
+        self.seen_states.add((current_app, screen_hash))
         return Observation(
             screenshot_b64=shot.base64_data,
             width=int(shot.width),

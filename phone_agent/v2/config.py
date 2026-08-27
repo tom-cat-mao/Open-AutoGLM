@@ -86,6 +86,19 @@ def _env_bool(key: str, default: bool) -> bool:
     return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _env_bool_default_true(key: str, default: bool = True) -> bool:
+    """Boolean flag that defaults to ``True`` and only ``0/false/no/off`` disable it.
+
+    Used for opt-out switches (e.g. ``PHONE_AGENT_TASKDOC``) where any value other
+    than an explicit falsy token keeps the feature enabled.
+    """
+
+    raw = os.getenv(key)
+    if raw is None or not raw.strip():
+        return default
+    return raw.strip().lower() not in {"0", "false", "no", "off"}
+
+
 def _parse_sampling() -> dict[str, float]:
     """Parse optional sampling params; illegal float values raise ValueError."""
 
@@ -143,6 +156,9 @@ class V2Config:
     # trace
     trace_dir: str = ".traces"
     trace_enabled: bool = True
+    # taskdoc (task board increment)
+    taskdoc_enabled: bool = True
+    taskdoc_nudge_steps: int = 5
     # sampling params (temperature/top_p/frequency_penalty) forwarded to the model
     sampling: dict[str, float] | None = None
     # request headers extras
@@ -189,6 +205,8 @@ class V2Config:
             lang=_env_str("PHONE_AGENT_LANG", "cn"),
             trace_dir=_env_str("PHONE_AGENT_TRACE_DIR", ".traces"),
             trace_enabled=_env_bool("PHONE_AGENT_TRACE", True),
+            taskdoc_enabled=_env_bool_default_true("PHONE_AGENT_TASKDOC", True),
+            taskdoc_nudge_steps=_env_int("PHONE_AGENT_TASKDOC_NUDGE_STEPS", 5),
             sampling=sampling or None,
             user_agent=_env_opt_str("PHONE_AGENT_USER_AGENT"),
             http_headers=http_headers or None,
