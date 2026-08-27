@@ -61,8 +61,8 @@ tail -f outputs/live-diagnosis/<run_id>/run_output.log
 tail -f outputs/live-diagnosis/<run_id>/traces/*.jsonl
 ```
 
-> The legacy copy under `.trae/skills/phone-agent-live-diagnosis/` is preserved for
-> TraeCLI. ZCode workflows should prefer the `.agents/skills/...` path above.
+> This `.agents/skills/...` directory is the canonical copy; `.claude/skills/phone-agent-live-diagnosis`
+> is a symlink to it.
 
 ## ZCode Permission & Escalation
 

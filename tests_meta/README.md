@@ -8,7 +8,6 @@
 
 | 路径 | 内容 |
 |---|---|
-| `trae/` | `.codex` / `.trae` 文档与技能边界（Autopilot / RALPLAN 工作流不复活） |
 | `test_packaging_docs.py` | setup.py 依赖、README 拓扑、future-roadmap 断言 |
 | `test_live_diagnosis_rules.py` | live-diagnosis 技能脚本的规则回归 |
 | `characterization/` | phase0 遗留的严格契约测试 |
@@ -20,7 +19,6 @@
 .venv/bin/python -m pytest tests_meta/ -q
 
 # 仅运行某一部分
-.venv/bin/python -m pytest tests_meta/trae/ -q
 .venv/bin/python -m pytest tests_meta/test_live_diagnosis_rules.py -q
 ```
 

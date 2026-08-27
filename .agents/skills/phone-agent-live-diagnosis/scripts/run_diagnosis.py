@@ -297,22 +297,23 @@ DECISION_LOOP_RULE = {
     "signals": {
         "repeated_action_detected",
         "avoid_repeating_ignored",
-        "budget_exhausted_no_finish",
-        "absolute_budget_exhausted",
+        "resource_fuse_exhausted",
+        "progress_exhaustion_observed",
+        "progress_evidence_exhausted",
         "liveness_stuck",
         "repeated_failure_count",
     },
     "layer": "decision",
     "severity": "P1",
-    "title": "决策层重复循环：agent 在同一目标/页面上反复动作直至预算耗尽",
+    "title": "决策层重复循环：agent 在同一目标/页面上反复动作直至资源或进展证据耗尽",
     "files": [
         "phone_agent/graph/context.py",
         "phone_agent/graph/edges.py",
         "phone_agent/graph/nodes/execute.py",
         "phone_agent/graph/nodes/plan.py",
     ],
-    "suggestion": "优先核对 execute 层重复目标守卫（repeated_target_loop）是否生效、trajectory_liveness 是否把语义振荡判为 stuck、avoid_repeating 提示是否被模型持续无视；此类失败不是 grounding/执行层故障，不要归因为 reflection。",
-    "verify": "用触发 repeated_action_detected / liveness_stuck 的 trace 重跑诊断，确认 decision finding 取代 reflection 误归因，且 signal_steps 覆盖率达到 confirmed。",
+    "suggestion": "优先核对 execute 层重复目标守卫（repeated_target_loop）是否生效、progress_exhaustion 是否连续 dry、progress_claim 是否被驳回后仍无新证据、avoid_repeating 提示是否被模型持续无视；此类失败不是 grounding/执行层故障，不要归因为 reflection。",
+    "verify": "用触发 repeated_action_detected / progress_exhaustion_observed / progress_evidence_exhausted 的 trace 重跑诊断，确认 decision finding 取代 reflection 误归因，且 signal_steps 覆盖率达到 confirmed。",
 }
 
 LAYER_FALLBACKS = {
@@ -1494,17 +1495,24 @@ def collect_signal_steps(trace_summary: dict[str, Any]) -> dict[str, list[str]]:
     for compact in trace_summary.get("timeline", []):
         step = compact.get("step_id")
         payload = compact.get("payload") or {}
-        if compact.get("event") != "reflect_result":
+        event = compact.get("event")
+        if event == "reflect_result":
+            if payload.get("repeated_action_detected"):
+                _add("repeated_action_detected", step)
+            repeat_count = payload.get("repeat_count")
+            if isinstance(repeat_count, int) and repeat_count >= 3:
+                _add("avoid_repeating_ignored", step)
+            liveness = payload.get("trajectory_liveness")
+            state = liveness.get("state") if isinstance(liveness, dict) else liveness
+            if state == "stuck":
+                _add("liveness_stuck", step)
             continue
-        if payload.get("repeated_action_detected"):
-            _add("repeated_action_detected", step)
-        repeat_count = payload.get("repeat_count")
-        if isinstance(repeat_count, int) and repeat_count >= 3:
-            _add("avoid_repeating_ignored", step)
-        liveness = payload.get("trajectory_liveness")
-        state = liveness.get("state") if isinstance(liveness, dict) else liveness
-        if state == "stuck":
-            _add("liveness_stuck", step)
+        if event == "progress_exhaustion_observed":
+            if payload.get("dry"):
+                _add("progress_exhaustion_observed", step)
+            continue
+        if event in {"resource_fuse_exhausted", "progress_evidence_exhausted"}:
+            _add(str(event), step)
     return {signal: sorted(steps) for signal, steps in mapping.items()} if total_steps else {}
 
 
@@ -1514,19 +1522,10 @@ def decision_loop_signals(
     """Decision-loop signals from the run record and per-step reflect payloads."""
 
     signals = set(signal_steps)
-    steps = record.get("steps")
-    max_steps = record.get("max_steps")
-    if (
-        isinstance(steps, int)
-        and isinstance(max_steps, int)
-        and max_steps > 0
-        and steps >= max_steps
-        and not record.get("acceptance_round_count")
-        and record.get("finish_validation_status") is None
-    ):
-        signals.add("budget_exhausted_no_finish")
-    if record.get("finish_source") == "absolute_budget_exhausted":
-        signals.add("absolute_budget_exhausted")
+    if record.get("failure_cause") == "resource_fuse_exhausted":
+        signals.add("resource_fuse_exhausted")
+    if record.get("failure_cause") == "progress_evidence_exhausted":
+        signals.add("progress_evidence_exhausted")
     repeated_failures = record.get("repeated_failure_count")
     if isinstance(repeated_failures, int) and repeated_failures >= 3:
         signals.add("repeated_failure_count")
@@ -1542,7 +1541,7 @@ def grade_confidence(matched: list[str], signal_steps: dict[str, list[str]], ste
     for signal in matched:
         covered.update(signal_steps.get(signal) or [])
     if not covered:
-        # Record-level signals (budget exhaustion, counters) and reflect
+        # Record-level signals (resource/progress exhaustion, counters) and reflect
         # verifier aggregates describe the whole run rather than one step, so
         # absence of per-step evidence is neutral, not weak.
         return "likely"

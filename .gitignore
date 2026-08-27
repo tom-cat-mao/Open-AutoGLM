@@ -57,11 +57,6 @@ screenshots/
 .traces/
 bench_output/
 outputs/
-.trae/skills/**/__pycache__/
-.trae/autopilot/*.json
-.trae/autopilot/*.jsonl
-.trae/ralplan/*.json
-.trae/modes/*.json
 
 # Keep old files during transition
 call_model.py
@@ -82,3 +77,9 @@ models/
 .codex/skills/.system/**
 !.codex/prompts/
 !.codex/prompts/**
+
+# Agent tooling
+.pi/
+.codebuddy/
+Untitled
+openautoglm-vs-deepagents.html
