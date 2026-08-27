@@ -1,12 +1,12 @@
 # Future Roadmap
 
-> 本文档记录 roadmap 的阶段进展与未来方向。硬性执行约束见仓库根 `AGENTS.md`（P0 表）与 `CLAUDE.md`；v2 架构契约以 `docs/refactor-thin-loop-v2.md` 为准；历史批次执行任务书见 `docs/archive/`。
+> 本文档记录 roadmap 的阶段进展与未来方向。硬性执行约束见仓库根 `AGENTS.md`（P0 表）；v2 模块契约以 `phone_agent/v2/` docstring 为准（重构规格文档属工作稿，不入库）；历史批次执行任务书见 `docs/archive/`。
 
 ---
 
 ## Thin-Loop v2（当前架构）
 
-> 绑定契约：`docs/refactor-thin-loop-v2.md`。三个并行 worktree（core / tools / middleware）以该文档为唯一契约。
+> 由三个并行 worktree（core / tools / middleware）按重构规格实施并合并验收。
 
 - **v1 退役**：LangGraph goal→plan→execute→reflect→acceptance 节点图（`phone_agent/graph/`、`phone_agent/agent.py`、`phone_agent/actions/`、`phone_agent/checkpoint/`、旧 `main.py`、`evals/`）已删除。保留并作为库复用的是 `phone_agent/adb`、`device_factory.py`、`phone_agent/grounding`、`phone_agent/config/{policy,app_registry,apps,i18n,timing,redact}.py`。
 - **薄 loop 已落地**：LLM 每步一次调用，经 LangChain `create_agent` 的 tool-calling loop 感知/操作设备；harness 只做工具供给、安全边界、context 卫生与可观测，不做工作流路由。入口改为 `main_v2.py`（task 为位置参数）。
@@ -19,7 +19,7 @@
     - `ModelCallLimitMiddleware(thread_limit=max_model_calls, exit_behavior="end")`——到界优雅停止。
   - **Agent 装配**（`phone_agent/v2/agent.py`）：`ThinPhoneAgent(config, checkpointer=None)` 默认 `MemorySaver`；`run(task, hitl_handler=input)` 返回 `RunResult(success, reason, steps, trace_path)`；结束条件为 `session.finished` | `session.takeover_reason` | 模型无 tool_call | ModelCallLimit。
   - **配置**（`phone_agent/v2/config.py`）：`V2Config` 三级解析 CLI > shell env > `.env` > 默认；保留 `PHONE_AGENT_MEMORY_MODEL` / `PHONE_AGENT_VERIFIER_MODEL`（本轮只读取不实现）。
-- **TaskDoc 任务板已落地**（增量一，契约 `docs/refactor-thin-loop-v2-taskdoc.md`）：goal 与 plan 合为同一文档的两个段落（目标 / 路线 / 关键事实），形态 = state（`PhoneSession.task_doc`）+ 工具写入（`update_task_doc` 是模型唯一写入者）+ `before_model` 渲染钩子。
+- **TaskDoc 任务板已落地**（增量一）：goal 与 plan 合为同一文档的两个段落（目标 / 路线 / 关键事实），形态 = state（`PhoneSession.task_doc`）+ 工具写入（`update_task_doc` 是模型唯一写入者）+ `before_model` 渲染钩子。
   - **播种与写入边界**：run 启动时 harness 播种 `TaskDoc(goal_base=task)`；`goal_base` 只有 harness 能写，模型经 `update_task_doc` 全量替换 items / 追加 amendments / 替换 facts，validate 失败不写入。
   - **渲染钩子**（`phone_agent/v2/middleware/taskdoc.py`）：`TaskDocMiddleware.before_model` 在 messages 尾部注入 `[TASK_DOC]\n<render>` system 消息（pinned，压缩免疫，每轮移除旧块重贴新块）；空文档不注入。
   - **停滞轻推**：连续 `PHONE_AGENT_TASKDOC_NUDGE_STEPS`（默认 5）次模型调用 `session.seen_states` 无新增且仍有 open items 时，在渲染块后追加一次非指导性提示（`session.nudged` 保证每 run 至多一次）；`observe()` 记录 `(current_app, screen_hash)`。
@@ -885,3 +885,19 @@ Grounding: LocateAnything-3B-4bit (MLX) — 已实现，作为 MarkProvider 运�
 | P3 | 技能记忆 | 7 天 | ⭐⭐⭐⭐⭐ | 需要重复任务数据积累 |
 | ❌ | Dreaming | 10+ 天 | — | 无足够会话数据 |
 | ❌ | 多 Agent | 15+ 天 | — | 场景不需要 |
+
+---
+
+## 工具扩展理念（设计共识，未实现）
+
+薄 loop 的能力 = 工具集：**加工具 = 加能力，loop 不改动**。未来扩展遵循契约：
+
+1. 工具返回 `str`，失败返回错误文本不 raise（fail-closed）。
+2. docstring 即文档——模型靠它决定何时调用。
+3. 有设备副作用的执行类工具，结果附 `[OBS]` 观测块。
+4. 元数据声明 `category: actuation|perception|control`、`side_effect`、`sensitive`；
+   `sensitive: true` 的工具调用进入 safety HITL 谓词。
+5. 设备访问只经 `session.device_factory`；坐标换算只在工具内；配置只从 `V2Config` 读。
+
+注册形态（待定）：`ext/` 目录自动发现 + 按名开关配置。
+另一条扩展通道是**知识型扩展**（per-App 记忆文件），与工具扩展分开设计。
