@@ -9,6 +9,7 @@ from langchain_core.runnables import RunnableConfig
 from phone_agent.device_factory import ObservationCaptureError
 from phone_agent.config.policy import (
     DEFAULT_VERIFICATION_POLICY,
+    PROGRESS_CLAIM_GRACE_STEPS,
     STAGE_STALL_RECOMPILE_WINDOWS,
 )
 from phone_agent.graph.context import (
@@ -23,6 +24,7 @@ from phone_agent.graph.context import (
     failure_memory_write_mode,
     get_context_mode,
     normalize_failure_cause,
+    progress_exhaustion,
     sanitize_context_payload,
     repeated_action_key,
     select_reflect_context,
@@ -55,6 +57,7 @@ from phone_agent.graph.goal import (
 from phone_agent.graph.goal_evaluator import _normalize_criterion_name
 from phone_agent.graph import goal_evidence
 from phone_agent.graph.trace import emit_trace
+from phone_agent.graph.resource_fuse import resource_fuse_update
 from phone_agent.graph.verifier import (
     merge_verifier_with_reflection,
     verify_action_outcome,
@@ -1601,6 +1604,77 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
             if repeat_key is not None:
                 repeat_count = consecutive_no_effect_count(tried_actions, repeat_key)
 
+    progress_state = {
+        **state,
+        **context_updates,
+        "goal_evidence_ledger": ledger,
+        "task_plan_status": task_plan_status,
+        "previous_task_plan_status": state.get("task_plan_status"),
+        "step_count": step_count,
+    }
+    exhaustion = progress_exhaustion(progress_state)
+    grace_remaining = int(state.get("progress_claim_grace_steps_remaining") or 0)
+    if exhaustion.get("dry") and grace_remaining > 0:
+        grace_remaining = max(0, grace_remaining - 1)
+    elif not exhaustion.get("dry"):
+        grace_remaining = 0
+    progress_updates: dict[str, Any] = {
+        "progress_exhaustion_streak": int(exhaustion.get("streak") or 0),
+        "progress_declaration_due": bool(exhaustion.get("declaration_due"))
+        or bool(state.get("progress_declaration_due")),
+        "progress_claim_grace_steps_remaining": grace_remaining,
+    }
+    if not exhaustion.get("dry"):
+        progress_updates.update(
+            {
+                "progress_declaration_due": False,
+                "progress_claim_feedback": None,
+                "progress_validation_status": None,
+                "progress_claim_round_count": 0,
+            }
+        )
+    elif (
+        bool(state.get("progress_declaration_due"))
+        and grace_remaining == 0
+        and int(state.get("progress_claim_round_count") or 0) > 0
+    ):
+        progress_updates.update(
+            {
+                "finished": True,
+                "failure_cause": "progress_evidence_exhausted",
+                "progress_validation_status": "exhausted",
+                "action_result": {
+                    "success": False,
+                    "message": "progress evidence exhausted",
+                },
+            }
+        )
+    emit_trace(
+        config,
+        state,
+        "reflect",
+        "progress_exhaustion_observed",
+        {
+            "streak": exhaustion.get("streak"),
+            "dry": exhaustion.get("dry"),
+            "reasons": list(exhaustion.get("reasons") or []),
+            "declaration_due": progress_updates.get("progress_declaration_due"),
+            "grace_steps_remaining": grace_remaining,
+        },
+    )
+    if progress_updates.get("failure_cause") == "progress_evidence_exhausted":
+        emit_trace(
+            config,
+            state,
+            "reflect",
+            "progress_evidence_exhausted",
+            {
+                "streak": exhaustion.get("streak"),
+                "round_count": state.get("progress_claim_round_count"),
+            },
+        )
+    fuse_update = resource_fuse_update({**state, **progress_updates}, config)
+
     emit_trace(
         config,
         state,
@@ -1692,4 +1766,6 @@ def reflect_node(state: "AgentState", config: RunnableConfig) -> dict:
         # acceptance node can set this True, after the goal gate passes.
         "finished": False,
         **context_updates,
+        **progress_updates,
+        **fuse_update,
     }

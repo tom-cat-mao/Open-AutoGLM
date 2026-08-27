@@ -1,6 +1,6 @@
 """Goal/Plan/Validator provenance unification (L1-L4).
 
-Covers the execution doc `docs/execution-provenance-validation.md`:
+Covers the execution doc `docs/archive/execution-provenance-validation.md`:
 
 * L1 compile sufficiency — `parameter_spans` / `parameter_hashes` /
   `parameter_constraint_uncovered`; multi-fragment `_quoted_spans` →

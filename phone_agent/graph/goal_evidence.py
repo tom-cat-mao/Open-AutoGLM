@@ -398,16 +398,23 @@ def model_observation_entry(
     status = str(status or "not_visible")
     if status not in MODEL_OBSERVATION_STATUSES:
         status = "not_visible"
+    redacted_value = (
+        redact_context_text(str(observed_value))[:200]
+        if observed_value is not None
+        else None
+    )
+    value_digest = (
+        hashlib.sha256(redacted_value.encode("utf-8")).hexdigest()[:16]
+        if redacted_value
+        else None
+    )
     return {
         "kind": "model_observation",
         "contract_id": contract_id,
         "criterion": str(criterion or "")[:128],
         "status": status,
-        "observed_value": (
-            redact_context_text(str(observed_value))[:200]
-            if observed_value is not None
-            else None
-        ),
+        "observed_value": redacted_value,
+        "observed_value_digest": value_digest,
         "step": int(step or 0),
         "screen_id": screen_id,
         "observation_epoch": observation_epoch,
@@ -577,6 +584,37 @@ def latest_status_by_criterion(
     return result
 
 
+def latest_value_digest_by_criterion(
+    ledger: list[dict[str, Any]], *, contract_id: str
+) -> dict[str, str]:
+    """Map criterion name -> latest redacted observed-value digest."""
+
+    result: dict[str, str] = {}
+    for entry in ledger:
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("kind") != "model_observation":
+            continue
+        if entry.get("contract_id") != contract_id:
+            continue
+        criterion = str(entry.get("criterion") or "")
+        digest = entry.get("observed_value_digest")
+        if criterion and isinstance(digest, str) and digest:
+            result[criterion] = digest
+    for entry in ledger:
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("kind") != "observation_anchor":
+            continue
+        if entry.get("contract_id") != contract_id:
+            continue
+        criterion = str(entry.get("criterion") or "")
+        digest = entry.get("observed_value_digest")
+        if criterion and isinstance(digest, str) and digest:
+            result[criterion] = digest
+    return result
+
+
 def fresh_observation_count(
     observations: list[dict[str, Any]] | None,
     ledger: list[dict[str, Any]],
@@ -596,6 +634,7 @@ def fresh_observation_count(
     """
 
     previous = latest_status_by_criterion(ledger, contract_id=contract_id)
+    previous_values = latest_value_digest_by_criterion(ledger, contract_id=contract_id)
     count = 0
     for item in observations or []:
         if not isinstance(item, dict):
@@ -604,7 +643,20 @@ def fresh_observation_count(
         if not criterion:
             continue
         status = str(item.get("status") or "not_visible")
-        if previous.get(criterion) != status:
+        observed_value = item.get("observed_value")
+        redacted_value = (
+            redact_context_text(str(observed_value))[:200]
+            if observed_value is not None
+            else None
+        )
+        value_digest = (
+            hashlib.sha256(redacted_value.encode("utf-8")).hexdigest()[:16]
+            if redacted_value
+            else None
+        )
+        if previous.get(criterion) != status or (
+            value_digest and previous_values.get(criterion) != value_digest
+        ):
             count += 1
     return count
 

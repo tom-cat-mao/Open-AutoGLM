@@ -1,6 +1,6 @@
 """D1/D2/D3 + A-lite regression tests: screen identity decoupling.
 
-Covers ``docs/execution-screen-identity-decoupling.md``:
+Covers ``docs/archive/execution-screen-identity-decoupling.md``:
 - D1: final screen_id topology uses base (ax) marks only — provider/locate
   marks never enter screen identity.
 - D2: locate inheritance gate is relaxed for the same physical page (semantic

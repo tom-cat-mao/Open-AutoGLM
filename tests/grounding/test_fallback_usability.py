@@ -1,6 +1,6 @@
 """R1-R4 grounding usability tightening for the fallback provider.
 
-Covers the plan in ``docs/grounding-usability-fix-plan.md``:
+Covers the plan in ``docs/archive/grounding-usability-fix-plan.md``:
 - R1 ``_tokenize_hint`` purification (numeric garbage, single chars, CJK bigrams)
 - R2 significant-term matching in ``_result_usability``
 - R3 ``_is_target_like_mark`` container / pure-display label exclusion

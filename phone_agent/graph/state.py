@@ -57,7 +57,10 @@ class AgentState(TypedDict):
     contract_adequacy_reasons: list[str]  # stable reason codes only
     needs_recompile: bool  # True only when reflect flags stage stall (W2 T6); goal_node recompiles and clears it
     step_count: int  # 当前步数
-    max_steps: int  # 最大步数
+    max_steps: int  # deprecated compatibility input/output; mirrors step_cap
+    step_cap: int  # resource fuse: maximum run steps
+    wall_clock_cap_started_at: Optional[float]  # epoch seconds for wall-clock fuse
+    wall_clock_cap_seconds: Optional[float]  # optional wall-clock fuse duration
     lang: str  # 语言
 
     # === F1 locate tool 预算 ===
@@ -66,13 +69,10 @@ class AgentState(TypedDict):
         str
     ]  # S4: locate_* marks invalidated after a failed tap; filtered from marks_block and rejected by grounding
 
-    # === F2 窗口预算（earned continuation） ===
-    continuation_count: int  # 已授予的续命窗口次数（上限 CONTINUATION_MAX_GRANTS）
-    continuation_last_latch_count: int  # 上一窗口边界时锁存（ever_matched）标准数
-    continuation_last_stage_index: Optional[
-        int
-    ]  # W2 T4: 上一窗口边界时 task_plan 当前阶段序号（无 plan 时 None）
-    absolute_max_steps: int  # 本 run 硬性步数上限（初始窗口 * 3）
+    # === Deprecated eval compatibility counters ===
+    continuation_count: int  # deprecated; always 0 after budget redesign
+    continuation_last_latch_count: int  # deprecated; kept for serde compatibility
+    continuation_last_stage_index: Optional[int]  # deprecated compatibility field
 
     # === 屏幕 ===
     screen_width: int  # 设备屏幕宽度（像素）
@@ -97,6 +97,17 @@ class AgentState(TypedDict):
     progress_note: Optional[
         str
     ]  # P4: 模型一句话自述（上轮完成+下一步意图），下轮 plan 注入“上轮意图”；inject 脱敏后存储
+    progress_claim: Optional[
+        dict
+    ]  # optional model declaration: still working, evidence refs, next actions
+    progress_validation_status: Optional[
+        str
+    ]  # accepted / rejected / missing / exhausted
+    progress_claim_feedback: Optional[dict]  # structured feedback for next plan context
+    progress_exhaustion_streak: int  # consecutive dry evidence windows
+    progress_declaration_due: bool  # plan context must ask for finish/takeover/claim
+    progress_claim_round_count: int  # rejected declaration rounds
+    progress_claim_grace_steps_remaining: int  # grace steps after rejected/missing claim
     action_raw: str  # 模型原始 action 文本
     action_parsed: Optional[dict]  # validated canonical ActionIR
     intent_raw: Optional[
@@ -147,8 +158,7 @@ class AgentState(TypedDict):
     ]  # trace-safe finish claim summary
     finish_source: Optional[
         str
-    ]  # who asked for the acceptance: model_claim / budget_forced
-    budget_acceptance_done: bool  # budget-forced acceptance already ran this run
+    ]  # who asked for the acceptance: model_claim
     finish_validation_status: Optional[str]  # pending / success / failure / unknown
     finish_validation_evidence: Optional[dict]  # trace-safe final goal evidence
     goal_evidence_ledger: list[dict]  # bounded privacy-safe criterion evidence; Reflect-owned

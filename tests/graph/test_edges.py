@@ -146,7 +146,7 @@ def test_after_interrupt_terminal_error_wins_over_pending_execute(base_state) ->
     assert after_interrupt(base_state) == "end"
 
 
-def test_should_continue_ends_on_error_finished_or_max_steps(base_state) -> None:
+def test_should_continue_ends_on_error_finished_or_step_cap(base_state) -> None:
     assert should_continue(base_state) == "replan"
     base_state["finished"] = True
     assert should_continue(base_state) == "end"
@@ -155,13 +155,10 @@ def test_should_continue_ends_on_error_finished_or_max_steps(base_state) -> None
     assert should_continue(base_state) == "end"
     base_state["error"] = None
     base_state["step_count"] = base_state["max_steps"]
-    # 2.1: budget exhaustion with a compiled contract triggers one acceptance.
-    assert should_continue(base_state) == "acceptance"
-    base_state["budget_acceptance_done"] = True
     assert should_continue(base_state) == "end"
 
 
-def test_should_continue_budget_acceptance_requires_compiled_contract(
+def test_should_continue_step_cap_fuse_ignores_contract_status(
     base_state,
 ) -> None:
     base_state["step_count"] = base_state["max_steps"]
@@ -170,7 +167,6 @@ def test_should_continue_budget_acceptance_requires_compiled_contract(
 
     base_state["goal_contract_status"] = "compiled"
     base_state["finished"] = True
-    # Terminal guard still wins over budget acceptance (P0 #5).
     assert should_continue(base_state) == "end"
 
 

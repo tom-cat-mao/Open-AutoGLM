@@ -325,6 +325,10 @@ def run_eval(args: argparse.Namespace) -> dict[str, Any]:
     total_failure_memory_hits = 0
     total_repeated_failures = 0
     total_continuations = 0
+    resource_fuse_exhausted_count = 0
+    total_progress_claims = 0
+    total_progress_claim_accepted = 0
+    total_progress_claim_rejected = 0
     total_locate_uses = 0
     finish_source_counts: dict[str, int] = {}
     verifier_status_counts: dict[str, int] = {}
@@ -344,6 +348,16 @@ def run_eval(args: argparse.Namespace) -> dict[str, Any]:
         total_message_chars_after += int(item.get("message_chars_after") or 0)
         total_failure_memory_hits += int(item.get("failure_memory_hit_count") or 0)
         total_repeated_failures += int(item.get("repeated_failure_count") or 0)
+        resource_fuse_exhausted_count += (
+            1 if item.get("failure_cause") == "resource_fuse_exhausted" else 0
+        )
+        total_progress_claims += int(item.get("progress_claim_count") or 0)
+        total_progress_claim_accepted += int(
+            item.get("progress_claim_accepted") or 0
+        )
+        total_progress_claim_rejected += int(
+            item.get("progress_claim_rejected") or 0
+        )
         for section in item.get("selected_sections") or []:
             section_id = str(section)
             selected_section_counts[section_id] = selected_section_counts.get(section_id, 0) + 1
@@ -380,6 +394,10 @@ def run_eval(args: argparse.Namespace) -> dict[str, Any]:
             "observation_retry_count": total_observation_retries,
             "acceptance_round_count": total_acceptance_rounds,
             "continuation_count": total_continuations,
+            "resource_fuse_exhausted_count": resource_fuse_exhausted_count,
+            "progress_claim_count": total_progress_claims,
+            "progress_claim_accepted": total_progress_claim_accepted,
+            "progress_claim_rejected": total_progress_claim_rejected,
             "locate_count": total_locate_uses,
             "finish_source_counts": finish_source_counts,
             "failure_cause_histogram": failure_cause_histogram,

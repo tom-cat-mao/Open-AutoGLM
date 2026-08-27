@@ -1,4 +1,4 @@
-"""F2 window-budget edge routing (edges stay pure; reads only)."""
+"""Resource-fuse edge routing (edges stay pure; reads only)."""
 
 from phone_agent.graph.edges import after_acceptance, should_continue
 
@@ -9,9 +9,8 @@ def _window_state(**overrides) -> dict:
         "error": None,
         "step_count": 20,
         "max_steps": 20,
+        "step_cap": 20,
         "goal_contract_status": "compiled",
-        "budget_acceptance_done": False,
-        "absolute_max_steps": 60,
         "continuation_count": 0,
         "pending_interrupt": None,
         "observation_retry_count": 0,
@@ -20,23 +19,25 @@ def _window_state(**overrides) -> dict:
     return state
 
 
-def test_after_acceptance_replans_when_grant_grew_the_window() -> None:
-    """After a grant the node wrote max_steps=30 and reset the done flag; the
-    pure edge must route back to planning, not end."""
-    merged = _window_state(max_steps=30, budget_acceptance_done=False)
+def test_after_acceptance_replans_when_fuse_not_hit() -> None:
+    merged = _window_state(step_count=20, max_steps=30, step_cap=30)
 
     assert after_acceptance(merged) == "replan"
 
 
-def test_after_acceptance_ends_without_grant_at_window_end() -> None:
+def test_after_acceptance_ends_at_step_cap() -> None:
     merged = _window_state(step_count=20, max_steps=20)
 
     assert after_acceptance(merged) == "end"
 
 
-def test_after_acceptance_ends_at_absolute_ceiling() -> None:
+def test_after_acceptance_ends_at_wall_clock_cap() -> None:
     merged = _window_state(
-        step_count=60, max_steps=60, absolute_max_steps=60
+        step_count=1,
+        max_steps=20,
+        step_cap=20,
+        wall_clock_cap_started_at=1,
+        wall_clock_cap_seconds=1,
     )
 
     assert after_acceptance(merged) == "end"
@@ -51,43 +52,31 @@ def test_after_acceptance_terminal_guard_wins_first() -> None:
     assert after_acceptance(merged) == "end"
 
 
-def test_should_continue_routes_new_window_to_acceptance_again() -> None:
-    """A granted window resets budget_acceptance_done: at the new window end the
-    run gets a second forced acceptance instead of ending."""
+def test_should_continue_routes_before_fuse_to_replan() -> None:
+    state = _window_state(step_count=29, max_steps=30, step_cap=30)
+
+    assert should_continue(state) == "replan"
+
+
+def test_should_continue_ends_at_step_cap() -> None:
+    state = _window_state(step_count=30, max_steps=30, step_cap=30)
+
+    assert should_continue(state) == "end"
+
+
+def test_should_continue_ends_at_wall_clock_cap() -> None:
     state = _window_state(
-        step_count=30,
-        max_steps=30,
-        budget_acceptance_done=False,
-    )
-
-    assert should_continue(state) == "acceptance"
-
-
-def test_should_continue_ends_when_grant_flag_consumed() -> None:
-    state = _window_state(
-        step_count=30,
-        max_steps=30,
-        budget_acceptance_done=True,
+        step_count=3,
+        max_steps=60,
+        step_cap=60,
+        wall_clock_cap_started_at=1,
+        wall_clock_cap_seconds=1,
     )
 
     assert should_continue(state) == "end"
 
 
-def test_should_continue_absolute_ceiling_still_routes_acceptance() -> None:
-    """At the absolute ceiling (no grant possible) the forced acceptance still
-    fires once; the acceptance node attributes absolute_budget_exhausted."""
-    state = _window_state(
-        step_count=60,
-        max_steps=60,
-        absolute_max_steps=60,
-        budget_acceptance_done=False,
-    )
-
-    assert should_continue(state) == "acceptance"
-
-
-def test_should_continue_p0_guard_wins_over_budget_routes() -> None:
-    """P0 #5: terminal states never route to acceptance, even at the ceiling."""
+def test_should_continue_p0_guard_wins_over_fuse_routes() -> None:
     state = _window_state(step_count=60, max_steps=60, finished=True)
     assert should_continue(state) == "end"
 
@@ -95,15 +84,13 @@ def test_should_continue_p0_guard_wins_over_budget_routes() -> None:
     assert should_continue(state) == "end"
 
 
-def test_should_continue_takeover_survives_budget_routes() -> None:
+def test_should_continue_takeover_survives_before_fuse() -> None:
     state = _window_state(
         step_count=10, max_steps=30, pending_interrupt="takeover"
     )
     assert should_continue(state) == "takeover"
 
 
-def test_should_continue_budget_wins_over_stale_takeover() -> None:
-    """At the window boundary the budget route wins over a stale interrupt;
-    P0 #5 still wins over everything."""
+def test_should_continue_fuse_wins_over_stale_takeover() -> None:
     state = _window_state(step_count=30, max_steps=30, pending_interrupt="takeover")
-    assert should_continue(state) == "acceptance"
+    assert should_continue(state) == "end"

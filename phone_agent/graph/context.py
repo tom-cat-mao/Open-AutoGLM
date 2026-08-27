@@ -9,10 +9,11 @@ from dataclasses import asdict, dataclass
 from typing import Any, Literal
 
 from phone_agent.config.policy import (
-    CONTINUATION_MAX_GRANTS,
-    CONTINUATION_NOVELTY_NEGATION_STREAK,
-    CONTINUATION_WINDOW_STEPS,
     DEFAULT_VERIFICATION_POLICY,
+    PROGRESS_CLAIM_GRACE_STEPS,
+    PROGRESS_CLAIM_MAX_ROUNDS,
+    PROGRESS_EVIDENCE_HORIZON,
+    PROGRESS_EXHAUSTION_TRIGGER,
 )
 
 REPEATED_ACTION_THRESHOLD = int(
@@ -61,6 +62,7 @@ _SECTION_BUDGETS = {
     "goal_agenda": 800,
     "acceptance_rejection": 400,
     "criterion_gap_list": 900,
+    "progress_claim_feedback": 420,
     "last_action_outcome": 900,
     "system_guidance": 160,
 }
@@ -76,6 +78,7 @@ CONTEXT_SECTION_IDS = (
     "gui_memory.task_progress",
     "grounding_observation",
     "task_plan_status",
+    "progress_claim_feedback",
     "system_guidance",
 )
 FAILURE_TAXONOMY = {
@@ -976,7 +979,7 @@ def _criterion_moved_toward_satisfaction(history: list[dict]) -> bool:
 
 
 # ----------------------------------------------------------------------
-# F2 earned-continuation credential (pure; written only by node code)
+# Progress evidence review (pure; written only by node code)
 # ----------------------------------------------------------------------
 
 CRITERION_STATUS_RANK = {
@@ -988,22 +991,6 @@ CRITERION_STATUS_RANK = {
     "unknown": 1,
     "matched": 2,
 }
-
-
-@dataclass(frozen=True)
-class ContinuationCredential:
-    """Pure decision about whether a rejected budget window earns another one."""
-
-    granted: bool
-    branches: tuple[str, ...] = ()
-    reason: str = ""
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "granted": self.granted,
-            "branches": list(self.branches),
-            "reason": self.reason,
-        }
 
 
 def _ledger_snapshots(
@@ -1021,6 +1008,11 @@ def _ledger_snapshots(
             index[key] = len(snapshots)
             snapshots.append({"per_criterion": {}})
         per_criterion = snapshots[index[key]].get("per_criterion")
+        if item.get("kind") == "model_observation":
+            criterion = str(item.get("criterion") or "")
+            if criterion:
+                per_criterion[criterion] = str(item.get("status") or "unknown")
+            continue
         criterion_id = str(item.get("criterion_id") or "")
         if criterion_id:
             per_criterion[criterion_id] = str(item.get("status") or "unknown")
@@ -1034,15 +1026,10 @@ def _criterion_rank(status: Any) -> int:
 def _criterion_moved_up_in_window(
     ledger: list[dict[str, Any]], *, contract_id: str
 ) -> bool:
-    """Branch 1: any criterion's rank rose across the recent window.
-
-    Compares the LATEST snapshot against the EARLIEST snapshot in the window,
-    so a pure A-B-A-B oscillation (start rank == end rank) never earns a
-    continuation — only a net upward movement does.
-    """
+    """Whether any criterion rank rose net across the recent evidence horizon."""
 
     snapshots = _ledger_snapshots(
-        ledger, contract_id=contract_id, limit=CONTINUATION_WINDOW_STEPS
+        ledger, contract_id=contract_id, limit=PROGRESS_EVIDENCE_HORIZON
     )
     if len(snapshots) < 2:
         return False
@@ -1075,10 +1062,6 @@ def _ever_matched_latch(
     return latched
 
 
-# Auto-verification kinds are satisfiable by deterministic/恒真 checks (e.g.
-# app foreground) regardless of real task progress. H5: continuation branches 2
-# and 3 may only count judge-type criteria (vlm_judge / non-auto, incl.
-# external_probe) so an always-true auto standard cannot self-grant a window.
 AUTO_VERIFICATION_KINDS = frozenset(
     {
         "accessibility_text_match",
@@ -1132,12 +1115,7 @@ def _goal_contract_view(state: dict[str, Any]) -> tuple[str, list[tuple[str, str
 
 
 def _latched_criterion_count(state: dict[str, Any]) -> int:
-    """Count goal criteria currently pinned by the ever-matched latch.
-
-    H5: only judge-type criteria count toward a continuation latch — an auto
-    standard (e.g. app foreground) that matches regardless of task progress
-    must not grant a new window on its own.
-    """
+    """Count judge-type goal criteria currently pinned by the ever-matched latch."""
 
     contract_id, criteria = _goal_contract_view(state)
     ledger = list(state.get("goal_evidence_ledger") or [])
@@ -1153,123 +1131,276 @@ def _latched_criterion_count(state: dict[str, Any]) -> int:
 
 
 def latched_criterion_count(state: dict[str, Any]) -> int:
-    """Public alias: count ever-matched latched criteria for window bookkeeping."""
+    """Public alias: count judge-type ever-matched latched criteria."""
 
     return _latched_criterion_count(state)
 
 
-def _judge_near_miss(state: dict[str, Any]) -> bool:
-    """Branch 3: the last acceptance's judge named judge-type evidence ≥ 1.
+def _latest_model_observation_steps(ledger: list[dict[str, Any]]) -> set[int]:
+    return {
+        int(item.get("step") or 0)
+        for item in ledger
+        if isinstance(item, dict) and item.get("kind") == "model_observation"
+    }
 
-    H5: only matched evidence whose criterion is judge-type in the contract
-    counts — auto standards (app_or_activity_match etc.) are excluded, so a
-    window cannot be earned by an always-true app-foreground standard.
-    """
 
-    evidence = state.get("finish_validation_evidence")
-    if not isinstance(evidence, dict):
-        return False
-    matched = evidence.get("matched") or evidence.get("matched_terminal_evidence")
-    if not isinstance(matched, list) or not matched:
-        return False
+def _model_value_digest_changed_in_window(
+    ledger: list[dict[str, Any]], *, contract_id: str, horizon: int
+) -> bool:
+    by_criterion: dict[str, list[dict[str, Any]]] = {}
+    for item in ledger:
+        if not isinstance(item, dict):
+            continue
+        if item.get("kind") != "model_observation" or item.get("contract_id") != contract_id:
+            continue
+        criterion = str(item.get("criterion") or "")
+        if criterion:
+            by_criterion.setdefault(criterion, []).append(item)
+    for entries in by_criterion.values():
+        recent = entries[-max(1, int(horizon)) :]
+        digests = [
+            item.get("observed_value_digest")
+            for item in recent
+            if item.get("observed_value_digest")
+        ]
+        if len(digests) >= 2 and digests[-1] != digests[0]:
+            return True
+    return False
+
+
+def _new_judge_latch_in_window(
+    state: dict[str, Any], ledger: list[dict[str, Any]], *, contract_id: str, horizon: int
+) -> bool:
+    cutoff = _cutoff_step(ledger, horizon=horizon)
     _, criteria = _goal_contract_view(state)
     judge_names = {
         name for name, verification in criteria if _criterion_is_judge_kind(verification)
     }
-    if not judge_names:
+    for item in ledger:
+        if not isinstance(item, dict) or item.get("contract_id") != contract_id:
+            continue
+        criterion = str(item.get("criterion_id") or item.get("criterion") or "")
+        if criterion not in judge_names:
+            continue
+        if item.get("target_app_entered") is not True:
+            continue
+        if str(item.get("status") or "") != "matched":
+            continue
+        if int(item.get("step") or item.get("observation_epoch") or 0) >= cutoff:
+            return True
+    return False
+
+
+def _stage_advanced_between(previous_status: Any, current_status: Any) -> bool:
+    if not isinstance(previous_status, dict) or not isinstance(current_status, dict):
         return False
-    return any(str(name) in judge_names for name in matched)
-
-
-def _novelty_streak(state: dict[str, Any]) -> int:
-    progress = (state.get("gui_memory") or {}).get("task_progress") or {}
-    if not isinstance(progress, dict):
-        return 0
-    try:
-        return int(progress.get("novelty_streak") or 0)
-    except (TypeError, ValueError):
-        return 0
-
-
-def _stage_advanced(state: dict[str, Any]) -> bool:
-    """Branch 4 (W2 T4): the current stage advanced past the window snapshot.
-
-    Compares ``task_plan_status.current_stage_index`` against the snapshot
-    taken at the last window boundary (``continuation_last_stage_index``,
-    written by the acceptance node). With no task plan (status missing) the
-    branch is always False; a ``None`` current index (every stage satisfied)
-    counts as having advanced past the last stage.
-    """
-
-    plan_status = state.get("task_plan_status")
-    if not isinstance(plan_status, dict):
-        return False
-    previous = state.get("continuation_last_stage_index")
-    if not isinstance(previous, int):
-        return False
-    current = plan_status.get("current_stage_index")
-    if current is None:
-        return True
-    if not isinstance(current, int):
-        return False
-    return current > previous
-
-
-def continuation_credential(state: dict[str, Any]) -> ContinuationCredential:
-    """Decide whether a rejected budget-forced acceptance earns another window.
-
-    Pure function of state; the caller (acceptance node) writes the outcome.
-    Branches:
-    1. criterion movement — any criterion status rank rose across the last
-       ``CONTINUATION_WINDOW_STEPS`` observations (net, so oscillation does not
-       grant);
-    2. new latch — the ever-matched milestone count grew since the previous
-       window boundary (Goal facts; exempt from novelty negation); H5: only
-       judge-type criteria count — auto standards (app_or_activity_match etc.)
-       are excluded;
-    3. judge near-miss — the forced acceptance produced judge-type named
-       evidence or at least one hard confirm (H5: auto-standard evidence does
-       not count);
-    4. stage_advance (W2 T4) — the task_plan's current stage advanced past the
-       window-boundary snapshot; with no task plan this branch is always False
-       and is also exempt from novelty negation (typed plan progress is strong
-       movement evidence).
-    Negation: with no branch 1/3, a novelty streak >= the negation threshold
-    (revisiting the same states) denies; branches 2 and 4 are never negated.
-    """
-
-    contract_id, _ = _goal_contract_view(state)
-    ledger = list(state.get("goal_evidence_ledger") or [])
-
-    branches: list[str] = []
-    if _criterion_moved_up_in_window(ledger, contract_id=contract_id):
-        branches.append("criterion_movement")
-    current_latch = _latched_criterion_count(state)
-    previous_latch = int(state.get("continuation_last_latch_count") or 0)
-    if current_latch > previous_latch:
-        branches.append("new_latch")
-    if _judge_near_miss(state):
-        branches.append("judge_near_miss")
-    if _stage_advanced(state):
-        branches.append("stage_advance")
-
-    if branches:
-        return ContinuationCredential(
-            granted=True,
-            branches=tuple(branches),
-            reason=";".join(branches),
-        )
-    if _novelty_streak(state) >= CONTINUATION_NOVELTY_NEGATION_STREAK:
-        return ContinuationCredential(
-            granted=False,
-            branches=(),
-            reason="novelty_exhausted",
-        )
-    return ContinuationCredential(
-        granted=False,
-        branches=(),
-        reason="no_progress_evidence",
+    return _stage_index_advanced(
+        previous_status.get("current_stage_index"),
+        current_status.get("current_stage_index"),
     )
+
+
+def _effect_event_in_window(
+    ledger: list[dict[str, Any]], *, contract_id: str, horizon: int
+) -> bool:
+    cutoff = _cutoff_step(ledger, horizon=horizon)
+    for item in ledger:
+        if not isinstance(item, dict):
+            continue
+        if item.get("kind") != "effect_event" or item.get("contract_id") != contract_id:
+            continue
+        if int(item.get("step") or 0) >= cutoff:
+            return True
+    return False
+
+
+def _cutoff_step(ledger: list[dict[str, Any]], *, horizon: int) -> int:
+    steps = [
+        int(item.get("step") or item.get("observation_epoch") or 0)
+        for item in ledger
+        if isinstance(item, dict)
+    ]
+    if not steps:
+        return 0
+    return max(0, max(steps) - max(1, int(horizon)) + 1)
+
+
+def _latest_tried_action(state: dict[str, Any]) -> dict[str, Any] | None:
+    tried = ((state.get("gui_memory") or {}).get("tried_actions") or [])
+    if tried and isinstance(tried[-1], dict):
+        return tried[-1]
+    return None
+
+
+def _latest_state_is_novel(state: dict[str, Any]) -> bool:
+    stream = ((state.get("gui_memory") or {}).get("screen_transition_stream") or [])
+    if len(stream) < 2 or not isinstance(stream[-1], dict):
+        return bool(stream)
+    latest = (
+        stream[-1].get("surface"),
+        stream[-1].get("semantic_screen_id") or stream[-1].get("screen_id"),
+    )
+    previous = {
+        (item.get("surface"), item.get("semantic_screen_id") or item.get("screen_id"))
+        for item in stream[:-1]
+        if isinstance(item, dict)
+    }
+    return latest not in previous
+
+
+def progress_exhaustion(state: dict[str, Any]) -> dict[str, Any]:
+    """Pure detector for evidence dryness.
+
+    It reads only ledger/history/gui-memory structure, never the single-step
+    reflection verdict as a progress authority. A novel screen can prevent the
+    repeated-state subreason, but cannot by itself make the step productive.
+    """
+
+    ledger = list(state.get("goal_evidence_ledger") or [])
+    contract_id, _ = _goal_contract_view(state)
+    latest_step = int(state.get("step_count") or 0)
+    if not contract_id:
+        return {"streak": 0, "dry": False, "reasons": ["no_contract"]}
+
+    reasons: list[str] = []
+    current_fresh = latest_step in _latest_model_observation_steps(ledger)
+    if current_fresh or _model_value_digest_changed_in_window(
+        ledger, contract_id=contract_id, horizon=1
+    ):
+        reasons.append("fresh_observation")
+    if _criterion_moved_up_in_window(ledger, contract_id=contract_id):
+        reasons.append("criterion_rank_up")
+    if _new_judge_latch_in_window(
+        state, ledger, contract_id=contract_id, horizon=PROGRESS_EVIDENCE_HORIZON
+    ):
+        reasons.append("new_judge_latch")
+    if _stage_advanced_between(
+        state.get("previous_task_plan_status"), state.get("task_plan_status")
+    ):
+        reasons.append("stage_advance")
+    if _effect_event_in_window(ledger, contract_id=contract_id, horizon=1):
+        reasons.append("effect_event")
+
+    latest_action = _latest_tried_action(state)
+    if latest_action is not None and bool(latest_action.get("had_effect")):
+        reasons.append("action_effect")
+
+    novel_state = _latest_state_is_novel(state)
+    if not novel_state:
+        reasons.append("repeated_state")
+
+    dry = not any(
+        reason in reasons
+        for reason in {
+            "fresh_observation",
+            "criterion_rank_up",
+            "new_judge_latch",
+            "stage_advance",
+            "effect_event",
+            "action_effect",
+        }
+    )
+    previous = int(state.get("progress_exhaustion_streak") or 0)
+    streak = previous + 1 if dry else 0
+    dry_reasons = ["no_progress_evidence"]
+    if "repeated_state" in reasons:
+        dry_reasons.append("repeated_state")
+    elif novel_state:
+        dry_reasons.append("novel_state_without_goal_evidence")
+    return {
+        "streak": streak,
+        "dry": dry,
+        "reasons": dry_reasons if dry else reasons,
+        "declaration_due": streak >= PROGRESS_EXHAUSTION_TRIGGER,
+    }
+
+
+def _claim_present(claim: Any) -> bool:
+    if not isinstance(claim, dict):
+        return False
+    return any(
+        claim.get(key)
+        for key in ("summary", "evidence_refs", "next_actions")
+    )
+
+
+def validate_progress_claim(
+    state: dict[str, Any], claim: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    """Validate a model progress declaration against structured evidence only."""
+
+    claim = claim if claim is not None else state.get("progress_claim")
+    if not _claim_present(claim):
+        return {
+            "status": "rejected",
+            "missing": ["progress_claim"],
+            "reason": "empty_claim",
+        }
+    ledger = list(state.get("goal_evidence_ledger") or [])
+    contract_id, _ = _goal_contract_view(state)
+    if not contract_id:
+        return {
+            "status": "rejected",
+            "missing": ["goal_contract"],
+            "reason": "no_contract",
+        }
+
+    evidence: list[str] = []
+    if _criterion_moved_up_in_window(ledger, contract_id=contract_id):
+        evidence.append("criterion_rank_up")
+    if _new_judge_latch_in_window(
+        state, ledger, contract_id=contract_id, horizon=PROGRESS_EVIDENCE_HORIZON
+    ):
+        evidence.append("new_judge_latch")
+    if _model_value_digest_changed_in_window(
+        ledger, contract_id=contract_id, horizon=PROGRESS_EVIDENCE_HORIZON
+    ):
+        evidence.append("fresh_observation_value")
+    if _effect_event_in_window(
+        ledger, contract_id=contract_id, horizon=PROGRESS_EVIDENCE_HORIZON
+    ):
+        evidence.append("effect_event")
+    if _stage_advanced_between(
+        state.get("previous_task_plan_status"), state.get("task_plan_status")
+    ):
+        evidence.append("stage_advance")
+
+    if evidence:
+        return {"status": "accepted", "missing": [], "reason": ";".join(evidence)}
+    return {
+        "status": "rejected",
+        "missing": ["strong_progress_evidence"],
+        "reason": "no_strong_evidence",
+    }
+
+
+def progress_claim_rejection_update(state: dict[str, Any], validation: dict[str, Any]) -> dict[str, Any]:
+    rounds = int(state.get("progress_claim_round_count") or 0) + 1
+    exhausted = rounds >= PROGRESS_CLAIM_MAX_ROUNDS
+    feedback = {
+        "missing": list(validation.get("missing") or ["strong_progress_evidence"]),
+        "reason": str(validation.get("reason") or "no_strong_evidence"),
+        "grace_steps": PROGRESS_CLAIM_GRACE_STEPS,
+    }
+    update: dict[str, Any] = {
+        "progress_validation_status": "rejected",
+        "progress_claim_feedback": feedback,
+        "progress_claim_round_count": rounds,
+        "progress_claim_grace_steps_remaining": PROGRESS_CLAIM_GRACE_STEPS,
+    }
+    if exhausted:
+        update.update(
+            {
+                "finished": True,
+                "failure_cause": "progress_evidence_exhausted",
+                "progress_validation_status": "exhausted",
+                "action_result": {
+                    "success": False,
+                    "message": "progress evidence exhausted",
+                },
+            }
+        )
+    return update
 
 
 def stage_stall_recompile(
@@ -1326,48 +1457,62 @@ def _stage_index_advanced(previous: Any, current: Any) -> bool:
 
 
 def build_budget_section(state: dict[str, Any], lang: str = "cn") -> str:
-    """Render the plan-block budget section (F2.2).
+    """Render dynamic resource-fuse disclosure for the plan context block."""
 
-    Dynamic context only — never system/goal blocks (P5 prefix-cache). Carries
-    the three-piece message: remaining steps in this window, continuations
-    granted, and "exhaustion != failure". The locate budget line was removed:
-    it is a pure runaway fuse (20 per run) that normal runs never
-    hit, and the old per-run countdown actively induced abandonment (稀缺暗示).
-    """
-
-    max_steps = int(state.get("max_steps") or 0)
+    max_steps = int(state.get("step_cap") or state.get("max_steps") or 0)
     step_count = int(state.get("step_count") or 0)
     if max_steps <= 0:
         return ""
     remaining = max(0, max_steps - step_count)
-    grants = int(state.get("continuation_count") or 0)
-    if lang == "en":
-        lines = [
-            f"Budget: {remaining}/{max_steps} steps left in this window; "
-            f"continuations granted {grants}/{CONTINUATION_MAX_GRANTS}."
-        ]
-        lines.append(
-            "Budget exhaustion is NOT failure — it only triggers a system "
-            "acceptance check. If the goal is actually done, finish now and "
-            "name the satisfied success criteria; if the task is structurally "
-            "infeasible, take_over and explain."
+    ratio = remaining / max_steps if max_steps else 1.0
+    exhaustion_streak = int(state.get("progress_exhaustion_streak") or 0)
+    due = bool(state.get("progress_declaration_due")) or remaining <= 2
+    liveness = (
+        ((state.get("gui_memory") or {}).get("task_progress") or {}).get(
+            "trajectory_liveness"
         )
-        if remaining <= max(1, max_steps // 4):
+    )
+    if lang == "en":
+        lines = [f"Budget: used {step_count}/{max_steps} steps, {remaining} left."]
+        if ratio <= 0.5:
             lines.append(
-                "This window is nearly exhausted: spend the remaining steps on "
-                "the most decisive action."
+                "When steps run out this run stops as a resource limit, not a task "
+                "judgement. If the task is actually complete, finish now and name "
+                "the success criteria."
+            )
+        if ratio <= 0.25 or str(liveness) == "stuck":
+            lines.append(
+                f"Trajectory hint: recent evidence is stalled "
+                f"(exhaustion_streak={exhaustion_streak}); judge from the screenshot "
+                "and change target or method if stuck."
+            )
+        if due:
+            lines.append(
+                "The system has observed multiple steps without task-progress "
+                "evidence. In this output declare: (a) complete -> finish; "
+                "(b) unable -> take_over; or (c) still advancing -> include "
+                "progress_claim with what is advancing, checkable evidence, and "
+                "1-3 decisive next actions. Self-report alone is not evidence."
             )
     else:
-        lines = [
-            f"预算：本窗口剩余 {remaining}/{max_steps} 步；"
-            f"已续命 {grants}/{CONTINUATION_MAX_GRANTS} 次。"
-        ]
-        lines.append(
-            "预算耗尽≠失败：它只是触发系统验收；若目标已实际完成请立即 "
-            "finish 并点名满足的成功标准；若结构性无法完成请 take_over 说明。"
-        )
-        if remaining <= max(1, max_steps // 4):
-            lines.append("本窗口即将耗尽：请把剩余步骤用在最有决定性的一步上。")
+        lines = [f"预算：已用 {step_count}/{max_steps} 步，剩余 {remaining} 步。"]
+        if ratio <= 0.5:
+            lines.append(
+                "步数用完后本次运行会停止（资源上限，不代表任务失败）。"
+                "若任务实际已完成，请及时 finish 并点名成功标准。"
+            )
+        if ratio <= 0.25 or str(liveness) == "stuck":
+            lines.append(
+                f"轨迹提示：最近证据停滞（exhaustion_streak={exhaustion_streak}）。"
+                "这只是提示，请对照截图自行判断；若确卡住，换目标/换操作方式/返回上级。"
+            )
+        if due:
+            lines.append(
+                "系统已连续多步未观察到任务进展证据。请在本次输出中表态："
+                "(a) 已完成 -> finish；(b) 无法完成 -> take_over；"
+                "(c) 仍在推进 -> 附 progress_claim（说明推进内容+可核对的证据+"
+                "接下来 1-3 个决定性动作）。自述不证明进展，系统只认账本证据。"
+            )
     return " ".join(lines)
 
 
@@ -1821,6 +1966,9 @@ def build_plan_context_block(
     acceptance_rejection = _render_acceptance_rejection(
         state, lang=lang, consumer=consumer, task_context=task_context
     )
+    progress_claim_feedback = _render_progress_claim_feedback(
+        state, lang=lang, consumer=consumer, task_context=task_context
+    )
     criterion_gap_list = _render_criterion_gap_list(
         state, lang=lang, consumer=consumer, task_context=task_context
     )
@@ -1862,6 +2010,11 @@ def build_plan_context_block(
                 "acceptance_rejection_chars",
                 _SECTION_BUDGETS["acceptance_rejection"],
             ),
+        ),
+        (
+            "progress_claim_feedback",
+            progress_claim_feedback,
+            _SECTION_BUDGETS["progress_claim_feedback"],
         ),
         ("budget", budget_section, None),
         ("liveness_note", liveness_note, None),
@@ -2202,6 +2355,51 @@ def _render_acceptance_rejection(
         return ""
     title = "Acceptance rejection guidance (evidence-driven, do not repeat the same claim)" if lang == "en" else "验收拒绝指引（按证据取证，勿重复同一条 finish 声明）"
     return _RenderedContextSection("\n".join(["acceptance_rejection:", title, *rows]))
+
+
+def _render_progress_claim_feedback(
+    state: dict[str, Any],
+    *,
+    lang: str,
+    consumer: ContextConsumer,
+    task_context: str | None,
+) -> _RenderedContextSection | str:
+    feedback = state.get("progress_claim_feedback")
+    if not isinstance(feedback, dict):
+        return ""
+    missing = feedback.get("missing")
+    if not isinstance(missing, list):
+        missing = []
+    safe_missing = [
+        str(
+            sanitize_context_payload(
+                str(item), consumer=consumer, task_context=task_context
+            )
+        )[:80]
+        for item in missing
+        if str(item).strip()
+    ]
+    reason = sanitize_context_payload(
+        str(feedback.get("reason") or ""),
+        consumer=consumer,
+        task_context=task_context,
+    )
+    grace = int(feedback.get("grace_steps") or 0)
+    if lang == "en":
+        title = "Progress claim rejected: provide ledger-backed progress evidence or change strategy."
+        rows = [
+            f"missing={safe_missing or ['strong_progress_evidence']}",
+            f"reason={reason or 'no_strong_evidence'}",
+            f"grace_steps={grace}",
+        ]
+    else:
+        title = "进展声明被驳回：请提供账本可核对的进展证据，或切换策略。"
+        rows = [
+            f"缺失={safe_missing or ['strong_progress_evidence']}",
+            f"原因={reason or 'no_strong_evidence'}",
+            f"宽限步数={grace}",
+        ]
+    return _RenderedContextSection("\n".join(["progress_claim_feedback:", title, *rows]))
 
 
 def _criterion_count_for_verdict_budget(state: dict[str, Any], verdicts: dict) -> int:
@@ -3102,6 +3300,8 @@ def _section_has_value(state: dict[str, Any], section: str) -> bool:
             isinstance(state.get("task_plan_status"), dict)
             and _task_plan_stages(state)
         )
+    if section == "progress_claim_feedback":
+        return isinstance(state.get("progress_claim_feedback"), dict)
     if section == "system_guidance":
         return bool(
             isinstance(state.get("mechanism_suggestion"), str)

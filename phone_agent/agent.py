@@ -25,7 +25,6 @@ from phone_agent.graph.state import AgentState
 from phone_agent.graph.trace import JsonlTraceWriter
 from phone_agent.graph.runtime_goal import RuntimeGoalContext
 from phone_agent.graph.runtime_app_learning import RuntimeAppLearningContext
-from phone_agent.config.policy import absolute_max_steps
 from phone_agent.grounding.factory import DEFAULT_GROUNDING_PROVIDER_NAME
 
 
@@ -34,6 +33,8 @@ class AgentConfig:
     """Configuration for the PhoneAgent."""
 
     max_steps: int = 100
+    step_cap: int | None = None
+    wall_clock_cap_seconds: float | None = None
     device_id: str | None = None
     lang: str = "cn"
     system_prompt: str | None = None
@@ -76,6 +77,13 @@ class AgentConfig:
     whole_screen_fact_extractor: Any | None = None
 
     def __post_init__(self):
+        if self.step_cap is None:
+            self.step_cap = int(self.max_steps or 100)
+        else:
+            self.step_cap = int(self.step_cap or 100)
+            self.max_steps = self.step_cap
+        if self.wall_clock_cap_seconds is not None:
+            self.wall_clock_cap_seconds = float(self.wall_clock_cap_seconds)
         self.context_mode = normalize_context_mode(self.context_mode)
         self.prompt_version = get_prompt_version(self.prompt_version)
 
@@ -110,6 +118,9 @@ class RunResult:
     acceptance_round_count: int = 0
     locate_count: int = 0
     continuation_count: int = 0
+    progress_claim_count: int = 0
+    progress_claim_accepted: int = 0
+    progress_claim_rejected: int = 0
     finish_source: str | None = None
     context_mode: str = DEFAULT_CONTEXT_MODE
     context_strategy: str = "unknown"
@@ -146,6 +157,19 @@ class RunResult:
     def to_dict(self) -> dict[str, Any]:
         """Serialize the result to a JSON-friendly dictionary."""
         return asdict(self)
+
+
+def _final_message_from_state(state: dict[str, Any]) -> str:
+    if state.get("finished"):
+        return "Task completed"
+    cause = state.get("failure_cause")
+    if cause == "resource_fuse_exhausted":
+        return "Run stopped: resource fuse exhausted"
+    if cause == "progress_evidence_exhausted":
+        return "Run stopped: progress evidence exhausted"
+    if state.get("error"):
+        return str(state.get("error"))
+    return "Run stopped before task completion"
 
 
 def interrupt_payload(
@@ -298,7 +322,7 @@ class PhoneAgent:
         result = self.run_structured(task)
         if result.error:
             return f"Error: {result.error}"
-        return result.final_message or "Max steps reached"
+        return result.final_message or _final_message_from_state(result.to_dict())
 
     def run_structured(self, task: str) -> RunResult:
         """Run the agent and return structured metrics for eval/trace consumers.
@@ -375,7 +399,7 @@ class PhoneAgent:
         # checkpointer (verified on langgraph 1.2.2) — the GraphInterrupt
         # catch above only fires on older versions. Without this check the
         # real batch path fell through to _state_to_run_result and misreported
-        # the HITL stop as a "Max steps reached" run (finished=False,
+        # the HITL stop as a generic unfinished run (finished=False,
         # hitl_count=0, no run_interrupted trace). Attribute it exactly like
         # the exception path: clean terminal, never run_error.
         pending = extract_interrupt(result)
@@ -619,14 +643,16 @@ class PhoneAgent:
             "needs_recompile": False,
             "messages": [],
             "step_count": 0,
-            "max_steps": self.agent_config.max_steps,
+            "max_steps": self.agent_config.step_cap,
+            "step_cap": self.agent_config.step_cap,
+            "wall_clock_cap_started_at": time.time(),
+            "wall_clock_cap_seconds": self.agent_config.wall_clock_cap_seconds,
             "lang": self.agent_config.lang,
             "locate_count": 0,
             "invalidated_mark_ids": [],
             "continuation_count": 0,
             "continuation_last_latch_count": 0,
             "continuation_last_stage_index": None,
-            "absolute_max_steps": absolute_max_steps(self.agent_config.max_steps),
             "screen_width": screenshot.width,
             "screen_height": screenshot.height,
             "screenshot_b64": None,
@@ -637,6 +663,13 @@ class PhoneAgent:
             "mark_registry": None,
             "thinking": "",
             "progress_note": None,
+            "progress_claim": None,
+            "progress_validation_status": None,
+            "progress_claim_feedback": None,
+            "progress_exhaustion_streak": 0,
+            "progress_declaration_due": False,
+            "progress_claim_round_count": 0,
+            "progress_claim_grace_steps_remaining": 0,
             "action_raw": "",
             "action_parsed": None,
             "intent_raw": None,
@@ -664,7 +697,6 @@ class PhoneAgent:
             "pending_finish": False,
             "finish_claim": None,
             "finish_source": None,
-            "budget_acceptance_done": False,
             "finish_validation_status": None,
             "finish_validation_evidence": None,
             "goal_evidence_ledger": [],
@@ -796,9 +828,7 @@ class PhoneAgent:
         """Convert final graph state into RunResult."""
         action_result = state.get("action_result") or {}
         error = state.get("error")
-        final_message = action_result.get("message") or (
-            "Task completed" if state.get("finished") else "Max steps reached"
-        )
+        final_message = action_result.get("message") or _final_message_from_state(state)
         success = (
             bool(state.get("finished"))
             and not error
@@ -825,6 +855,12 @@ class PhoneAgent:
             acceptance_round_count=int(state.get("acceptance_round_count") or 0),
             locate_count=int(state.get("locate_count") or 0),
             continuation_count=int(state.get("continuation_count") or 0),
+            progress_claim_count=int(state.get("progress_claim_round_count") or 0)
+            + (1 if state.get("progress_validation_status") == "accepted" else 0),
+            progress_claim_accepted=(
+                1 if state.get("progress_validation_status") == "accepted" else 0
+            ),
+            progress_claim_rejected=int(state.get("progress_claim_round_count") or 0),
             finish_source=state.get("finish_source"),
             verifier_status=state.get("verifier_status"),
             verifier_failure_cause=state.get("verifier_failure_cause"),

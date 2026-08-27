@@ -1,7 +1,7 @@
 """J-batch integration: producer-written guidance fields must render in plan context.
 
 J1 (producers: plan/acceptance) and J2 (renderer: context.py) were built in
-isolation against docs/execution-j-guidance-contract.md. These tests wire the
+isolation against docs/archive/execution-j-guidance-contract.md. These tests wire the
 real producer output into the real renderer — no fake shapes on either side.
 """
 

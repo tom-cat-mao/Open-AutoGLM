@@ -4,6 +4,7 @@ from typing import Literal
 
 from phone_agent.actions.capability import get_tool_capability
 from phone_agent.config.policy import DEFAULT_VERIFICATION_POLICY
+from phone_agent.graph.resource_fuse import resource_fuse_exhausted
 from phone_agent.graph.state import AgentState
 
 OBSERVATION_RETRY_LIMIT = int(
@@ -21,9 +22,11 @@ def after_goal(state: AgentState) -> Literal["plan", "end", "takeover"]:
     return "plan"
 
 
-def after_plan(state: AgentState) -> Literal["execute", "replan"]:
+def after_plan(state: AgentState) -> Literal["execute", "replan", "end"]:
     """Route validation/adapter guidance replans without executing a null action."""
 
+    if state.get("finished") or state.get("error"):
+        return "end"
     failure = state.get("parse_failure")
     if (
         not state.get("finished")
@@ -45,12 +48,7 @@ def should_continue(
 
     Routes:
     - "end" if finished or errored — always wins (P0 #5)
-    - "acceptance" once when the step budget is exhausted and the goal
-      contract was compiled but never validated (budget-forced acceptance,
-      model-delegation refactor 2.1). The acceptance node itself sets
-      ``budget_acceptance_done`` so this fires at most once per run; if the
-      forced claim is rejected, ``after_acceptance`` still routes to "end"
-      at max_steps, so this never loops.
+    - "end" if a user-domain resource fuse is exhausted
     - "takeover" if reflect requested a takeover interrupt, or observation
       infrastructure failures exceeded the retry limit
     - "replan" otherwise (route to goal → plan; goal_node no-ops when the
@@ -61,12 +59,7 @@ def should_continue(
         return "end"
     if state.get("error"):
         return "end"
-    if state["step_count"] >= state["max_steps"]:
-        if (
-            state.get("goal_contract_status") == "compiled"
-            and not state.get("budget_acceptance_done")
-        ):
-            return "acceptance"
+    if resource_fuse_exhausted(state):
         return "end"
     if state.get("pending_interrupt") == "takeover":
         return "takeover"
@@ -165,7 +158,7 @@ def after_acceptance(state: AgentState) -> Literal["replan", "takeover", "end"]:
     """
     if state.get("finished") or state.get("error"):
         return "end"
-    if state["step_count"] >= state["max_steps"]:
+    if resource_fuse_exhausted(state):
         return "end"
     if state.get("pending_interrupt") == "takeover":
         return "takeover"

@@ -12,7 +12,7 @@ import unicodedata
 SafetyRoute = Literal["confirm", "takeover"]
 
 # ---------------------------------------------------------------------------
-# Run-budget constants (F1 locate tool / F2 earned continuation)
+# Run resource fuses and progress evidence review
 # ---------------------------------------------------------------------------
 
 # F1: how many locate actions may run per run, and how many locate marks may
@@ -79,17 +79,12 @@ LOCATE_SCOPE_PADDING_RATIO = 0.05
 # jitter, never an independent screen-identity oracle.
 LOCATE_INHERIT_PHASH_MAX_DISTANCE = 8
 
-# F2: window-budget continuation constants. `max_steps` is the current window
-# size; a rejected budget-forced acceptance may earn one more window of
-# CONTINUATION_GRANT_STEPS steps (up to CONTINUATION_MAX_GRANTS times).
-# CONTINUATION_WINDOW_STEPS bounds the credential's criterion-movement lookback
-# and CONTINUATION_NOVELTY_NEGATION_STREAK is the novelty streak that negates
-# branch-free grants. absolute_max_steps() is the hard ceiling on max_steps.
-CONTINUATION_GRANT_STEPS = 10
-CONTINUATION_MAX_GRANTS = 2
-CONTINUATION_WINDOW_STEPS = 6
-CONTINUATION_ABSOLUTE_MULTIPLIER = 3
-CONTINUATION_NOVELTY_NEGATION_STREAK = 4
+# User-domain fuses. `max_steps` is retained by public callers as a compatibility
+# input, but state/routing consume `step_cap`.
+PROGRESS_EVIDENCE_HORIZON = 6
+PROGRESS_EXHAUSTION_TRIGGER = 4
+PROGRESS_CLAIM_GRACE_STEPS = 3
+PROGRESS_CLAIM_MAX_ROUNDS = 2
 
 # W2 T6: consecutive reflect windows in which the task_plan's current stage
 # does not advance AND the trajectory is stuck, before reflect sets
@@ -97,13 +92,6 @@ CONTINUATION_NOVELTY_NEGATION_STREAK = 4
 # A "window" is one reflect observation round. The plan is a belief, not a
 # gate: recompiling it never blocks or finishes a task by itself.
 STAGE_STALL_RECOMPILE_WINDOWS = 2
-
-
-def absolute_max_steps(max_steps: int) -> int:
-    """Return the hard step ceiling for one run (initial window * 3)."""
-
-    return max(1, int(max_steps or 1)) * CONTINUATION_ABSOLUTE_MULTIPLIER
-
 
 @dataclass(frozen=True)
 class SafetyCategory:

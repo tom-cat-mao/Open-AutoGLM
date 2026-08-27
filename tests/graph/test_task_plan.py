@@ -1,4 +1,4 @@
-"""W2 task_plan: data model, compilation, ledger fold, credential branch,
+"""W2 task_plan: data model, compilation, ledger fold, progress claims,
 prompt blocks, and the stage-stall recompile write point.
 
 Philosophy red line: stages are belief, never authorization — they enter
@@ -14,8 +14,8 @@ import pytest
 from phone_agent.config.policy import STAGE_STALL_RECOMPILE_WINDOWS
 from phone_agent.graph.context import (
     build_plan_context_block,
-    continuation_credential,
     stage_stall_recompile,
+    validate_progress_claim,
 )
 from phone_agent.graph.goal import (
     GoalContract,
@@ -545,108 +545,107 @@ def test_stage_status_none_without_plan() -> None:
 
 
 # ----------------------------------------------------------------------
-# T4: continuation_credential stage_advance branch
+# T4: stage advance as progress-claim evidence
 # ----------------------------------------------------------------------
 
 
-def _credential_state(**overrides) -> dict:
+def _progress_state(**overrides) -> dict:
     state = {
         "goal_contract": {"runtime_reference": "r1", "success_criteria": []},
         "goal_evidence_ledger": [],
-        "continuation_last_latch_count": 0,
-        "continuation_last_stage_index": None,
+        "previous_task_plan_status": None,
         "task_plan_status": None,
         "gui_memory": {"task_progress": {}},
-        "finish_validation_evidence": None,
     }
     state.update(overrides)
     return state
 
 
-def test_stage_advance_branch_grants() -> None:
-    credential = continuation_credential(
-        _credential_state(
+def test_stage_advance_accepts_progress_claim() -> None:
+    result = validate_progress_claim(
+        _progress_state(
+            previous_task_plan_status={"current_stage_index": 1},
             task_plan_status={"current_stage_index": 2},
-            continuation_last_stage_index=1,
-        )
+        ),
+        {"summary": "阶段推进", "evidence_refs": ["stage:2"]},
     )
 
-    assert credential.granted is True
-    assert "stage_advance" in credential.branches
+    assert result["status"] == "accepted"
+    assert result["reason"] == "stage_advance"
 
 
 def test_stage_advance_all_satisfied_counts_as_advance() -> None:
-    credential = continuation_credential(
-        _credential_state(
+    result = validate_progress_claim(
+        _progress_state(
+            previous_task_plan_status={"current_stage_index": 2},
             task_plan_status={"current_stage_index": None},
-            continuation_last_stage_index=2,
-        )
+        ),
+        {"summary": "全部阶段已满足", "evidence_refs": ["stage:all"]},
     )
 
-    assert credential.granted is True
-    assert "stage_advance" in credential.branches
+    assert result["status"] == "accepted"
+    assert result["reason"] == "stage_advance"
 
 
-def test_stage_advance_no_plan_is_false_and_does_not_grant() -> None:
-    credential = continuation_credential(
-        _credential_state(continuation_last_stage_index=1)
+def test_stage_advance_no_plan_rejects_progress_claim() -> None:
+    result = validate_progress_claim(
+        _progress_state(previous_task_plan_status={"current_stage_index": 1}),
+        {"summary": "阶段推进", "evidence_refs": ["stage:2"]},
     )
 
-    assert credential.granted is False
-    assert "stage_advance" not in credential.branches
-    assert credential.reason == "no_progress_evidence"
+    assert result["status"] == "rejected"
+    assert result["reason"] == "no_strong_evidence"
 
 
-def test_stage_advance_no_boundary_snapshot_is_false() -> None:
-    credential = continuation_credential(
-        _credential_state(task_plan_status={"current_stage_index": 1})
+def test_stage_advance_no_previous_snapshot_rejects_progress_claim() -> None:
+    result = validate_progress_claim(
+        _progress_state(task_plan_status={"current_stage_index": 1}),
+        {"summary": "阶段推进", "evidence_refs": ["stage:1"]},
     )
 
-    assert credential.granted is False
-    assert "stage_advance" not in credential.branches
+    assert result["status"] == "rejected"
+    assert result["reason"] == "no_strong_evidence"
 
 
-def test_stage_advance_exempts_novelty_negation() -> None:
-    """Stage advance is strong typed-progress evidence, like new_latch: it is
-    never negated by a high novelty streak."""
-    credential = continuation_credential(
-        _credential_state(
+def test_stage_advance_accepts_even_when_liveness_stuck() -> None:
+    result = validate_progress_claim(
+        _progress_state(
+            previous_task_plan_status={"current_stage_index": 2},
             task_plan_status={"current_stage_index": 3},
-            continuation_last_stage_index=2,
             gui_memory={
                 "task_progress": {
                     "trajectory_liveness": "stuck",
                     "novelty_streak": 10,
                 }
             },
-        )
+        ),
+        {"summary": "阶段推进", "evidence_refs": ["stage:3"]},
     )
 
-    assert credential.granted is True
-    assert "stage_advance" in credential.branches
+    assert result["status"] == "accepted"
+    assert result["reason"] == "stage_advance"
 
 
-def test_stage_advance_combines_with_other_branches_any_grant() -> None:
+def test_criterion_movement_accepts_when_stage_did_not_advance() -> None:
     ledger = [
         _entry(1, "c1", "unknown"),
         _entry(2, "c1", "matched"),
     ]
-    credential = continuation_credential(
-        _credential_state(
+    result = validate_progress_claim(
+        _progress_state(
+            previous_task_plan_status={"current_stage_index": 1},
             task_plan_status={"current_stage_index": 1},
-            continuation_last_stage_index=1,
             goal_contract={
                 "runtime_reference": "h",
                 "success_criteria": [{"name": "c1", "verification": "vlm_judge"}],
             },
             goal_evidence_ledger=ledger,
-        )
+        ),
+        {"summary": "判据推进", "evidence_refs": ["criterion:c1"]},
     )
 
-    # stage did not advance, but criterion_movement grants via the shared fold
-    assert credential.granted is True
-    assert "stage_advance" not in credential.branches
-    assert "criterion_movement" in credential.branches
+    assert result["status"] == "accepted"
+    assert "criterion_rank_up" in result["reason"]
 
 
 # ----------------------------------------------------------------------

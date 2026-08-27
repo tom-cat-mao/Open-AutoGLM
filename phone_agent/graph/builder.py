@@ -62,7 +62,7 @@ def create_agent_graph(checkpointer=None):
     graph.add_conditional_edges(
         "plan",
         after_plan,
-        {"execute": "execute", "replan": "plan"},
+        {"execute": "execute", "replan": "plan", "end": END},
     )
     graph.add_conditional_edges(
         "execute",

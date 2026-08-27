@@ -136,6 +136,8 @@ def test_reflect_state_plan_gap_list_full_chain(base_state, fake_device) -> None
     base_state["goal_contract"] = _run_g_contract()
     base_state["task"] = "查机票"
     base_state["step_count"] = 15
+    base_state["max_steps"] = 30
+    base_state["step_cap"] = 30
     base_state["expected_outcome"] = {
         "kind": "generic",
         "must_observe": [],
@@ -301,6 +303,8 @@ def test_run_g_panel_observation_to_finish_passes(base_state, fake_device) -> No
     base_state["goal_contract"] = contract
     base_state["task"] = "查机票"
     base_state["step_count"] = 15
+    base_state["max_steps"] = 30
+    base_state["step_cap"] = 30
     base_state["expected_outcome"] = None
     base_state["action_parsed"] = {
         "_metadata": "finish",
@@ -407,6 +411,8 @@ def test_run_g_no_observation_no_reference_rejected(base_state, fake_device) -> 
     base_state["goal_contract"] = contract
     base_state["task"] = "查机票"
     base_state["step_count"] = 15
+    base_state["max_steps"] = 30
+    base_state["step_cap"] = 30
     base_state["expected_outcome"] = None
     base_state["action_parsed"] = {
         "_metadata": "finish",

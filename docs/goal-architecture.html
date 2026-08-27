@@ -1,0 +1,559 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<base target="_blank">
+<title>Open-AutoGLM Goal 契约与实机诊断架构</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --primary: #2563EB;
+    --primary-light: #3B82F6;
+    --primary-dark: #1D4ED8;
+    --secondary: #64748B;
+    --bg: #F8FAFC;
+    --bg-card: #FFFFFF;
+    --bg-code: #F1F5F9;
+    --bg-dark: #0F172A;
+    --text: #1E293B;
+    --text-muted: #475569;
+    --text-light: #94A3B8;
+    --border: #E2E8F0;
+    --accent-amber: #F59E0B;
+    --accent-green: #10B981;
+    --accent-red: #EF4444;
+    --accent-purple: #8B5CF6;
+    --accent-cyan: #06B6D4;
+    --shadow-sm: 0 1px 2px rgba(0,0,0,0.05);
+    --shadow-md: 0 4px 6px -1px rgba(0,0,0,0.07), 0 2px 4px -2px rgba(0,0,0,0.05);
+    --shadow-lg: 0 10px 15px -3px rgba(0,0,0,0.08), 0 4px 6px -4px rgba(0,0,0,0.05);
+    --radius: 8px;
+    --radius-lg: 12px;
+    --font-sans: 'IBM Plex Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+    --font-mono: 'JetBrains Mono', 'Fira Code', monospace;
+  }
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  html { scroll-behavior: smooth; }
+  body {
+    font-family: var(--font-sans);
+    color: var(--text);
+    background: var(--bg);
+    line-height: 1.7;
+    font-size: 15px;
+    -webkit-font-smoothing: antialiased;
+  }
+  nav {
+    position: fixed; top: 0; left: 0; right: 0; z-index: 100;
+    background: rgba(248,250,252,0.92);
+    backdrop-filter: blur(12px);
+    border-bottom: 1px solid var(--border);
+    padding: 0 24px; height: 56px;
+    display: flex; align-items: center; justify-content: space-between;
+  }
+  nav .brand { font-family: var(--font-mono); font-weight: 700; font-size: 14px; color: var(--primary); letter-spacing: -0.02em; }
+  nav .brand span { color: var(--text-muted); font-weight: 400; }
+  nav .nav-links { display: flex; gap: 4px; overflow-x: auto; scrollbar-width: none; }
+  nav .nav-links::-webkit-scrollbar { display: none; }
+  nav .nav-links a {
+    font-size: 12px; font-weight: 500; color: var(--text-muted);
+    text-decoration: none; padding: 6px 10px; border-radius: 6px;
+    white-space: nowrap; transition: all 0.15s;
+  }
+  nav .nav-links a:hover { color: var(--primary); background: rgba(37,99,235,0.06); }
+  main { max-width: 1100px; margin: 0 auto; padding: 80px 24px 80px; }
+  .hero { padding: 48px 0 40px; border-bottom: 1px solid var(--border); margin-bottom: 48px; }
+  .hero h1 {
+    font-family: var(--font-mono); font-size: clamp(2rem, 5vw, 3rem);
+    font-weight: 700; letter-spacing: -0.03em; color: var(--bg-dark);
+    line-height: 1.15; margin-bottom: 12px;
+  }
+  .hero h1 .accent { color: var(--primary); }
+  .hero p { font-size: 16px; color: var(--text-muted); max-width: 720px; line-height: 1.7; }
+  .hero .meta { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 20px; }
+  .hero .meta .tag {
+    font-family: var(--font-mono); font-size: 11px; font-weight: 500;
+    padding: 4px 10px; border-radius: 6px; background: var(--bg-code); color: var(--text-muted);
+  }
+  .hero .meta .tag.blue { background: #EFF6FF; color: var(--primary); }
+  .hero .meta .tag.green { background: #ECFDF5; color: #047857; }
+  .hero .meta .tag.amber { background: #FFFBEB; color: #B45309; }
+  section { margin-bottom: 56px; scroll-margin-top: 72px; }
+  section > h2 {
+    font-family: var(--font-mono); font-size: 22px; font-weight: 700;
+    color: var(--bg-dark); margin-bottom: 8px; letter-spacing: -0.02em;
+    padding-bottom: 10px; border-bottom: 2px solid var(--primary); display: inline-block;
+  }
+  section > .section-lead { font-size: 15px; color: var(--text-muted); margin: 14px 0 24px; max-width: 780px; }
+  h3 { font-size: 17px; font-weight: 600; color: var(--text); margin: 28px 0 10px; }
+  h4 { font-family: var(--font-mono); font-size: 12px; font-weight: 600; color: var(--text-muted); margin: 20px 0 8px; text-transform: uppercase; letter-spacing: 0.05em; }
+  section p { margin-bottom: 12px; color: var(--text); }
+  .card {
+    background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius-lg);
+    padding: 24px; margin-bottom: 16px; box-shadow: var(--shadow-sm); transition: box-shadow 0.15s;
+  }
+  .card:hover { box-shadow: var(--shadow-md); }
+  .card-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 16px; margin-bottom: 16px; }
+  .card .card-title {
+    font-family: var(--font-mono); font-size: 14px; font-weight: 600; color: var(--primary);
+    margin-bottom: 8px; display: flex; align-items: center; gap: 8px;
+  }
+  .card .card-title .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; flex-shrink: 0; }
+  .card .card-title .dot.blue { background: var(--primary); }
+  .card .card-title .dot.amber { background: var(--accent-amber); }
+  .card .card-title .dot.green { background: var(--accent-green); }
+  .card .card-title .dot.red { background: var(--accent-red); }
+  .card .card-title .dot.purple { background: var(--accent-purple); }
+  .card .card-title .dot.cyan { background: var(--accent-cyan); }
+  .card p, .card li { font-size: 14px; color: var(--text-muted); line-height: 1.65; }
+  .card ul { padding-left: 18px; margin-top: 6px; }
+  .card ul li { margin-bottom: 4px; }
+  code {
+    font-family: var(--font-mono); font-size: 12.5px; background: var(--bg-code);
+    padding: 2px 6px; border-radius: 4px; color: var(--primary-dark);
+    word-break: break-all; overflow-wrap: break-word;
+  }
+  pre {
+    background: var(--bg-dark); color: #E2E8F0; border-radius: var(--radius); padding: 20px;
+    overflow-x: auto; margin: 12px 0 16px; font-family: var(--font-mono);
+    font-size: 12.5px; line-height: 1.65; border: 1px solid #1E293B;
+  }
+  pre code { background: none; padding: 0; color: inherit; word-break: normal; overflow-wrap: normal; }
+  pre .comment { color: #64748B; }
+  pre .keyword { color: #7DD3FC; }
+  pre .string { color: #86EFAC; }
+  pre .type { color: #C4B5FD; }
+  pre .fn { color: #FCD34D; }
+  pre .num { color: #FDA4AF; }
+  .flow { display: flex; flex-direction: column; align-items: center; gap: 0; margin: 24px 0; padding: 24px; background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius-lg); }
+  .flow-node {
+    font-family: var(--font-mono); font-size: 12px; font-weight: 600; padding: 10px 20px;
+    border-radius: 8px; border: 2px solid; text-align: center; min-width: 220px; max-width: 420px;
+    word-break: break-word; overflow-wrap: break-word;
+  }
+  .flow-node.primary { border-color: var(--primary); background: #EFF6FF; color: var(--primary-dark); }
+  .flow-node.secondary { border-color: var(--secondary); background: #F8FAFC; color: var(--text); }
+  .flow-node.amber { border-color: var(--accent-amber); background: #FFFBEB; color: #92400E; }
+  .flow-node.green { border-color: var(--accent-green); background: #ECFDF5; color: #065F46; }
+  .flow-node.red { border-color: var(--accent-red); background: #FEF2F2; color: #991B1B; }
+  .flow-node.purple { border-color: var(--accent-purple); background: #F5F3FF; color: #5B21B6; }
+  .flow-node.cyan { border-color: var(--accent-cyan); background: #ECFEFF; color: #155E75; }
+  .flow-node.dark { border-color: var(--bg-dark); background: var(--bg-dark); color: #F1F5F9; }
+  .flow-arrow { font-size: 18px; color: var(--text-light); line-height: 1; padding: 2px 0; }
+  .flow-arrow-label { font-family: var(--font-mono); font-size: 10px; color: var(--text-light); text-align: center; padding: 0 0 2px; }
+  .flow-row { display: flex; align-items: flex-start; gap: 16px; width: 100%; justify-content: center; flex-wrap: wrap; }
+  .flow-branch { display: flex; flex-direction: column; align-items: center; gap: 0; flex: 1; min-width: 160px; max-width: 300px; }
+  table { width: 100%; border-collapse: collapse; margin: 12px 0 16px; font-size: 13px; }
+  table thead th {
+    font-family: var(--font-mono); font-size: 11px; font-weight: 600; text-transform: uppercase;
+    letter-spacing: 0.05em; color: var(--text-muted); background: var(--bg-code);
+    padding: 10px 12px; text-align: left; border-bottom: 2px solid var(--border);
+  }
+  table tbody td { padding: 10px 12px; border-bottom: 1px solid var(--border); color: var(--text); vertical-align: top; overflow-wrap: break-word; }
+  table tbody tr:hover { background: rgba(37,99,235,0.02); }
+  table tbody td:first-child { font-family: var(--font-mono); font-size: 12px; font-weight: 500; color: var(--primary-dark); }
+  .badge { display: inline-block; font-family: var(--font-mono); font-size: 10px; font-weight: 600; padding: 2px 7px; border-radius: 4px; letter-spacing: 0.02em; vertical-align: middle; }
+  .badge.blue { background: #EFF6FF; color: var(--primary); }
+  .badge.amber { background: #FFFBEB; color: #B45309; }
+  .badge.green { background: #ECFDF5; color: #047857; }
+  .badge.red { background: #FEF2F2; color: #B91C1C; }
+  .badge.purple { background: #F5F3FF; color: #6D28D9; }
+  .badge.cyan { background: #ECFEFF; color: #0E7490; }
+  .callout { border-radius: var(--radius); padding: 16px 20px; margin: 16px 0; font-size: 14px; line-height: 1.65; }
+  .callout.info { background: #EFF6FF; border-left: 4px solid var(--primary); color: #1E40AF; }
+  .callout.warn { background: #FFFBEB; border-left: 4px solid var(--accent-amber); color: #92400E; }
+  .callout.danger { background: #FEF2F2; border-left: 4px solid var(--accent-red); color: #991B1B; }
+  .callout.success { background: #ECFDF5; border-left: 4px solid var(--accent-green); color: #065F46; }
+  .callout strong { font-weight: 600; }
+  .timeline { position: relative; margin: 24px 0; padding-left: 28px; }
+  .timeline::before { content: ""; position: absolute; left: 7px; top: 6px; bottom: 6px; width: 2px; background: var(--border); }
+  .tl-item { position: relative; margin-bottom: 22px; }
+  .tl-item::before { content: ""; position: absolute; left: -25px; top: 4px; width: 12px; height: 12px; border-radius: 50%; background: var(--primary); border: 2px solid var(--bg); }
+  .tl-item.fix::before { background: var(--accent-amber); }
+  .tl-item.big::before { background: var(--accent-purple); width: 14px; height: 14px; left: -26px; }
+  .tl-hash { font-family: var(--font-mono); font-size: 11px; color: var(--primary); font-weight: 600; }
+  .tl-title { font-weight: 600; font-size: 15px; margin: 2px 0 4px; }
+  .tl-body { font-size: 13.5px; color: var(--text-muted); }
+  .footer { text-align: center; padding: 40px 0 0; border-top: 1px solid var(--border); color: var(--text-light); font-size: 12px; font-family: var(--font-mono); }
+  .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  @media (max-width: 720px) { .two-col { grid-template-columns: 1fr; } main { padding: 72px 16px 60px; } }
+  .anchor-ref { font-family: var(--font-mono); font-size: 11px; color: var(--text-light); }
+</style>
+</head>
+<body>
+<nav>
+  <div class="brand">Open-AutoGLM<span> / goal-architecture</span></div>
+  <div class="nav-links">
+    <a href="#overview">总览</a>
+    <a href="#evolution">演进</a>
+    <a href="#lifecycle">生命周期</a>
+    <a href="#compile">编译链</a>
+    <a href="#validator">Validator</a>
+    <a href="#finish">Finish 门</a>
+    <a href="#privacy">隐私边界</a>
+    <a href="#longtask">长任务</a>
+    <a href="#diagnosis">实机诊断</a>
+    <a href="#risks">已知风险</a>
+  </div>
+</nav>
+
+<main>
+  <header class="hero">
+    <h1>Goal 契约 &amp; <span class="accent">实机诊断</span> 架构</h1>
+    <p>
+      Open-AutoGLM 的目标子系统如何把一句自然语言任务，编译成一份<strong>可验证、隐私安全、跨轮持久</strong>的声明式契约，
+      并在 Plan-Execute-Reflect 循环里用它做 finish 门控——这是长任务不"提前假完成"、不"带错目标空转"的核心。
+      本文档同时覆盖配套的实机诊断技能如何把 trace 信号归因回源码。
+    </p>
+    <div class="meta">
+      <span class="tag blue">LangGraph StateGraph</span>
+      <span class="tag">phone_agent/graph/goal*.py</span>
+      <span class="tag green">fail-closed finish gate</span>
+      <span class="tag amber">commit 71cd829 → HEAD</span>
+      <span class="tag">P0 constraint #13a</span>
+    </div>
+  </header>
+
+  <!-- ================= OVERVIEW ================= -->
+  <section id="overview">
+    <h2>1 · 总览</h2>
+    <p class="section-lead">
+      一次任务 = 一份 <code>GoalContract</code>。它在图起点编译一次，之后跨所有 replan 轮次复用，
+      finish 时被逐条对账。目标不再是"屏幕上出现某个关键词"，而是"一组带类型化验证方式的成功标准"。
+    </p>
+    <div class="card-grid">
+      <div class="card">
+        <div class="card-title"><span class="dot blue"></span>声明式契约</div>
+        <p><code>GoalContract</code> 由 <code>CriterionSpec[]</code>（成功标准）、约束、非目标、验证策略组成。每条标准声明自己用哪种 <code>verification</code> 验证。</p>
+      </div>
+      <div class="card">
+        <div class="card-title"><span class="dot purple"></span>独立需求交叉校验</div>
+        <p><code>TaskRequirementSet</code> 从原始任务独立抽取需求，<code>ContractAdequacyValidator</code> 校验契约是否真的覆盖需求——契约不能自证充分。</p>
+      </div>
+      <div class="card">
+        <div class="card-title"><span class="dot green"></span>类型化证据</div>
+        <p>证据是 <code>ObservedFact</code>（中性、无极性），由 <code>Matcher</code> 判定匹配，按来源分权威等级（device &gt; accessibility &gt; …）。</p>
+      </div>
+      <div class="card">
+        <div class="card-title"><span class="dot amber"></span>Fail-closed finish 门</div>
+        <p>execute 只声明 <code>pending_finish</code>；reflect 用 evaluator 验证证据才置 <code>finished=True</code>。unknown/缺失 → replan，永不自动升级为成功。</p>
+      </div>
+      <div class="card">
+        <div class="card-title"><span class="dot red"></span>隐私分层</div>
+        <p>完整契约 + 截图留在进程内 <code>RuntimeGoalContext</code>/<code>RuntimeObservationContext</code>，绝不进 state/trace/checkpoint。</p>
+      </div>
+      <div class="card">
+        <div class="card-title"><span class="dot cyan"></span>可信恢复</div>
+        <p><code>checkpoint/goal_resume.py</code> 用 HMAC 绑定；evidence ledger 在 checkpoint 出口清空，进度只从可信投影重水合。</p>
+      </div>
+    </div>
+    <div class="callout info">
+      <strong>一句话对比：</strong>旧设计 = "看屏幕上有没有 <code>播放/详情/评论</code> 这些词就算完成"；
+      新设计 = "编译一份可验证契约 → 每步收集类型化证据 → finish 时逐条对账、程序信号优先、不满足就继续"。
+    </div>
+  </section>
+
+  <!-- ================= EVOLUTION ================= -->
+  <section id="evolution">
+    <h2>2 · 演进：从关键词碰运气到可验证契约</h2>
+    <p class="section-lead">Goal 子系统经历 6 次关键提交。理解这条链，就理解了每个设计决策为什么存在。</p>
+
+    <h4>改之前 · 关键词硬编码</h4>
+    <p>旧的 <code>task_goal.py</code> 里，finish 判定靠写死的词表：</p>
+    <pre><code><span class="comment"># 旧 validate_finish_claim（已删除）</span>
+detail_terms = (<span class="string">"播放","播放器","全屏","暂停","弹幕","详情","评论"</span>...)
+APP_HINTS = {<span class="string">"bilibili"</span>:(<span class="string">"b站","哔哩"</span>...), ...}  <span class="comment"># 只有 5 个 app</span>
+<span class="keyword">if</span> any(term <span class="keyword">in</span> text_blob <span class="keyword">for</span> term <span class="keyword">in</span> detail_terms):
+    matched.append(<span class="string">"detail_or_player_visible"</span>)   <span class="comment"># 屏幕有"播放"二字 == 成功？</span></code></pre>
+    <p>问题：只认 5 个写死 app；finish 靠字符串包含；<code>goal_type</code> 是几个枚举，无法表达真实任务。</p>
+
+    <div class="timeline">
+      <div class="tl-item">
+        <div class="tl-hash">71cd829</div>
+        <div class="tl-title">重建为声明式成功标准 + Evaluator</div>
+        <div class="tl-body">删 <code>task_goal.py</code>，引入 <code>GoalContract</code> + <code>SuccessCriterion[]</code>、编译链 <code>External &gt; LLM &gt; Heuristic</code>、<code>AggregatingGoalEvaluator</code>。图拓扑改为 <code>START → goal → plan → execute → reflect</code>。关键：程序信号可推翻 vlm_judge 自称；unknown 永不自动升级为成功。</div>
+      </div>
+      <div class="tl-item fix">
+        <div class="tl-hash">25d92b4</div>
+        <div class="tl-title">修 P0/P1，让 finish 链真正跑通</div>
+        <div class="tl-body">validator 曾拒绝带 <code>matched_terminal_evidence</code> 的 finish 动作，导致 finish 门整条断链；plan/reflect 不再把 trace payload 写回 state（否则第 2 轮契约损坏）；堵掉"普通 do 声称 finish 就绕过 Goal 门"的后门。</div>
+      </div>
+      <div class="tl-item fix">
+        <div class="tl-hash">d2795a4</div>
+        <div class="tl-title">补 mark-based tap 的 finish 缺口</div>
+        <div class="tl-body">"选第 N 个"任务：verifier 算不出内容哈希但已进详情页时，加 detail-only 软匹配（<code>soft_match</code>），不逼模型算它算不出的哈希。</div>
+      </div>
+      <div class="tl-item big">
+        <div class="tl-hash">7dc6946</div>
+        <div class="tl-title">9-phase 大重建：通用化 + 隐私安全 + 可验证（40+ 文件）</div>
+        <div class="tl-body">删掉写死的五 app 词表 → 真实 <code>AppRegistry</code>；引入独立 <code>TaskRequirementSet</code> + <code>ContractAdequacyValidator</code>；typed predicates + <code>ObservedFact</code> + <code>Matcher</code> + 证据权威分级；<code>RuntimeGoalContext</code>/<code>RuntimeObservationContext</code> 把截图/完整契约隔离出 state；HMAC 可信 resume；版本化 <code>SafetyPolicyRegistry</code>。</div>
+      </div>
+      <div class="tl-item fix">
+        <div class="tl-hash">db3fa31</div>
+        <div class="tl-title">统一实体抽取 + 放宽 adequacy，不再误杀真实任务</div>
+        <div class="tl-body">大重建后需求抽取与编译各写一套分词器，实体哈希永不相交 → 搜索/选择任务几乎全被判 inadequate 终止。抽出单一来源 <code>extract_entity_spans</code>；required vlm_judge 算作语义兜底；未知动词降级到 LLM+vlm_judge 而非阻断。</div>
+      </div>
+      <div class="tl-item fix">
+        <div class="tl-hash">HEAD (工作树)</div>
+        <div class="tl-title">修 finish 门回归 + 序数 + fact extractor 接线</div>
+        <div class="tl-body">db3fa31 把"不可满足"从 goal 门搬到 finish 门（hash 期望值 vs 屏幕原文永远 contradicted）。修复：hash-bound 矛盾视为"域不匹配"回退 <code>_check_vlm_judge</code>；<code>parse_chinese_ordinal</code> 正确解析"第二十个=20"；agent 接入 visual/whole_screen fact extractor；<code>after_goal</code> 加 takeover 路由。</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= LIFECYCLE ================= -->
+  <section id="lifecycle">
+    <h2>3 · Goal 在图中的生命周期</h2>
+    <p class="section-lead">Goal 是图的第一等节点（<code>graph/builder.py</code>），在 <code>START</code> 之后第一个执行。</p>
+    <div class="flow">
+      <div class="flow-node dark">START</div>
+      <div class="flow-arrow">↓</div>
+      <div class="flow-node primary">goal_node · 编译一次契约（replan 回来时 no-op）</div>
+      <div class="flow-arrow-label">after_goal</div>
+      <div class="flow-row">
+        <div class="flow-branch">
+          <div class="flow-node green">plan · 注入 goal_contract_block（独立可缓存消息）</div>
+          <div class="flow-arrow">↓</div>
+          <div class="flow-node secondary">execute · finish 动作只设 pending_finish</div>
+          <div class="flow-arrow-label">after_execute</div>
+          <div class="flow-node purple">reflect · 逐条验证证据 → finished?</div>
+          <div class="flow-arrow-label">should_continue</div>
+          <div class="flow-row">
+            <div class="flow-node secondary">replan → 回 goal</div>
+            <div class="flow-node amber">takeover</div>
+            <div class="flow-node dark">END</div>
+          </div>
+        </div>
+        <div class="flow-branch">
+          <div class="flow-node red">契约不充分 → finished=True / takeover</div>
+          <div class="flow-arrow">↓</div>
+          <div class="flow-node dark">END</div>
+        </div>
+      </div>
+    </div>
+    <table>
+      <thead><tr><th>环节</th><th>文件</th><th>职责</th></tr></thead>
+      <tbody>
+        <tr><td>goal_node</td><td>graph/nodes/goal_node.py</td><td>编译契约、跑 adequacy 校验、可选 HITL 审批、绑定 runtime_reference；replan 回来时若已编译则 no-op</td></tr>
+        <tr><td>after_goal</td><td>graph/edges.py</td><td>契约失败 fail-closed；<code>finished/error → end</code>（终止守卫优先）</td></tr>
+        <tr><td>plan</td><td>graph/nodes/plan.py</td><td>用 <code>build_goal_prompt_block</code> 注入契约作为独立可缓存 user 消息</td></tr>
+        <tr><td>execute</td><td>graph/nodes/execute.py</td><td>finish 动作只置 <code>pending_finish=True</code>，绝不自行 finish</td></tr>
+        <tr><td>reflect</td><td>graph/nodes/reflect.py</td><td>调 evaluator 验证 finish 声明；维护 evidence ledger；不满足 → 继续/replan</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <!-- ================= COMPILE CHAIN ================= -->
+  <section id="compile">
+    <h2>4 · 编译链：一句话 → 一份契约</h2>
+    <p class="section-lead"><code>compile_goal_contract()</code> 按 <code>External &gt; LLM &gt; Heuristic</code> 顺序尝试（<code>graph/goal_compiler.py</code>）。</p>
+    <div class="card-grid">
+      <div class="card">
+        <div class="card-title"><span class="dot cyan"></span>ExternalGoalCompiler</div>
+        <p>benchmark / eval 注入的预制契约，标记 <code>compile_status=user_override</code>。必须附带独立的 requirement set 做绑定校验。</p>
+      </div>
+      <div class="card">
+        <div class="card-title"><span class="dot blue"></span>LLMGoalCompiler</div>
+        <p>一次 structured-output 调用（失败重试一次）。产出 <code>verification_strategy=hybrid</code>。对实体任务会合成一条 required <code>vlm_judge</code> 标准。</p>
+      </div>
+      <div class="card">
+        <div class="card-title"><span class="dot amber"></span>HeuristicGoalCompiler</div>
+        <p>永不失败的兜底。抽取 app/ordinal/entity，产出 <code>vlm_judge_at_finish</code> 弱契约。<strong>不驱动自动成功</strong>——evaluator 仍要求点名 + grounded 证据。</p>
+      </div>
+    </div>
+    <h4>成功标准的验证方式（VerificationKind）</h4>
+    <table>
+      <thead><tr><th>verification</th><th>验证信号来源</th></tr></thead>
+      <tbody>
+        <tr><td>app_or_activity_match</td><td>前台包名 / top activity 与 <code>target_app_hint</code> 匹配</td></tr>
+        <tr><td>object_rank_match</td><td>选中对象的 ordinal 与契约 <code>ordinal</code> 相等（+ detail-only 软匹配兜底）</td></tr>
+        <tr><td>accessibility_text_match</td><td>description 里的 <code>sha256:xxx</code> stub 在 after-observation 文本中命中</td></tr>
+        <tr><td>object_hash_match</td><td>verifier 的 <code>selected_object_match</code> 信号</td></tr>
+        <tr><td>focus_or_keyboard</td><td>输入框聚焦 / 键盘可见</td></tr>
+        <tr><td>vlm_judge</td><td>三段式：①在 <code>matched_terminal_evidence</code> 点名 ②reflect 给出 grounded <code>screen_reference</code> ③不被程序信号反证</td></tr>
+        <tr><td>external_probe</td><td><code>configurable["goal_probes"]</code> 里的可调用探针</td></tr>
+      </tbody>
+    </table>
+    <div class="callout info">
+      <strong>序数解析（HEAD 修复）：</strong><code>parse_chinese_ordinal</code> 先解析完整数词再回退单字，正确处理
+      <code>第二十个 → 20</code>（旧的子串匹配会误读成 <code>2</code>）。数字形式 <code>第20个</code> 由正则直接命中。
+    </div>
+  </section>
+
+  <!-- ================= VALIDATOR ================= -->
+  <section id="validator">
+    <h2>5 · Validator：让 Goal 能力"真正有牙齿"</h2>
+    <p class="section-lead">
+      Goal 能力的关键不在编译，而在<strong>两道独立校验</strong>：编译前的 adequacy 校验（契约是否覆盖需求）、finish 时的 evaluator 校验（证据是否满足标准）。
+    </p>
+
+    <h3>5.1 ContractAdequacyValidator — 契约不能自证充分</h3>
+    <p><code>TaskRequirementExtractor</code> 从原始任务<strong>独立</strong>抽取需求（operation_kind、target_app、ordinal、entity hashes、terminal_state、constraints），再由 <code>ContractAdequacyValidator</code> 逐项比对契约是否覆盖：</p>
+    <pre><code><span class="comment"># graph/goal_requirements.py（简化）</span>
+<span class="keyword">if</span> requirements.target_app_identity != contract.target_app_hint:   reasons.append(<span class="string">"target_app_uncovered"</span>)
+<span class="keyword">if</span> requirements.ordinal != contract.ordinal:                       reasons.append(<span class="string">"ordinal_uncovered"</span>)
+<span class="keyword">if</span> entity_hashes 不相交:                                          reasons.append(<span class="string">"target_entities_uncovered"</span>)
+<span class="keyword">if</span> 无 semantic predicate <span class="keyword">且</span> 无 required vlm_judge:            reasons.append(<span class="string">"semantic_criterion_missing"</span>)
+<span class="keyword">if</span> <span class="keyword">not</span> terminal_state_covered(...):                             reasons.append(<span class="string">"terminal_state_uncovered"</span>)</code></pre>
+    <div class="two-col">
+      <div class="callout danger"><strong>关键修复 db3fa31：</strong>需求侧与编译侧原来各写一套分词器（compiler 剥掉"视频"、extractor 保留），实体哈希<strong>永不相交</strong>，几乎所有搜索/选择任务被判 <code>target_entities_uncovered</code> 终止。抽出单一来源 <code>extract_entity_spans</code> 两边共用后修复。</div>
+      <div class="callout success"><strong>放宽策略：</strong>required <code>vlm_judge</code> 现在算作语义/终态兜底覆盖；<code>operation_unknown</code> 不再算 ambiguity（未知动词降级到 LLM + vlm_judge，只降低 confidence），不再一开始就终止任务。</div>
+    </div>
+
+    <h3>5.2 finish 时的 evaluator — 逐条对账</h3>
+    <p><code>AggregatingGoalEvaluator</code> 逐条 <code>_check_criterion</code>，再做第二遍"程序信号推翻 vlm_judge 自称"。全 typed 契约还会再跑纯函数 <code>PureGoalEvaluator</code>。</p>
+    <div class="card">
+      <div class="card-title"><span class="dot purple"></span>核心不变量</div>
+      <ul>
+        <li><strong>criterion 未在 <code>matched_terminal_evidence</code> 点名</strong> → <code>missing</code>（硬门）</li>
+        <li><strong>required 缺失</strong> → <code>failure</code>；<strong>全 required 命中</strong> → <code>success</code>；<strong>其余</strong> → <code>unknown</code>（不升级为成功）</li>
+        <li><strong>程序信号矛盾</strong>（accessibility/app-activity）压过 vlm_judge 自称</li>
+        <li><strong>placeholder screen_reference</strong>（<code>region-1</code>/<code>screen</code>/<code>区域2</code>）→ 拒绝，视为无判别信息</li>
+      </ul>
+    </div>
+    <div class="callout warn">
+      <strong>HEAD 关键修复（finish 门回归）：</strong>编译器给 <code>vlm_judge</code> 标准绑了 <code>semantic.entity_matches</code>，其期望值是<strong>实体哈希</strong>，
+      但 finish 时 provider/VLM 产出的是<strong>屏幕原文</strong>，<code>casefold_exact(hash, 原文)</code> 永远 <code>contradicted</code>。
+      修复：<code>_is_hash_bound_expectation</code> 识别哈希期望，把这种矛盾判为"域不匹配"而非反证，回退到 <code>_check_vlm_judge</code>（有 grounded reference 即可）。
+    </div>
+  </section>
+
+  <!-- ================= FINISH GATE ================= -->
+  <section id="finish">
+    <h2>6 · Finish 门：声明 ≠ 成功</h2>
+    <p class="section-lead">这是 AGENTS.md P0 约束 #13a 的落地，也是长任务不"提前假完成"的核心闸门。</p>
+    <div class="flow">
+      <div class="flow-node secondary">execute：finish 动作 → 只设 pending_finish=True</div>
+      <div class="flow-arrow">↓</div>
+      <div class="flow-node primary">reflect：evaluate_finish_claim(contract, evidence...)</div>
+      <div class="flow-arrow">↓</div>
+      <div class="flow-row">
+        <div class="flow-branch"><div class="flow-node green">status=success<br>→ finished=True</div></div>
+        <div class="flow-branch"><div class="flow-node red">status=failure<br>→ goal_not_satisfied → replan</div></div>
+        <div class="flow-branch"><div class="flow-node amber">status=unknown<br>→ 跑 VLM 收集 named_evidence 再评</div></div>
+      </div>
+    </div>
+    <table>
+      <thead><tr><th>信号</th><th>含义</th></tr></thead>
+      <tbody>
+        <tr><td>pending_finish</td><td>execute 声明想 finish，等待 reflect 验证</td></tr>
+        <tr><td>matched_terminal_evidence</td><td>模型点名它认为满足的成功标准（缺一条硬门 missing）</td></tr>
+        <tr><td>finish_validation_status</td><td>success / failure / unknown — unknown 绝不自动升级</td></tr>
+        <tr><td>soft_match_accepted</td><td>依赖 detail-only 软匹配（无内容哈希确认，需人工复核）</td></tr>
+        <tr><td>programmatic_contradiction_override</td><td>程序信号推翻了 vlm_judge 自称</td></tr>
+        <tr><td>goal_not_satisfied</td><td>finish 被拒 → 继续/replan</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <!-- ================= PRIVACY ================= -->
+  <section id="privacy">
+    <h2>7 · 隐私边界与证据权威</h2>
+    <p class="section-lead">完整契约值、截图、原始语义值绝不跨越运行时边界进入 state/trace/checkpoint。</p>
+    <div class="two-col">
+      <div class="card">
+        <div class="card-title"><span class="dot red"></span>运行时隔离</div>
+        <ul>
+          <li><code>RuntimeGoalContext</code>：完整契约 + requirement，<code>__getstate__</code> 抛异常禁止序列化</li>
+          <li><code>RuntimeObservationContext</code>：节点内截图上下文，用后 <code>invalidate()</code></li>
+          <li>state 只存 <code>runtime_reference</code> + 脱敏投影（<code>to_state_payload</code>）</li>
+        </ul>
+      </div>
+      <div class="card">
+        <div class="card-title"><span class="dot green"></span>predicate 投影策略</div>
+        <ul>
+          <li><code>PUBLIC_CHECKPOINT</code>：app 身份等公开值可全量落盘</li>
+          <li><code>PRIVATE_RUNTIME</code>：<code>ui.text_equals</code>/<code>semantic.entity_matches</code> 等 → state/trace 仅 metadata，checkpoint omit</li>
+          <li>runtime-only predicate 必须从 checkpoint 省略（<code>__post_init__</code> 强制）</li>
+        </ul>
+      </div>
+    </div>
+    <h4>证据权威分级（fact_providers.py）</h4>
+    <p>同一 predicate 有多来源事实时，高权威源压过低权威源，减少长任务里的证据噪声误判：</p>
+    <div class="flow-row" style="margin:16px 0;">
+      <div class="flow-node green">device / external_probe · tier 5</div>
+      <div class="flow-node primary">accessibility · tier 4</div>
+      <div class="flow-node cyan">screen_object · tier 3</div>
+      <div class="flow-node amber">mark / visual_region · tier 2</div>
+      <div class="flow-node secondary">whole_screen · tier 1</div>
+    </div>
+  </section>
+
+  <!-- ================= LONG TASK ================= -->
+  <section id="longtask">
+    <h2>8 · 为什么这提升了长任务能力</h2>
+    <p class="section-lead">长任务能力不来自单点，而来自几个机制的组合。</p>
+    <table>
+      <thead><tr><th>机制</th><th>对长任务的作用</th></tr></thead>
+      <tbody>
+        <tr><td>契约编译一次、跨轮复用</td><td>目标不随 message 压缩丢失——几十步后 Goal 仍在；replan 时 <code>goal_node</code> no-op 不重编译</td></tr>
+        <tr><td>adequacy 交叉校验</td><td>编译出的契约必须覆盖独立抽取的需求，否则一开始就 fail-closed，不让 agent 带错目标空跑几十步</td></tr>
+        <tr><td>finish 是声明不是成功</td><td>防止长任务"提前假完成"的核心闸门：证据不够就继续，而不是乐观结束</td></tr>
+        <tr><td>程序信号 &gt; vlm_judge 自称</td><td>模型说"做完了"但 accessibility/app-activity 反证 → 推翻，防止长任务里模型自欺</td></tr>
+        <tr><td>证据账本 + 权威分级</td><td>reflect 维护 bounded ledger，<code>PureGoalEvaluator</code> 做纯函数折叠；高权威源压过低权威源，减少噪声误判</td></tr>
+      </tbody>
+    </table>
+    <div class="callout success">
+      净效果：agent 在长任务里不会因一次乐观判断提前结束，也不会带着无法满足的目标空转——这正是"长任务能力"的来源。
+    </div>
+  </section>
+
+  <!-- ================= DIAGNOSIS ================= -->
+  <section id="diagnosis">
+    <h2>9 · 实机诊断技能</h2>
+    <p class="section-lead">
+      配套的 <code>phone-agent-live-diagnosis</code> 技能在真机上跑 PhoneAgent，采集 trace，把失败信号<strong>按分层归因回源码</strong>，产出交互式 HTML 报告。
+      入口：<code>.venv/bin/python .agents/skills/phone-agent-live-diagnosis/scripts/run_diagnosis.py "&lt;目标&gt;"</code>
+    </p>
+    <h4>信号 → 分层 → 源码 归因</h4>
+    <table>
+      <thead><tr><th>层 (layer)</th><th>典型信号</th><th>首查源码</th></tr></thead>
+      <tbody>
+        <tr><td>goal</td><td>unsupported_semantics · needs_goal_clarification · goal_contract_invalid</td><td>goal_node.py · goal_requirements.py（<code>_OPERATIONS</code> 动词表）</td></tr>
+        <tr><td>reflection</td><td>goal_not_satisfied · soft_match_accepted · programmatic_contradiction_override</td><td>goal_evaluator.py · reflect.py · fact_providers.py</td></tr>
+        <tr><td>capability</td><td>capability_missing · capability_unavailable</td><td>actions/capability.py · actions/receipt.py</td></tr>
+        <tr><td>grounding</td><td>低置信 · bbox 非法 · 多候选</td><td>actions/grounding.py · grounding/ · observation.py</td></tr>
+        <tr><td>safety/HITL</td><td>action_safety_rejected · confirmation_required</td><td>config/policy.py · actions/safety.py · edges.py</td></tr>
+        <tr><td>checkpoint</td><td>trusted_projection_missing · contract_binding_mismatch</td><td>checkpoint/goal_resume.py · serde.py</td></tr>
+      </tbody>
+    </table>
+    <h4>报告首屏：根因叙事</h4>
+    <p><code>build_root_causes()</code> 把结构化 findings 转成"发生了什么 / 为什么（带源码定位） / 怎么办"的中文卡片，作为主阅读路径；结构化 findings 作为下钻细节。</p>
+    <div class="callout info">
+      <strong>诊断信号深挖：</strong>报告会下钻 <code>finish_validation.evidence.per_criterion</code>，区分 <code>soft_match_accepted</code>（详情页软匹配、无内容哈希确认）与
+      <code>programmatic_contradiction_override</code>（程序信号推翻自称）——避免"看似成功"和"真成功"无法区分。
+    </div>
+  </section>
+
+  <!-- ================= RISKS ================= -->
+  <section id="risks">
+    <h2>10 · 已知风险与边界</h2>
+    <p class="section-lead">诚实记录当前尚未闭合的点，供后续修复决策。</p>
+    <div class="card-grid">
+      <div class="card">
+        <div class="card-title"><span class="dot red"></span>after_goal takeover 路由不可达</div>
+        <p><code>after_goal</code> 的终止守卫 <code>if finished/error: return "end"</code> 先执行，而 <code>goal_node</code> 失败时同时返回 <code>finished=True</code> 和 <code>retry_policy=takeover</code>，因此新加的 takeover 分支目前<strong>永不触发</strong>（单测用 <code>finished=False</code> 通过，但生产不可达）。</p>
+      </div>
+      <div class="card">
+        <div class="card-title"><span class="dot amber"></span>vlm_judge 语义强度受限</div>
+        <p>hash-bound 回退到 <code>_check_vlm_judge</code> 后只校验"存在非占位 screen_reference"，不校验观测实体是否等于目标实体——错误实体自证仍可能通过。这是 vlm_judge 固有信任级别，非本轮新增。真正的语义精确匹配依赖 <code>visual/whole_screen_fact_extractor</code> 实际接入（默认 None，无默认实现）。</p>
+      </div>
+      <div class="card">
+        <div class="card-title"><span class="dot purple"></span>needs_recompile 无 writer</div>
+        <p>mid-task 契约切换目前只能通过 <code>configurable["task_goal_contract_override"]</code>；运行时没有写 <code>needs_recompile</code> 的路径。</p>
+      </div>
+      <div class="card">
+        <div class="card-title"><span class="dot cyan"></span>checkpointer 未接线</div>
+        <p><code>graph.compile()</code> 无 checkpointer，可信 resume 逻辑存在但运行时不触发（"runtime saver not enabled"）。</p>
+      </div>
+    </div>
+  </section>
+
+  <div class="footer">
+    Open-AutoGLM · goal-architecture.html · 基于 HEAD 工作树源码（71cd829 → db3fa31 + 未提交修复）· 仅描述现状，不含推测
+  </div>
+</main>
+</body>
+</html>

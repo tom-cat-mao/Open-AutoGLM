@@ -17,17 +17,22 @@ from phone_agent.actions.validator import (
 )
 from phone_agent.config import get_prompt_version, get_system_prompt
 from phone_agent.config.apps import get_app_registry_summary
+from phone_agent.config.policy import PROGRESS_CLAIM_GRACE_STEPS
 from phone_agent.device_factory import ObservationCaptureError
 from phone_agent.graph.context import (
     build_context_metrics,
     compact_messages_for_request,
     get_context_mode,
+    progress_claim_rejection_update,
     replace_fat_tails_with_skinny,
+    sanitize_context_text_regex,
     sanitize_context_payload,
     select_plan_context,
+    validate_progress_claim,
 )
 from phone_agent.graph.expected_outcome import (
     expected_outcome_trace_projection,
+    extract_progress_claim,
     extract_progress_note,
     extract_provider_envelope,
     normalize_expected_outcome,
@@ -50,6 +55,7 @@ from phone_agent.graph.goal import (
     goal_trace_payload,
 )
 from phone_agent.graph.trace import emit_trace, save_debug_screenshot
+from phone_agent.graph.resource_fuse import resource_fuse_update
 from phone_agent.grounding.factory import build_mark_providers
 from phone_agent.grounding.provider import ScreenBinding
 from phone_agent.model.client import MessageBuilder
@@ -513,6 +519,7 @@ def _parse_and_ground_response(
     intent_raw = None
     raw_expected_outcome = None
     progress_note = None
+    progress_claim = None
     grounding_error = None
     grounding_observation: dict = {}
     structured_json_response = False
@@ -525,6 +532,7 @@ def _parse_and_ground_response(
                 provider_payload
             )
             progress_note = extract_progress_note(provider_payload)
+            progress_claim = extract_progress_claim(provider_payload)
             action_parsed = adapt_json_action(action_payload)
         else:
             raise ActionAdapterError(
@@ -667,6 +675,7 @@ def _parse_and_ground_response(
         expected_outcome_dict,
         expected_outcome_trace,
         progress_note,
+        progress_claim,
     )
 
 
@@ -777,6 +786,113 @@ def _recovery_action_for_parse_failure(
     return {"_metadata": "do", "action": "Back"}
 
 
+def _sanitize_progress_claim(
+    claim: dict[str, Any] | None, *, task_context: str | None
+) -> dict[str, Any] | None:
+    if not isinstance(claim, dict):
+        return None
+    safe = sanitize_context_payload(
+        claim,
+        "progress_claim",
+        consumer="inject",
+        task_context=task_context,
+    )
+    if not isinstance(safe, dict):
+        return None
+    result: dict[str, Any] = {}
+    summary = safe.get("summary")
+    if isinstance(summary, str) and summary.strip():
+        result["summary"] = summary.strip()[:240]
+    evidence_refs = safe.get("evidence_refs")
+    if isinstance(evidence_refs, list):
+        refs = [str(item).strip()[:120] for item in evidence_refs if str(item).strip()]
+        if refs:
+            result["evidence_refs"] = refs[:8]
+    next_actions = safe.get("next_actions")
+    if isinstance(next_actions, list):
+        actions = [
+            str(item).strip()[:160] for item in next_actions if str(item).strip()
+        ]
+        if actions:
+            result["next_actions"] = actions[:3]
+    return result or None
+
+
+def _progress_claim_update(
+    state: "AgentState",
+    config: RunnableConfig,
+    *,
+    claim: dict[str, Any] | None,
+    task_context: str | None,
+) -> dict[str, Any]:
+    safe_claim = _sanitize_progress_claim(claim, task_context=task_context)
+    due = bool(state.get("progress_declaration_due"))
+    if not due and not safe_claim:
+        return {"progress_claim": None}
+    if due and not safe_claim:
+        feedback = {
+            "missing": ["progress_claim"],
+            "reason": "missing_declaration",
+            "grace_steps": PROGRESS_CLAIM_GRACE_STEPS,
+        }
+        emit_trace(
+            config,
+            state,
+            "plan",
+            "progress_claim_rejected",
+            feedback,
+        )
+        return {
+            "progress_claim": None,
+            "progress_validation_status": "missing",
+            "progress_claim_feedback": feedback,
+            "progress_claim_grace_steps_remaining": max(
+                int(state.get("progress_claim_grace_steps_remaining") or 0),
+                PROGRESS_CLAIM_GRACE_STEPS,
+            ),
+        }
+    validation = validate_progress_claim(state, safe_claim)
+    emit_trace(
+        config,
+        state,
+        "plan",
+        "progress_claim_validation_result",
+        {
+            "status": validation.get("status"),
+            "missing": list(validation.get("missing") or []),
+            "reason": validation.get("reason"),
+            "claim": safe_claim,
+        },
+    )
+    if validation.get("status") == "accepted":
+        return {
+            "progress_claim": safe_claim,
+            "progress_validation_status": "accepted",
+            "progress_claim_feedback": None,
+            "progress_exhaustion_streak": 0,
+            "progress_declaration_due": False,
+            "progress_claim_grace_steps_remaining": 0,
+        }
+    update = progress_claim_rejection_update(state, validation)
+    update["progress_claim"] = safe_claim
+    emit_trace(
+        config,
+        state,
+        "plan",
+        (
+            "progress_evidence_exhausted"
+            if update.get("failure_cause") == "progress_evidence_exhausted"
+            else "progress_claim_rejected"
+        ),
+        {
+            "missing": list(validation.get("missing") or []),
+            "reason": validation.get("reason"),
+            "round_count": update.get("progress_claim_round_count"),
+        },
+    )
+    return update
+
+
 def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
     """
     Plan node: capture screen, build messages, get model response, parse action.
@@ -792,6 +908,20 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
 
     step_count = state["step_count"]
     task = state["task"]
+    if step_count == 0:
+        emit_trace(
+            config,
+            state,
+            "plan",
+            "resource_fuse_disclosed",
+            {
+                "step_cap": state.get("step_cap") or state.get("max_steps"),
+                "wall_clock_cap_seconds": state.get("wall_clock_cap_seconds"),
+            },
+        )
+    fuse_update = resource_fuse_update(state, config)
+    if fuse_update:
+        return {"messages": [], **fuse_update}
     # Build goal block from new GoalContract (compiled by goal_node)
     task_goal_block = build_goal_prompt_block(state, lang=lang, config=config)
     task_goal_trace = goal_trace_payload(state, config) or {}
@@ -1439,6 +1569,7 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
         expected_outcome,
         expected_outcome_trace,
         progress_note,
+        progress_claim,
     ) = _parse_and_ground_response(
         response,
         parse_configurable,
@@ -1492,6 +1623,7 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
                 retry_expected_outcome,
                 retry_expected_outcome_trace,
                 retry_progress_note,
+                retry_progress_claim,
             ) = _parse_and_ground_response(
                 retry_response,
                 parse_configurable,
@@ -1514,6 +1646,7 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
             expected_outcome = retry_expected_outcome
             expected_outcome_trace = retry_expected_outcome_trace
             progress_note = retry_progress_note
+            progress_claim = retry_progress_claim
         except Exception as exc:
             parse_metadata = {
                 **parse_metadata,
@@ -1591,6 +1724,12 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
                 task_context=task,
             )
         )[:120]
+    progress_update = _progress_claim_update(
+        state,
+        config,
+        claim=progress_claim,
+        task_context=task,
+    )
 
     emit_trace(
         config,
@@ -1625,6 +1764,10 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
             "selected_grounding_candidate_id": selected_grounding_candidate_id,
             "expected_outcome": expected_outcome_trace,
             "progress_note": progress_note_safe,
+            "progress_claim": progress_update.get("progress_claim"),
+            "progress_validation_status": progress_update.get(
+                "progress_validation_status"
+            ),
             "task_goal_contract": task_goal_trace,
             "task_goal_injected": True,
             "task_goal_block_chars": len(task_goal_block),
@@ -1710,6 +1853,7 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
                 "action_confirmed": False,
                 "context_mode": context_mode,
                 **context_metrics,
+                **progress_update,
             }
         replan_update = _validation_replan_update(state, error_fields)
         return {
@@ -1760,6 +1904,7 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
             **replan_update,
             "context_mode": context_mode,
             **context_metrics,
+            **progress_update,
         }
 
     return {
@@ -1802,4 +1947,5 @@ def plan_node(state: "AgentState", config: RunnableConfig) -> dict:
         "action_confirmed": False,
         "context_mode": context_mode,
         **context_metrics,
+        **progress_update,
     }

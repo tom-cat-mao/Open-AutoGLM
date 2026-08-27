@@ -4,22 +4,26 @@
 
 ## 架构
 
-核心采用 **Plan-Execute-Reflect** 三节点拓扑，由 LangGraph StateGraph 驱动：
+核心是 LangGraph StateGraph 驱动的 **Plan-Execute-Reflect** 循环，外加独立的 **acceptance** 终局验收节点：
 
 ```
-START → goal → plan → execute → [confirm|takeover|reflect|replan|end]
+START → goal → plan → execute → [confirm|takeover|acceptance|reflect|replan|end]
+                               ├─ plan → after_plan → [execute|replan→plan]（validation/adapter 失败带指导自循环一次）
                                ├─ confirm → after_interrupt → [execute|reflect|end]
                                ├─ takeover → after_interrupt → [reflect|end]
-                               ├─ reflect → should_continue → [replan→goal|takeover|end]
-                               ├─ replan → goal → plan (skip reflect for Wait/Note/Call_API/Interact)
+                               ├─ acceptance → after_acceptance → [takeover|replan→goal|end]
+                               ├─ reflect → should_continue → [takeover|replan→goal|acceptance|end]
+                               ├─ replan → goal → plan（仅限不产生观察影响的内部动作）
                                └─ end → END
 ```
 
-- **goal** — 从 raw task 独立提取 `TaskRequirementSet`，编译 typed `GoalContract` 并通过 `ContractAdequacyValidator`；已编译且未请求重编译时为 no-op，可选 `require_goal_approval` interrupt
-- **plan** — 截图 + 模型推理 + 解析 action
-- **execute** — Safety Gate 后校验 `ToolCapability`，再 dispatch，并只产生 dispatch 语义的 `ActionReceipt`
-- **reflect** — 再截图 + 模型判断动作是否生效；独占写入 privacy-safe Goal evidence ledger，并对 `pending_finish` 调用 pure `GoalEvaluator` 验证 criterion IDs 与 current screen/epoch binding
-- **confirm / takeover** — LangGraph `interrupt()` 实现 Human-in-the-Loop；当前保证 interrupt 路由语义，持久 resume 将在后续 checkpoint/resume 阶段完善
+- **goal** — 从 raw task 独立提取 `TaskRequirementSet`，编译 typed `GoalContract` 并通过 `ContractAdequacyValidator`；已编译且 `needs_recompile=False` 时为 no-op，可选 `require_goal_approval` interrupt
+- **plan** — 截图 + 构建 marks/objects + 模型推理 + Adapter→grounding→Validator→Repair 解析；validation/adapter 失败且 repair 用尽时，写入结构化 `parse_failure`（expected/found）与机制级 `mechanism_suggestion`，经 `after_plan` 带指导自循环一次（每 run 一次），再失败才终止
+- **execute** — Safety Gate 后校验 `ToolCapability`，再 dispatch，并只产生 dispatch 语义的 `ActionReceipt`；`finish` 是声明而非成功：只设置 `pending_finish` 并路由到 acceptance
+- **reflect** — 再截图 + deterministic verifier + 模型判断**这个动作是否生效**（单步判定，不判任务进度）；独占写入 privacy-safe Goal evidence ledger，并从账本/轨迹结构计算纯 `progress_exhaustion` 遥测
+- **acceptance** — 验收 `pending_finish` 声明：按判据从证据账本逐层坐实（seal > 最新 observed > judge 引用 > 程序化），unknown 不升级 success；拒绝时写入结构化 rejection feedback、per-criterion verdicts 与 judge 判词供下轮 plan 消费
+- **resource / progress review** — `step_cap` 与可选 wall-clock cap 是资源保险丝，只能诚实停止运行，不伪造 finish；证据连续枯竭时，Plan 要求模型在 `finish` / `take_over` / `progress_claim` 中表态，`progress_claim` 只由账本强证据校验
+- **confirm / takeover** — LangGraph `interrupt()` 实现 Human-in-the-Loop；配合可选 checkpointer（`AgentConfig.enable_hitl_resume` + `run_live()`）支持进程内暂停/恢复，跨进程持久 resume 尚未实现
 
 ### 项目结构
 
@@ -49,6 +53,9 @@ phone_agent/
     ├── state.py                 # AgentState TypedDict
     ├── builder.py               # create_agent_graph()
     ├── edges.py                 # 条件边路由
+    ├── goal.py / goal_compiler.py / goal_evaluator.py / goal_evidence.py  # GoalContract + 编译链 + 证据账本
+    ├── verifier.py              # deterministic per-step verifier
+    ├── guidance.py              # 机制级失败建议映射（parse_failure → mechanism_suggestion）
     ├── marks.py / objects.py    # screen-bound marks、ScreenStructure、ObjectRegistry sidecars
     ├── trace.py                 # 本地 JSONL trace 与脱敏
     ├── context.py               # context selector、request compaction、预算裁剪与脱敏
@@ -56,14 +63,18 @@ phone_agent/
     ├── runtime_goal.py          # per-run private Goal values; never serialized
     ├── compatibility_adapters.py # legacy page-signal shadow telemetry only
     ├── nodes/
+    │   ├── goal_node.py         # GoalContract 编译（任务开始一次）
     │   ├── plan.py
     │   ├── execute.py
-    │   ├── reflect.py
+    │   ├── reflect.py           # 单步动作生效判定
+    │   ├── acceptance.py        # finish 声明的终局验收（账本折叠）
+    │   ├── observation_capture.py
     │   ├── confirm.py           # interrupt() 确认
     │   └── takeover.py          # interrupt() 接管
     └── tools/                   # @tool 函数
         ├── __init__.py          # dispatch_tool, get_tool_map
         ├── coords.py            # 坐标转换
+        ├── locate.py            # 受控 locate（只生成 marks，不直接执行）
         ├── tap.py / type_text.py / swipe.py / launch.py
         ├── navigation.py        # back / home
         ├── press.py             # double_tap / long_press
@@ -149,7 +160,7 @@ print(structured.to_dict())
 | `observe` | 生成 state/trace/eval 指标，但不向 Plan 注入 context block |
 | `inject` | 默认模式；注入脱敏、裁剪后的短期 context block |
 
-`AgentConfig(context_mode="inject")` 为默认值，也可通过 `--context-mode` 或 `PHONE_AGENT_CONTEXT_MODE` 切换为 `observe/off`。context 字段包括 `screen_belief`、`action_outcome_summary`、`failure_memory`、`summarized_history` 与预算/截断指标；默认预算为 failure memory 最近 3 条、screen belief 摘要 300 字符、history 摘要 800 字符、context block 1500 字符。姓名、手机号、邮箱、订单号、验证码、API key/token、长 base64/JWT 等敏感文本默认脱敏，context 不绕过 HITL/confirm/takeover。
+`AgentConfig(context_mode="inject")` 为默认值，也可通过 `--context-mode` 或 `PHONE_AGENT_CONTEXT_MODE` 切换为 `observe/off`。context 字段包括 `screen_belief`、`action_outcome_summary`、`failure_memory`、`summarized_history`、`acceptance_rejection`、`progress_claim_feedback`、`system_guidance` 等与裁剪指标；默认预算为 failure memory 最近 3 条、history 摘要 800 字符、context block 2200 字符（各 section 另有独立预算，如 `system_guidance` 160 字符）。姓名、手机号、邮箱、订单号、验证码、API key/token、长 base64/JWT 等敏感文本默认脱敏，context 不绕过 HITL/confirm/takeover。
 
 #### LangGraph-native Context Engineering Harness
 
@@ -174,15 +185,19 @@ Plan 阶段支持 provider response envelope：`{"action": {...}, "expected_outc
 
 Reflect 阶段会基于动作后的截图/current_app 重新构建 after observation，并携带动作前/动作后的脱敏 observation 摘要运行 deterministic verifier；高置信 deterministic success/failure 会直接映射到结构化 reflection，只有 unknown/低置信才把 stub/hash 后的 verifier signal、ExpectedOutcome summary、before/after observation summary 与当前截图作为 isolated verifier request 交给模型判断。该请求不追加到 `state["messages"]`，也不参与 request compaction 的持久状态。Reflect 默认只使用 accessibility/device marks，不触发 LocateAnything fallback，除非显式开启 `reflect_enable_vlm_grounding`。`screen_changed` 已降级为 weak signal，不能单独证明 Tap/Type/搜索/打开视频/Swipe 成功。广告、banner、推荐流、热词、计数器等动态区域默认视为噪声；搜索框/输入框类 `input_focused` 后置条件会参考 focused/editable/keyboard/top activity 等只读信号。只有按 action/outcome 绑定的强进展（如 Type 后目标文本出现、input_focused 的 focused/keyboard 信号）才会阻止机械 takeover；trace 只记录 `verifier_evidence` 中 stubbed/redacted matched/missing postconditions、progress/weak signals 与 redacted summaries。
 
-Plan 每一轮都会注入一个声明式 `GoalContract`（由 `goal_node` 在任务开始时一次性编译，通过 External/LLM/Heuristic 编译链），包含 `SuccessCriterion[]`、`constraints`、`non_goals`、`target_app_hint`、`ordinal`、`verification_strategy` 等；契约独立于历史消息 compaction 保留，trace-safe（只暴露 hash/长度 stub）。`finish` 不再直接等同成功：`finish` 动作必须在 `matched_terminal_evidence` 中点名契约 criterion，execute 只记录 `pending_finish` 与脱敏 `finish_claim`，然后路由到 reflect。reflect 的 `GoalEvaluator` 对每条 criterion 按 verification 分发核验——`accessibility_text_match`/`object_hash_match`/`object_rank_match`/`app_or_activity_match`/`focus_or_keyboard` 复用既有 verifier 信号（程序化），`vlm_judge` 由证据账本分层坐实：程序化/typed 判据优先（反证 veto），无程序化事实时由 reflect JSON `named_evidence`（含 grounded `screen_reference`）或 L3 judge 的 `satisfied` 引用（必须携带合法 `evidence_step`）坐实；finish claim 命名仅诊断（见下"Finish Gate 语义"）；任一 required criterion 未 matched → `failure_cause="goal_not_satisfied"` replan，unknown 不自动升级 success（删除了原 generic_task 的后门）。reflect 同时引入统一 context 窗口管理（`select_reflect_context` + 最近 K=3 action_outcome 摘要），并将 `goal_contract_block` 提到独立 message 块以利 prompt prefix cache。trace/eval 只记录 `finish_validation_status`、per-criterion matched/missing、task hash 与长度/哈希 stub，不记录 raw task/entity/title。
+Plan 每一轮都会注入一个声明式 `GoalContract`（由 `goal_node` 在任务开始时一次性编译，通过 External/LLM/Heuristic 编译链），包含 `SuccessCriterion[]`、`constraints`、`non_goals`、`target_app_hint`、`ordinal`、`verification_strategy` 等；契约独立于历史消息 compaction 保留，trace-safe（只暴露 hash/长度 stub）。`finish` 不再直接等同成功：execute 只记录 `pending_finish` 与脱敏 `finish_claim`（`matched_terminal_evidence` 仅作诊断 trace），然后路由到独立的 acceptance 节点；`step_cap` / wall-clock 资源保险丝只会以 `resource_fuse_exhausted` 停止运行，不触发 acceptance。acceptance 对每条 criterion 从证据账本逐层坐实——seal > 最新 `model_observation` > judge 引用 > 程序化信号；程序化反证需要正向反观察，且优先于 vlm_judge self-attestation；judge 的 `satisfied` 必须携带合法 `evidence_step` 引用；任一 required criterion 未坐实 → `failure_cause="goal_not_satisfied"` replan，unknown 不自动升级 success（见下"Finish Gate 语义"）。reflect 同时引入统一 context 窗口管理（`select_reflect_context` + 最近 K=3 action_outcome 摘要），并将 `goal_contract_block` 提到独立 message 块以利 prompt prefix cache。trace/eval 只记录 `finish_validation_status`、per-criterion matched/missing、task hash 与长度/哈希 stub，不记录 raw task/entity/title。
+
+#### 资源保险丝与进展声明
+
+`AgentConfig.step_cap`（兼容 `max_steps`）和 `wall_clock_cap_seconds` 是用户域资源保险丝：到界后以 `failure_cause="resource_fuse_exhausted"` 结束，不代表任务成功或失败，也不会伪造 `pending_finish`。当 `progress_exhaustion()` 连续观察不到强进展证据时，Plan context 会要求模型表态：已完成则 `finish`，无法继续则 `take_over`，仍在推进则附 `progress_claim`。`validate_progress_claim()` 是纯校验器，只认近窗口内的结构化证据（criterion rank 净升、observed value digest 变化、new latch、目标相关 effect event、stage advance）；长列表新 screen 本身不算强证据。claim 自由文本按 context payload 脱敏，trace 只持久化脱敏摘要与校验结果。
 
 #### Finish Gate 语义（fail-closed）
 
-- `finish` 是**声明**而非执行成功：模型只能在 `action.finish.matched_terminal_evidence` 中点名它认为已满足的 required criterion；execute 设置 `pending_finish=True` 后路由到 reflect，由 `GoalEvaluator` 复核。
+- `finish` 是**声明**而非执行成功：模型只能在 `action.finish.matched_terminal_evidence` 中点名它认为已满足的 required criterion；execute 设置 `pending_finish=True` 后路由到 acceptance 节点，由证据账本折叠复核。
 - `matched_terminal_evidence` 只是模型的 finish 声明（claim），**命名门禁已退役**：criterion 是否满足由证据账本分层坐实（seal > `model_observation` > judge 引用），finish 点名既不能单独产生 `matched`，也不会因漏点直接判 `missing`——claim 只作为 `finish_claim_matched`/`unknown_finish_claim_ids` 进入 trace 诊断（judge 的 `satisfied` 必须携带合法 `evidence_step` 引用，缺失/越界 → `unknown` → `goal_not_satisfied` replan，不自动升级 success）。
 - 程序化 criterion（accessibility/object_rank/app_or_activity/focus）的反证 **优先于** vlm_judge self-attestation；任一程序化信号 `missing` 且对应 criterion 与 vlm_judge 同名时，会把该 vlm_judge 的 matched 结果覆盖为 missing。
-- `needs_recompile` 字段当前**没有写入路径**（仅 `agent.py` 初始化为 `False`），reflect 不会自动触发 goal 重编译；如需在任务中途替换契约，使用 `configurable["task_goal_contract_override"]` 注入外部契约。
-- `should_continue` 的 `replan` 路由现在是 `goal → plan`（非直接 `plan`）；`goal_node` 在已编译且 `needs_recompile=False` 时 no-op 返回 `{}`，等价于直接进入 plan，但保留编译热路径以备后续接通自动重编译。
+- `needs_recompile` 由 reflect 在检测到 stage 停滞时写入（单写点），下一轮 `goal_node` 重编译契约并清除该标志；也可用 `configurable["task_goal_contract_override"]` 注入外部契约。
+- `should_continue` 的 `replan` 路由是 `goal → plan`（非直接 `plan`）；`goal_node` 在已编译且 `needs_recompile=False` 时 no-op 返回 `{}`，等价于直接进入 plan。
 
 ### Model Output Adapter
 
@@ -383,6 +398,7 @@ python main.py --device-id 192.168.1.100:5555 --base-url http://localhost:8000/v
 | `PHONE_AGENT_LOCATEANYTHING_VISUAL_CATEGORY_BUDGET` | `screen` 模式 bounded category prompt 数量 | `5` |
 | `PHONE_AGENT_LOCATEANYTHING_MAX_STRUCTURE_CALLS` | `screen` 模式最多 LocateAnything 结构化调用数 | `5` |
 | `PHONE_AGENT_GROUNDING_MAX_SIZE` | 通用 grounding 输入图最长边 fallback；当前仅 LocateAnything factory 消费 | `960` |
+| `PHONE_AGENT_DEBUG_FULL` | 调试模式：把每帧原始截图写入 `<trace_dir>/screenshots/`（P0#10 豁免项，注意隐私） | 关闭 |
 
 ## 开发
 
@@ -403,7 +419,7 @@ python main.py --device-id 192.168.1.100:5555 --base-url http://localhost:8000/v
 .venv/bin/python evals/run_eval.py --dry-run --trace-dir .traces/smoke
 ```
 
-当前 Evaluation Harness 覆盖结构化结果、基础指标、HITL interrupt routing 计数、trace 文件关联、retry count、failure cause histogram、`verifier_status_counts`、`finish_validation_counts`，以及 `context_mode`、`context_strategy`、`prompt_version`、`selected_sections`、`messages_before/after`、`message_chars_before/after`、`approx_tokens_before/after`、`context_block_chars`、`context_truncated`、`failure_memory_hit_count`、`repeated_failure_count` 等 context 指标；不承诺跨进程持久 resume，完整 resume 指标将在 checkpoint/resume 阶段补齐。
+当前 Evaluation Harness 覆盖结构化结果、基础指标、HITL interrupt routing 计数、trace 文件关联、retry count、failure cause histogram、`verifier_status_counts`、`finish_validation_counts`，以及 `context_mode`、`context_strategy`、`prompt_version`、`selected_sections`、`messages_before/after`、`message_chars_before/after`、`approx_tokens_before/after`、`context_block_chars`、`context_truncated`、`failure_memory_hit_count`、`repeated_failure_count` 等 context 指标。HITL 进程内 resume 已支持（`AgentConfig.enable_hitl_resume` + `run_live()`），跨进程持久 resume 及其 eval 指标尚未提供。
 
 ```bash
 .venv/bin/python evals/run_eval.py --dry-run --context-mode observe --trace-dir .traces/smoke
@@ -411,24 +427,9 @@ python main.py --device-id 192.168.1.100:5555 --base-url http://localhost:8000/v
 .venv/bin/python evals/run_eval.py --dry-run --context-mode off --trace-dir .traces/smoke
 ```
 
-### TraeCLI 项目配置
+### Agent 开发工作流配置
 
-本仓库包含项目级 TraeCLI 配置，用于约束开发流程和持续执行编排：
-
-| 范围 | 路径 |
-|------|------|
-| TraeCLI 2.0 项目配置 | `.trae/traecli.toml` |
-| LangGraph roadmap 与执行约束 | `.trae/rules/graph.mdc` |
-| RALPLAN 共识规划协议 | `.trae/rules/ralplan.mdc` |
-| Autopilot 流水线协议 | `.trae/rules/autopilot.mdc` |
-| OMX skills | `.codex/skills/ralplan/SKILL.md`, `.codex/skills/autopilot/SKILL.md`, `.codex/skills/ultragoal/SKILL.md` |
-| Project agents | `.trae/agents/*.md` |
-
-Autopilot 使用 OMX canonical workflow：`$deep-interview -> $ralplan -> $ultragoal -> $code-review -> $ultraqa`，本仓库 `.trae/rules/autopilot.mdc` / `.trae/rules/ralplan.mdc` 只保留 TraeCLI 2.0 边界规则并指向 `.codex/skills/`。业务执行协议以 `json_schema|tool_calls|auto` 为准，不再包含旧 text DSL 回滚。涉及 prompt/context/grounding/finish validation harness 的执行计划、验收矩阵与阶段状态以 `.trae/rules/graph.mdc` 为准；TraeCLI 规则、README、docs 与 AGENTS 约束必须同步更新。项目命令必须优先使用 `.venv/bin/python`、`.venv/bin/pytest`、`.venv/bin/pip`。
-
-```bash
-.venv/bin/pytest tests -q
-```
+给 AI coding agent 的项目约定集中在仓库根 `AGENTS.md`（P0 硬性约束 + 工作约定）与 `CLAUDE.md`（Claude Code 引导）；OMX 规划/执行 workflow skills 在 `.codex/skills/`（如 `ralplan`、`autopilot`、`ultragoal`）。架构与阶段状态以本 README、`docs/future-roadmap.md` 和源码（`phone_agent/graph/builder.py` docstring）为准。项目命令必须优先使用 `.venv/bin/python`、`.venv/bin/pytest`、`.venv/bin/pip`。
 
 ## 常见问题
 

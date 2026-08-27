@@ -81,6 +81,7 @@ MAX_TEXT_CHARS = 160
 # P4 #1: bounded provider self-note for next-step intent continuity.
 PROGRESS_NOTE_MAX_CHARS = 120
 PROGRESS_NOTE_FIELD = "progress_note"
+PROGRESS_CLAIM_FIELD = "progress_claim"
 
 
 @dataclass(frozen=True)
@@ -167,6 +168,37 @@ def extract_progress_note(payload: Any) -> str | None:
     if not text:
         return None
     return text[:PROGRESS_NOTE_MAX_CHARS]
+
+
+def extract_progress_claim(payload: Any) -> dict[str, Any] | None:
+    """Extract optional provider progress declaration from the envelope.
+
+    Malformed claims are ignored so declaration parsing cannot block the main
+    action path. Free text is sanitized later at the state write boundary.
+    """
+
+    if not isinstance(payload, dict):
+        return None
+    claim = payload.get(PROGRESS_CLAIM_FIELD)
+    if not isinstance(claim, dict):
+        return None
+    result: dict[str, Any] = {}
+    summary = claim.get("summary")
+    if isinstance(summary, str) and summary.strip():
+        result["summary"] = summary.strip()[:240]
+    evidence_refs = claim.get("evidence_refs")
+    if isinstance(evidence_refs, list):
+        refs = [str(item).strip()[:120] for item in evidence_refs if str(item).strip()]
+        if refs:
+            result["evidence_refs"] = refs[:8]
+    next_actions = claim.get("next_actions")
+    if isinstance(next_actions, list):
+        actions = [
+            str(item).strip()[:160] for item in next_actions if str(item).strip()
+        ]
+        if actions:
+            result["next_actions"] = actions[:3]
+    return result or None
 
 
 def extract_provider_envelope(payload: Any) -> tuple[Any, dict[str, Any] | None]:
