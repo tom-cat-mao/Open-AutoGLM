@@ -174,8 +174,8 @@ class V2Config:
                     http_headers[hkey.strip()] = hvalue.strip()
 
         config = cls(
-            base_url=_env_str("PHONE_AGENT_BASE_URL", ""),
-            model_name=_env_str("PHONE_AGENT_MODEL", ""),
+            base_url=_env_str("PHONE_AGENT_BASE_URL", "http://localhost:8000/v1"),
+            model_name=_env_str("PHONE_AGENT_MODEL", "autoglm-phone-9b"),
             api_key=_env_str("PHONE_AGENT_API_KEY", "EMPTY"),
             model_timeout=_env_float("PHONE_AGENT_MODEL_TIMEOUT", 180.0),
             model_max_retries=_env_int("PHONE_AGENT_MODEL_MAX_RETRIES", 2),
