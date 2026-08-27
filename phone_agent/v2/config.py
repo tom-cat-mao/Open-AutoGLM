@@ -1,0 +1,208 @@
+"""v2 configuration layer: three-tier env / .env / CLI resolution.
+
+Resolution order (highest wins): CLI overrides > shell env > project .env >
+dataclass defaults. ``load_project_env()`` loads ``PHONE_AGENT_*`` keys from the
+project ``.env`` without overriding values already present in the shell
+environment (ported from the live-diagnosis ``run_diagnosis.py`` helper).
+
+See ``docs/refactor-thin-loop-v2.md`` §4 for the binding contract.
+"""
+
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass
+from pathlib import Path
+
+# repo root = phone_agent/v2/config.py -> parents[2]
+ROOT = Path(__file__).resolve().parents[2]
+
+
+def load_project_env() -> None:
+    """Load PHONE_AGENT_* defaults from the project .env without overriding shell values.
+
+    Tolerates a leading ``export `` prefix and surrounding single/double quotes.
+    Only keys with the ``PHONE_AGENT_`` prefix are loaded, and existing shell env
+    values are never overwritten (shell env > .env).
+    """
+
+    env_path = ROOT / ".env"
+    if not env_path.exists():
+        return
+    for raw_line in env_path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        if line.startswith("export "):
+            line = line[len("export ") :].strip()
+        key, value = line.split("=", 1)
+        key = key.strip()
+        if not key.startswith("PHONE_AGENT_") or key in os.environ:
+            continue
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'"}:
+            value = value[1:-1]
+        os.environ[key] = value
+
+
+def _env_str(key: str, default: str) -> str:
+    raw = os.getenv(key)
+    if raw is None or not raw.strip():
+        return default
+    return raw
+
+
+def _env_opt_str(key: str) -> str | None:
+    raw = os.getenv(key)
+    if raw is None or not raw.strip():
+        return None
+    return raw
+
+
+def _env_float(key: str, default: float) -> float:
+    raw = os.getenv(key)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        return float(raw)
+    except ValueError as exc:
+        raise ValueError(f"{key} must be a float, got {raw!r}") from exc
+
+
+def _env_int(key: str, default: int) -> int:
+    raw = os.getenv(key)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        return int(raw)
+    except ValueError as exc:
+        raise ValueError(f"{key} must be an int, got {raw!r}") from exc
+
+
+def _env_bool(key: str, default: bool) -> bool:
+    raw = os.getenv(key)
+    if raw is None or not raw.strip():
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _parse_sampling() -> dict[str, float]:
+    """Parse optional sampling params; illegal float values raise ValueError."""
+
+    sampling: dict[str, float] = {}
+    for env_key, param in (
+        ("PHONE_AGENT_TEMPERATURE", "temperature"),
+        ("PHONE_AGENT_TOP_P", "top_p"),
+        ("PHONE_AGENT_FREQUENCY_PENALTY", "frequency_penalty"),
+    ):
+        raw = os.getenv(env_key)
+        if raw is None or not raw.strip():
+            continue
+        try:
+            sampling[param] = float(raw)
+        except ValueError as exc:
+            raise ValueError(f"{env_key} must be a float, got {raw!r}") from exc
+    return sampling
+
+
+def _parse_cf_access() -> tuple[str | None, str | None]:
+    """CF Access id/secret must be supplied as a pair or not at all."""
+
+    cf_id = _env_opt_str("PHONE_AGENT_CF_ACCESS_CLIENT_ID")
+    cf_secret = _env_opt_str("PHONE_AGENT_CF_ACCESS_CLIENT_SECRET")
+    if bool(cf_id) != bool(cf_secret):
+        raise ValueError(
+            "PHONE_AGENT_CF_ACCESS_CLIENT_ID and PHONE_AGENT_CF_ACCESS_CLIENT_SECRET "
+            "must be set together (a CF Access id/secret pair)"
+        )
+    return cf_id, cf_secret
+
+
+@dataclass
+class V2Config:
+    """Resolved runtime configuration for one v2 run."""
+
+    # model
+    base_url: str
+    model_name: str
+    api_key: str = "EMPTY"
+    model_timeout: float = 180.0
+    model_max_retries: int = 2
+    # device
+    device_id: str | None = None
+    # loop
+    max_model_calls: int = 20
+    # grounding
+    grounding_provider: str = "hybrid"
+    accessibility_timeout: float = 3.0
+    accessibility_max_marks: int = 80
+    locateanything_model: str | None = None
+    locateanything_max_size: int = 960
+    # i18n / misc
+    lang: str = "cn"
+    # trace
+    trace_dir: str = ".traces"
+    trace_enabled: bool = True
+    # sampling params (temperature/top_p/frequency_penalty) forwarded to the model
+    sampling: dict[str, float] | None = None
+    # request headers extras
+    user_agent: str | None = None
+    http_headers: dict[str, str] | None = None
+    cf_access_client_id: str | None = None
+    cf_access_client_secret: str | None = None
+    # reserved (read-only this round; not implemented)
+    memory_model: str | None = None
+    verifier_model: str | None = None
+
+    @classmethod
+    def from_env(cls, overrides: dict | None = None) -> "V2Config":
+        """Build a V2Config from shell/.env values, applying CLI overrides last.
+
+        ``overrides`` mirrors the dataclass field names; ``None`` values are
+        ignored so CLI flags left unset never clobber env-derived values.
+        """
+
+        sampling = _parse_sampling()
+        cf_id, cf_secret = _parse_cf_access()
+
+        http_headers: dict[str, str] = {}
+        raw_headers = os.getenv("PHONE_AGENT_HTTP_HEADERS")
+        if raw_headers:
+            for pair in raw_headers.split(";"):
+                if "=" in pair:
+                    hkey, hvalue = pair.split("=", 1)
+                    http_headers[hkey.strip()] = hvalue.strip()
+
+        config = cls(
+            base_url=_env_str("PHONE_AGENT_BASE_URL", ""),
+            model_name=_env_str("PHONE_AGENT_MODEL", ""),
+            api_key=_env_str("PHONE_AGENT_API_KEY", "EMPTY"),
+            model_timeout=_env_float("PHONE_AGENT_MODEL_TIMEOUT", 180.0),
+            model_max_retries=_env_int("PHONE_AGENT_MODEL_MAX_RETRIES", 2),
+            device_id=_env_opt_str("PHONE_AGENT_DEVICE_ID"),
+            max_model_calls=_env_int("PHONE_AGENT_MAX_STEPS", 20),
+            grounding_provider=_env_str("PHONE_AGENT_GROUNDING_PROVIDER", "hybrid"),
+            accessibility_timeout=_env_float("PHONE_AGENT_ACCESSIBILITY_TIMEOUT", 3.0),
+            accessibility_max_marks=_env_int("PHONE_AGENT_ACCESSIBILITY_MAX_MARKS", 80),
+            locateanything_model=_env_opt_str("PHONE_AGENT_LOCATEANYTHING_MODEL"),
+            locateanything_max_size=_env_int("PHONE_AGENT_LOCATEANYTHING_MAX_SIZE", 960),
+            lang=_env_str("PHONE_AGENT_LANG", "cn"),
+            trace_dir=_env_str("PHONE_AGENT_TRACE_DIR", ".traces"),
+            trace_enabled=_env_bool("PHONE_AGENT_TRACE", True),
+            sampling=sampling or None,
+            user_agent=_env_opt_str("PHONE_AGENT_USER_AGENT"),
+            http_headers=http_headers or None,
+            cf_access_client_id=cf_id,
+            cf_access_client_secret=cf_secret,
+            memory_model=_env_opt_str("PHONE_AGENT_MEMORY_MODEL"),
+            verifier_model=_env_opt_str("PHONE_AGENT_VERIFIER_MODEL"),
+        )
+
+        for field_name, value in (overrides or {}).items():
+            if value is None:
+                continue
+            if not hasattr(config, field_name):
+                raise ValueError(f"Unknown V2Config override: {field_name}")
+            setattr(config, field_name, value)
+
+        return config
