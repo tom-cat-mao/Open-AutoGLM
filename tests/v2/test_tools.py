@@ -31,6 +31,7 @@ def test_full_tool_set_present():
         "finish",
         "ask_user",
         "take_over",
+        "update_task_doc",
     }
 
 
