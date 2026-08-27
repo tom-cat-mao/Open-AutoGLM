@@ -19,6 +19,12 @@
     - `ModelCallLimitMiddleware(thread_limit=max_model_calls, exit_behavior="end")`——到界优雅停止。
   - **Agent 装配**（`phone_agent/v2/agent.py`）：`ThinPhoneAgent(config, checkpointer=None)` 默认 `MemorySaver`；`run(task, hitl_handler=input)` 返回 `RunResult(success, reason, steps, trace_path)`；结束条件为 `session.finished` | `session.takeover_reason` | 模型无 tool_call | ModelCallLimit。
   - **配置**（`phone_agent/v2/config.py`）：`V2Config` 三级解析 CLI > shell env > `.env` > 默认；保留 `PHONE_AGENT_MEMORY_MODEL` / `PHONE_AGENT_VERIFIER_MODEL`（本轮只读取不实现）。
+- **TaskDoc 任务板已落地**（增量一，契约 `docs/refactor-thin-loop-v2-taskdoc.md`）：goal 与 plan 合为同一文档的两个段落（目标 / 路线 / 关键事实），形态 = state（`PhoneSession.task_doc`）+ 工具写入（`update_task_doc` 是模型唯一写入者）+ `before_model` 渲染钩子。
+  - **播种与写入边界**：run 启动时 harness 播种 `TaskDoc(goal_base=task)`；`goal_base` 只有 harness 能写，模型经 `update_task_doc` 全量替换 items / 追加 amendments / 替换 facts，validate 失败不写入。
+  - **渲染钩子**（`phone_agent/v2/middleware/taskdoc.py`）：`TaskDocMiddleware.before_model` 在 messages 尾部注入 `[TASK_DOC]\n<render>` system 消息（pinned，压缩免疫，每轮移除旧块重贴新块）；空文档不注入。
+  - **停滞轻推**：连续 `PHONE_AGENT_TASKDOC_NUDGE_STEPS`（默认 5）次模型调用 `session.seen_states` 无新增且仍有 open items 时，在渲染块后追加一次非指导性提示（`session.nudged` 保证每 run 至多一次）；`observe()` 记录 `(current_app, screen_hash)`。
+  - **finish 守卫**（`phone_agent/v2/tools/control.py`）：evidence 校验保留；新增 `task_doc.has_open_items()` 为真时拒绝 finish 并列出未完成项。
+  - **配置**：`PHONE_AGENT_TASKDOC`（默认 true，`0/false/no/off` 关闭时不注册中间件不渲染）、`PHONE_AGENT_TASKDOC_NUDGE_STEPS`（默认 5）。
 - **测试门禁**：`.venv/bin/pytest tests/v2 tests/grounding -q` 全绿（全部 fake，无真机无 MLX）。LangChain 网关兼容 spike：`scripts/spike_langchain_compat.py`。
 - **本轮不做（后续迭代项）**：
   - **handoff 压缩 / writer**：`images.py` 目前只做滚动剪除，未做压缩合并；context-window compaction 与摘要 handoff 延后。

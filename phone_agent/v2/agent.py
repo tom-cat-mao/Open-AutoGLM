@@ -94,6 +94,23 @@ class ThinPhoneAgent:
             ),
         ]
 
+        # TaskDoc render/nudge middleware (task-board increment). Guarded so a
+        # missing taskdoc module (e.g. this file imported before the concurrent
+        # W1 worktree lands) degrades gracefully to a plain thin loop.
+        if getattr(config, "taskdoc_enabled", True):
+            try:
+                from phone_agent.v2.middleware.taskdoc import build_taskdoc_middleware
+
+                middleware.append(
+                    build_taskdoc_middleware(
+                        self.session,
+                        lang=getattr(config, "lang", "cn"),
+                        nudge_steps=getattr(config, "taskdoc_nudge_steps", 5),
+                    )
+                )
+            except Exception:  # noqa: BLE001 - optional increment; never block bring-up
+                pass
+
         from phone_agent.v2.prompts import get_system_prompt
 
         self.agent = create_agent(
@@ -159,8 +176,28 @@ class ThinPhoneAgent:
         return decisions
 
     # ------------------------------------------------------------------
+    def _seed_task_doc(self, task: str) -> None:
+        """Harness-seed the task board's goal base at run start (§2.5).
+
+        ``goal_base`` is only ever set here — the model can never rewrite it (it
+        writes exclusively through ``update_task_doc``). Lazy/guarded import so a
+        missing taskdoc module degrades to a plain thin loop.
+        """
+
+        if not getattr(self.config, "taskdoc_enabled", True):
+            return
+        try:
+            from phone_agent.v2.taskdoc import TaskDoc
+
+            self.session.task_doc = TaskDoc(goal_base=task)
+        except Exception:  # noqa: BLE001 - optional increment; skip seeding on import failure
+            pass
+
+    # ------------------------------------------------------------------
     def run(self, task: str, hitl_handler: Callable[[str], str] = input) -> RunResult:
         from langgraph.types import Command
+
+        self._seed_task_doc(task)
 
         config = {"configurable": {"thread_id": self.run_id}}
         payload: Any = {"messages": self._initial_messages(task)}

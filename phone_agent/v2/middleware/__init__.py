@@ -13,6 +13,10 @@ from phone_agent.v2.middleware.safety import (
     build_hitl_middleware,
     is_sensitive_tool_call,
 )
+from phone_agent.v2.middleware.taskdoc import (
+    TaskDocMiddleware,
+    build_taskdoc_middleware,
+)
 from phone_agent.v2.middleware.trace import (
     TraceMiddleware,
     build_trace_middleware,
@@ -24,6 +28,8 @@ __all__ = [
     "is_sensitive_tool_call",
     "ImagePruningMiddleware",
     "build_image_middleware",
+    "TaskDocMiddleware",
+    "build_taskdoc_middleware",
     "TraceMiddleware",
     "build_trace_middleware",
     "redact_args",
