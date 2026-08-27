@@ -1,85 +1,58 @@
 # Phone Agent
 
-基于 LangGraph 的手机端智能助理框架。通过视觉语言模型理解屏幕内容，自动规划并执行操作流程。
+基于 LangChain `create_agent` 的**薄 loop（thin-loop v2）** 手机端智能助理框架。通过视觉语言模型理解屏幕内容，每步一次模型调用，通过工具感知和操作真实 Android 设备。
+
+> **v2 架构已上线，v1（LangGraph goal→plan→execute→reflect→acceptance 节点图）已退役。** 迁移背景与后续迭代项见 [`docs/refactor-thin-loop-v2.md`](docs/refactor-thin-loop-v2.md) 与 [`docs/future-roadmap.md`](docs/future-roadmap.md)。
 
 ## 架构
 
-核心是 LangGraph StateGraph 驱动的 **Plan-Execute-Reflect** 循环，外加独立的 **acceptance** 终局验收节点：
+v2 是**薄 loop + 工具化**：LLM 每步一次调用，通过工具感知/操作设备；harness（middleware）只负责工具供给、安全边界、context 卫生和可观测，不做工作流路由。
 
 ```
-START → goal → plan → execute → [confirm|takeover|acceptance|reflect|replan|end]
-                               ├─ plan → after_plan → [execute|replan→plan]（validation/adapter 失败带指导自循环一次）
-                               ├─ confirm → after_interrupt → [execute|reflect|end]
-                               ├─ takeover → after_interrupt → [reflect|end]
-                               ├─ acceptance → after_acceptance → [takeover|replan→goal|end]
-                               ├─ reflect → should_continue → [takeover|replan→goal|acceptance|end]
-                               ├─ replan → goal → plan（仅限不产生观察影响的内部动作）
-                               └─ end → END
+system(极简契约) + user(task + 首次观测块含截图)
+      → create_agent tool-calling loop:
+          model → [safety HITL] → tool(s) → model → …
+      → 结束条件: session.finished | session.takeover_reason | 模型无 tool_call | ModelCallLimit
 ```
 
-- **goal** — 从 raw task 独立提取 `TaskRequirementSet`，编译 typed `GoalContract` 并通过 `ContractAdequacyValidator`；已编译且 `needs_recompile=False` 时为 no-op，可选 `require_goal_approval` interrupt
-- **plan** — 截图 + 构建 marks/objects + 模型推理 + Adapter→grounding→Validator→Repair 解析；validation/adapter 失败且 repair 用尽时，写入结构化 `parse_failure`（expected/found）与机制级 `mechanism_suggestion`，经 `after_plan` 带指导自循环一次（每 run 一次），再失败才终止
-- **execute** — Safety Gate 后校验 `ToolCapability`，再 dispatch，并只产生 dispatch 语义的 `ActionReceipt`；`finish` 是声明而非成功：只设置 `pending_finish` 并路由到 acceptance
-- **reflect** — 再截图 + deterministic verifier + 模型判断**这个动作是否生效**（单步判定，不判任务进度）；独占写入 privacy-safe Goal evidence ledger，并从账本/轨迹结构计算纯 `progress_exhaustion` 遥测
-- **acceptance** — 验收 `pending_finish` 声明：按判据从证据账本逐层坐实（seal > 最新 observed > judge 引用 > 程序化），unknown 不升级 success；拒绝时写入结构化 rejection feedback、per-criterion verdicts 与 judge 判词供下轮 plan 消费
-- **resource / progress review** — `step_cap` 与可选 wall-clock cap 是资源保险丝，只能诚实停止运行，不伪造 finish；证据连续枯竭时，Plan 要求模型在 `finish` / `take_over` / `progress_claim` 中表态，`progress_claim` 只由账本强证据校验
-- **confirm / takeover** — LangGraph `interrupt()` 实现 Human-in-the-Loop；配合可选 checkpointer（`AgentConfig.enable_hitl_resume` + `run_live()`）支持进程内暂停/恢复，跨进程持久 resume 尚未实现
+- **工具（`phone_agent/v2/tools/`）** — 执行族 `tap/long_press/type_text/scroll/swipe/back/home/launch_app/wait`、感知族 `read_screen/locate`、控制族 `finish/ask_user/take_over`。执行类工具成功后自动附带 `[OBS]` 观测块。
+- **Session（`phone_agent/v2/session.py`）** — 一次 run 的设备侧状态：截图、当前屏 marks、`resolve_mark`、`locate`、`finished/takeover_reason`。
+- **marks-first grounding** — 执行类动作必须绑定 mark；`tap` 支持双寻址 `target_mark_id`（直达）| `target_description`（自然语言，须经 grounding 解析为唯一 mark，歧义/无匹配 fail-closed 不执行）。原始坐标仅 swipe fallback。
+- **Middleware（`phone_agent/v2/middleware/`）** — 安全 HITL、历史截图滚动剪除、JSONL trace 脱敏、`ModelCallLimit`（见下）。
+
+### Middleware 栈
+
+| Middleware | 作用 |
+|------------|------|
+| `safety.py` | 危险动作（支付/密码/验证码/敏感 App）经 `HumanInTheLoopMiddleware` interrupt 等待人工 `approve`/`reject`；`ask_user`→`respond`；`take_over` 始终 interrupt。安全硬门只活在这里 |
+| `images.py` | `before_model` 钩子：除最新 1 个含图消息外，其余 image content block 替换为 `[screen#n 已剪除]` 文本占位，滚动剪除历史截图 |
+| `trace.py` | 每次 model/tool 调用写 JSONL（`model_call`/`tool_call`/`tool_result`/`run_end`），脱敏（>64 字截断、敏感词 redacted），不记录截图 base64（只记 screen_seq 与字节数） |
+| `ModelCallLimitMiddleware` | `thread_limit=max_model_calls`，`exit_behavior="end"`，到界优雅停止 |
 
 ### 项目结构
 
 ```
 phone_agent/
-├── agent.py                     # PhoneAgent 入口，使用 StateGraph
-├── device_factory.py            # 设备工厂
-├── model/
-│   └── client.py                # ModelClient (OpenAI 兼容；text/json/tool_calls 输出适配)
-├── actions/
-│   ├── result.py                # ActionResult
-│   ├── receipt.py               # ActionReceipt（dispatch，不代表 transition/Goal 成功）
-│   ├── capability.py            # 每个 canonical action 的不可变能力元数据
-│   └── adapter.py               # JSON/tool_calls → canonical action 适配与校验
-├── grounding/                   # MarkProvider、LocateAnything MLX、fake provider、bbox parser
-├── adb/                         # Android 设备控制
-├── checkpoint/
-│   ├── serde.py                 # checkpoint egress redaction / metadata projection
-│   └── goal_resume.py           # HMAC-bound trusted trajectory rehydration contract
+├── adb/                 # 设备层（截图/tap/swipe/type/launch/back/home/dump_uiautomator_xml/foreground）【保留】
+├── device_factory.py    # DeviceFactory【保留】
+├── grounding/           # MarkProvider 体系（accessibility tree / LocateAnything / fallback / factory）【保留】
 ├── config/
-│   ├── apps.py                  # legacy Launch 名称兼容数据
-│   ├── app_registry.py          # AppIdentity / inventory / LaunchPolicy 边界
-│   ├── policy.py                # versioned SafetyPolicyRegistry / VerificationPolicy
-│   ├── prompts_zh.py / prompts_en.py  # structured prompt contract
-│   └── timing.py
-└── graph/                       # LangGraph 核心
-    ├── state.py                 # AgentState TypedDict
-    ├── builder.py               # create_agent_graph()
-    ├── edges.py                 # 条件边路由
-    ├── goal.py / goal_compiler.py / goal_evaluator.py / goal_evidence.py  # GoalContract + 编译链 + 证据账本
-    ├── verifier.py              # deterministic per-step verifier
-    ├── guidance.py              # 机制级失败建议映射（parse_failure → mechanism_suggestion）
-    ├── marks.py / objects.py    # screen-bound marks、ScreenStructure、ObjectRegistry sidecars
-    ├── trace.py                 # 本地 JSONL trace 与脱敏
-    ├── context.py               # context selector、request compaction、预算裁剪与脱敏
-    ├── fact_providers.py        # node-local neutral facts、authority resolution、optional adapters
-    ├── runtime_goal.py          # per-run private Goal values; never serialized
-    ├── compatibility_adapters.py # legacy page-signal shadow telemetry only
-    ├── nodes/
-    │   ├── goal_node.py         # GoalContract 编译（任务开始一次）
-    │   ├── plan.py
-    │   ├── execute.py
-    │   ├── reflect.py           # 单步动作生效判定
-    │   ├── acceptance.py        # finish 声明的终局验收（账本折叠）
-    │   ├── observation_capture.py
-    │   ├── confirm.py           # interrupt() 确认
-    │   └── takeover.py          # interrupt() 接管
-    └── tools/                   # @tool 函数
-        ├── __init__.py          # dispatch_tool, get_tool_map
-        ├── coords.py            # 坐标转换
-        ├── locate.py            # 受控 locate（只生成 marks，不直接执行）
-        ├── tap.py / type_text.py / swipe.py / launch.py
-        ├── navigation.py        # back / home
-        ├── press.py             # double_tap / long_press
-        ├── wait.py
-        └── misc.py              # note / call_api / interact
+│   ├── policy.py        # versioned SafetyPolicyRegistry / VerificationPolicy（middleware 使用）【保留】
+│   ├── app_registry.py  # AppIdentity / inventory / LaunchPolicy（launch_app 解析使用）【保留】
+│   ├── apps.py / i18n.py / timing.py
+│   └── redact.py        # 隐私脱敏原语（trace/grounding 共用）
+└── v2/
+    ├── config.py        # V2Config：env/.env/CLI 三级解析
+    ├── model.py         # build_chat_model()：ChatOpenAI 工厂
+    ├── session.py       # PhoneSession：设备状态 + 截图 + marks + locate
+    ├── coords.py        # 0-1000 相对坐标 → 绝对像素
+    ├── resolver.py      # 目标解析：mark_id | description → 唯一 mark（fail-closed）
+    ├── prompts.py       # 极简 system prompt（cn/en）
+    ├── agent.py         # ThinPhoneAgent：create_agent 装配 + run 循环 + HITL resume
+    ├── tools/           # actuation / perception / control 工具族
+    └── middleware/      # safety / images / trace
+main_v2.py               # CLI 入口
+tests/v2/                # v2 测试（全部 fake，无真机无 MLX）
 ```
 
 ## 快速开始
@@ -109,111 +82,37 @@ pip install -e ".[dev]"
 ### 运行
 
 ```bash
-# 交互模式
-python main.py --base-url http://localhost:8000/v1 --model "autoglm-phone-9b"
-
-# 指定任务
-python main.py --base-url http://localhost:8000/v1 "打开美团搜索附近的火锅店"
-
-# 使用智谱 API
-python main.py --base-url https://open.bigmodel.cn/api/paas/v4 --model "autoglm-phone" --apikey "your-key"
+# 指定任务（task 是位置参数）
+.venv/bin/python main_v2.py "打开美团搜索附近的火锅店" \
+    --device-id <serial> --max-steps 20 \
+    --model autoglm-phone-9b --base-url http://localhost:8000/v1 \
+    --grounding-provider hybrid --lang cn --trace-dir .traces
 
 # 英文模式
-python main.py --lang en --base-url http://localhost:8000/v1 "Open Chrome browser"
+.venv/bin/python main_v2.py "Open Chrome browser" --lang en --base-url http://localhost:8000/v1
 ```
+
+CLI 先 `load_project_env()` 加载 `.env`，再 argparse（默认 None 不覆盖 env）。退出码：success `0` / takeover `2` / max_calls `3` / error `1`。HITL 时用 `input()` 收集 approve/reject/respond。
 
 ### Python API
 
 ```python
-from phone_agent import PhoneAgent
-from phone_agent.model import ModelConfig
+from phone_agent.v2.config import V2Config
+from phone_agent.v2.agent import ThinPhoneAgent
 
-agent = PhoneAgent(model_config=ModelConfig(
-    base_url="http://localhost:8000/v1",
-    model_name="autoglm-phone-9b",
-    output_mode="json_schema",  # json_schema | tool_calls | auto
-))
-
-result = agent.run("打开淘宝搜索无线耳机")
-print(result)
+config = V2Config.from_env()
+agent = ThinPhoneAgent(config)
+result = agent.run("打开淘宝搜索无线耳机")   # hitl_handler 默认 input
+print(result.success, result.reason, result.steps, result.trace_path)
 ```
 
-`run()` 保持返回字符串的兼容行为；评测或观测场景可使用结构化 API：
+`ThinPhoneAgent.run(task, hitl_handler=input)` 返回 `RunResult(success, reason, steps, trace_path)`：
+- `success` — `session.finished` 且非 takeover
+- `reason` — finish summary / takeover reason / `"max_model_calls"` / `"model_stopped"`
 
-```python
-structured = agent.run_structured("打开淘宝搜索无线耳机")
-print(structured.to_dict())
-# 包含 success / finished / steps / duration / error / hitl_count / trace_id / trace_path
-# failure_cause / retry_count / finish_validation_status / verifier_status / prompt_version
-# selected_sections / messages_before/after / approx_tokens_before/after 等 context metrics
-```
+默认启用本地 JSONL trace，文件写入 `<trace_dir>/<run_id>.jsonl`；截图 base64、敏感文本默认不以原文写入（见 Middleware 栈 · `trace.py`）。
 
-默认启用本地 JSONL trace，文件写入 `.traces/{trace_id}.jsonl`。trace 记录 run id、trace id、step id、node、event、timestamp 与脱敏后的 payload；截图、prompt、API key、任务文本、thinking、reflection、HITL 消息默认不会以原文写入。
 
-### Context & Observability Harness
-
-默认启用短期 context 注入模式，用于把脱敏、裁剪后的执行上下文和失败模式注入模型 Plan：
-
-| 模式 | 行为 |
-|------|------|
-| `off` | 不生成新增 context 指标 |
-| `observe` | 生成 state/trace/eval 指标，但不向 Plan 注入 context block |
-| `inject` | 默认模式；注入脱敏、裁剪后的短期 context block |
-
-`AgentConfig(context_mode="inject")` 为默认值，也可通过 `--context-mode` 或 `PHONE_AGENT_CONTEXT_MODE` 切换为 `observe/off`。context 字段包括 `screen_belief`、`action_outcome_summary`、`failure_memory`、`summarized_history`、`acceptance_rejection`、`progress_claim_feedback`、`system_guidance` 等与裁剪指标；默认预算为 failure memory 最近 3 条、history 摘要 800 字符、context block 2200 字符（各 section 另有独立预算，如 `system_guidance` 160 字符）。姓名、手机号、邮箱、订单号、验证码、API key/token、长 base64/JWT 等敏感文本默认脱敏，context 不绕过 HITL/confirm/takeover。
-
-#### LangGraph-native Context Engineering Harness
-
-Phase 14 将 prompt、context selector 与 context-window compaction 收敛为 LangGraph 原生请求构造层，不替换现有 `StateGraph` 拓扑：
-
-| 能力 | 行为 |
-|------|------|
-| Prompt contract | `get_system_prompt(lang, output_mode, prompt_version)` 由 System Contract + Action Schema + Policy + Context Rules + 单一输出契约组成 |
-| Prompt contract | 默认且唯一支持 `prompt_version="context_harness_v1"`；旧 text DSL prompt 不再作为回滚路径 |
-| Context selector | `select_plan_context()` 输出 `context_strategy`、`selected_sections`、脱敏 context block 与计数指标 |
-| Request compaction | `compact_messages_for_request()` 仅压缩传给 `model_client.request()` 的消息，不改写 `state["messages"]` |
-| 图片预算 | 历史图片从模型请求中剥离，最新用户截图保留；保持 `messages_reducer` append/replace 语义 |
-| 隐私指标 | trace/eval 只持久化 section IDs、消息数、字符数、近似 token、截断状态、finish validation code/hash 等，不持久化 raw prompt/context/image |
-
-Context selector 与 compaction 只能影响模型请求构造和脱敏观测指标，不得修改 `action_raw`、`action_parsed`、`pending_execute`、`interrupt_result`、`action_confirmed` 或 Safety/HITL 路由字段。
-
-### ExpectedOutcome 与动作验证
-
-Plan 阶段支持 provider response envelope：`{"action": {...}, "expected_outcome": {...}}`。其中 `action` 继续经 adapter、grounding、validator、repair、safety gate 和 executor；`expected_outcome` 是 sibling postcondition contract，绝不进入 canonical `ActionIR` 或 executor payload，也不提供执行授权。运行态 state 保存 hash/哨兵形式的 verifier contract，verifier 会对当轮 UI 文本做现场 hash/片段 hash 匹配；`action_raw`、trace、report、checkpoint 等外发/持久化路径单独使用 stub/hash summary。真实 `ModelClient` 会先校验 nested `action`，再保留 envelope 给 Plan 拆分；旧 plain action JSON 仍兼容。
-
-`ExpectedOutcome` 支持 `kind`、`must_observe`、`must_not_observe`、`target_mark_id`、`target_text_hint`、`timeout_hint`、`dynamic_regions`。结构化 object selector 成功编译后，还可绑定 verifier-only selected-object 字段：`selected_object_id_hash`、`object_type`、`object_evidence_hash`、`title_stub`、`title_hash`、`container_lineage_hash`、`list_lineage_hash`、`expected_page_type`。这些字段只以 hash/stub 形式进入 ExpectedOutcome、trace/checkpoint/verifier prompt，不进入 canonical ActionIR、Validator、Safety Gate、Executor 或 `pending_execute`，也不提供执行授权。provider 未给出时会按动作生成保守默认：Launch 验证目标 app；Type 默认不把原始输入文本持久化到 `must_observe`，只有 provider 显式给出隐私安全的 outcome 时才做文本匹配；带 object evidence 的 Tap/Double Tap/Long Press 会提升为 `input_focused`、`page_opened` 或 `target_appeared`，否则保持 `generic`，避免把原本已存在的 target hint 当作成功证据；Swipe 只把内容位移作为弱确定信号；Wait 验证 loading/spinner/network error 等消失。
-
-Reflect 阶段会基于动作后的截图/current_app 重新构建 after observation，并携带动作前/动作后的脱敏 observation 摘要运行 deterministic verifier；高置信 deterministic success/failure 会直接映射到结构化 reflection，只有 unknown/低置信才把 stub/hash 后的 verifier signal、ExpectedOutcome summary、before/after observation summary 与当前截图作为 isolated verifier request 交给模型判断。该请求不追加到 `state["messages"]`，也不参与 request compaction 的持久状态。Reflect 默认只使用 accessibility/device marks，不触发 LocateAnything fallback，除非显式开启 `reflect_enable_vlm_grounding`。`screen_changed` 已降级为 weak signal，不能单独证明 Tap/Type/搜索/打开视频/Swipe 成功。广告、banner、推荐流、热词、计数器等动态区域默认视为噪声；搜索框/输入框类 `input_focused` 后置条件会参考 focused/editable/keyboard/top activity 等只读信号。只有按 action/outcome 绑定的强进展（如 Type 后目标文本出现、input_focused 的 focused/keyboard 信号）才会阻止机械 takeover；trace 只记录 `verifier_evidence` 中 stubbed/redacted matched/missing postconditions、progress/weak signals 与 redacted summaries。
-
-Plan 每一轮都会注入一个声明式 `GoalContract`（由 `goal_node` 在任务开始时一次性编译，通过 External/LLM/Heuristic 编译链），包含 `SuccessCriterion[]`、`constraints`、`non_goals`、`target_app_hint`、`ordinal`、`verification_strategy` 等；契约独立于历史消息 compaction 保留，trace-safe（只暴露 hash/长度 stub）。`finish` 不再直接等同成功：execute 只记录 `pending_finish` 与脱敏 `finish_claim`（`matched_terminal_evidence` 仅作诊断 trace），然后路由到独立的 acceptance 节点；`step_cap` / wall-clock 资源保险丝只会以 `resource_fuse_exhausted` 停止运行，不触发 acceptance。acceptance 对每条 criterion 从证据账本逐层坐实——seal > 最新 `model_observation` > judge 引用 > 程序化信号；程序化反证需要正向反观察，且优先于 vlm_judge self-attestation；judge 的 `satisfied` 必须携带合法 `evidence_step` 引用；任一 required criterion 未坐实 → `failure_cause="goal_not_satisfied"` replan，unknown 不自动升级 success（见下"Finish Gate 语义"）。reflect 同时引入统一 context 窗口管理（`select_reflect_context` + 最近 K=3 action_outcome 摘要），并将 `goal_contract_block` 提到独立 message 块以利 prompt prefix cache。trace/eval 只记录 `finish_validation_status`、per-criterion matched/missing、task hash 与长度/哈希 stub，不记录 raw task/entity/title。
-
-#### 资源保险丝与进展声明
-
-`AgentConfig.step_cap`（兼容 `max_steps`）和 `wall_clock_cap_seconds` 是用户域资源保险丝：到界后以 `failure_cause="resource_fuse_exhausted"` 结束，不代表任务成功或失败，也不会伪造 `pending_finish`。当 `progress_exhaustion()` 连续观察不到强进展证据时，Plan context 会要求模型表态：已完成则 `finish`，无法继续则 `take_over`，仍在推进则附 `progress_claim`。`validate_progress_claim()` 是纯校验器，只认近窗口内的结构化证据（criterion rank 净升、observed value digest 变化、new latch、目标相关 effect event、stage advance）；长列表新 screen 本身不算强证据。claim 自由文本按 context payload 脱敏，trace 只持久化脱敏摘要与校验结果。
-
-#### Finish Gate 语义（fail-closed）
-
-- `finish` 是**声明**而非执行成功：模型只能在 `action.finish.matched_terminal_evidence` 中点名它认为已满足的 required criterion；execute 设置 `pending_finish=True` 后路由到 acceptance 节点，由证据账本折叠复核。
-- `matched_terminal_evidence` 只是模型的 finish 声明（claim），**命名门禁已退役**：criterion 是否满足由证据账本分层坐实（seal > `model_observation` > judge 引用），finish 点名既不能单独产生 `matched`，也不会因漏点直接判 `missing`——claim 只作为 `finish_claim_matched`/`unknown_finish_claim_ids` 进入 trace 诊断（judge 的 `satisfied` 必须携带合法 `evidence_step` 引用，缺失/越界 → `unknown` → `goal_not_satisfied` replan，不自动升级 success）。
-- 程序化 criterion（accessibility/object_rank/app_or_activity/focus）的反证 **优先于** vlm_judge self-attestation；任一程序化信号 `missing` 且对应 criterion 与 vlm_judge 同名时，会把该 vlm_judge 的 matched 结果覆盖为 missing。
-- `needs_recompile` 由 reflect 在检测到 stage 停滞时写入（单写点），下一轮 `goal_node` 重编译契约并清除该标志；也可用 `configurable["task_goal_contract_override"]` 注入外部契约。
-- `should_continue` 的 `replan` 路由是 `goal → plan`（非直接 `plan`）；`goal_node` 在已编译且 `needs_recompile=False` 时 no-op 返回 `{}`，等价于直接进入 plan。
-
-### Model Output Adapter
-
-默认使用结构化 JSON 输出，同时支持已聚合 OpenAI `tool_calls`；旧 text DSL 不再作为动作执行协议：
-
-| 模式 | 行为 |
-|------|------|
-| `json_schema` | 模型输出 JSON，经 adapter 映射为内部 canonical action |
-| `tool_calls` | 聚合 streaming tool_calls delta 后，经 adapter 映射为内部 canonical action |
-| `auto` | 自动识别结构化 JSON / tool_calls；不回退旧 text DSL 执行 |
-
-所有格式最终都进入统一执行路径：adapter 只生成 canonical action，不直接调用工具；真实执行仍由 `execute_node -> dispatch_tool()` 完成。JSON/tool_calls 仅允许白名单 action 与字段，坐标保持 0-1000 相对值并在 tool 层转换为绝对像素；未知 action、缺字段、越界坐标、非 literal/危险结构均 fail-closed，并按 `parse|adapter|validation` 等错误层记录，不会伪装成成功 `finish`，也不会绕过 confirm/takeover HITL。
-
-解析观测字段会进入 trace/eval 相关链路，包括 configured mode、detected format、adapter used、parse success/error code；`parse_error`、截图、API key、任务文本与隐私文本默认脱敏。
-
-### LocateAnything 本地 Mark Provider（可选）
 
 > 完整架构文档见 [Grounding Architecture](docs/grounding-architecture.html)
 
@@ -362,7 +261,7 @@ python scripts/check_deployment_cn.py --base-url http://localhost:8000/v1 --mode
 | `Wait` | 等待加载 |
 | `Take_over` | 人工接管（interrupt） |
 
-运行 `python main.py --list-apps` 查看支持的启动名称。运行时使用统一 AppRegistry 解析别名；前台 package/activity observation、设备安装状态和启动授权是三个独立事实，未知前台 package 不会被猜测成系统桌面。
+运行 `.venv/bin/python main_v2.py --help` 查看可用参数。运行时使用统一 AppRegistry 解析别名；前台 package/activity observation、设备安装状态和启动授权是三个独立事实，未知前台 package 不会被猜测成系统桌面。
 
 ## 远程调试
 
@@ -371,34 +270,34 @@ python scripts/check_deployment_cn.py --base-url http://localhost:8000/v1 --mode
 adb connect 192.168.1.100:5555
 
 # 指定设备运行
-python main.py --device-id 192.168.1.100:5555 --base-url http://localhost:8000/v1 "打开抖音刷视频"
+.venv/bin/python main_v2.py "打开抖音刷视频" --device-id 192.168.1.100:5555 --base-url http://localhost:8000/v1
 ```
 
 ## 环境变量
+
+配置只经 `V2Config` 三级解析：CLI 覆盖 > shell env > `.env`（`PHONE_AGENT_` 前缀，不覆盖已存在 shell env）> 默认。
 
 | 变量 | 说明 | 默认值 |
 |------|------|--------|
 | `PHONE_AGENT_BASE_URL` | 模型 API 地址 | `http://localhost:8000/v1` |
 | `PHONE_AGENT_MODEL` | 模型名称 | `autoglm-phone-9b` |
 | `PHONE_AGENT_API_KEY` | API Key | `EMPTY` |
-| `PHONE_AGENT_OUTPUT_MODE` | 模型输出模式：`json_schema` / `tool_calls` / `auto` | `json_schema` |
-| `PHONE_AGENT_CONTEXT_MODE` | Context harness 模式：`inject` / `observe` / `off` | `inject` |
-| `PHONE_AGENT_MAX_STEPS` | 最大步数 | `100` |
+| `PHONE_AGENT_MODEL_TIMEOUT` | 模型请求超时（秒） | `180` |
+| `PHONE_AGENT_MODEL_MAX_RETRIES` | 模型请求重试次数 | `2` |
+| `PHONE_AGENT_MAX_STEPS` | 最大模型调用数（→ `ModelCallLimit`） | `20` |
 | `PHONE_AGENT_DEVICE_ID` | 设备 ID | 自动检测 |
-| `PHONE_AGENT_LANG` | 语言 | `cn` |
+| `PHONE_AGENT_LANG` | 语言（`cn` / `en`） | `cn` |
+| `PHONE_AGENT_TRACE_DIR` | JSONL trace 输出目录 | `.traces` |
+| `PHONE_AGENT_TRACE` | 是否启用 trace | `true` |
+| `PHONE_AGENT_TEMPERATURE` / `PHONE_AGENT_TOP_P` / `PHONE_AGENT_FREQUENCY_PENALTY` | 采样参数（float，非法值 raise） | 未设置 |
+| `PHONE_AGENT_USER_AGENT` / `PHONE_AGENT_HTTP_HEADERS`（`k=v;k2=v2`） | 自定义请求头 | 默认 UA |
+| `PHONE_AGENT_CF_ACCESS_CLIENT_ID` / `_SECRET` | Cloudflare Access（必须成对，否则 raise） | 未设置 |
 | `PHONE_AGENT_GROUNDING_PROVIDER` | grounding provider：`hybrid` / `locateanything` / `accessibility` / `fake` / `off`（别名：`accessibility_tree`/`uiautomator`→accessibility，`locateanything_mlx`/`mlx`→locateanything，`accessibility_locateanything`/`uiautomator_locateanything`→hybrid） | `hybrid` |
-| `PHONE_AGENT_ACCESSIBILITY_MARKS` | 是否把 Android UiAutomator tree 作为设备 base marks 注入 MarkRegistry | `false` |
 | `PHONE_AGENT_ACCESSIBILITY_TIMEOUT` | `uiautomator dump` 超时时间（秒） | `3.0` |
 | `PHONE_AGENT_ACCESSIBILITY_MAX_MARKS` | 每屏最多保留的 accessibility marks 数量 | `80` |
 | `PHONE_AGENT_LOCATEANYTHING_MODEL` | LocateAnything-3B-4bit 模型路径 | `models/LocateAnything-3B-4bit` |
-| `PHONE_AGENT_LOCATEANYTHING_MAX_SIZE` | LocateAnything 输入图最长边；provider 专属配置，优先于通用 grounding max size | `960` |
-| `PHONE_AGENT_LOCATEANYTHING_CONTEXT_MAX_CHARS` | LocateAnything prompt 的可选短 context 字符预算；0 表示关闭 | `0` |
-| `PHONE_AGENT_LOCATEANYTHING_STRUCTURE_MODE` | LocateAnything 视觉结构 sidecar 模式：`off` / `target` / `screen`；显式 config 非法值报错，env 非法值回落 `off` 并记录 metadata | `off` |
-| `PHONE_AGENT_LOCATEANYTHING_MAX_VISUAL_CANDIDATES` | 视觉结构 sidecar 最大候选数 | `30` |
-| `PHONE_AGENT_LOCATEANYTHING_VISUAL_CATEGORY_BUDGET` | `screen` 模式 bounded category prompt 数量 | `5` |
-| `PHONE_AGENT_LOCATEANYTHING_MAX_STRUCTURE_CALLS` | `screen` 模式最多 LocateAnything 结构化调用数 | `5` |
-| `PHONE_AGENT_GROUNDING_MAX_SIZE` | 通用 grounding 输入图最长边 fallback；当前仅 LocateAnything factory 消费 | `960` |
-| `PHONE_AGENT_DEBUG_FULL` | 调试模式：把每帧原始截图写入 `<trace_dir>/screenshots/`（P0#10 豁免项，注意隐私） | 关闭 |
+| `PHONE_AGENT_LOCATEANYTHING_MAX_SIZE` | LocateAnything 输入图最长边 | `960` |
+| `PHONE_AGENT_MEMORY_MODEL` / `PHONE_AGENT_VERIFIER_MODEL` | 预留（本轮只读取不实现） | 未设置 |
 
 ## 开发
 
@@ -406,30 +305,16 @@ python main.py --device-id 192.168.1.100:5555 --base-url http://localhost:8000/v
 # 安装开发依赖
 .venv/bin/pip install -e ".[dev]"
 
-# 运行测试
-.venv/bin/pytest tests/ -v
+# 运行 v2 + grounding 测试（全部 fake，无真机无 MLX）
+.venv/bin/pytest tests/v2 tests/grounding -q
 
-# 运行 graph 测试
-.venv/bin/pytest tests/graph -v
-
-# 本地 dry-run 评测 smoke（不依赖模型和设备）
-.venv/bin/python evals/run_eval.py --dry-run
-
-# 指定 trace 输出目录
-.venv/bin/python evals/run_eval.py --dry-run --trace-dir .traces/smoke
-```
-
-当前 Evaluation Harness 覆盖结构化结果、基础指标、HITL interrupt routing 计数、trace 文件关联、retry count、failure cause histogram、`verifier_status_counts`、`finish_validation_counts`，以及 `context_mode`、`context_strategy`、`prompt_version`、`selected_sections`、`messages_before/after`、`message_chars_before/after`、`approx_tokens_before/after`、`context_block_chars`、`context_truncated`、`failure_memory_hit_count`、`repeated_failure_count` 等 context 指标。HITL 进程内 resume 已支持（`AgentConfig.enable_hitl_resume` + `run_live()`），跨进程持久 resume 及其 eval 指标尚未提供。
-
-```bash
-.venv/bin/python evals/run_eval.py --dry-run --context-mode observe --trace-dir .traces/smoke
-.venv/bin/python evals/run_eval.py --dry-run --context-mode inject --trace-dir .traces/smoke
-.venv/bin/python evals/run_eval.py --dry-run --context-mode off --trace-dir .traces/smoke
+# LangChain 网关兼容 spike（tool_calls + image content block + 采样参数）
+.venv/bin/python scripts/spike_langchain_compat.py
 ```
 
 ### Agent 开发工作流配置
 
-给 AI coding agent 的项目约定集中在仓库根 `AGENTS.md`（P0 硬性约束 + 工作约定）与 `CLAUDE.md`（Claude Code 引导）；OMX 规划/执行 workflow skills 在 `.codex/skills/`（如 `ralplan`、`autopilot`、`ultragoal`）。架构与阶段状态以本 README、`docs/future-roadmap.md` 和源码（`phone_agent/graph/builder.py` docstring）为准。项目命令必须优先使用 `.venv/bin/python`、`.venv/bin/pytest`、`.venv/bin/pip`。
+给 AI coding agent 的项目约定集中在仓库根 `AGENTS.md`（P0 硬性约束 + 工作约定）与 `CLAUDE.md`（Claude Code 引导）；OMX 规划/执行 workflow skills 在 `.codex/skills/`（如 `ralplan`、`autopilot`）。架构与阶段状态以本 README、`docs/refactor-thin-loop-v2.md`、`docs/future-roadmap.md` 为准。项目命令必须优先使用 `.venv/bin/python`、`.venv/bin/pytest`、`.venv/bin/pip`。
 
 ## 常见问题
 

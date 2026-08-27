@@ -1,8 +1,37 @@
 # Future Roadmap
 
-> 本文档记录 LangGraph roadmap 的阶段进展与未来方向。硬性执行约束见仓库根 `AGENTS.md`（P0 表）与 `CLAUDE.md`；图拓扑以 `phone_agent/graph/builder.py` docstring 为准；历史批次执行任务书见 `docs/archive/`。
+> 本文档记录 roadmap 的阶段进展与未来方向。硬性执行约束见仓库根 `AGENTS.md`（P0 表）与 `CLAUDE.md`；v2 架构契约以 `docs/refactor-thin-loop-v2.md` 为准；历史批次执行任务书见 `docs/archive/`。
 
 ---
+
+## Thin-Loop v2（当前架构）
+
+> 绑定契约：`docs/refactor-thin-loop-v2.md`。三个并行 worktree（core / tools / middleware）以该文档为唯一契约。
+
+- **v1 退役**：LangGraph goal→plan→execute→reflect→acceptance 节点图（`phone_agent/graph/`、`phone_agent/agent.py`、`phone_agent/actions/`、`phone_agent/checkpoint/`、旧 `main.py`、`evals/`）已删除。保留并作为库复用的是 `phone_agent/adb`、`device_factory.py`、`phone_agent/grounding`、`phone_agent/config/{policy,app_registry,apps,i18n,timing,redact}.py`。
+- **薄 loop 已落地**：LLM 每步一次调用，经 LangChain `create_agent` 的 tool-calling loop 感知/操作设备；harness 只做工具供给、安全边界、context 卫生与可观测，不做工作流路由。入口改为 `main_v2.py`（task 为位置参数）。
+  - **工具层**（`phone_agent/v2/tools/`）：actuation（`tap`/`long_press`/`type_text`/`scroll`/`swipe`/`back`/`home`/`launch_app`/`wait`）、perception（`read_screen`/`locate`）、control（`finish`/`ask_user`/`take_over`）。执行类工具成功后自动附带 `[OBS]` 观测块。工具返回 `str`，失败返回错误文本，fail-closed。
+  - **grounding**：marks-first；`tap` 双寻址 `target_mark_id` | `target_description`（解析为唯一 mark，歧义/无匹配 fail-closed 不执行）。坐标 0-1000 → 绝对像素只在工具内（`v2/coords.py`）。
+  - **Middleware 栈**（`phone_agent/v2/middleware/`）：
+    - `safety.py`——敏感工具调用谓词 + `HumanInTheLoopMiddleware`；危险动作（支付/密码/验证码/敏感 App）interrupt 等待人工 approve/reject，`ask_user`→respond，`take_over` 始终 interrupt。安全硬门只活在这里。
+    - `images.py`——`before_model` 钩子滚动剪除历史截图，仅保留最新 1 张含图消息，其余 image block 替换为 `[screen#n 已剪除]`。
+    - `trace.py`——每次 model/tool 调用写 `<trace_dir>/<run_id>.jsonl`；脱敏（>64 字截断、敏感词 redacted、不记录截图 base64，只记 screen_seq + 字节数）。
+    - `ModelCallLimitMiddleware(thread_limit=max_model_calls, exit_behavior="end")`——到界优雅停止。
+  - **Agent 装配**（`phone_agent/v2/agent.py`）：`ThinPhoneAgent(config, checkpointer=None)` 默认 `MemorySaver`；`run(task, hitl_handler=input)` 返回 `RunResult(success, reason, steps, trace_path)`；结束条件为 `session.finished` | `session.takeover_reason` | 模型无 tool_call | ModelCallLimit。
+  - **配置**（`phone_agent/v2/config.py`）：`V2Config` 三级解析 CLI > shell env > `.env` > 默认；保留 `PHONE_AGENT_MEMORY_MODEL` / `PHONE_AGENT_VERIFIER_MODEL`（本轮只读取不实现）。
+- **测试门禁**：`.venv/bin/pytest tests/v2 tests/grounding -q` 全绿（全部 fake，无真机无 MLX）。LangChain 网关兼容 spike：`scripts/spike_langchain_compat.py`。
+- **本轮不做（后续迭代项）**：
+  - **handoff 压缩 / writer**：`images.py` 目前只做滚动剪除，未做压缩合并；context-window compaction 与摘要 handoff 延后。
+  - **长期记忆文件**：跨 run 持久记忆（`PHONE_AGENT_MEMORY_MODEL` 预留）未实现。
+  - **plan 工具**：显式规划/TodoList 工具未纳入本轮。
+  - **finish verifier 子代理**：v1 的 GoalContract + acceptance 账本折叠 + progress-claim 校验未在 v2 重建；`finish` 目前是直接声明（`PHONE_AGENT_VERIFIER_MODEL` 预留），独立 finish 验收子代理延后。
+- **已知连带破坏**：`.agents/skills/phone-agent-live-diagnosis/` 依赖 v1 run 结构，需要 v2 适配（本轮不动）。
+
+---
+
+## 历史状态（v1，已退役）
+
+> 以下为 v1 LangGraph 架构的历史记录，保留以备回溯；对应代码已删除。
 
 ## 当前状态
 
