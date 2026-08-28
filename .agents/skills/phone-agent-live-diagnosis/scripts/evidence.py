@@ -20,6 +20,7 @@ from typing import Any, Iterable
 EVENTS = (
     "run_start",
     "model_request",
+    "model_response",
     "taskdoc_snapshot",
     "tool_invoke",
     "tool_observation",
@@ -130,6 +131,7 @@ class EvidenceView:
     run_start: dict[str, Any] | None = None
     run_end: dict[str, Any] | None = None
     model_requests: list[dict[str, Any]] = field(default_factory=list)
+    model_responses: list[dict[str, Any]] = field(default_factory=list)
     taskdoc_snapshots: list[dict[str, Any]] = field(default_factory=list)
     invocations: list[dict[str, Any]] = field(default_factory=list)
     observations: list[dict[str, Any]] = field(default_factory=list)
@@ -150,6 +152,8 @@ class EvidenceView:
                 view.run_end = ev
             elif kind == "model_request":
                 view.model_requests.append(ev)
+            elif kind == "model_response":
+                view.model_responses.append(ev)
             elif kind == "taskdoc_snapshot":
                 view.taskdoc_snapshots.append(ev)
             elif kind == "tool_invoke":
@@ -184,6 +188,47 @@ class EvidenceView:
         """All ``finish`` tool calls (invoke+observation), in order."""
 
         return [c for c in self.tool_calls if c.get("tool") == "finish"]
+
+    def replay_steps(self) -> list[dict[str, Any]]:
+        """Assemble per-step replay records for the step-by-step report (A5 §3).
+
+        One record per model step, in order, each carrying the model turn
+        (thinking + tool calls + token usage), the tool observations that
+        followed it (result text, latency, screenshot ``path``/summary, parsed
+        OBS), and the model_request context stats. The step index is the
+        ``step`` field the middleware stamps on every event.
+        """
+
+        by_step: dict[Any, dict[str, Any]] = {}
+        order: list[Any] = []
+
+        def _slot(step: Any) -> dict[str, Any]:
+            if step not in by_step:
+                by_step[step] = {
+                    "step": step,
+                    "request": None,
+                    "response": None,
+                    "tool_calls": [],
+                    "hitl": [],
+                }
+                order.append(step)
+            return by_step[step]
+
+        for req in self.model_requests:
+            _slot(req.get("step"))["request"] = req
+        for resp in self.model_responses:
+            _slot(resp.get("step"))["response"] = resp
+        for call in self.tool_calls:
+            _slot(call.get("step"))["tool_calls"].append(call)
+        for decision in self.hitl_decisions:
+            step = decision.get("step")
+            if step is not None:
+                _slot(step)["hitl"].append(decision)
+
+        def _sort_key(step: Any) -> tuple[int, Any]:
+            return (0, step) if isinstance(step, (int, float)) else (1, str(step))
+
+        return [by_step[s] for s in sorted(order, key=_sort_key)]
 
 
 __all__ = [

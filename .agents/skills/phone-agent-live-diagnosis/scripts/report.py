@@ -1,21 +1,28 @@
 """Render the v2 ``summary.json`` (+ evidence stream) into an interactive HTML report.
 
-Per ``outputs/design-council/ROUND2-D1.md`` §4. The report is a single
-self-contained HTML file: the design system (primary ``#1E40AF`` / accent
-``#F59E0B`` / Fira Code, ``<base target="_blank">``, KPI cards, cause cards,
-tab framework) is carried over from the v1 template, but the content is reworked
-to the v2 thin-loop dimensions. The overview tab leads with R1's three
-first-page blocks:
+Per ``outputs/design-council/ROUND2-D1.md`` §4, **rebuilt for A5** (local-first,
+full-fidelity, step-by-step replay). The report is a single self-contained HTML
+file whose reader is the **device owner on their own machine**:
 
-1. **终局裁定** — the verdict + terminal + finish-gate outcome.
-2. **TaskDoc 板** — the terminal task board (goal / route items / facts).
-3. **80/20 三件事** — the top recommendations.
+* **Full fidelity** — the default artifacts are unredacted; the report shows the
+  real model thinking, tool args, tool results, task board, and terminal text.
+* **Screenshots on disk** — the diagnostic middleware lands each screenshot at
+  ``<run_dir>/screenshots/screen-<seq>.png`` and records a relative ``image.path``.
+  The report renders the *real screenshot* (``<img src="screenshots/…">``, click
+  to open full-size) beside each step. The old "never store an image" constraint
+  is intentionally gone — it belonged to the redacted-share world.
+* **Step-by-step replay is the core** — every step is: screenshot thumbnail +
+  full model thinking + tool call & args + full result + latency.
 
-Data is embedded as a JSON island in a ``<script type="application/json">`` tag
-with ``</``-safe escaping (mirrors the v1 ``__REPORT_DATA__`` scheme), so the
-report is offline and never executes the payload. The evidence and summary are
-already redacted + base64-free by the diagnostic middleware and the analyzer;
-this module adds no secrets and re-escapes nothing sensitive back in.
+The design system is carried over from the v1 template (primary ``#1E40AF`` /
+accent ``#F59E0B`` / Fira Code, ``<base target="_blank">``, KPI cards, cause
+cards, long-path wrapping). Data is embedded as a ``</``-safe JSON island so the
+report is offline and never executes its payload.
+
+Sharing: an explicit ``--share`` export (``run_diagnosis.py``) deep-redacts the
+summary + evidence and drops every ``image.path`` before calling this same
+renderer, producing ``report-share.html`` with no screenshot references and no
+sensitive text. This module itself adds nothing back and re-escapes nothing.
 """
 
 from __future__ import annotations
@@ -40,11 +47,13 @@ def _escape_report_data(payload: str) -> str:
 
 
 def render_html(summary: dict[str, Any], evidence: list[dict[str, Any]] | None = None) -> str:
-    """Render ``summary`` (+ optional redacted evidence stream) to an HTML string.
+    """Render ``summary`` (+ optional evidence stream) to an HTML string.
 
-    ``evidence`` is the list of diagnostic events (already redacted / base64-free);
-    it powers the timeline and raw-evidence tabs. Both are embedded as a JSON
-    island and rendered client-side.
+    ``summary`` carries the analyzed dimensions **and** the per-step ``replay``
+    list the step-by-step view renders; ``evidence`` powers the raw-events tab.
+    Both are embedded as a JSON island and rendered client-side. Screenshots are
+    referenced by the relative ``image.path`` the middleware recorded, so the
+    report must sit in the run dir (next to ``screenshots/``) to show them.
     """
 
     payload = json.dumps(
@@ -137,15 +146,18 @@ HTML_TEMPLATE = r"""<!doctype html>
     .badge.success { background: #DCFCE7; color: var(--success); border-color: #86EFAC; }
     .badge.completed { background: #DCFCE7; color: var(--success); border-color: #86EFAC; }
     .badge.failed { background: #FEE2E2; color: var(--failed); border-color: #FCA5A5; }
+    .badge.error { background: #FEE2E2; color: var(--failed); border-color: #FCA5A5; }
     .badge.blocked { background: #FEF3C7; color: var(--blocked); border-color: #FCD34D; }
     .badge.in_progress { background: #DBEAFE; color: var(--primary); border-color: #93C5FD; }
     .badge.pending { background: #F1F5F9; color: var(--muted); border-color: #CBD5E1; }
+    .badge.accent { background: #FEF3C7; color: var(--blocked); border-color: #FCD34D; }
     .alert {
       border-radius: 8px; padding: 10px 14px; margin: 0 0 12px;
       font-weight: 700; word-break: break-all; overflow-wrap: break-word;
     }
     .alert.danger { background: #FEE2E2; color: var(--failed); border: 1px solid #FCA5A5; }
     .alert.warn { background: #FEF3C7; color: var(--blocked); border: 1px solid #FCD34D; }
+    .alert.info { background: #DBEAFE; color: var(--primary); border: 1px solid #93C5FD; font-weight: 500; }
     .toolbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 14px 0; }
     button, input, select {
       border: 1px solid var(--line); background: white; color: var(--ink);
@@ -183,16 +195,40 @@ HTML_TEMPLATE = r"""<!doctype html>
     .board-goal { font-size: 14px; line-height: 1.6; margin-bottom: 10px; }
     .board-goal .base { font-weight: 700; }
     .facts-list { margin: 8px 0 0; padding-left: 18px; font-size: 13px; line-height: 1.7; }
-    /* Timeline */
-    .timeline { display: grid; gap: 8px; }
-    .event {
-      border-left: 4px solid var(--primary); padding: 10px 14px;
-      background: white; border-radius: 8px;
-      border-top: 1px solid var(--line); border-right: 1px solid var(--line); border-bottom: 1px solid var(--line);
+    .evi-note { color: var(--success); font-size: 12px; margin-top: 3px; }
+    /* Step replay */
+    .step {
+      background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius);
+      margin-bottom: 16px; box-shadow: 0 1px 3px rgba(15,23,42,.06); overflow: hidden;
     }
-    .event.is-error { border-left-color: var(--failed); background: #FFF7F7; }
-    .event.is-image { border-left-color: var(--accent); }
-    .event-head { display: flex; gap: 8px; align-items: center; justify-content: space-between; flex-wrap: wrap; }
+    .step-head {
+      display: flex; gap: 10px; align-items: center; flex-wrap: wrap;
+      padding: 12px 16px; background: #F8FAFC; border-bottom: 1px solid var(--line);
+    }
+    .step-no { font: 700 15px "Fira Code"; color: var(--primary); }
+    .step-body { display: grid; grid-template-columns: 300px minmax(0,1fr); gap: 16px; padding: 16px; }
+    .shot-col { display: flex; flex-direction: column; gap: 6px; }
+    .shot {
+      display: block; width: 100%; border: 1px solid var(--line); border-radius: 8px;
+      background: #0B1220; object-fit: contain; max-height: 520px;
+    }
+    .shot-missing {
+      display: flex; align-items: center; justify-content: center; min-height: 160px;
+      border: 1px dashed var(--line); border-radius: 8px; color: var(--muted);
+      font-size: 12.5px; text-align: center; padding: 12px;
+    }
+    .shot-cap { font-size: 11.5px; color: var(--muted); text-align: center; }
+    .think {
+      background: #FFFBEB; border: 1px solid #FCD34D; border-radius: 8px;
+      padding: 10px 12px; font-size: 13.5px; line-height: 1.6; white-space: pre-wrap;
+      word-break: break-word; margin-bottom: 12px;
+    }
+    .think.empty { background: #F8FAFC; border-color: var(--line); color: var(--muted); }
+    .toolcall { border: 1px solid var(--line); border-radius: 8px; margin-bottom: 10px; overflow: hidden; }
+    .toolcall.is-error { border-color: #FCA5A5; }
+    .toolcall-head { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; padding: 8px 12px; background: #F8FAFC; }
+    .toolcall-body { padding: 10px 12px; }
+    .kv { font-size: 12.5px; color: var(--muted); margin-bottom: 4px; }
     details { margin-top: 8px; }
     summary { cursor: pointer; color: var(--primary); font-weight: 700; }
     pre {
@@ -200,15 +236,19 @@ HTML_TEMPLATE = r"""<!doctype html>
       border-radius: 8px; overflow: auto; max-height: 360px; font-size: 12px;
       white-space: pre-wrap; word-break: break-all;
     }
+    pre.result { max-height: 320px; }
     .severity-P0 { color: #B91C1C; font-weight: 700; }
     .severity-P1 { color: #B45309; font-weight: 700; }
     .severity-P2 { color: #1E40AF; font-weight: 700; }
     .severity-Info { color: #15803D; font-weight: 700; }
     .muted { color: var(--muted); }
+    .bar { height: 8px; border-radius: 4px; background: var(--primary-soft); overflow: hidden; }
+    .bar > span { display: block; height: 100%; background: var(--primary); }
     a { color: var(--primary); text-decoration: none; }
     a:hover { text-decoration: underline; }
     @media (max-width: 1100px) {
       .grid-2 { grid-template-columns: 1fr; }
+      .step-body { grid-template-columns: 1fr; }
     }
     @media (max-width: 520px) {
       header, .shell { padding-left: 16px; padding-right: 16px; }
@@ -230,69 +270,91 @@ HTML_TEMPLATE = r"""<!doctype html>
 <main class="shell">
   <section class="kpis" id="kpis"></section>
   <nav class="toolbar" id="tabs"></nav>
-  <section class="toolbar">
-    <input id="search" placeholder="搜索 step / event / tool / file / class">
-    <select id="layerFilter"><option value="">全部层级</option></select>
-    <select id="severityFilter"><option value="">全部优先级</option></select>
-  </section>
   <section id="overview" class="tab active"></section>
+  <section id="replay" class="tab"></section>
+  <section id="problems" class="tab"></section>
   <section id="dimensions" class="tab"></section>
-  <section id="timeline" class="tab"></section>
   <section id="source" class="tab"></section>
-  <section id="recommendations" class="tab"></section>
   <section id="raw" class="tab"></section>
 </main>
 <script>
 const data = JSON.parse(document.getElementById('report-data').textContent);
 const summary = data.summary || {};
 const evidence = data.evidence || [];
-const state = { tab: 'overview', query: '', layer: '', severity: '' };
+const state = { tab: 'overview' };
 const tabs = [
-  ['overview', '终局与首页'],
-  ['dimensions', '运行维度'],
-  ['timeline', '决策时间线'],
+  ['overview', '概览与终局'],
+  ['replay', '逐步回放'],
+  ['problems', '问题分析'],
+  ['dimensions', '性能与维度'],
   ['source', '源码归因'],
-  ['recommendations', '修改建议'],
-  ['raw', '原始证据'],
+  ['raw', '原始文件'],
 ];
 const VERDICT_LABEL = { success: '成功', failed: '失败', takeover: '人工接管', max_steps: '步数耗尽', uncertain: '不确定' };
+const CLASS_LABEL = {
+  success: 'OK', observation: '观测', obs_capture_failed: '再观测失败',
+  addressing_conflict: '寻址冲突', addressing_missing: '缺寻址', stale_mark: 'stale mark',
+  ambiguous_resolve: '描述歧义', locate_no_match: '未定位', locate_provider_error: '定位失败',
+  bad_coords: '坐标非法', bad_direction: '方向非法', ambiguous_app: 'app 歧义',
+  launch_denied: '启动被拒', app_not_installed: '未安装', unknown_app: '未知 app',
+  taskdoc_input_invalid: '任务板输入无效', taskdoc_validation_failed: '任务板校验失败',
+  taskdoc_ok: '任务板已更新', finish_no_evidence: 'finish 无证据',
+  finish_blocked_open_items: 'finish 被拦截', finish_ok: 'finish 通过',
+  ask_user: '询问用户', takeover_requested: '请求接管', unknown: '未分类',
+};
+const ERROR_CLASSES = new Set([
+  'obs_capture_failed','addressing_conflict','addressing_missing','stale_mark','ambiguous_resolve',
+  'locate_no_match','locate_provider_error','bad_coords','bad_direction','ambiguous_app',
+  'launch_denied','app_not_installed','unknown_app','taskdoc_input_invalid','taskdoc_validation_failed',
+  'finish_no_evidence','finish_blocked_open_items',
+]);
 function esc(v) {
   return String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }
 function json(v) { return esc(JSON.stringify(v, null, 2)); }
 function badge(text, cls='') { return `<span class="badge ${cls}">${esc(text)}</span>`; }
-function num(v) { return (v ?? v === 0) ? esc(v) : '-'; }
-function matches(text) { return !state.query || String(text).toLowerCase().includes(state.query.toLowerCase()); }
+function num(v) { return (v || v === 0) ? esc(v) : '-'; }
 function row(k, v) { return `<tr><td class="mono">${esc(k)}</td><td class="wrap">${esc(v ?? '-')}</td></tr>`; }
+function classBadge(cls) {
+  const label = CLASS_LABEL[cls] || cls || '未分类';
+  return badge(label, ERROR_CLASSES.has(cls) ? 'error' : (cls === 'success' || cls === 'finish_ok' || cls === 'taskdoc_ok' ? 'success' : ''));
+}
 
 function render() {
+  const m = summary.model || {};
+  const usage = m.token_usage || {};
+  const tokenStr = usage.total_tokens ? `${usage.total_tokens} tok` : '—';
   document.getElementById('subtitle').innerHTML =
-    `<strong>${esc(summary.target)}</strong><br><span class="mono wrap">${esc(summary.run_id)} · ${esc(summary.created_at || '')} · ${esc(summary.steps ?? '-')} 步 · ${esc((summary.duration_sec ?? 0))}s</span>`;
+    `<strong>${esc(summary.target)}</strong><br><span class="mono wrap">${esc(summary.run_id)} · ${esc(summary.created_at || '')} · ${esc(summary.steps ?? '-')} 步 · ${esc(summary.duration_sec ?? 0)}s · ${esc(tokenStr)}</span>`;
   document.getElementById('verdictChip').innerHTML =
     `<span class="verdict-chip ${esc(summary.verdict)}">${esc(VERDICT_LABEL[summary.verdict] || summary.verdict)}</span>`;
   renderKpis();
   renderTabs();
-  renderFilters();
   renderOverview();
+  renderReplay();
+  renderProblems();
   renderDimensions();
-  renderTimeline();
   renderSource();
-  renderRecommendations();
   renderRaw();
 }
 function renderKpis() {
   const th = summary.tool_health || {};
-  const g = summary.grounding || {};
   const v = summary.visual || {};
   const td = summary.taskdoc_final || {};
+  const m = summary.model || {};
+  const usage = m.token_usage || {};
+  const cfg = ((evidence.find(e => e.event === 'run_start') || {}).config_digest) || {};
+  const isDry = (summary.command || []).includes('dry-run');
+  const device = cfg.device_id || (isDry ? 'dry-run' : (cfg.grounding_provider || '-'));
   const items = [
     ['结论', VERDICT_LABEL[summary.verdict] || summary.verdict || '-'],
     ['步数', num(summary.steps)],
+    ['耗时', (summary.duration_sec ?? 0) + 's'],
+    ['Token 用量', usage.total_tokens ? num(usage.total_tokens) : '—'],
     ['工具错误率', th.total_calls ? Math.round((th.error_rate || 0) * 100) + '%' : '-'],
     ['TaskDoc 终态', td.terminal_state || '-'],
-    ['开放项', num(td.open_item_count)],
-    ['视觉回流', (v.tool_results_with_image ?? 0) > 0 ? '有(' + v.tool_results_with_image + ')' : '无'],
-    ['mark 寻址', `${(g.mark_addressing||{}).by_mark_id ?? 0}/${(g.mark_addressing||{}).by_description ?? 0}`],
+    ['截图落盘', (v.tool_results_with_image ?? 0) > 0 ? '有(' + v.tool_results_with_image + ')' : '无'],
+    ['设备', device],
   ];
   document.getElementById('kpis').innerHTML = items.map(([k, val]) =>
     `<div class="card"><div class="kpi-label">${k}</div><div class="kpi-value wrap">${esc(val)}</div></div>`).join('');
@@ -305,19 +367,14 @@ function selectTab() {
   for (const [id] of tabs) document.getElementById(id).classList.toggle('active', state.tab === id);
   renderTabs();
 }
-function renderFilters() {
-  const layers = [...new Set((summary.findings || []).map(f => f.layer).filter(Boolean))];
-  const severities = [...new Set((summary.findings || []).map(f => f.severity).filter(Boolean))];
-  const layer = document.getElementById('layerFilter');
-  const severity = document.getElementById('severityFilter');
-  if (layer.options.length <= 1) layer.innerHTML += layers.map(v => `<option value="${esc(v)}">${esc(v)}</option>`).join('');
-  if (severity.options.length <= 1) severity.innerHTML += severities.map(v => `<option value="${esc(v)}">${esc(v)}</option>`).join('');
-}
 
-// ---- first-page block 1: terminal verdict --------------------------------
+// ---- overview block 1: header + terminal verdict -------------------------
 function renderTerminalBlock() {
   const t = summary.terminal || {};
   const fg = summary.finish_gate || {};
+  const m = summary.model || {};
+  const usage = m.token_usage || {};
+  const cfg = ((evidence.find(e => e.event === 'run_start') || {}).config_digest) || {};
   const rejections = (fg.rejections || []);
   let banner = '';
   if (fg.blocked_by_open_items) {
@@ -330,33 +387,35 @@ function renderTerminalBlock() {
     <table>
       ${row('目标', summary.target)}
       ${row('结论', VERDICT_LABEL[summary.verdict] || summary.verdict)}
+      ${row('耗时 / 步数', `${summary.duration_sec ?? 0}s / ${summary.steps ?? '-'} 步`)}
+      ${row('Token 用量', usage.total_tokens ? `${usage.total_tokens}（入 ${usage.input_tokens ?? '?'} / 出 ${usage.output_tokens ?? '?'}）` : '模型未上报')}
+      ${row('模型 / provider', `${cfg.model_name ?? '-'} / ${cfg.grounding_provider ?? '-'}`)}
+      ${row('设备', cfg.device_id ?? '-')}
       ${row('已声明完成', t.finished)}
       ${row('完成摘要', t.finish_summary)}
       ${row('接管原因', t.takeover_reason)}
       ${row('停止原因', t.reason)}
-      ${row('finish 尝试', fg.attempted)}
-      ${row('finish 被接受', fg.accepted)}
-      ${row('被开放项拦截', fg.blocked_by_open_items)}
+      ${row('finish 尝试 / 被接受', `${fg.attempted} / ${fg.accepted}`)}
     </table>
     ${rejections.length ? `<table style="margin-top:10px"><tr><th>step</th><th>class</th><th>message</th></tr>
-      ${rejections.map(r => `<tr><td class="mono">${num(r.step)}</td><td class="mono">${badge(r.class,'failed')}</td><td class="wrap">${esc(r.message)}</td></tr>`).join('')}
+      ${rejections.map(r => `<tr><td class="mono">${num(r.step)}</td><td>${classBadge(r.class)}</td><td class="wrap">${esc(r.message)}</td></tr>`).join('')}
     </table>` : ''}
     ${openList.length ? `<div class="cause-src mono wrap">finish 时仍开放：${openList.map(esc).join(' · ')}</div>` : ''}
   </div>`;
 }
 
-// ---- first-page block 2: task board --------------------------------------
+// ---- overview block 2: task board (terminal card) ------------------------
 function renderTaskBoardBlock() {
   const td = summary.taskdoc_final || {};
   const c = td.counts || {};
   if (td.terminal_state === 'no_board' || !td.items) {
-    return `<div class="card"><h2>TaskDoc 板</h2><div class="muted">无任务板记录（taskdoc 关闭或未写入）。</div></div>`;
+    return `<div class="card"><h2>任务板终态</h2><div class="muted">无任务板记录（taskdoc 关闭或未写入）。</div></div>`;
   }
   const items = td.items || [];
   const amendments = td.amendments || [];
   const facts = td.facts || [];
   return `<div class="card">
-    <h2>TaskDoc 板</h2>
+    <h2>任务板终态</h2>
     <div class="board-goal">
       <div><span class="cause-label">目标</span> <span class="base wrap">${esc(td.goal_base)}</span></div>
       ${amendments.length ? `<div><span class="cause-label">补充</span> <span class="wrap">${amendments.map(esc).join('；')}</span></div>` : ''}
@@ -369,10 +428,10 @@ function renderTaskBoardBlock() {
       ${badge('阻塞 ' + (c.blocked ?? 0), 'blocked')}
       ${badge('终态 ' + (td.terminal_state || '-'))}
     </div>
-    <table style="margin-top:10px"><tr><th>id</th><th>路线项</th><th>状态</th><th>原因</th></tr>
+    <table style="margin-top:10px"><tr><th>id</th><th>路线项（带证据）</th><th>状态</th><th>原因</th></tr>
       ${items.length ? items.map(it => `<tr>
         <td class="mono">${esc(it.id)}</td>
-        <td class="wrap">${esc(it.content)}</td>
+        <td class="wrap">${esc(it.content)}${it.evidence_note ? `<div class="evi-note wrap">✓ ${esc(it.evidence_note)}</div>` : ''}</td>
         <td>${badge(it.status, it.status)}</td>
         <td class="wrap muted">${esc(it.reason || '-')}</td>
       </tr>`).join('') : '<tr><td colspan="4" class="muted">路线为空</td></tr>'}
@@ -381,7 +440,7 @@ function renderTaskBoardBlock() {
   </div>`;
 }
 
-// ---- first-page block 3: 80/20 recommendations ---------------------------
+// ---- overview block 3: 80/20 recommendations -----------------------------
 function renderTopThree() {
   const recs = (summary.recommendations || []).slice(0, 3);
   if (!recs.length) return `<div class="card"><h2>80/20 三件事</h2><div class="muted">未发现需要修改的高优先级问题。</div></div>`;
@@ -412,23 +471,147 @@ function renderOverview() {
     <div style="margin-top:14px">${renderTopThree()}</div>`;
 }
 
-function renderDimensions() {
+// ---- replay (core): screenshot + thinking + tool calls + result ----------
+function renderShot(image) {
+  if (image && image.path) {
+    const cap = image.screen_seq != null ? ('screen#' + image.screen_seq) : '截图';
+    return `<div class="shot-col">
+      <a href="${esc(image.path)}"><img class="shot" src="${esc(image.path)}" alt="${esc(cap)}" loading="lazy"></a>
+      <div class="shot-cap">${esc(cap)} · 点击看大图</div>
+    </div>`;
+  }
+  if (image && image.present) {
+    return `<div class="shot-col"><div class="shot-missing">截图已回流但未落盘引用<br>（share 副本或旧版本）</div></div>`;
+  }
+  return `<div class="shot-col"><div class="shot-missing">本步无截图<br>（工具未回流图像）</div></div>`;
+}
+function renderToolCall(tc) {
+  const isErr = !!tc.error || ERROR_CLASSES.has(tc.class);
+  const argStr = tc.args && Object.keys(tc.args || {}).length ? json(tc.args) : '{}';
+  const truncNote = tc.result_truncated ? ' <span class="muted">(超 4000 字已截断)</span>' : '';
+  return `<div class="toolcall ${isErr ? 'is-error' : ''}">
+    <div class="toolcall-head">
+      ${badge(tc.tool || '?', isErr ? 'error' : '')}
+      ${classBadge(tc.class)}
+      ${tc.latency_ms != null ? badge(tc.latency_ms + 'ms') : ''}
+      ${(tc.image && tc.image.screen_seq != null) ? badge('screen#' + tc.image.screen_seq, 'accent') : ''}
+    </div>
+    <div class="toolcall-body">
+      <div class="kv">参数</div><pre>${argStr}</pre>
+      <div class="kv" style="margin-top:8px">结果${truncNote}</div>
+      <pre class="result">${esc(tc.result_text || (tc.error ? ('⚠ ' + tc.error) : '（空返回）'))}</pre>
+    </div>
+  </div>`;
+}
+function renderStep(s) {
+  const think = (s.thinking || '').trim();
+  const calls = s.tool_calls || [];
+  // The screenshot to show for the step: the first tool call that produced one.
+  const shotImg = (calls.find(c => c.image && (c.image.path || c.image.present)) || {}).image || null;
+  const ctx = s.context || {};
+  const modelCalls = (s.model_tool_calls || []).map(mc => badge(mc.name || '?')).join(' ');
+  const hitl = s.hitl || [];
+  return `<div class="step">
+    <div class="step-head">
+      <span class="step-no">STEP ${esc(s.step ?? '?')}</span>
+      ${modelCalls || '<span class="muted">（无工具调用）</span>'}
+      ${ctx.image_message_count != null ? badge('图消息 ' + ctx.image_message_count) : ''}
+      ${ctx.pruned_screen_count ? badge('剪除 ' + ctx.pruned_screen_count) : ''}
+      ${ctx.context_chars != null ? badge(ctx.context_chars + ' 字') : ''}
+      ${ctx.taskdoc_present ? badge('TaskDoc✓', 'success') : ''}
+    </div>
+    <div class="step-body">
+      ${renderShot(shotImg)}
+      <div class="detail-col">
+        <div class="kv">模型思考</div>
+        <div class="think ${think ? '' : 'empty'}">${think ? esc(think) : '（本步模型未输出文本思考）'}</div>
+        ${calls.length ? calls.map(renderToolCall).join('') : '<div class="muted">本步没有工具调用（可能是终局消息）。</div>'}
+        ${hitl.length ? `<div class="alert info">HITL：${hitl.map(h => esc((h.decision || '') + ' — ' + (h.requested_action || ''))).join('；')}</div>` : ''}
+      </div>
+    </div>
+  </div>`;
+}
+function renderReplay() {
+  const replay = summary.replay || [];
+  const host = document.getElementById('replay');
+  if (!replay.length) {
+    host.innerHTML = `<div class="card"><h2>逐步回放</h2><div class="muted">无回放数据（evidence 未记录 model_response/tool 事件）。</div></div>`;
+    return;
+  }
+  host.innerHTML = `<div class="alert info">逐步回放：每步 = 真实截图（点击看大图）+ 模型思考全文 + 工具调用与参数 + 结果全文 + 延迟。截图落盘在 <span class="mono">screenshots/</span>，报告需与其同目录。</div>
+    ${replay.map(renderStep).join('')}`;
+}
+
+// ---- problems: taxonomy errors + stagnation + finish + hitl --------------
+function renderProblems() {
+  const th = summary.tool_health || {};
+  const byTool = th.by_tool || {};
   const s = summary.stagnation || {};
-  const c = summary.context || {};
+  const fg = summary.finish_gate || {};
   const h = summary.hitl || {};
+  // Aggregate error classes across tools.
+  const errAgg = {};
+  for (const st of Object.values(byTool)) {
+    for (const [cls, n] of Object.entries(st.error_classes || {})) errAgg[cls] = (errAgg[cls] || 0) + n;
+  }
+  const errRows = Object.entries(errAgg).sort((a,b) => b[1]-a[1]);
+  const stagAlert = s.nudged
+    ? `<div class="alert warn">停滞轻推已触发（step ${num(s.nudge_step)}，停滞连击峰值 ${num(s.stagnant_streak_peak)}）——模型可能在原地打转。</div>`
+    : `<div class="alert info">未触发停滞轻推；停滞连击峰值 ${num(s.stagnant_streak_peak)}（上升但未触发属正常探索）。</div>`;
+  document.getElementById('problems').innerHTML = `
+    <div class="card">
+      <h2>错误分类统计（taxonomy）</h2>
+      ${errRows.length ? `<table><tr><th>class</th><th>次数</th></tr>
+        ${errRows.map(([cls, n]) => `<tr><td>${classBadge(cls)}</td><td class="mono">${n}</td></tr>`).join('')}</table>`
+        : '<div class="muted">全程无被分类为错误的工具返回。</div>'}
+    </div>
+    <div class="card" style="margin-top:14px"><h2>停滞</h2>${stagAlert}
+      <table>
+        ${row('触发轻推', s.nudged)}
+        ${row('轻推步', s.nudge_step)}
+        ${row('最大观测状态数', s.max_seen_states)}
+        ${row('停滞连击峰值', s.stagnant_streak_peak)}
+      </table>
+    </div>
+    <div class="card" style="margin-top:14px"><h2>完成门（finish gate）</h2>
+      <table>
+        ${row('尝试 finish', fg.attempted)}
+        ${row('被接受', fg.accepted)}
+        ${row('被开放项拦截', fg.blocked_by_open_items)}
+      </table>
+      ${(fg.rejections || []).length ? `<h3 style="margin-top:10px">被拒历史</h3><table><tr><th>step</th><th>class</th><th>message</th></tr>
+        ${(fg.rejections||[]).map(r => `<tr><td class="mono">${num(r.step)}</td><td>${classBadge(r.class)}</td><td class="wrap">${esc(r.message)}</td></tr>`).join('')}</table>`
+        : '<div class="muted" style="margin-top:8px">无 finish 被拒记录。</div>'}
+    </div>
+    <div class="card" style="margin-top:14px"><h2>HITL 事件</h2>
+      <table>
+        ${row('中断次数', h.interrupts)}
+        ${row('批准 / 拒绝 / 应答', `${h.approvals ?? 0} / ${h.rejections ?? 0} / ${h.responds ?? 0}`)}
+        ${row('ask_user / take_over', `${h.ask_user_count ?? 0} / ${h.take_over_count ?? 0}`)}
+      </table>
+      ${(h.decisions || []).length ? `<table style="margin-top:8px"><tr><th>step</th><th>tool</th><th>决定</th></tr>
+        ${(h.decisions||[]).map(d => `<tr><td class="mono">${num(d.step)}</td><td class="mono">${esc(d.tool)}</td><td>${badge(d.decision)}</td></tr>`).join('')}</table>` : ''}
+    </div>`;
+}
+
+// ---- dimensions: perf distribution + tool/grounding/context/model --------
+function renderDimensions() {
+  const c = summary.context || {};
   const th = summary.tool_health || {};
   const g = summary.grounding || {};
   const v = summary.visual || {};
   const m = summary.model || {};
+  const usage = m.token_usage || {};
   const byTool = th.by_tool || {};
+  const maxLat = Math.max(1, ...Object.values(byTool).map(st => st.p95_latency_ms || 0));
   document.getElementById('dimensions').innerHTML = `<div class="grid-2">
-    <div class="card"><h2>停滞</h2><table>
-      ${row('触发轻推', s.nudged)}
-      ${row('轻推步', s.nudge_step)}
-      ${row('最大观测状态数', s.max_seen_states)}
-      ${row('停滞连击峰值', s.stagnant_streak_peak)}
-    </table></div>
-    <div class="card"><h2>上下文留存</h2><table>
+    <div class="card"><h2>模型</h2><table>
+      ${row('调用次数', m.calls)}
+      ${row('输入 token', usage.input_tokens)}
+      ${row('输出 token', usage.output_tokens)}
+      ${row('总 token', usage.total_tokens)}
+    </table><div class="muted" style="margin-top:6px;font-size:12px">模型逐步延迟见 traces/&lt;run_id&gt;.jsonl（P0 #6 生产 trace）。</div></div>
+    <div class="card"><h2>上下文卫生</h2><table>
       ${row('峰值消息数', c.peak_message_count)}
       ${row('峰值图像消息', c.peak_image_messages)}
       ${row('累计剪除截图', c.pruned_screen_total)}
@@ -437,71 +620,35 @@ function renderDimensions() {
     </table>
     ${c.peak_image_messages > 1 ? '<div class="alert warn">峰值图像消息 &gt; 1：图像剪裁可能失效（应恒为 1）。</div>' : ''}
     </div>
-    <div class="card"><h2>HITL 小卡</h2><table>
-      ${row('中断次数', h.interrupts)}
-      ${row('批准 / 拒绝 / 应答', `${h.approvals ?? 0} / ${h.rejections ?? 0} / ${h.responds ?? 0}`)}
-      ${row('ask_user 次数', h.ask_user_count)}
-      ${row('take_over 次数', h.take_over_count)}
-    </table>
-    ${(h.decisions || []).length ? `<table style="margin-top:8px"><tr><th>step</th><th>tool</th><th>决定</th></tr>
-      ${(h.decisions||[]).map(d => `<tr><td class="mono">${num(d.step)}</td><td class="mono">${esc(d.tool)}</td><td>${badge(d.decision)}</td></tr>`).join('')}</table>` : ''}
-    </div>
     <div class="card"><h2>视觉回流</h2><table>
       ${row('带截图的工具返回', v.tool_results_with_image)}
       ${row('累计截图字节', v.total_image_bytes)}
-      ${row('首个截图步', v.first_image_step)}
-      ${row('末个截图步', v.last_image_step)}
+      ${row('首个 / 末个截图步', `${v.first_image_step ?? '-'} / ${v.last_image_step ?? '-'}`)}
     </table></div>
     <div class="card"><h2>Grounding</h2><table>
       ${row('by_mark_id / by_description', `${(g.mark_addressing||{}).by_mark_id ?? 0} / ${(g.mark_addressing||{}).by_description ?? 0}`)}
       ${row('解析失败 (ambiguous/stale/no_match)', `${(g.resolve_failures||{}).ambiguous ?? 0} / ${(g.resolve_failures||{}).stale ?? 0} / ${(g.resolve_failures||{}).no_match ?? 0}`)}
       ${row('locate (calls/ok/no_match/err)', `${(g.locate||{}).calls ?? 0} / ${(g.locate||{}).success ?? 0} / ${(g.locate||{}).no_match ?? 0} / ${(g.locate||{}).provider_error ?? 0}`)}
-      ${row('launch (resolved/denied/unknown/not_installed/ambiguous)', `${(g.launch||{}).resolved ?? 0} / ${(g.launch||{}).denied ?? 0} / ${(g.launch||{}).unknown ?? 0} / ${(g.launch||{}).not_installed ?? 0} / ${(g.launch||{}).ambiguous ?? 0}`)}
     </table></div>
-    <div class="card"><h2>模型</h2><table>
-      ${row('调用次数', m.calls)}
-      ${row('平均延迟(ms)', m.avg_latency_ms)}
-      ${row('p95 延迟(ms)', m.p95_latency_ms)}
-      ${row('错误', m.errors)}
-    </table></div>
-    <div class="card" style="grid-column:1 / -1"><h2>工具健康</h2>
+    <div class="card" style="grid-column:1 / -1"><h2>工具健康与延迟分布</h2>
       <div class="cause-head">${badge('调用 ' + (th.total_calls ?? 0))} ${badge('错误 ' + (th.total_errors ?? 0), (th.total_errors||0) ? 'failed' : '')} ${badge('错误率 ' + Math.round((th.error_rate||0)*100) + '%')}</div>
-      <table><tr><th>tool</th><th>calls</th><th>ok</th><th>error</th><th>error classes</th><th>avg ms</th><th>p95 ms</th></tr>
+      <table><tr><th>tool</th><th>calls</th><th>ok</th><th>error</th><th>error classes</th><th>avg ms</th><th>p95 ms</th><th>p95 分布</th></tr>
         ${Object.keys(byTool).length ? Object.entries(byTool).map(([tool, st]) => `<tr>
           <td class="mono">${esc(tool)}</td>
           <td class="mono">${num(st.calls)}</td>
           <td class="mono">${num(st.ok)}</td>
           <td class="mono ${st.error ? 'severity-P0' : ''}">${num(st.error)}</td>
-          <td class="mono wrap">${esc(Object.entries(st.error_classes||{}).map(([k,c]) => `${k}×${c}`).join(', ') || '-')}</td>
+          <td class="mono wrap">${esc(Object.entries(st.error_classes||{}).map(([k,cc]) => `${k}×${cc}`).join(', ') || '-')}</td>
           <td class="mono">${num(st.avg_latency_ms)}</td>
           <td class="mono">${num(st.p95_latency_ms)}</td>
-        </tr>`).join('') : '<tr><td colspan="7" class="muted">无工具调用</td></tr>'}
+          <td style="min-width:120px"><div class="bar"><span style="width:${Math.round(100*(st.p95_latency_ms||0)/maxLat)}%"></span></div></td>
+        </tr>`).join('') : '<tr><td colspan="8" class="muted">无工具调用</td></tr>'}
       </table>
     </div>
   </div>`;
 }
 
-function renderTimeline() {
-  const rows = evidence.filter(e => {
-    const kind = e.event || '';
-    return ['tool_invoke','tool_observation','hitl_decision','stagnation_nudge','taskdoc_snapshot','run_end'].includes(kind)
-      && matches(`${e.step} ${kind} ${e.tool || ''} ${JSON.stringify(e)}`);
-  });
-  const isErr = e => e.event === 'tool_observation' && e.error;
-  const isImg = e => e.event === 'tool_observation' && (e.image || {}).present;
-  document.getElementById('timeline').innerHTML = `<div class="timeline">${rows.map(e => {
-    const head = e.event === 'tool_observation'
-      ? `${badge('step ' + (e.step ?? '-'))} ${badge(e.tool || '')} ${badge('obs', isErr(e) ? 'failed' : '')} ${isImg(e) ? badge('📷 screen#' + ((e.image||{}).screen_seq ?? '?')) : ''}`
-      : e.event === 'tool_invoke'
-      ? `${badge('step ' + (e.step ?? '-'))} ${badge(e.tool || '')} ${badge('invoke')}`
-      : `${badge('step ' + (e.step ?? '-'))} ${badge(e.event)}`;
-    return `<article class="event ${isErr(e) ? 'is-error' : ''} ${isImg(e) ? 'is-image' : ''}">
-      <div class="event-head"><div>${head}</div><span class="mono muted">${esc((e.result_text && typeof e.result_text === 'object') ? '截断' : '')}</span></div>
-      <details><summary>event</summary><pre>${json(e)}</pre></details>
-    </article>`;
-  }).join('') || '<div class="card">没有匹配的事件。</div>'}</div>`;
-}
-
+// ---- source attribution ---------------------------------------------------
 function renderFiles(files) {
   return (files || []).map(file => {
     const anchors = (file.anchors || []).slice(0, 3).map(a => `${a.symbol}:${a.line}`).join(', ');
@@ -509,14 +656,8 @@ function renderFiles(files) {
     return `<div class="mono wrap">${esc(file.path)}${missing}${anchors ? '<br><span class="muted">' + esc(anchors) + '</span>' : ''}</div>`;
   }).join('');
 }
-function filteredFindings() {
-  return (summary.findings || []).filter(f => {
-    const text = JSON.stringify(f);
-    return (!state.layer || f.layer === state.layer) && (!state.severity || f.severity === state.severity) && matches(text);
-  });
-}
 function renderSource() {
-  const rows = filteredFindings();
+  const rows = summary.findings || [];
   document.getElementById('source').innerHTML = `<div class="card"><h2>源码归因（v2 source map）</h2><table>
     <tr><th>优先级</th><th>层级</th><th>现象</th><th>次数</th><th>源码位置</th><th>建议 / 验证</th></tr>
     ${rows.length ? rows.map(f => `<tr>
@@ -526,31 +667,43 @@ function renderSource() {
       <td class="mono">${num(f.count)}</td>
       <td>${renderFiles(f.files || [])}</td>
       <td class="wrap">${esc(f.suggestion)}<br><span class="muted">${esc(f.verify)}</span></td>
-    </tr>`).join('') : '<tr><td colspan="6" class="muted">当前筛选下无源码归因条目。</td></tr>'}
-  </table></div>`;
-}
-function renderRecommendations() {
-  const rows = (summary.recommendations || []).filter(r => matches(JSON.stringify(r)) && (!state.severity || r.priority === state.severity));
-  document.getElementById('recommendations').innerHTML = `<div class="card"><h2>修改建议</h2><table>
-    <tr><th>ID</th><th>优先级</th><th>建议</th><th>目标文件</th><th>验证方式</th></tr>
-    ${rows.length ? rows.map(r => `<tr>
+    </tr>`).join('') : '<tr><td colspan="6" class="muted">未发现被归因的错误类别。</td></tr>'}
+  </table></div>
+  <div class="card" style="margin-top:14px"><h2>全部修改建议</h2><table>
+    <tr><th>ID</th><th>优先级</th><th>建议</th><th>目标文件</th><th>验证</th></tr>
+    ${(summary.recommendations || []).length ? (summary.recommendations||[]).map(r => `<tr>
       <td class="mono">${esc(r.id)}</td>
       <td class="severity-${esc(r.priority)}">${esc(r.priority)}</td>
       <td class="wrap"><strong>${esc(r.title)}</strong><br>${esc(r.recommendation)}</td>
       <td>${renderFiles(r.target_files || [])}</td>
       <td class="wrap">${esc(r.verification)}</td>
-    </tr>`).join('') : '<tr><td colspan="5" class="muted">无建议条目。</td></tr>'}
+    </tr>`).join('') : '<tr><td colspan="5" class="muted">无建议。</td></tr>'}
   </table></div>`;
 }
+
+// ---- raw file links + json -----------------------------------------------
 function renderRaw() {
-  document.getElementById('raw').innerHTML = `<div class="grid-2">
-    <div class="card"><h2>Summary JSON</h2><pre>${json(summary)}</pre></div>
-    <div class="card"><h2>Evidence 事件（前 200）</h2><pre>${json(evidence.slice(0, 200))}</pre></div>
-  </div>`;
+  const a = summary.artifacts || {};
+  const links = [
+    ['summary.json', a.summary || 'summary.json'],
+    ['evidence.jsonl', a.evidence || summary.evidence_stream || 'evidence.jsonl'],
+    ['traces/', summary.trace || 'traces'],
+    ['run_dir', summary.run_dir || '.'],
+  ];
+  const notes = summary.notes || [];
+  document.getElementById('raw').innerHTML = `
+    ${notes.length ? `<div class="alert info">${notes.map(esc).join('<br>')}</div>` : ''}
+    <div class="card"><h2>原始文件链接</h2>
+      <table><tr><th>文件</th><th>路径</th></tr>
+        ${links.map(([k, p]) => `<tr><td class="mono">${esc(k)}</td><td class="wrap"><a href="${esc(p)}">${esc(p)}</a></td></tr>`).join('')}
+      </table>
+      <div class="muted" style="margin-top:8px;font-size:12px">截图位于 <span class="mono">screenshots/screen-&lt;seq&gt;.png</span>；本报告需与该目录同级方能显示缩略图。</div>
+    </div>
+    <div class="grid-2" style="margin-top:14px">
+      <div class="card"><h2>Summary JSON</h2><pre>${json(summary)}</pre></div>
+      <div class="card"><h2>Evidence 事件（前 200）</h2><pre>${json(evidence.slice(0, 200))}</pre></div>
+    </div>`;
 }
-document.getElementById('search').addEventListener('input', e => { state.query = e.target.value; renderTimeline(); renderSource(); renderRecommendations(); });
-document.getElementById('layerFilter').addEventListener('change', e => { state.layer = e.target.value; renderSource(); });
-document.getElementById('severityFilter').addEventListener('change', e => { state.severity = e.target.value; renderSource(); renderRecommendations(); });
 render();
 </script>
 </body>

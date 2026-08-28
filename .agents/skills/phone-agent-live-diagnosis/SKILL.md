@@ -46,28 +46,56 @@ conversion happens only inside tools; the model never sees absolute pixels.
 The skill turns on an **opt-in** middleware, `DiagnosticEvidenceMiddleware`
 (`phone_agent/v2/middleware/diagnostic.py`), that is **default-OFF and zero-cost** in
 production. It is mounted last, so its `before_model` sees the *final* context the model
-will receive (after image pruning + TaskDoc injection) and its `wrap_tool_call` captures
+will receive (after image pruning + TaskDoc injection), its `wrap_model_call` captures the
+model's own turn (thinking + tool calls + token usage), and its `wrap_tool_call` captures
 the *raw* tool return. It writes one JSON object per line to `<run_id>.evidence.jsonl`:
 
 | event | meaning |
 |---|---|
-| `run_start` | run id, redacted goal, config digest |
+| `run_start` | run id, goal, config digest (incl. `device_id`, `unredacted`) |
 | `model_request` | per step: message/image counts, pruned-screen count, taskdoc presence, context chars |
-| `taskdoc_snapshot` | the task board whenever it changes (goal/route/facts) |
-| `tool_invoke` / `tool_observation` | each tool call: redacted args in, then latency + full-text (bounded) result, parsed `[OBS]` block, and an `image{present,screen_seq,bytes}` summary |
+| `model_response` | per step: the model's **thinking full text**, its tool calls, and token usage (when reported) |
+| `taskdoc_snapshot` | the task board whenever it changes (goal/route/facts, with per-item `evidence_note`) |
+| `tool_invoke` / `tool_observation` | each tool call: args in, then latency + full result, parsed `[OBS]` block, and an `image{present,screen_seq,bytes,path}` summary |
 | `hitl_decision` | human approve/reject/respond at an interrupt (written by the driver) |
 | `stagnation_nudge` | the one-shot "you look stuck" nudge fired |
 | `run_end` | terminal state (finished / takeover_reason / finish_summary) |
 
-It shares the exact redaction primitives with the production trace
-(`phone_agent/v2/middleware/_redact.py`): **sensitive substrings redacted, screenshot
-base64 never written.** The only difference from the P0 trace is that diagnostic keeps
-full text (bounded at `DIAG_MAX_TEXT=4000`) instead of truncating to 64 chars — the
-report is "full picture but bounded", never "raw".
+### Local-first full fidelity (the reader is you)
+
+The diagnosis report's reader is **the device owner on their own machine**, so the
+diagnostic products default to **full fidelity, un-redacted**: the evidence stream keeps
+sensitive substrings verbatim and does **not** truncate text. The skill drives this by
+setting `V2Config.diagnostic_unredacted=True` (env `PHONE_AGENT_DIAG_UNREDACTED`) for every
+`run`/`--dry-run`. Two structural guarantees still hold **unconditionally**, in both
+fidelity modes:
+
+- the JSONL never carries screenshot `base64` — image blocks are reduced to
+  `{present, screen_seq, bytes, path}` and the pixels are **written to disk** (below);
+- multimodal `[text + image]` tool content is always *split* (text → `result_text`,
+  image → the summary above).
+
+Redaction only returns for an explicit **`--share`** export (see below). This full-fidelity
+behavior is confined to the diagnosis mode; it **never** touches the P0 #6 production trace
+(`trace.py` stays a single, un-flippable 64-char-truncate + redact + no-base64 branch), so
+`traces/<run_id>.jsonl` is always the compliance artifact. When `--share` captures with
+`diagnostic_unredacted=False` the stream falls back to the earlier "full text but redacted +
+bounded at `DIAG_MAX_TEXT=4000`" behavior.
+
+### Screenshots on disk
+
+In diagnosis mode the middleware **decodes each screenshot to disk** at
+`<run_dir>/screenshots/screen-<seq>.png` — every image-bearing tool result plus the opening
+observation. The write is idempotent (the same `screen_seq` overwrites its file), files are
+`0600`, and the `image` field of the evidence gains a relative `path` (e.g.
+`screenshots/screen-3.png`). The report renders the *real screenshot* next to each step; the
+base64 itself is still never written into the JSONL.
 
 `scripts/analyze.py` classifies each recorded result string against the taxonomy
 (`scripts/taxonomy.py`) **at analysis time** — the middleware records raw text only, so
-the production tools never depend on a classifier.
+the production tools never depend on a classifier. It also assembles a per-step **`replay`**
+(model thinking + tool calls + results + screenshot `path`) that powers the step-by-step
+report view.
 
 ## Default Command
 
@@ -81,6 +109,16 @@ Offline pipeline check (no model, no device — fastest smoke test of the whole 
 
 ```bash
 .venv/bin/python .agents/skills/phone-agent-live-diagnosis/scripts/run_diagnosis.py "完成一个本地 smoke 任务" --dry-run
+```
+
+Share a diagnosis with someone else (redacted, screenshot-free copy alongside the
+full-fidelity report):
+
+```bash
+# writes report.html (local-first full-fidelity) AND report-share.html (redacted, no screenshots)
+.venv/bin/python .agents/skills/phone-agent-live-diagnosis/scripts/run_diagnosis.py "测试目标" --share
+# or derive just the share copy from an existing run
+.venv/bin/python .agents/skills/phone-agent-live-diagnosis/scripts/run_diagnosis.py report outputs/live-diagnosis/<run_id> --share
 ```
 
 Re-derive a summary or re-render a report from existing artifacts (no re-run):
@@ -148,11 +186,14 @@ Commands that typically need escalation:
 --nudge-steps 5              # stagnation nudge threshold
 --reset-app <package>        # adb pm clear before the run
 --output-dir outputs/live-diagnosis
+--share                      # also emit a redacted, screenshot-free report-share.html
 --quiet
 ```
 
-The diagnostic evidence stream is forced on for every `run`/`--dry-run` (it writes into
-the run dir); you do not pass a flag for it. There is no v1 grounding-sidecar knob
+The diagnostic evidence stream is forced on (**full fidelity, un-redacted**) for every
+`run`/`--dry-run` — it writes into the run dir and lands screenshots on disk; you do not
+pass a flag for it. Add `--share` to also emit a redacted, screenshot-free
+`report-share.html` (see below). There is no v1 grounding-sidecar knob
 (`--locateanything-structure-mode`, …), no `--output-mode`/`--context-mode`/`--thinking-*`,
 and no `--trace-*` debug flag — the diagnostic stream safely supersedes those.
 
@@ -165,8 +206,8 @@ and no `--trace-*` debug flag — the diagnostic stream safely supersedes those.
 
 A bare `run_diagnosis.py "目标"` already picks up `.env` values for base URL, model, key,
 device, and grounding provider. Verify what was actually resolved in `preflight.json` and
-in `summary.json → command` (API key redacted) rather than assuming — pass only flags you
-intend to override.
+in `summary.json → command` rather than assuming — pass only flags you intend to override.
+(Local-first: `command` records the target verbatim; the run dir is owner-private, `0600`.)
 
 ## Evidence Contract — the run folder
 
@@ -175,26 +216,33 @@ outputs/live-diagnosis/<run_id>/
   preflight.json            # python/.venv, adb + wm size, MLX-Metal (hybrid/LA), config digest
   <run_id>.evidence.jsonl   # the raw diagnostic stream (middleware output)
   evidence.jsonl            # stable-named copy of the stream
+  screenshots/screen-<n>.png# decoded screenshots (one per screen_seq; 0600)
   summary.json              # analyzed dimensions (below)
-  report.html               # primary deliverable
+  report.html               # primary deliverable — local-first, full fidelity, step replay
+  report-share.html         # (only with --share) redacted, screenshot-free share copy
+  summary-share.json        # (only with --share) the redacted summary behind report-share
   status.json               # completed|failed|error + verdict + paths
   traces/<run_id>.jsonl     # the P0 #6 production trace (64-char, base64-free)
 ```
 
-`summary.json` top level: `run_id, created_at, target(redacted goal), verdict
-(success|failed|takeover|max_steps|uncertain), run_dir, command(redacted), duration_sec,
+All produced artifacts (summary/report/evidence/status/preflight/screenshots) are chmod
+`0600` — the run dir carries un-redacted, local-first data.
+
+`summary.json` top level: `run_id, created_at, target(goal), verdict
+(success|failed|takeover|max_steps|uncertain), run_dir, command, duration_sec,
 steps, evidence_stream, trace, artifacts{}`, then these dimension blocks:
 
 - `terminal` — finished / finish_summary / takeover_reason / reason / returncode
 - `finish_gate` — attempted / accepted / blocked_by_open_items / open_items_at_finish / rejections[]
-- `taskdoc_final` — goal_base / amendments / items / facts / counts / open_item_count / terminal_state
+- `taskdoc_final` — goal_base / amendments / items(+evidence_note) / facts / counts / open_item_count / terminal_state
 - `stagnation` — nudged / nudge_step / max_seen_states / stagnant_streak_peak
 - `context` — peak_message_count / peak_image_messages / pruned_screen_total / taskdoc_pinned_every_step / avg_context_chars
 - `hitl` — interrupts / decisions[] / approvals / rejections / responds / ask_user_count / take_over_count
 - `tool_health` — total_calls / total_errors / error_rate / by_tool{calls,ok,error,error_classes,avg/p95 latency}
 - `grounding` — mark_addressing / resolve_failures / locate / launch
 - `visual` — tool_results_with_image / total_image_bytes / first_image_step / last_image_step
-- `model` — calls / latency (latency comes from the trace, not this stream)
+- `model` — calls / latency (from the trace) / token_usage{input,output,total} (when reported)
+- `replay[]` — per step: thinking, model tool calls, tool results (+screenshot `path`), context stats, HITL
 - `findings[]` / `recommendations[]` — category → v2 source file, with `path:line` anchors
 
 `verdict` order: `takeover_reason` → takeover; `finished` → success; `max_model_calls` →
@@ -202,24 +250,46 @@ max_steps; any tool error / rejected finish → failed; else uncertain.
 
 ## Report Design
 
-Interactive HTML dashboard (primary blue `#1E40AF`, amber `#F59E0B`, Fira Code):
+Interactive HTML dashboard (primary blue `#1E40AF`, amber `#F59E0B`, Fira Code),
+**local-first full fidelity** — the reader is the device owner on their own machine:
 
-- Tabs: 终局与首页 / 运行维度 / 决策时间线 / 源码归因 / 修改建议 / 原始证据.
-- The **overview** leads with three first-page blocks:
-  1. **终局裁定** — verdict + terminal + finish-gate outcome (with the open-items banner
-     when `finish` was blocked);
-  2. **TaskDoc 板** — the terminal task board (goal / route items with status / facts);
-  3. **80/20 三件事** — the top recommendations, each with target files + a verify step.
+- Tabs: 概览与终局 / 逐步回放 / 问题分析 / 性能与维度 / 源码归因 / 原始文件.
+- **概览与终局** — header (任务 / 终局 / 耗时 / 步数 / token 用量 / 设备) + the terminal
+  verdict card (with the open-items banner when `finish` was blocked) + the task-board
+  terminal card (goal / route items with status **and per-item evidence** / key facts) +
+  the 80/20 top-three recommendations.
+- **逐步回放 (the core)** — one card per step: the **real screenshot thumbnail**
+  (`<img src="screenshots/screen-N.png">`, click to open full-size) + the model's **thinking
+  full text** + each tool call & args + the full result + latency.
+- **问题分析** — taxonomy error tally, stagnation segment, finish review/rejection history,
+  HITL events.
+- **性能与维度** — token usage, context hygiene, visual reflow, grounding, and the per-tool
+  latency distribution (p95 bars).
+- **源码归因** — findings + recommendations mapped to v2 source files with `path:line` anchors.
+- **原始文件** — links to summary.json / evidence.jsonl / traces / run dir + embedded JSON.
 - `<base target="_blank">`; `word-break: break-all` on long paths; data embedded as a
-  `</`-safe JSON island.
-- **Never** render screenshot base64, API keys, verification codes, or unredacted private
-  text (the stream is already redacted; the report adds nothing back).
+  `</`-safe JSON island (offline, never executes the payload).
+- **Full fidelity, local-first**: `report.html` shows the real (un-redacted) text and
+  references the on-disk screenshots — the old "never store an image / never render private
+  text" constraint is **gone**, it belonged to the share world. The base64 payload is still
+  never embedded (screenshots are file references). The report **must sit in the run dir**
+  (next to `screenshots/`) for the thumbnails to resolve.
+
+### Sharing (`--share`)
+
+`--share` writes an additional `report-share.html` (+ `summary-share.json`) that is safe to
+hand to someone else: every string is redacted via the production `_redact` primitive and
+every screenshot `path` is dropped, so the share copy **references no screenshot and leaks
+no sensitive text**. Derive it at run time (`run … --share`) or after the fact
+(`report <run_id> --share`). The full-fidelity `report.html` is untouched.
 
 ## Workflow
 
 1. Confirm the user gave a concrete test target. If not, ask.
-2. Run `scripts/run_diagnosis.py` with the target and any user-provided flags.
-3. Read `summary.json` and the `report.html` path.
+2. Run `scripts/run_diagnosis.py` with the target and any user-provided flags. Add `--share`
+   if the user wants a copy safe to hand to someone else.
+3. Read `summary.json` and the `report.html` path (open it from inside the run dir so the
+   step-replay screenshots resolve).
 4. Report briefly in Chinese: verdict, report path, trace path, and the top source-code
    findings. Explain *what actually happened* — never stop at "success=false".
 
@@ -233,9 +303,14 @@ Interactive HTML dashboard (primary blue `#1E40AF`, amber `#F59E0B`, Fira Code):
   intact. It does **not** exercise real grounding or finish semantics; the report says so.
 - **视觉回流 (visual reflow).** Tool returns are moving to `[OBS 文本 + 截图 image 块]`.
   The diagnostic stream splits that: text → `result_text`, image → `{present,screen_seq,
-  bytes}` (never base64). If `visual.tool_results_with_image == 0` on a real run, the model
-  is operating blind on a text-only marks summary — the report flags it red. Check
-  `_obs.py` / `actuation.py` for whether the image block is being reflowed.
+  bytes,path}` (never base64; the pixels are decoded to `screenshots/screen-<seq>.png`). If
+  `visual.tool_results_with_image == 0` on a real run, the model is operating blind on a
+  text-only marks summary — the report flags it red. Check `_obs.py` / `actuation.py` for
+  whether the image block is being reflowed.
+- **Screenshots are file references, not embedded.** The report shows real thumbnails via
+  `<img src="screenshots/…">`; open `report.html` **from inside the run dir** or the images
+  404. Moving the HTML elsewhere breaks the thumbnails (the data is intact — re-render in
+  place). The `--share` copy intentionally has no screenshots at all.
 - **Absence of evidence is not failure.** A `未定位:` / `not observed` result means the
   target was not found *this instant via this channel* — it may be offscreen or need a
   scroll. Only a positive counter-observation (read the target, saw a different value) is a

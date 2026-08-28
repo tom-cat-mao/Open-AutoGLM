@@ -145,6 +145,7 @@ class ThinPhoneAgent:
                     ),
                     session=self.session,
                     enabled=True,
+                    unredacted=bool(getattr(config, "diagnostic_unredacted", False)),
                 )
                 middleware.append(self._diagnostic)
             except Exception:  # noqa: BLE001 - optional increment; never block bring-up

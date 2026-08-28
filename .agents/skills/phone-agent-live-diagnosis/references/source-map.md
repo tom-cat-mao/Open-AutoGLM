@@ -99,10 +99,10 @@ Underlying exception → emitted prefix (the causal chain the report links):
 
 | Concern | Files |
 |---|---|
-| Diagnostic evidence stream (opt-in middleware) | `phone_agent/v2/middleware/diagnostic.py` |
+| Diagnostic evidence stream (opt-in middleware; full-fidelity + screenshots-on-disk) | `phone_agent/v2/middleware/diagnostic.py` |
 | Shared redaction primitives (base64-drop + sensitive substrings) | `phone_agent/v2/middleware/_redact.py` (delegates to `phone_agent/config/redact.py`) |
-| P0 #6 production trace (64-char, base64-free) | `phone_agent/v2/middleware/trace.py` |
-| Config fields `diagnostic_evidence` / `diagnostic_evidence_dir` | `phone_agent/v2/config.py` |
+| P0 #6 production trace (64-char, base64-free) — **untouched by full-fidelity** | `phone_agent/v2/middleware/trace.py` |
+| Config fields `diagnostic_evidence` / `diagnostic_evidence_dir` / `diagnostic_unredacted` | `phone_agent/v2/config.py` |
 | Middleware wiring (diagnostic appended last, guarded) | `phone_agent/v2/agent.py` |
 | Run driver + preflight + subcommands | `scripts/run_diagnosis.py` |
 | Evidence read/index | `scripts/evidence.py` |
@@ -118,7 +118,8 @@ diagnosis cares about: `BASE_URL`, `MODEL`, `API_KEY`, `DEVICE_ID`, `MAX_MODEL_C
 `GROUNDING_PROVIDER`, `ACCESSIBILITY_TIMEOUT`, `ACCESSIBILITY_MAX_MARKS`,
 `LOCATEANYTHING_MODEL`, `LOCATEANYTHING_MAX_SIZE`, `LANG`, `TASKDOC`,
 `TASKDOC_NUDGE_STEPS`, `TRACE_DIR`, `TRACE`, and the diagnosis-only
-`DIAG_EVIDENCE` / `DIAG_EVIDENCE_DIR` (forced on by the skill; default OFF elsewhere).
+`DIAG_EVIDENCE` / `DIAG_EVIDENCE_DIR` / `DIAG_UNREDACTED` (all forced on by the skill:
+evidence on, full fidelity on; default OFF/false elsewhere).
 
 There is **no** v1 remote-grounding config (`PHONE_AGENT_REMOTE_GROUNDING_*`) in v2, and
 **no** grounding-sidecar / output-mode / context-mode / thinking knobs. If a `.env`

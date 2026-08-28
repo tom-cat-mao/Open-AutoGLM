@@ -412,13 +412,95 @@ def build_visual(view: EvidenceView) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 def build_model(view: EvidenceView) -> dict[str, Any]:
     # Model latency is not recorded by the diagnostic stream (that's the trace's
-    # model_call event); calls are counted from model_request events.
+    # model_call event); calls are counted from model_request events. Token usage
+    # is aggregated from model_response events when the model reports it.
+    prompt_tokens = 0
+    output_tokens = 0
+    total_tokens = 0
+    have_usage = False
+    for resp in view.model_responses:
+        usage = resp.get("usage")
+        if not isinstance(usage, dict):
+            continue
+        have_usage = True
+        prompt_tokens += int(usage.get("input_tokens", 0) or 0)
+        output_tokens += int(usage.get("output_tokens", 0) or 0)
+        total_tokens += int(usage.get("total_tokens", 0) or 0)
+    if have_usage and not total_tokens:
+        total_tokens = prompt_tokens + output_tokens
     return {
         "calls": len(view.model_requests),
         "avg_latency_ms": None,
         "p95_latency_ms": None,
         "errors": 0,
+        "token_usage": {
+            "input_tokens": prompt_tokens,
+            "output_tokens": output_tokens,
+            "total_tokens": total_tokens,
+        }
+        if have_usage
+        else None,
     }
+
+
+# ---------------------------------------------------------------------------
+# replay (A5 §3): per-step model turn + tool observations for the step report
+# ---------------------------------------------------------------------------
+def build_replay(view: EvidenceView) -> list[dict[str, Any]]:
+    """Flatten the evidence into an ordered per-step replay for the report.
+
+    Each entry carries the model's thinking + tool calls + token usage, the tool
+    observations that followed (result text, latency, screenshot ``path``, parsed
+    OBS, error), and the request context stats. This is the data behind the
+    step-by-step replay — the report renders the real screenshot from
+    ``image.path`` next to the model's full reasoning and each tool result.
+    """
+
+    replay: list[dict[str, Any]] = []
+    for slot in view.replay_steps():
+        request = slot.get("request") or {}
+        response = slot.get("response") or {}
+        calls = []
+        for call in slot.get("tool_calls", []):
+            obs = call.get("observation") or {}
+            invoke = call.get("invoke") or {}
+            image = obs.get("image") or {}
+            calls.append(
+                {
+                    "tool": call.get("tool"),
+                    "args": invoke.get("args"),
+                    "result_text": result_text_of(obs),
+                    "result_truncated": isinstance(obs.get("result_text"), dict),
+                    "latency_ms": call.get("latency_ms"),
+                    "error": call.get("error"),
+                    "class": classify_result(call.get("result_text") or ""),
+                    "obs": obs.get("obs"),
+                    "image": {
+                        "present": bool(image.get("present")),
+                        "screen_seq": image.get("screen_seq"),
+                        "bytes": image.get("bytes", 0),
+                        "path": image.get("path"),
+                    },
+                }
+            )
+        replay.append(
+            {
+                "step": slot.get("step"),
+                "thinking": response.get("thinking", ""),
+                "model_tool_calls": response.get("tool_calls", []),
+                "usage": response.get("usage"),
+                "context": {
+                    "message_count": request.get("message_count"),
+                    "image_message_count": request.get("image_message_count"),
+                    "pruned_screen_count": request.get("pruned_screen_count"),
+                    "taskdoc_present": request.get("taskdoc_present"),
+                    "context_chars": request.get("context_chars"),
+                },
+                "tool_calls": calls,
+                "hitl": slot.get("hitl", []),
+            }
+        )
+    return replay
 
 
 # ---------------------------------------------------------------------------
@@ -511,6 +593,7 @@ def build_summary(
         "grounding": build_grounding(view),
         "visual": build_visual(view),
         "model": build_model(view),
+        "replay": build_replay(view),
         "findings": findings,
         "recommendations": recommendations,
     }
@@ -565,6 +648,7 @@ __all__ = [
     "build_grounding",
     "build_visual",
     "build_model",
+    "build_replay",
     "build_findings",
     "build_recommendations",
     "build_summary",

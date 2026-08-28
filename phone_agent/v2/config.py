@@ -197,6 +197,13 @@ class V2Config:
     # evidence to ``<diagnostic_evidence_dir>/<run_id>.evidence.jsonl``.
     diagnostic_evidence: bool = False
     diagnostic_evidence_dir: str = "outputs/live-diagnosis/.evidence"
+    # diagnostic full-fidelity mode (local-first). The diagnosis report's reader is
+    # the device owner on their own machine, so when this is set the diagnostic
+    # evidence stream keeps sensitive substrings UNREDACTED and text UNTRUNCATED
+    # (still multimodal text/image split, still no base64 in the JSONL). Set by the
+    # live-diagnosis skill in diagnosis mode; redaction only returns for an explicit
+    # ``--share`` copy. This NEVER affects the P0 #6 production trace (trace.py).
+    diagnostic_unredacted: bool = False
     # sampling params (temperature/top_p/frequency_penalty) forwarded to the model
     sampling: dict[str, float] | None = None
     # request headers extras
@@ -264,6 +271,7 @@ class V2Config:
             diagnostic_evidence_dir=_env_str(
                 "PHONE_AGENT_DIAG_EVIDENCE_DIR", "outputs/live-diagnosis/.evidence"
             ),
+            diagnostic_unredacted=_env_bool("PHONE_AGENT_DIAG_UNREDACTED", False),
             sampling=sampling or None,
             user_agent=_env_opt_str("PHONE_AGENT_USER_AGENT"),
             http_headers=http_headers or None,
