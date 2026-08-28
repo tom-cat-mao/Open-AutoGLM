@@ -24,11 +24,15 @@ def _coerce_item(raw: object) -> TaskItem:
     if not isinstance(raw, dict):
         raise ValueError(f"路线项必须是对象（含 id/content/status），收到 {type(raw).__name__}")
     reason = raw.get("reason")
+    evidence_note = raw.get("evidence_note")
     return TaskItem(
         id=str(raw.get("id", "")).strip(),
         content=str(raw.get("content", "")).strip(),
         status=str(raw.get("status", "pending")).strip() or "pending",
         reason=(str(reason).strip() if reason not in (None, "") else None),
+        evidence_note=(
+            str(evidence_note).strip() if evidence_note not in (None, "") else None
+        ),
     )
 
 
@@ -48,13 +52,14 @@ def make_update_task_doc_tool(session, lang: str) -> StructuredTool:
         （价格/已选值/坑），最多 10 条、每条 ≤120 字。
 
         参数：
-        - items：全量替换路线。每项为 {id, content, status, reason?}，
+        - items：全量替换路线。每项为 {id, content, status, reason?, evidence_note?}，
           status ∈ pending|in_progress|completed|blocked。不传则保留现有路线。
+          完成项（completed）必须写 evidence_note（屏幕上的完成证据）。
         - add_amendments：向"目标.补充"追加条目（只增不改，用于细化理解/记录用户补充）。
         - facts：全量替换关键事实列表。不传则保留现有事实。
         目标 base 段不可由本工具修改（仅任务启动时播种）。
         校验不通过（多个 in_progress / 路线超 15 项 / blocked 缺 reason /
-        事实超限）时不写入并返回错误说明。
+        completed 缺 evidence_note / 事实超限）时不写入并返回错误说明。
         """
 
         current = getattr(session, "task_doc", None)

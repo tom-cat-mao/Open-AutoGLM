@@ -16,6 +16,8 @@ PHONE_AGENT_KEYS = [
     "PHONE_AGENT_MODEL_MAX_RETRIES",
     "PHONE_AGENT_DEVICE_ID",
     "PHONE_AGENT_MAX_STEPS",
+    "PHONE_AGENT_MAX_HITL_RESUMES",
+    "PHONE_AGENT_BUDGET_WARN_RATIO",
     "PHONE_AGENT_IMAGE_KEEP",
     "PHONE_AGENT_OBS_MARKS_KEEP",
     "PHONE_AGENT_GROUNDING_PROVIDER",
@@ -26,6 +28,7 @@ PHONE_AGENT_KEYS = [
     "PHONE_AGENT_LANG",
     "PHONE_AGENT_TRACE_DIR",
     "PHONE_AGENT_TRACE",
+    "PHONE_AGENT_FINISH_VERIFY",
     "PHONE_AGENT_TEMPERATURE",
     "PHONE_AGENT_TOP_P",
     "PHONE_AGENT_FREQUENCY_PENALTY",
@@ -56,6 +59,9 @@ def test_from_env_defaults():
     assert cfg.model_timeout == 180.0
     assert cfg.model_max_retries == 2
     assert cfg.max_model_calls == 20
+    assert cfg.max_hitl_resumes == 20
+    assert cfg.budget_warn_ratio == 0.8
+    assert cfg.finish_verify == "auto"
     assert cfg.image_keep == 2
     assert cfg.obs_marks_keep == 2
     assert cfg.grounding_provider == "hybrid"
@@ -93,6 +99,30 @@ def test_context_pruning_keys_env_and_override(monkeypatch):
     cfg2 = V2Config.from_env({"image_keep": 1, "obs_marks_keep": 5})
     assert cfg2.image_keep == 1
     assert cfg2.obs_marks_keep == 5
+
+
+def test_budget_and_resume_keys_env_and_override(monkeypatch):
+    monkeypatch.setenv("PHONE_AGENT_MAX_HITL_RESUMES", "7")
+    monkeypatch.setenv("PHONE_AGENT_BUDGET_WARN_RATIO", "0.5")
+    cfg = V2Config.from_env()
+    assert cfg.max_hitl_resumes == 7
+    assert cfg.budget_warn_ratio == 0.5
+    # CLI override beats env.
+    cfg2 = V2Config.from_env({"max_hitl_resumes": 3, "budget_warn_ratio": 0.9})
+    assert cfg2.max_hitl_resumes == 3
+    assert cfg2.budget_warn_ratio == 0.9
+
+
+@pytest.mark.parametrize("raw", ["off", "auto", "always", "ALWAYS", "Off"])
+def test_finish_verify_valid_values(monkeypatch, raw):
+    monkeypatch.setenv("PHONE_AGENT_FINISH_VERIFY", raw)
+    assert V2Config.from_env().finish_verify == raw.strip().lower()
+
+
+@pytest.mark.parametrize("raw", ["", "  ", "bogus", "yes", "1"])
+def test_finish_verify_illegal_falls_back_to_auto(monkeypatch, raw):
+    monkeypatch.setenv("PHONE_AGENT_FINISH_VERIFY", raw)
+    assert V2Config.from_env().finish_verify == "auto"
 
 
 # -- priority: override > shell env > .env > default ---------------------

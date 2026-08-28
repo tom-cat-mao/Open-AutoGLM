@@ -19,6 +19,30 @@ from __future__ import annotations
 import hashlib
 
 
+def mark_tool_ok(session) -> None:
+    """Record that the most recent actuation/perception tool call succeeded.
+
+    Drives the finish review packet's "last action" mirror and its
+    hard-contradiction check (S2 §1.2/§1.5): a value of ``False`` is a hard
+    contradiction, ``None`` means unknown. Best-effort: a session double without
+    the attribute must not crash the tool path.
+    """
+
+    try:
+        session.last_tool_ok = True
+    except Exception:  # noqa: BLE001 - best-effort state write, never block a tool
+        pass
+
+
+def mark_tool_fail(session) -> None:
+    """Record that the most recent actuation/perception tool call failed."""
+
+    try:
+        session.last_tool_ok = False
+    except Exception:  # noqa: BLE001 - best-effort state write, never block a tool
+        pass
+
+
 def format_marks_digest_fallback(marks: dict, max_items: int = 40) -> str:
     """Render ``mark_id | role | text(<=32) | center`` lines (§6 sketch).
 

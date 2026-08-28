@@ -34,6 +34,7 @@ class FakeTaskItem:
     content: str
     status: str = "pending"
     reason: str | None = None
+    evidence_note: str | None = None
 
 
 @dataclass
@@ -79,13 +80,20 @@ class FakeSession:
     nudged: bool = False
     finished: bool = False
     finish_summary: str | None = None
+    # finish two-step review state (S2 §1.2): the first finish() call records the
+    # review packet + the seq it was taken at; confirm=True lands only while fresh.
+    screen_seq: int = 0
+    last_tool_ok: bool | None = None
+    finish_reviewed: bool = False
+    finish_review_seq: int = -1
+    finish_dispute_count: int = 0
 
 
 def _open_doc() -> FakeTaskDoc:
     return FakeTaskDoc(
         goal_base="打开设置并连上 WLAN",
         items=[
-            FakeTaskItem("1", "打开设置", status="completed"),
+            FakeTaskItem("1", "打开设置", status="completed", evidence_note="设置页可见"),
             FakeTaskItem("2", "连接 WLAN", status="pending"),
         ],
         facts=["WLAN 名称 HomeNet"],
@@ -95,7 +103,9 @@ def _open_doc() -> FakeTaskDoc:
 def _done_doc() -> FakeTaskDoc:
     return FakeTaskDoc(
         goal_base="打开设置",
-        items=[FakeTaskItem("1", "打开设置", status="completed")],
+        items=[
+            FakeTaskItem("1", "打开设置", status="completed", evidence_note="设置页可见")
+        ],
     )
 
 
@@ -227,10 +237,17 @@ def test_finish_blocked_when_open_items():
 
 
 def test_finish_allowed_when_all_completed():
+    # Two-step (S2 §1): the first call returns a review packet (no land); the
+    # confirm call lands. The route has no open items so the TaskDoc gate passes.
     session = FakeSession(task_doc=_done_doc())
     finish = _finish_tool(session)
-    out = finish.invoke({"summary": "已打开设置", "evidence": ["设置页可见"]})
-    assert out == "已记录完成声明"
+    first = finish.invoke({"summary": "已打开设置", "evidence": ["设置页可见"]})
+    assert "[FINISH 复核包]" in first
+    assert session.finished is False
+    second = finish.invoke(
+        {"summary": "已打开设置", "evidence": ["设置页可见"], "confirm": True}
+    )
+    assert second == "已确认完成"
     assert session.finished is True
     assert session.finish_summary == "已打开设置"
 
@@ -244,10 +261,17 @@ def test_finish_still_rejects_empty_evidence_before_taskdoc_guard():
 
 
 def test_finish_without_task_doc_uses_only_evidence_gate():
+    # No task board -> the TaskDoc gate is skipped, but the two-step review still
+    # applies: first call returns the packet, confirm lands.
     session = FakeSession(task_doc=None)
     finish = _finish_tool(session)
-    out = finish.invoke({"summary": "done", "evidence": ["ok"]})
-    assert out == "已记录完成声明"
+    first = finish.invoke({"summary": "done", "evidence": ["ok"]})
+    assert "[FINISH 复核包]" in first
+    assert session.finished is False
+    second = finish.invoke(
+        {"summary": "done", "evidence": ["ok"], "confirm": True}
+    )
+    assert second == "已确认完成"
     assert session.finished is True
 
 

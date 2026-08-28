@@ -33,7 +33,7 @@ from phone_agent.v2.resolver import (
     candidate_summary,
     resolve_description,
 )
-from phone_agent.v2.tools._obs import auto_observation
+from phone_agent.v2.tools._obs import auto_observation, mark_tool_fail, mark_tool_ok
 
 
 def _ok_with_obs(head: str, session) -> list[dict]:
@@ -42,10 +42,25 @@ def _ok_with_obs(head: str, session) -> list[dict]:
     Success paths return a content ``list`` (text + image when the screen
     changed); the observation layer owns image dedup and fail-closed text
     fallback (``tools/_obs.py``). Error branches stay ``str`` (no image).
+
+    Records ``session.last_tool_ok=True`` (all actuation success paths funnel
+    here) so the finish review packet can mirror the last action (S2 §1.2).
     """
 
+    mark_tool_ok(session)
     return [{"type": "text", "text": f"OK. {head}"}, *auto_observation(session)]
 
+
+def _fail(session, message: str) -> str:
+    """Record an actuation failure (``last_tool_ok=False``) and return the error text.
+
+    Every actuation error branch funnels here so the finish review packet's
+    hard-contradiction check sees the failed last action (S2 §1.5). The error
+    string stays in the transcript unchanged (fail-closed, no device action).
+    """
+
+    mark_tool_fail(session)
+    return message
 
 
 def _resolve_target(
@@ -127,7 +142,7 @@ def build_actuation_tools(session, config) -> list[StructuredTool]:
     ) -> str | list[dict]:
         mark, err = _resolve_target(session, target_mark_id, target_description)
         if err is not None:
-            return err
+            return _fail(session, err)
         x, y = session.mark_center_abs(mark)
         if action == "long_press":
             device.long_press(x, y, device_id=device_id)
@@ -172,7 +187,7 @@ def build_actuation_tools(session, config) -> list[StructuredTool]:
         if target_mark_id or target_description:
             mark, err = _resolve_target(session, target_mark_id, target_description)
             if err is not None:
-                return err
+                return _fail(session, err)
             fx, fy = session.mark_center_abs(mark)
             device.tap(fx, fy, device_id=device_id)
 
@@ -209,9 +224,9 @@ def build_actuation_tools(session, config) -> list[StructuredTool]:
             "right": (lx, cy, rx, cy),
         }
         if direction not in moves:
-            return (
-                f"error: unknown direction {direction!r}; "
-                "use up|down|left|right"
+            return _fail(
+                session,
+                f"error: unknown direction {direction!r}; use up|down|left|right",
             )
         sx, sy, ex, ey = moves[direction]
         device.swipe(sx, sy, ex, ey, device_id=device_id)
@@ -225,9 +240,9 @@ def build_actuation_tools(session, config) -> list[StructuredTool]:
         """
 
         if not (isinstance(start, (list, tuple)) and len(start) == 2):
-            return "error: start must be [x, y] in 0-1000 relative coords"
+            return _fail(session, "error: start must be [x, y] in 0-1000 relative coords")
         if not (isinstance(end, (list, tuple)) and len(end) == 2):
-            return "error: end must be [x, y] in 0-1000 relative coords"
+            return _fail(session, "error: end must be [x, y] in 0-1000 relative coords")
         sx, sy = _relative_to_abs(session, int(start[0]), int(start[1]))
         ex, ey = _relative_to_abs(session, int(end[0]), int(end[1]))
         device.swipe(sx, sy, ex, ey, device_id=device_id)
@@ -273,15 +288,17 @@ def build_actuation_tools(session, config) -> list[StructuredTool]:
             names = []
             for cand in resolution.candidates[:5]:
                 names.append(getattr(cand, "canonical_id", str(cand)))
-            return (
-                f"ambiguous app {app_name!r}: {', '.join(names)} — be more specific"
+            return _fail(
+                session,
+                f"ambiguous app {app_name!r}: {', '.join(names)} — be more specific",
             )
         if status == "denied":
-            return f"denied: {app_name!r} is not launch-authorized"
+            return _fail(session, f"denied: {app_name!r} is not launch-authorized")
         if status == "not_installed":
-            return f"error: {app_name!r} is not installed on this device"
-        return (
-            f"unknown app {app_name!r}: not in registry/inventory — cannot launch"
+            return _fail(session, f"error: {app_name!r} is not installed on this device")
+        return _fail(
+            session,
+            f"unknown app {app_name!r}: not in registry/inventory — cannot launch",
         )
 
     return [

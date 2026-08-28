@@ -86,6 +86,20 @@ def _env_bool(key: str, default: bool) -> bool:
     return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _env_choice(key: str, default: str, choices: tuple[str, ...]) -> str:
+    """Read an enum-like value; illegal / empty values fall back to ``default``.
+
+    Mirrors the design intent (S2 附A): a mistyped ``PHONE_AGENT_FINISH_VERIFY``
+    must never crash bring-up — it silently degrades to the default mode.
+    """
+
+    raw = os.getenv(key)
+    if raw is None or not raw.strip():
+        return default
+    value = raw.strip().lower()
+    return value if value in choices else default
+
+
 def _env_bool_default_true(key: str, default: bool = True) -> bool:
     """Boolean flag that defaults to ``True`` and only ``0/false/no/off`` disable it.
 
@@ -145,6 +159,13 @@ class V2Config:
     device_id: str | None = None
     # loop
     max_model_calls: int = 20
+    # HITL resume budget (S1 §3.3): outer-loop cap on human-in-the-loop resumes,
+    # orthogonal to the per-invoke model-call budget. Exhaustion ends the run with
+    # reason ``hitl_resume_exhausted``.
+    max_hitl_resumes: int = 20
+    # L0 budget warn ratio (S1 §3.1): inject a one-time "budget remaining" mirror
+    # once model calls reach ``ceil(budget_warn_ratio * max_model_calls)``.
+    budget_warn_ratio: float = 0.8
     # context hygiene (S1 §1.4/§2): rolling image + OBS-marks pruning windows
     image_keep: int = 2
     obs_marks_keep: int = 2
@@ -162,6 +183,10 @@ class V2Config:
     # taskdoc (task board increment)
     taskdoc_enabled: bool = True
     taskdoc_nudge_steps: int = 5
+    # finish verification (S2 §1.6): off|auto|always. This round only wires the
+    # key + two-step review packet; the independent-context verifier itself lands
+    # next relay. ``off`` degrades finish to the pre-two-step single-call behavior.
+    finish_verify: str = "auto"
     # sampling params (temperature/top_p/frequency_penalty) forwarded to the model
     sampling: dict[str, float] | None = None
     # request headers extras
@@ -200,6 +225,8 @@ class V2Config:
             model_max_retries=_env_int("PHONE_AGENT_MODEL_MAX_RETRIES", 2),
             device_id=_env_opt_str("PHONE_AGENT_DEVICE_ID"),
             max_model_calls=_env_int("PHONE_AGENT_MAX_STEPS", 20),
+            max_hitl_resumes=_env_int("PHONE_AGENT_MAX_HITL_RESUMES", 20),
+            budget_warn_ratio=_env_float("PHONE_AGENT_BUDGET_WARN_RATIO", 0.8),
             image_keep=_env_int("PHONE_AGENT_IMAGE_KEEP", 2),
             obs_marks_keep=_env_int("PHONE_AGENT_OBS_MARKS_KEEP", 2),
             grounding_provider=_env_str("PHONE_AGENT_GROUNDING_PROVIDER", "hybrid"),
@@ -212,6 +239,9 @@ class V2Config:
             trace_enabled=_env_bool("PHONE_AGENT_TRACE", True),
             taskdoc_enabled=_env_bool_default_true("PHONE_AGENT_TASKDOC", True),
             taskdoc_nudge_steps=_env_int("PHONE_AGENT_TASKDOC_NUDGE_STEPS", 5),
+            finish_verify=_env_choice(
+                "PHONE_AGENT_FINISH_VERIFY", "auto", ("off", "auto", "always")
+            ),
             sampling=sampling or None,
             user_agent=_env_opt_str("PHONE_AGENT_USER_AGENT"),
             http_headers=http_headers or None,

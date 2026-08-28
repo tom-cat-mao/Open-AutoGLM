@@ -99,6 +99,12 @@ class FakePhoneSession:
         self.finish_summary: str | None = None
         self.takeover_reason: str | None = None
         self.last_image_hash: str | None = None
+        # finish two-step review state (S2 §1.2): mirrors PhoneSession so the
+        # control-tool tests exercise the real review/confirm seq guard.
+        self.last_tool_ok: bool | None = None
+        self.finish_reviewed: bool = False
+        self.finish_review_seq: int = -1
+        self.finish_dispute_count: int = 0
         self._locate_result = locate_result
         self._locate_error = locate_error
         self.observe_count = 0

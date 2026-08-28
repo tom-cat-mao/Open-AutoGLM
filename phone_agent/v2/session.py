@@ -79,6 +79,15 @@ class PhoneSession:
         self.finished: bool = False
         self.finish_summary: str | None = None
         self.takeover_reason: str | None = None
+        # finish two-step review (S2 §1.2): the first finish() call emits a world
+        # mirror (review packet) and sets finish_reviewed=True at finish_review_seq;
+        # confirm=True only lands finished when the review is still valid
+        # (screen_seq == finish_review_seq — any intervening observe invalidates it).
+        # finish_dispute_count tallies verifier rejections (reserved for next relay).
+        self.last_tool_ok: bool | None = None
+        self.finish_reviewed: bool = False
+        self.finish_review_seq: int = -1
+        self.finish_dispute_count: int = 0
         # Last screenshot hash whose image block was actually sent to the model.
         # Same-screen re-observations reuse the text OBS but drop the image
         # (see ``tools/_obs.py``); reset to None so the first frame always ships.

@@ -10,7 +10,7 @@ from __future__ import annotations
 from langchain_core.tools import StructuredTool
 
 from phone_agent.v2.resolver import LocateAmbiguousError, candidate_summary
-from phone_agent.v2.tools._obs import auto_observation
+from phone_agent.v2.tools._obs import auto_observation, mark_tool_fail, mark_tool_ok
 
 
 def build_perception_tools(session, config) -> list[StructuredTool]:
@@ -24,6 +24,7 @@ def build_perception_tools(session, config) -> list[StructuredTool]:
         when the screen changed since the last one sent.
         """
 
+        mark_tool_ok(session)
         return auto_observation(session)
 
     def locate(description: str) -> str:
@@ -37,9 +38,12 @@ def build_perception_tools(session, config) -> list[StructuredTool]:
         try:
             mark = session.locate(description)
         except LocateAmbiguousError as exc:
+            mark_tool_fail(session)
             return f"未定位: {exc}（请细化描述）"
         except Exception as exc:  # noqa: BLE001 - surface provider failure text
+            mark_tool_fail(session)
             return f"定位失败: {exc}"
+        mark_tool_ok(session)
         return (
             f"已定位并注册为 mark {mark.mark_id}，可用 "
             f"tap(target_mark_id={mark.mark_id!r}) 点击 [{candidate_summary(mark)}]"

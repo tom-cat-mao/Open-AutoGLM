@@ -24,7 +24,7 @@ def test_validate_ok_returns_none():
     doc = TaskDoc(
         goal_base="打开设置连上 WLAN",
         items=[
-            TaskItem("s1", "打开设置", status="completed"),
+            TaskItem("s1", "打开设置", status="completed", evidence_note="设置页标题可见"),
             TaskItem("s2", "进入 WLAN", status="in_progress"),
             TaskItem("s3", "选择网络", status="pending"),
         ],

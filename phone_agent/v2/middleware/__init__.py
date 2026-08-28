@@ -5,6 +5,10 @@ See ``docs/refactor-thin-loop-v2.md`` §9 for the binding contract.
 
 from __future__ import annotations
 
+from phone_agent.v2.middleware.budget import (
+    BudgetMiddleware,
+    build_budget_middleware,
+)
 from phone_agent.v2.middleware.images import (
     ContextPruningMiddleware,
     ImagePruningMiddleware,
@@ -28,6 +32,8 @@ from phone_agent.v2.middleware.trace import (
 __all__ = [
     "build_hitl_middleware",
     "is_sensitive_tool_call",
+    "BudgetMiddleware",
+    "build_budget_middleware",
     "ContextPruningMiddleware",
     "build_context_pruning_middleware",
     "ImagePruningMiddleware",

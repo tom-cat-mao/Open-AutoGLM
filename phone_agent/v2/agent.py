@@ -63,6 +63,7 @@ class ThinPhoneAgent:
         from phone_agent.v2.model import build_chat_model
         from phone_agent.v2.session import PhoneSession
         from phone_agent.v2.tools import build_tools
+        from phone_agent.v2.middleware.budget import build_budget_middleware
         from phone_agent.v2.middleware.images import build_context_pruning_middleware
         from phone_agent.v2.middleware.safety import build_hitl_middleware
         from phone_agent.v2.middleware.trace import build_trace_middleware
@@ -84,6 +85,15 @@ class ThinPhoneAgent:
         )
         self.trace_path = self._trace.trace_path
 
+        # L0 budget-warn mirror: fires once at ceil(warn_ratio * limit) model
+        # calls, before ModelCallLimit's hard stop (S1 §3.1). Held as an
+        # attribute so run() can reset its one-shot guard on reuse (S1 R7).
+        self._budget = build_budget_middleware(
+            max_model_calls=getattr(config, "max_model_calls", 20),
+            warn_ratio=getattr(config, "budget_warn_ratio", 0.8),
+            lang=getattr(config, "lang", "cn"),
+        )
+
         middleware = [
             build_hitl_middleware(self.session),
             build_context_pruning_middleware(
@@ -91,6 +101,7 @@ class ThinPhoneAgent:
                 keep_marks=getattr(config, "obs_marks_keep", 2),
             ),
             self._trace,
+            self._budget,
             ModelCallLimitMiddleware(
                 thread_limit=getattr(config, "max_model_calls", 20),
                 exit_behavior="end",
@@ -201,17 +212,28 @@ class ThinPhoneAgent:
         from langgraph.types import Command
 
         self._seed_task_doc(task)
+        # Reset per-run one-shot flags so a reused agent behaves like a fresh run
+        # (S1 R7): the HITL-exhaustion terminal flag and the budget-warn guard.
+        self._hitl_exhausted = False
+        if getattr(self, "_budget", None) is not None:
+            self._budget.reset()
 
         config = {"configurable": {"thread_id": self.run_id}}
         payload: Any = {"messages": self._initial_messages(task)}
 
         result: Any = None
-        # Bound the resume loop to the model-call budget plus HITL slack.
-        max_rounds = getattr(self.config, "max_model_calls", 20) + 5
-        for _ in range(max_rounds):
+        # The outer loop only iterates past the first invoke when a HITL interrupt
+        # is raised (S1 F7); bound it by the HITL-resume budget, orthogonal to the
+        # per-invoke model-call budget. ``+1`` accounts for the initial invoke.
+        max_resumes = getattr(self.config, "max_hitl_resumes", 20)
+        for attempt in range(max_resumes + 1):
             result = self.agent.invoke(payload, config)
             interrupts = self._extract_interrupts(result)
             if not interrupts:
+                break
+            if attempt == max_resumes:
+                # Still interrupting but the resume budget is spent: terminate.
+                self._hitl_exhausted = True
                 break
             decisions: list[dict[str, Any]] = []
             for interrupt in interrupts:
@@ -232,16 +254,15 @@ class ThinPhoneAgent:
             summary = getattr(session, "finish_summary", None) or "finished"
             return RunResult(True, str(summary), steps, self.trace_path)
 
-        # No terminal declaration: distinguish budget exhaustion from a model
-        # that simply stopped emitting tool calls.
-        reason = "model_stopped"
-        if isinstance(result, dict):
-            messages = result.get("messages") or []
-            for message in reversed(messages):
-                content = getattr(message, "content", "")
-                if isinstance(content, str) and "limit" in content.lower():
-                    reason = "max_model_calls"
-                    break
+        # No terminal declaration. Distinguish the terminal causes numerically
+        # (S1 §3.2): a spent HITL-resume budget, an exhausted model-call budget
+        # (``_trace._step`` equals the budget when ModelCallLimit hard-stops —
+        # its injected terminal message never runs wrap_model_call, F6), or a
+        # model that simply stopped emitting tool calls.
+        if getattr(self, "_hitl_exhausted", False):
+            return RunResult(False, "hitl_resume_exhausted", steps, self.trace_path)
+        budget = getattr(self.config, "max_model_calls", 20)
+        reason = "max_model_calls" if steps >= budget else "model_stopped"
         return RunResult(False, reason, steps, self.trace_path)
 
 

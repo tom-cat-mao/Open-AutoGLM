@@ -271,9 +271,46 @@ def test_finish_empty_evidence_rejected():
     assert session.finished is False
 
 
-def test_finish_records_declaration():
+def test_finish_two_step_review_then_confirm():
+    # First call returns the review packet and does NOT land; confirm lands.
     session = FakePhoneSession({})
     tools = _tool_map(session)
+    first = tools["finish"].invoke(
+        {"summary": "已连上 WLAN", "evidence": ["WLAN 显示已连接"]}
+    )
+    assert "[FINISH 复核包]" in first
+    assert session.finished is False
+
+    second = tools["finish"].invoke(
+        {"summary": "已连上 WLAN", "evidence": ["WLAN 显示已连接"], "confirm": True}
+    )
+    assert second == "已确认完成"
+    assert session.finished is True
+    assert session.finish_summary == "已连上 WLAN"
+
+
+def test_finish_stale_confirm_reissues_packet():
+    # An observation between the packet and the confirm invalidates the review;
+    # the stale confirm re-emits a fresh packet instead of landing.
+    session = FakePhoneSession({})
+    tools = _tool_map(session)
+    tools["finish"].invoke({"summary": "x", "evidence": ["proof"]})
+    # A read_screen bumps screen_seq, making the recorded review_seq stale.
+    tools["read_screen"].invoke({})
+    out = tools["finish"].invoke(
+        {"summary": "x", "evidence": ["proof"], "confirm": True}
+    )
+    assert "[FINISH 复核包]" in out
+    assert session.finished is False
+
+
+def test_finish_off_mode_single_step_lands():
+    # PHONE_AGENT_FINISH_VERIFY=off degrades to the pre-two-step single call.
+    class OffConfig(FakeConfig):
+        finish_verify = "off"
+
+    session = FakePhoneSession({})
+    tools = _tool_map(session, OffConfig())
     out = tools["finish"].invoke(
         {"summary": "已连上 WLAN", "evidence": ["WLAN 显示已连接"]}
     )

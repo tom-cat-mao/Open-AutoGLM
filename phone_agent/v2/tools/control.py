@@ -4,10 +4,19 @@ Per refactor-thin-loop-v2.md §7.3. These tools shape the run outcome rather tha
 touching the device. HITL interrupts for ``ask_user``/``take_over`` are enforced
 by the safety middleware; the tool bodies only record intent / format text.
 
-``finish`` additionally enforces the TaskDoc guard
-(``docs/refactor-thin-loop-v2-taskdoc.md`` §2.4): if the task board still has
-open items it rejects the declaration and lists them, so the model cannot claim
-success while the route is unfinished.
+``finish`` enforces two fail-closed gates and a two-step review (S2 §1):
+
+1. Non-empty ``evidence`` (list what was done + the on-screen proof).
+2. TaskDoc guard (``docs/refactor-thin-loop-v2-taskdoc.md`` §2.4): open route
+   items block the declaration.
+
+Then, unless ``PHONE_AGENT_FINISH_VERIFY=off`` degrades it to the pre-two-step
+single-call landing, ``finish`` is **two-step** (S2 §1): the first call returns a
+*review packet* (a cheap L0 world-state mirror built by ``review.py`` — one
+``observe()``) and does **not** land ``finished``; the model reflects and calls
+``finish(confirm=true)`` to land it. A confirm is only honoured while the review
+is still fresh (``screen_seq == finish_review_seq``); any intervening observation
+invalidates the mirror and re-emits a fresh packet.
 """
 
 from __future__ import annotations
@@ -16,14 +25,24 @@ from langchain_core.tools import StructuredTool
 
 
 def build_control_tools(session, config) -> list[StructuredTool]:
-    """Return the control tool list bound to ``session``."""
+    """Return the control tool list bound to ``session``.
 
-    def finish(summary: str, evidence: list[str]) -> str:
-        """Declare the task complete.
+    ``config`` may be ``None`` (some integration tests build the control tools
+    without a config); ``finish`` reads ``finish_verify`` defensively.
+    """
+
+    def finish(summary: str, evidence: list[str], confirm: bool = False) -> str:
+        """Declare the task complete (two-step review; S2 §1).
 
         ``evidence`` is REQUIRED and non-empty: enumerate what was accomplished
         and the concrete on-screen evidence for each claim. An empty list is
         rejected and nothing is recorded (fail-closed).
+
+        The first call returns a review packet (current world state + route
+        status + doubts + options) and does NOT finish. Read it, then call
+        ``finish(confirm=true, summary=..., evidence=[...])`` to land the result.
+        If any observation happened since the packet was shown, the confirm is
+        stale and a fresh packet is returned instead.
         """
 
         items = [str(e).strip() for e in (evidence or []) if str(e).strip()]
@@ -50,9 +69,37 @@ def build_control_tools(session, config) -> list[StructuredTool]:
                     f"路线仍有未完成项：{open_summary}。请先完成、标记 blocked"
                     "（带原因），或用 update_task_doc 修正路线后再 finish。"
                 )
-        session.finished = True
-        session.finish_summary = summary
-        return "已记录完成声明"
+
+        # Backward-compat gate (S2 §1.6): FINISH_VERIFY=off degrades finish to the
+        # pre-two-step single-call landing (no review packet, no seq guard).
+        mode = getattr(config, "finish_verify", "auto") or "auto"
+        if mode == "off":
+            session.finished = True
+            session.finish_summary = summary
+            return "已记录完成声明"
+
+        # Two-step (auto/always). Second stage lands only when the model confirms
+        # AND the review packet is still fresh (no observation invalidated it).
+        reviewed = bool(getattr(session, "finish_reviewed", False))
+        review_seq = getattr(session, "finish_review_seq", -1)
+        current_seq = getattr(session, "screen_seq", 0)
+        if confirm and reviewed and current_seq == review_seq:
+            session.finished = True
+            session.finish_summary = summary
+            session.finish_reviewed = False
+            return "已确认完成"
+
+        # First stage (or a stale confirm): build + return the review packet and
+        # record the seq it was taken at, so the next confirm can be validated.
+        from phone_agent.v2.review import build_review_package
+
+        packet = build_review_package(session, config)
+        try:
+            session.finish_reviewed = True
+            session.finish_review_seq = getattr(session, "screen_seq", 0)
+        except Exception:  # noqa: BLE001 - best-effort state write; packet still returned
+            pass
+        return packet
 
     def ask_user(question: str) -> str:
         """Ask the human operator a question and wait for their answer (HITL).

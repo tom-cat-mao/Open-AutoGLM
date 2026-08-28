@@ -14,6 +14,10 @@ from phone_agent.v2.middleware.images import (
     ImagePruningMiddleware,
     build_context_pruning_middleware,
 )
+from phone_agent.v2.middleware.budget import (
+    BudgetMiddleware,
+    build_budget_middleware,
+)
 from phone_agent.v2.middleware.safety import (
     build_hitl_middleware,
     is_sensitive_tool_call,
@@ -254,3 +258,55 @@ def test_trace_disabled_writes_nothing(tmp_path):
         handler=lambda r: SimpleNamespace(content="OK"),
     )
     assert not list(tmp_path.iterdir())
+
+
+# --------------------------------------------------------------------------
+# 3.1 budget-warn middleware (L0 mirror; one-shot at ceil(warn_ratio * limit))
+# --------------------------------------------------------------------------
+def _budget_text(result) -> str:
+    assert result is not None
+    return result["messages"][0].content
+
+
+def test_budget_warn_fires_once_at_threshold():
+    mw = build_budget_middleware(max_model_calls=20, warn_ratio=0.8)  # threshold = 16
+    # Below threshold: no mirror injected.
+    assert mw.before_model({"thread_model_call_count": 15}, runtime=None) is None
+    # At threshold: inject exactly one budget-remaining SystemMessage.
+    text = _budget_text(mw.before_model({"thread_model_call_count": 16}, runtime=None))
+    assert text.startswith("预算余量：已用 16/20")
+    assert "剩 4 次" in text
+    # One-shot: never fires again even as the count grows.
+    assert mw.before_model({"thread_model_call_count": 19}, runtime=None) is None
+
+
+def test_budget_reset_re_arms_the_one_shot():
+    mw = BudgetMiddleware(max_model_calls=10, warn_ratio=0.8)  # threshold = 8
+    assert mw.before_model({"thread_model_call_count": 8}, runtime=None) is not None
+    assert mw.before_model({"thread_model_call_count": 9}, runtime=None) is None
+    mw.reset()
+    assert mw.before_model({"thread_model_call_count": 9}, runtime=None) is not None
+
+
+def test_budget_missing_count_is_tolerated():
+    mw = BudgetMiddleware(max_model_calls=20, warn_ratio=0.8)
+    # First turn has no merged ModelCallLimit state key yet -> treat as 0.
+    assert mw.before_model({}, runtime=None) is None
+    assert mw.before_model({"messages": []}, runtime=None) is None
+
+
+def test_budget_ratio_out_of_range_clamps_to_default():
+    # Illegal ratios must neither disable nor over-fire; they fall back to 0.8.
+    assert BudgetMiddleware(max_model_calls=20, warn_ratio=0.0).warn_ratio == 0.8
+    assert BudgetMiddleware(max_model_calls=20, warn_ratio=5.0).warn_ratio == 0.8
+    # A ratio of exactly 1.0 is legal (warn only on the very last call).
+    mw = BudgetMiddleware(max_model_calls=10, warn_ratio=1.0)
+    assert mw.warn_ratio == 1.0
+    assert mw.before_model({"thread_model_call_count": 9}, runtime=None) is None
+    assert mw.before_model({"thread_model_call_count": 10}, runtime=None) is not None
+
+
+def test_budget_english_text():
+    mw = BudgetMiddleware(max_model_calls=20, warn_ratio=0.8, lang="en")
+    text = _budget_text(mw.before_model({"thread_model_call_count": 16}, runtime=None))
+    assert text.startswith("Budget remaining: 16/20 model calls used, 4 left.")

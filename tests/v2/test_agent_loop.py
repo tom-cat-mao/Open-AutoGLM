@@ -12,6 +12,7 @@ from __future__ import annotations
 import sys
 import types
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -184,3 +185,107 @@ def test_thin_loop_call_sequence_recorded(scripted_agent):
     tool_names = [e["tool"] for e in events if e["event"] == "tool_call"]
     assert tool_names == ["read_screen", "tap", "finish"]
     assert any(e["event"] == "run_end" for e in events)
+
+
+# --------------------------------------------------------------------------
+# Terminal-reason resolution (S1 §3.2): numeric, no "limit"-string matching.
+# Built via __new__ so we exercise the pure decision logic without the full
+# create_agent / middleware assembly.
+# --------------------------------------------------------------------------
+def _bare_agent(*, steps: int, budget: int, finished=False, takeover=None, hitl_exhausted=False):
+    from phone_agent.v2.agent import ThinPhoneAgent
+
+    agent = ThinPhoneAgent.__new__(ThinPhoneAgent)
+    agent.config = FakeConfig(max_model_calls=budget)
+    agent.trace_path = None
+    agent._trace = SimpleNamespace(_step=steps)
+    agent.session = SimpleNamespace(
+        finished=finished,
+        finish_summary="做完了" if finished else None,
+        takeover_reason=takeover,
+    )
+    agent._hitl_exhausted = hitl_exhausted
+    return agent
+
+
+def test_build_result_finished_is_success():
+    result = _bare_agent(steps=3, budget=20, finished=True)._build_result({})
+    assert result.success is True
+    assert result.reason == "做完了"
+    assert result.steps == 3
+
+
+def test_build_result_takeover_takes_priority_over_budget():
+    # Even with the budget spent, an explicit takeover wins the priority order.
+    agent = _bare_agent(steps=20, budget=20, takeover="需要人工登录")
+    result = agent._build_result({})
+    assert result.success is False
+    assert result.reason == "需要人工登录"
+
+
+def test_build_result_budget_exhausted_is_max_model_calls():
+    # steps >= budget with no finish -> numeric max_model_calls (no string match).
+    result = _bare_agent(steps=20, budget=20)._build_result({})
+    assert result.success is False
+    assert result.reason == "max_model_calls"
+
+
+def test_build_result_model_stopped_below_budget():
+    # Model stopped emitting tool calls before the budget ran out.
+    result = _bare_agent(steps=4, budget=20)._build_result({})
+    assert result.success is False
+    assert result.reason == "model_stopped"
+
+
+def test_build_result_hitl_resume_exhausted_before_budget_check():
+    # A spent HITL-resume budget is reported even though steps < model budget.
+    agent = _bare_agent(steps=4, budget=20, hitl_exhausted=True)
+    result = agent._build_result({})
+    assert result.success is False
+    assert result.reason == "hitl_resume_exhausted"
+
+
+def test_build_result_no_limit_string_match():
+    # Regression guard for the deleted `"limit" in content` heuristic: an
+    # assistant message literally containing "limit" must NOT force
+    # max_model_calls when the numeric budget is not spent.
+    from langchain_core.messages import AIMessage
+
+    agent = _bare_agent(steps=4, budget=20)
+    result = agent._build_result({"messages": [AIMessage(content="hit the rate limit page")]})
+    assert result.reason == "model_stopped"
+
+
+# --------------------------------------------------------------------------
+# HITL-resume budget: the outer loop terminates as hitl_resume_exhausted when a
+# persistent interrupt keeps re-raising past max_hitl_resumes (S1 §3.3).
+# --------------------------------------------------------------------------
+def test_run_hitl_resume_exhausted(monkeypatch):
+    from phone_agent.v2.agent import ThinPhoneAgent
+
+    agent = ThinPhoneAgent.__new__(ThinPhoneAgent)
+    agent.config = FakeConfig(max_model_calls=20)
+    agent.config.max_hitl_resumes = 2
+    agent.run_id = "run-hitl"
+    agent.trace_path = None
+    agent._trace = SimpleNamespace(_step=1)
+    agent.session = SimpleNamespace(finished=False, finish_summary=None, takeover_reason=None)
+    agent._budget = None
+
+    invokes = {"n": 0}
+
+    # A fake compiled graph whose invoke always returns an interrupt payload, so
+    # the resume loop can never clear it and must hit the resume budget.
+    def _always_interrupt(payload, config):  # noqa: ANN001
+        invokes["n"] += 1
+        return {"__interrupt__": [SimpleNamespace(value={"action_requests": [{"name": "take_over"}], "review_configs": []})]}
+
+    agent.agent = SimpleNamespace(invoke=_always_interrupt)
+    monkeypatch.setattr(agent, "_seed_task_doc", lambda task: None)
+    monkeypatch.setattr(agent, "_initial_messages", lambda task: [])
+
+    result = agent.run("卡住的任务", hitl_handler=lambda prompt: "approve")
+    assert result.success is False
+    assert result.reason == "hitl_resume_exhausted"
+    # initial invoke + max_hitl_resumes resumes = 1 + 2 = 3 invokes total.
+    assert invokes["n"] == 3

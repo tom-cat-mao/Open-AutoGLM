@@ -33,13 +33,16 @@ class TaskItem:
     """One 路线 milestone.
 
     ``status`` is one of :data:`VALID_STATUSES`; ``reason`` is required only when
-    ``status == "blocked"`` (why the item is stuck).
+    ``status == "blocked"`` (why the item is stuck). ``evidence_note`` is required
+    only when ``status == "completed"`` (the on-screen proof for the completion),
+    feeding the finish review packet / verifier with a trustworthy evidence source.
     """
 
     id: str
     content: str
     status: str = "pending"
     reason: str | None = None
+    evidence_note: str | None = None
 
 
 @dataclass
@@ -64,7 +67,8 @@ class TaskDoc:
 
         Enforces the spec §1 constraints: at most one ``in_progress`` item;
         at most :data:`MAX_ITEMS` items; every ``blocked`` item carries a
-        ``reason``; only known statuses; at most :data:`MAX_FACTS` facts, each
+        ``reason``; every ``completed`` item carries an ``evidence_note``
+        (S2 §2); only known statuses; at most :data:`MAX_FACTS` facts, each
         at most :data:`MAX_FACT_LEN` characters.
         """
 
@@ -82,6 +86,8 @@ class TaskDoc:
                 in_progress += 1
             if item.status == "blocked" and not (item.reason or "").strip():
                 return f"blocked 项 {item.id!r} 必须带 reason（说明为何卡住）。"
+            if item.status == "completed" and not (item.evidence_note or "").strip():
+                return f"completed 项 {item.id!r} 缺少 evidence_note（完成项需给出屏幕证据）。"
         if in_progress > 1:
             return f"至多一个 in_progress 项，当前有 {in_progress} 个。"
 
@@ -139,6 +145,12 @@ class TaskDoc:
                 if item.status == "blocked" and item.reason:
                     suffix = (
                         f"（原因：{item.reason}）" if cn else f" (reason: {item.reason})"
+                    )
+                elif item.status == "completed" and (item.evidence_note or "").strip():
+                    suffix = (
+                        f"（证据：{item.evidence_note}）"
+                        if cn
+                        else f" (evidence: {item.evidence_note})"
                     )
                 lines.append(f"- [{item.status}] {item.id}: {item.content}{suffix}")
 
