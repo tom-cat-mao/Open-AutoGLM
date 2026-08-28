@@ -192,13 +192,14 @@ def test_thin_loop_call_sequence_recorded(scripted_agent):
 # Built via __new__ so we exercise the pure decision logic without the full
 # create_agent / middleware assembly.
 # --------------------------------------------------------------------------
-def _bare_agent(*, steps: int, budget: int, finished=False, takeover=None, hitl_exhausted=False):
+def _bare_agent(*, steps: int, budget: int, finished=False, takeover=None, hitl_exhausted=False, token_exhausted=False):
     from phone_agent.v2.agent import ThinPhoneAgent
 
     agent = ThinPhoneAgent.__new__(ThinPhoneAgent)
     agent.config = FakeConfig(max_model_calls=budget)
     agent.trace_path = None
     agent._trace = SimpleNamespace(_step=steps)
+    agent._budget = SimpleNamespace(exhausted=token_exhausted)
     agent.session = SimpleNamespace(
         finished=finished,
         finish_summary="做完了" if finished else None,
@@ -223,16 +224,24 @@ def test_build_result_takeover_takes_priority_over_budget():
     assert result.reason == "需要人工登录"
 
 
-def test_build_result_budget_exhausted_is_max_model_calls():
-    # steps >= budget with no finish -> numeric max_model_calls (no string match).
-    result = _bare_agent(steps=20, budget=20)._build_result({})
+def test_build_result_budget_exhausted_is_loop_fuse():
+    # steps >= fuse with no finish and no token-exhaust -> loop_fuse (A4 rename).
+    result = _bare_agent(steps=100, budget=100)._build_result({})
     assert result.success is False
-    assert result.reason == "max_model_calls"
+    assert result.reason == "loop_fuse"
+
+
+def test_build_result_token_budget_exhausted_beats_fuse():
+    # The token-cost ceiling fired: reason is token_budget_exhausted even though
+    # steps are below the loop fuse.
+    result = _bare_agent(steps=5, budget=100, token_exhausted=True)._build_result({})
+    assert result.success is False
+    assert result.reason == "token_budget_exhausted"
 
 
 def test_build_result_model_stopped_below_budget():
-    # Model stopped emitting tool calls before the budget ran out.
-    result = _bare_agent(steps=4, budget=20)._build_result({})
+    # Model stopped emitting tool calls before the fuse ran out.
+    result = _bare_agent(steps=4, budget=100)._build_result({})
     assert result.success is False
     assert result.reason == "model_stopped"
 

@@ -1,90 +1,193 @@
-"""Budget-warn middleware: L0 mirror of the remaining model-call budget (S1 §3.1).
+"""Budget middleware: token-cost mirror + hard cost ceiling (S1 §3.1 / A4 §2).
 
-Per S1 §3.1 this is a pure **L0 镜子** — it only reflects world state (how much
-budget is left plus the option space), it never instructs and never stops. Once
-the thread model-call count reaches ``ceil(warn_ratio * limit)`` it injects a
-single ``SystemMessage`` (once per run, guarded by ``self._warned``) noting the
-remaining budget and the option space; the hard stop stays with
-``ModelCallLimitMiddleware``.
+A4 re-bases the run budget from *model-call count* to *token cost* — the gateway
+bills per token, so tokens are the meaningful ceiling. This middleware owns the
+**two-level token budget**:
 
-The count is read from ``state["thread_model_call_count"]`` (S1 F4: any custom
-middleware can read the ModelCallLimit merged state in ``before_model``). It may
-be absent on the very first turn, so ``.get(..., 0)`` tolerates that.
+* **L0 warn (mirror, never stops)** — once the remaining budget drops to
+  ``warn_remaining`` it injects a single ``SystemMessage`` (once per run) that
+  mirrors the remaining tokens and the full option space (finish / write key
+  facts into the TaskDoc / converge the route / take_over). Pure information.
+* **Hard cost ceiling (stops once)** — once cumulative usage reaches
+  ``token_budget`` it jumps the graph to ``end`` with a ``[TOKEN_BUDGET_EXHAUSTED]``
+  marker. This is the cost cap; ``ModelCallLimitMiddleware`` (``PHONE_AGENT_MAX_STEPS``,
+  A4 default 100) is now only an independent **runaway-loop fuse**.
+
+Cumulative accounting is compaction-proof: the auto-compact middleware replaces
+old ``AIMessage``s (and their ``usage_metadata``) with a summary, so re-summing
+the live transcript would *undercount* the cost already billed. Instead this
+middleware accumulates each turn's usage in ``after_model`` into an instance
+counter (``_used_tokens``), keyed by the newest AI message id to avoid
+double-counting. Usage prefers ``AIMessage.usage_metadata`` (input + output) and
+falls back to a crude content estimate when the provider omits it.
 """
 
 from __future__ import annotations
 
-import math
 from typing import Any
 
 from langchain.agents.middleware import AgentMiddleware
-from langchain_core.messages import SystemMessage
+from langchain.agents.middleware.types import hook_config
+from langchain_core.messages import AIMessage, SystemMessage
+
+from phone_agent.v2.middleware._tokens import estimate_message_tokens, usage_tokens
+
+# Terminal marker text the hard ceiling injects; agent._build_result keys on the
+# instance flag, not this string, but it keeps the transcript self-describing.
+TOKEN_BUDGET_EXHAUSTED_MARKER = "[TOKEN_BUDGET_EXHAUSTED]"
 
 _WARN_TEXT = {
     "cn": (
-        "预算余量：已用 {count}/{limit} 次模型调用，剩 {remaining} 次。"
-        "若任务已达成请立即 finish（附 evidence）；否则用 update_task_doc "
-        "收敛路线，优先做关键项。"
+        "Token 预算余量：已用约 {used}/{budget}，剩约 {remaining}。"
+        "若任务已达成请立即 finish（附 evidence）；否则可用 update_task_doc "
+        "把要紧事实写进任务板（压缩免疫）、收敛路线并优先做关键项；"
+        "若需人工介入请 take_over。"
     ),
     "en": (
-        "Budget remaining: {count}/{limit} model calls used, {remaining} left. "
+        "Token budget remaining: ~{used}/{budget} used, ~{remaining} left. "
         "If the task is done call finish (with evidence); otherwise use "
-        "update_task_doc to converge the route and do the critical items first."
+        "update_task_doc to record key facts into the board (compaction-immune), "
+        "converge the route and do critical items first; take_over if a human is "
+        "needed."
+    ),
+}
+
+_EXHAUSTED_TEXT = {
+    "cn": (
+        TOKEN_BUDGET_EXHAUSTED_MARKER
+        + " Token 预算已耗尽（约 {used}/{budget}），本次运行结束。"
+    ),
+    "en": (
+        TOKEN_BUDGET_EXHAUSTED_MARKER
+        + " Token budget exhausted (~{used}/{budget}); ending this run."
     ),
 }
 
 
 class BudgetMiddleware(AgentMiddleware):
-    """before_model: inject a one-time budget-remaining mirror at ``warn_ratio``."""
+    """Token-cost mirror (warn) + hard ceiling (stop); cumulative & compaction-proof."""
 
     def __init__(
-        self, max_model_calls: int = 20, warn_ratio: float = 0.8, lang: str = "cn"
+        self,
+        token_budget: int = 1_000_000,
+        warn_remaining: int = 100_000,
+        lang: str = "cn",
     ) -> None:
         super().__init__()
-        self.limit = max(1, int(max_model_calls))
-        # Clamp to (0, 1]: an out-of-range ratio must not disable or over-fire.
-        ratio = float(warn_ratio)
-        if ratio <= 0 or ratio > 1:
-            ratio = 0.8
-        self.warn_ratio = ratio
+        self.token_budget = max(1, int(token_budget))
+        # Clamp the absolute warn line into (0, token_budget]; an out-of-range
+        # value must neither disable the warn nor fire it before any usage.
+        warn = int(warn_remaining)
+        if warn <= 0 or warn > self.token_budget:
+            warn = min(100_000, self.token_budget)
+        self.warn_remaining = warn
         self.lang = lang
-        self._threshold = max(1, math.ceil(self.warn_ratio * self.limit))
         self._warned = False
+        self._exhausted = False
+        self._used_tokens = 0
+        self._counted_id: str | None = None
 
     def reset(self) -> None:
-        """Clear the one-shot guard so a reused agent warns again on the next run."""
+        """Clear per-run state so a reused agent budgets the next run from zero."""
 
         self._warned = False
+        self._exhausted = False
+        self._used_tokens = 0
+        self._counted_id = None
 
-    def _warn_text(self, count: int) -> str:
+    @property
+    def used_tokens(self) -> int:
+        """Cumulative billed tokens accounted so far (compaction-proof)."""
+
+        return self._used_tokens
+
+    @property
+    def exhausted(self) -> bool:
+        """True once the hard cost ceiling fired this run."""
+
+        return self._exhausted
+
+    # ------------------------------------------------------------------
+    def _newest_ai(self, messages: list[Any]) -> AIMessage | None:
+        for msg in reversed(messages or []):
+            if isinstance(msg, AIMessage):
+                return msg
+        return None
+
+    def _accumulate(self, messages: list[Any]) -> None:
+        """Add the newest AI turn's usage to the cumulative counter (once)."""
+
+        newest = self._newest_ai(messages)
+        if newest is None:
+            return
+        msg_id = getattr(newest, "id", None)
+        # Only count a given AI message once. When ids are absent (rare), fall back
+        # to always counting the newest — after_model runs once per model call.
+        if msg_id is not None and msg_id == self._counted_id:
+            return
+        reported = usage_tokens(newest)
+        self._used_tokens += (
+            reported if reported is not None else estimate_message_tokens(newest)
+        )
+        self._counted_id = msg_id
+
+    def _warn_text(self) -> str:
         template = _WARN_TEXT.get(self.lang, _WARN_TEXT["cn"])
+        remaining = max(0, self.token_budget - self._used_tokens)
         return template.format(
-            count=count, limit=self.limit, remaining=max(0, self.limit - count)
+            used=self._used_tokens, budget=self.token_budget, remaining=remaining
         )
 
-    def before_model(self, state, runtime) -> dict[str, Any] | None:  # noqa: ANN001
-        if self._warned:
-            return None
-        count = 0
-        if isinstance(state, dict):
-            count = int(state.get("thread_model_call_count", 0) or 0)
-        if count < self._threshold:
-            return None
-        self._warned = True
-        return {"messages": [SystemMessage(content=self._warn_text(count))]}
+    def _exhausted_text(self) -> str:
+        template = _EXHAUSTED_TEXT.get(self.lang, _EXHAUSTED_TEXT["cn"])
+        return template.format(used=self._used_tokens, budget=self.token_budget)
 
+    # ------------------------------------------------------------------
+    @hook_config(can_jump_to=["end"])
+    def before_model(self, state, runtime) -> dict[str, Any] | None:  # noqa: ANN001
+        remaining = self.token_budget - self._used_tokens
+        # Hard cost ceiling: stop the run once the budget is fully spent.
+        if remaining <= 0:
+            if not self._exhausted:
+                self._exhausted = True
+                return {
+                    "jump_to": "end",
+                    "messages": [AIMessage(content=self._exhausted_text())],
+                }
+            return {"jump_to": "end"}
+        # L0 warn mirror (once per run) as the remaining budget crosses the line.
+        if not self._warned and remaining <= self.warn_remaining:
+            self._warned = True
+            return {"messages": [SystemMessage(content=self._warn_text())]}
+        return None
+
+    @hook_config(can_jump_to=["end"])
     async def abefore_model(self, state, runtime) -> dict[str, Any] | None:  # noqa: ANN001
         return self.before_model(state, runtime)
 
+    def after_model(self, state, runtime) -> dict[str, Any] | None:  # noqa: ANN001
+        messages = state.get("messages") if isinstance(state, dict) else None
+        self._accumulate(messages or [])
+        return None
+
+    async def aafter_model(self, state, runtime) -> dict[str, Any] | None:  # noqa: ANN001
+        return self.after_model(state, runtime)
+
 
 def build_budget_middleware(
-    max_model_calls: int = 20, warn_ratio: float = 0.8, lang: str = "cn"
+    token_budget: int = 1_000_000,
+    warn_remaining: int = 100_000,
+    lang: str = "cn",
 ) -> BudgetMiddleware:
     """Build a :class:`BudgetMiddleware` from the resolved config values."""
 
     return BudgetMiddleware(
-        max_model_calls=max_model_calls, warn_ratio=warn_ratio, lang=lang
+        token_budget=token_budget, warn_remaining=warn_remaining, lang=lang
     )
 
 
-__all__ = ["BudgetMiddleware", "build_budget_middleware"]
+__all__ = [
+    "BudgetMiddleware",
+    "build_budget_middleware",
+    "TOKEN_BUDGET_EXHAUSTED_MARKER",
+]

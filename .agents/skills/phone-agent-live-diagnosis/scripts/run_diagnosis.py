@@ -318,7 +318,7 @@ def _returncode_for(success: bool, reason: str, takeover: str | None) -> int:
         return 0
     if takeover:
         return 2
-    if reason == "max_model_calls":
+    if reason in {"token_budget_exhausted", "loop_fuse", "max_model_calls"}:
         return 3
     return 1
 
@@ -533,7 +533,10 @@ def run_dry(args: argparse.Namespace, run_dir: Path) -> tuple[Any, Any]:
                 candidate.amendments.extend(str(a) for a in add_amendments)
             if facts is not None:
                 candidate.facts = [str(f) for f in facts]
-            error = candidate.validate()
+            # A4 contract alignment: validate against the pre-write board so the
+            # transition discipline (no pending→completed jump / batch back-fill)
+            # matches the real ``update_task_doc`` tool.
+            error = candidate.validate(previous=current)
             if error is not None:
                 return f"未写入（校验失败）：{error}"
             session.task_doc = candidate

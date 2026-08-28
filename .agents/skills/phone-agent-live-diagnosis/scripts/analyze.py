@@ -62,7 +62,7 @@ def classify_verdict(outcome: dict[str, Any], view: EvidenceView) -> str:
     if finished:
         return "success"
     reason = str(outcome.get("reason") or "")
-    if reason == "max_model_calls":
+    if reason in {"token_budget_exhausted", "loop_fuse", "max_model_calls"}:
         return "max_steps"
     # An "error event" is a raised-exception tool result OR a fail-closed error
     # return string (same accounting as build_tool_health's _ERROR_CLASSES), so

@@ -59,7 +59,8 @@ def make_update_task_doc_tool(session, lang: str) -> StructuredTool:
         - facts：全量替换关键事实列表。不传则保留现有事实。
         目标 base 段不可由本工具修改（仅任务启动时播种）。
         校验不通过（多个 in_progress / 路线超 15 项 / blocked 缺 reason /
-        completed 缺 evidence_note / 事实超限）时不写入并返回错误说明。
+        completed 缺 evidence_note / 事实超限 / 把 pending 直接标 completed（须先
+        in_progress）/ 一次批量补标多项 completed）时不写入并返回错误说明。
         """
 
         current = getattr(session, "task_doc", None)
@@ -85,7 +86,9 @@ def make_update_task_doc_tool(session, lang: str) -> StructuredTool:
         except ValueError as exc:
             return f"未写入（输入无效）：{exc}"
 
-        error = candidate.validate()
+        # Validate against the pre-write board so the A4 transition discipline
+        # (no pending→completed jump, no batch back-fill) can compare item states.
+        error = candidate.validate(previous=current)
         if error is not None:
             return f"未写入（校验失败）：{error}"
 

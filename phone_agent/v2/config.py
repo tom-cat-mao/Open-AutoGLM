@@ -158,14 +158,30 @@ class V2Config:
     # device
     device_id: str | None = None
     # loop
-    max_model_calls: int = 20
+    max_model_calls: int = 100
     # HITL resume budget (S1 §3.3): outer-loop cap on human-in-the-loop resumes,
     # orthogonal to the per-invoke model-call budget. Exhaustion ends the run with
     # reason ``hitl_resume_exhausted``.
     max_hitl_resumes: int = 20
-    # L0 budget warn ratio (S1 §3.1): inject a one-time "budget remaining" mirror
-    # once model calls reach ``ceil(budget_warn_ratio * max_model_calls)``.
+    # L0 budget warn ratio (S1 §3.1): retained for backward compatibility. A4
+    # re-based the budget from model-call count to token cost (see token_budget /
+    # token_warn_remaining below); this field is no longer read by BudgetMiddleware.
     budget_warn_ratio: float = 0.8
+    # L0 token budget (A4 §2): total token cost budget (input+output, summed from
+    # usage_metadata). BudgetMiddleware injects a one-time remaining-token mirror
+    # once the remaining budget drops to ``token_warn_remaining``. max_model_calls
+    # is now a runaway-loop fuse only (ModelCallLimit), not the cost ceiling.
+    token_budget: int = 1_000_000
+    token_warn_remaining: int = 100_000
+    # two-threshold auto-compact (A4 §3). ``compact_enabled`` is the master switch
+    # (env ``PHONE_AGENT_COMPACT``, default on). Ratios are of the context window:
+    # a T1 warn SystemMessage at ``compact_warn_ratio`` and a T2 forced handoff
+    # summary at ``compact_trigger_ratio``. ``context_window`` overrides the
+    # model-name inference (default 256k).
+    compact_enabled: bool = True
+    compact_warn_ratio: float = 0.75
+    compact_trigger_ratio: float = 0.92
+    context_window: int | None = None
     # context hygiene (S1 §1.4/§2): rolling image + OBS-marks pruning windows
     image_keep: int = 2
     obs_marks_keep: int = 2
@@ -238,9 +254,21 @@ class V2Config:
             model_timeout=_env_float("PHONE_AGENT_MODEL_TIMEOUT", 180.0),
             model_max_retries=_env_int("PHONE_AGENT_MODEL_MAX_RETRIES", 2),
             device_id=_env_opt_str("PHONE_AGENT_DEVICE_ID"),
-            max_model_calls=_env_int("PHONE_AGENT_MAX_STEPS", 20),
+            max_model_calls=_env_int("PHONE_AGENT_MAX_STEPS", 100),
             max_hitl_resumes=_env_int("PHONE_AGENT_MAX_HITL_RESUMES", 20),
             budget_warn_ratio=_env_float("PHONE_AGENT_BUDGET_WARN_RATIO", 0.8),
+            token_budget=_env_int("PHONE_AGENT_TOKEN_BUDGET", 1_000_000),
+            token_warn_remaining=_env_int(
+                "PHONE_AGENT_TOKEN_WARN_REMAINING", 100_000
+            ),
+            compact_enabled=_env_bool_default_true("PHONE_AGENT_COMPACT", True),
+            compact_warn_ratio=_env_float("PHONE_AGENT_COMPACT_WARN_RATIO", 0.75),
+            compact_trigger_ratio=_env_float(
+                "PHONE_AGENT_COMPACT_TRIGGER_RATIO", 0.92
+            ),
+            context_window=(
+                _env_int("PHONE_AGENT_CONTEXT_WINDOW", 0) or None
+            ),
             image_keep=_env_int("PHONE_AGENT_IMAGE_KEEP", 2),
             obs_marks_keep=_env_int("PHONE_AGENT_OBS_MARKS_KEEP", 2),
             grounding_provider=_env_str("PHONE_AGENT_GROUNDING_PROVIDER", "hybrid"),

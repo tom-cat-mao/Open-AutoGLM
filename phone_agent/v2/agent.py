@@ -85,32 +85,39 @@ class ThinPhoneAgent:
         )
         self.trace_path = self._trace.trace_path
 
-        # L0 budget-warn mirror: fires once at ceil(warn_ratio * limit) model
-        # calls, before ModelCallLimit's hard stop (S1 §3.1). Held as an
-        # attribute so run() can reset its one-shot guard on reuse (S1 R7).
+        # L0 token-budget mirror + hard cost ceiling (A4 §2). Warns once as the
+        # remaining token budget crosses the line, and hard-stops the run when the
+        # budget is fully spent. Held as an attribute so run() can reset its
+        # per-run state on reuse (S1 R7) and _build_result can read ``exhausted``.
         self._budget = build_budget_middleware(
-            max_model_calls=getattr(config, "max_model_calls", 20),
-            warn_ratio=getattr(config, "budget_warn_ratio", 0.8),
+            token_budget=getattr(config, "token_budget", 1_000_000),
+            warn_remaining=getattr(config, "token_warn_remaining", 100_000),
             lang=getattr(config, "lang", "cn"),
         )
 
+        # Two-threshold auto-compact (A4 §3): T1 warn + T2 forced handoff summary.
+        # Guarded/optional so a missing module or disabled switch degrades to a
+        # plain thin loop. Placed before context-pruning (coarse fold before the
+        # fine-grained image/marks prune).
+        self._compact = None
+        if getattr(config, "compact_enabled", True):
+            try:
+                from phone_agent.v2.middleware.compact import build_compact_middleware
+
+                self._compact = build_compact_middleware(
+                    self.session, config, model=self.model
+                )
+            except Exception:  # noqa: BLE001 - optional increment; never block bring-up
+                self._compact = None
+
         middleware = [
             build_hitl_middleware(self.session, config),
-            build_context_pruning_middleware(
-                keep_images=getattr(config, "image_keep", 2),
-                keep_marks=getattr(config, "obs_marks_keep", 2),
-            ),
-            self._trace,
-            self._budget,
-            ModelCallLimitMiddleware(
-                thread_limit=getattr(config, "max_model_calls", 20),
-                exit_behavior="end",
-            ),
         ]
-
         # TaskDoc render/nudge middleware (task-board increment). Guarded so a
         # missing taskdoc module (e.g. this file imported before the concurrent
-        # W1 worktree lands) degrades gracefully to a plain thin loop.
+        # W1 worktree lands) degrades gracefully to a plain thin loop. Kept before
+        # compact so the pinned [TASK_DOC] block exists when compact chooses its
+        # cut point (compact never folds the pinned block).
         if getattr(config, "taskdoc_enabled", True):
             try:
                 from phone_agent.v2.middleware.taskdoc import build_taskdoc_middleware
@@ -124,6 +131,24 @@ class ThinPhoneAgent:
                 )
             except Exception:  # noqa: BLE001 - optional increment; never block bring-up
                 pass
+
+        if self._compact is not None:
+            middleware.append(self._compact)
+
+        middleware.extend(
+            [
+                build_context_pruning_middleware(
+                    keep_images=getattr(config, "image_keep", 2),
+                    keep_marks=getattr(config, "obs_marks_keep", 2),
+                ),
+                self._budget,
+                self._trace,
+                ModelCallLimitMiddleware(
+                    thread_limit=getattr(config, "max_model_calls", 100),
+                    exit_behavior="end",
+                ),
+            ]
+        )
 
         # Diagnostic evidence stream (live-diagnosis skill). Appended LAST so its
         # before_model sees the post-image-prune + post-TaskDoc context and its
@@ -239,10 +264,16 @@ class ThinPhoneAgent:
 
         self._seed_task_doc(task)
         # Reset per-run one-shot flags so a reused agent behaves like a fresh run
-        # (S1 R7): the HITL-exhaustion terminal flag and the budget-warn guard.
+        # (S1 R7): the HITL-exhaustion terminal flag, the token-budget state, and
+        # the compaction middleware's per-run counters.
         self._hitl_exhausted = False
         if getattr(self, "_budget", None) is not None:
             self._budget.reset()
+        if getattr(self, "_compact", None) is not None:
+            try:
+                self._compact.reset()
+            except Exception:  # noqa: BLE001 - best-effort reset; never block a run
+                pass
 
         config = {"configurable": {"thread_id": self.run_id}}
         payload: Any = {"messages": self._initial_messages(task)}
@@ -280,15 +311,19 @@ class ThinPhoneAgent:
             summary = getattr(session, "finish_summary", None) or "finished"
             return RunResult(True, str(summary), steps, self.trace_path)
 
-        # No terminal declaration. Distinguish the terminal causes numerically
-        # (S1 §3.2): a spent HITL-resume budget, an exhausted model-call budget
-        # (``_trace._step`` equals the budget when ModelCallLimit hard-stops —
-        # its injected terminal message never runs wrap_model_call, F6), or a
-        # model that simply stopped emitting tool calls.
+        # No terminal declaration. Distinguish the terminal causes (A4 §2): a
+        # spent HITL-resume budget, an exhausted **token** cost budget (the L0
+        # BudgetMiddleware hard ceiling set ``exhausted``), the runaway-loop fuse
+        # (ModelCallLimit hard-stopped at ``max_model_calls`` — its injected
+        # terminal message never runs wrap_model_call, so ``_trace._step`` equals
+        # the fuse limit, F6), or a model that simply stopped emitting tool calls.
         if getattr(self, "_hitl_exhausted", False):
             return RunResult(False, "hitl_resume_exhausted", steps, self.trace_path)
-        budget = getattr(self.config, "max_model_calls", 20)
-        reason = "max_model_calls" if steps >= budget else "model_stopped"
+        budget = getattr(self, "_budget", None)
+        if budget is not None and getattr(budget, "exhausted", False):
+            return RunResult(False, "token_budget_exhausted", steps, self.trace_path)
+        fuse = getattr(self.config, "max_model_calls", 100)
+        reason = "loop_fuse" if steps >= fuse else "model_stopped"
         return RunResult(False, reason, steps, self.trace_path)
 
 

@@ -365,9 +365,10 @@ def test_locate_success_returns_str_no_image():
     assert _image_blocks(out) == []
 
 
-def test_same_screen_dedup_drops_image_second_time():
-    # A static screen keeps the same screenshot hash; the second observation
-    # reuses the text OBS but drops the image and notes it.
+def test_static_screen_still_sends_image_each_time():
+    # A4 removed same-screen image dedup: even a static screen (constant
+    # screenshot hash) ships a fresh image every observation. Bounding total
+    # image growth is the history-side pruner's job, not the produce side.
     marks = {"ax_1": make_mark("ax_1", text="X", center=(500, 500))}
     session = FakePhoneSession(marks, static_screen=True)
     tools = _tool_map(session)
@@ -376,13 +377,13 @@ def test_same_screen_dedup_drops_image_second_time():
     assert len(_image_blocks(first)) == 1
 
     second = tools["read_screen"].invoke({})
-    assert _image_blocks(second) == []
-    assert "未重复发图" in _text(second)
+    assert len(_image_blocks(second)) == 1
+    assert "未重复发图" not in _text(second)
 
 
 def test_changed_screen_sends_new_image():
-    # A dynamic screen bumps the payload each observe -> hash changes -> image
-    # ships every step and last_image_hash tracks the newest.
+    # A dynamic screen bumps the payload each observe -> image ships every step
+    # (same as a static screen now that dedup is gone).
     marks = {"ax_1": make_mark("ax_1", text="X", center=(500, 500))}
     session = FakePhoneSession(marks, static_screen=False)
     tools = _tool_map(session)

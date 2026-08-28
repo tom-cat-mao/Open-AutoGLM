@@ -8,7 +8,7 @@ from __future__ import annotations
 import json
 from types import SimpleNamespace
 
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage
 
 from phone_agent.v2.middleware.images import (
     ImagePruningMiddleware,
@@ -263,52 +263,104 @@ def test_trace_disabled_writes_nothing(tmp_path):
 
 
 # --------------------------------------------------------------------------
-# 3.1 budget-warn middleware (L0 mirror; one-shot at ceil(warn_ratio * limit))
+# 3.1 budget middleware (A4: token-cost mirror + hard ceiling, cumulative)
 # --------------------------------------------------------------------------
 def _budget_text(result) -> str:
     assert result is not None
     return result["messages"][0].content
 
 
-def test_budget_warn_fires_once_at_threshold():
-    mw = build_budget_middleware(max_model_calls=20, warn_ratio=0.8)  # threshold = 16
-    # Below threshold: no mirror injected.
-    assert mw.before_model({"thread_model_call_count": 15}, runtime=None) is None
-    # At threshold: inject exactly one budget-remaining SystemMessage.
-    text = _budget_text(mw.before_model({"thread_model_call_count": 16}, runtime=None))
-    assert text.startswith("预算余量：已用 16/20")
-    assert "剩 4 次" in text
-    # One-shot: never fires again even as the count grows.
-    assert mw.before_model({"thread_model_call_count": 19}, runtime=None) is None
+def _ai(input_tokens: int, output_tokens: int, mid: str) -> AIMessage:
+    return AIMessage(
+        content="",
+        id=mid,
+        usage_metadata={
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "total_tokens": input_tokens + output_tokens,
+        },
+    )
 
 
-def test_budget_reset_re_arms_the_one_shot():
-    mw = BudgetMiddleware(max_model_calls=10, warn_ratio=0.8)  # threshold = 8
-    assert mw.before_model({"thread_model_call_count": 8}, runtime=None) is not None
-    assert mw.before_model({"thread_model_call_count": 9}, runtime=None) is None
-    mw.reset()
-    assert mw.before_model({"thread_model_call_count": 9}, runtime=None) is not None
+def _advance(mw: BudgetMiddleware, msg: AIMessage) -> None:
+    """Simulate one model call: after_model accounts the newest AI turn."""
+
+    mw.after_model({"messages": [msg]}, runtime=None)
 
 
-def test_budget_missing_count_is_tolerated():
-    mw = BudgetMiddleware(max_model_calls=20, warn_ratio=0.8)
-    # First turn has no merged ModelCallLimit state key yet -> treat as 0.
-    assert mw.before_model({}, runtime=None) is None
+def test_budget_warn_fires_once_when_remaining_crosses_line():
+    mw = build_budget_middleware(token_budget=1000, warn_remaining=200)
+    # Below the line: no mirror injected (used 700 -> remaining 300 > 200).
+    _advance(mw, _ai(500, 200, "a1"))
+    assert mw.before_model({"messages": []}, runtime=None) is None
+    # Cross the line: used 850 -> remaining 150 <= 200 -> one mirror.
+    _advance(mw, _ai(100, 50, "a2"))
+    text = _budget_text(mw.before_model({"messages": []}, runtime=None))
+    assert text.startswith("Token 预算余量：已用约 850/1000")
+    assert "剩约 150" in text
+    # One-shot: never fires again even as usage grows (still below ceiling).
+    _advance(mw, _ai(10, 10, "a3"))
     assert mw.before_model({"messages": []}, runtime=None) is None
 
 
-def test_budget_ratio_out_of_range_clamps_to_default():
-    # Illegal ratios must neither disable nor over-fire; they fall back to 0.8.
-    assert BudgetMiddleware(max_model_calls=20, warn_ratio=0.0).warn_ratio == 0.8
-    assert BudgetMiddleware(max_model_calls=20, warn_ratio=5.0).warn_ratio == 0.8
-    # A ratio of exactly 1.0 is legal (warn only on the very last call).
-    mw = BudgetMiddleware(max_model_calls=10, warn_ratio=1.0)
-    assert mw.warn_ratio == 1.0
-    assert mw.before_model({"thread_model_call_count": 9}, runtime=None) is None
-    assert mw.before_model({"thread_model_call_count": 10}, runtime=None) is not None
+def test_budget_hard_ceiling_jumps_to_end_once():
+    mw = build_budget_middleware(token_budget=100, warn_remaining=30)
+    _advance(mw, _ai(80, 30, "a1"))  # used 110 >= 100
+    result = mw.before_model({"messages": []}, runtime=None)
+    assert result is not None
+    assert result["jump_to"] == "end"
+    assert "[TOKEN_BUDGET_EXHAUSTED]" in result["messages"][0].content
+    assert mw.exhausted is True
+    # Still jumps on a subsequent call but does not re-inject the marker message.
+    again = mw.before_model({"messages": []}, runtime=None)
+    assert again == {"jump_to": "end"}
+
+
+def test_budget_uses_usage_metadata_cumulatively_not_live_transcript():
+    # Cumulative counter survives compaction: even if the live transcript is
+    # replaced (AIMessages dropped), used_tokens keeps the billed total.
+    mw = build_budget_middleware(token_budget=10_000, warn_remaining=1)
+    _advance(mw, _ai(1000, 500, "a1"))
+    _advance(mw, _ai(1000, 500, "a2"))
+    assert mw.used_tokens == 3000
+    # A "compaction" empties the transcript; before_model must not reset the gauge.
+    mw.before_model({"messages": []}, runtime=None)
+    assert mw.used_tokens == 3000
+
+
+def test_budget_double_count_guard_on_same_ai_id():
+    mw = build_budget_middleware(token_budget=10_000, warn_remaining=1)
+    msg = _ai(100, 50, "same")
+    _advance(mw, msg)
+    _advance(mw, msg)  # same id -> not counted twice
+    assert mw.used_tokens == 150
+
+
+def test_budget_falls_back_to_estimate_without_usage():
+    mw = build_budget_middleware(token_budget=10_000, warn_remaining=1)
+    # No usage_metadata -> crude len//4 estimate over the content text.
+    _advance(mw, AIMessage(content="x" * 400, id="a1"))
+    assert mw.used_tokens == 100
+
+
+def test_budget_reset_re_arms_everything():
+    mw = BudgetMiddleware(token_budget=100, warn_remaining=30)
+    _advance(mw, _ai(80, 30, "a1"))
+    assert mw.before_model({"messages": []}, runtime=None)["jump_to"] == "end"
+    mw.reset()
+    assert mw.used_tokens == 0
+    assert mw.exhausted is False
+    assert mw.before_model({"messages": []}, runtime=None) is None
+
+
+def test_budget_warn_remaining_out_of_range_clamps():
+    # A warn line larger than the budget or non-positive is clamped sanely.
+    assert BudgetMiddleware(token_budget=1000, warn_remaining=0).warn_remaining == 1000
+    assert BudgetMiddleware(token_budget=500, warn_remaining=99999).warn_remaining == 500
 
 
 def test_budget_english_text():
-    mw = BudgetMiddleware(max_model_calls=20, warn_ratio=0.8, lang="en")
-    text = _budget_text(mw.before_model({"thread_model_call_count": 16}, runtime=None))
-    assert text.startswith("Budget remaining: 16/20 model calls used, 4 left.")
+    mw = BudgetMiddleware(token_budget=1000, warn_remaining=200, lang="en")
+    _advance(mw, _ai(600, 250, "a1"))  # used 850 -> remaining 150
+    text = _budget_text(mw.before_model({"messages": []}, runtime=None))
+    assert text.startswith("Token budget remaining: ~850/1000 used, ~150 left.")

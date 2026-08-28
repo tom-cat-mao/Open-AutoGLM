@@ -18,6 +18,12 @@ PHONE_AGENT_KEYS = [
     "PHONE_AGENT_MAX_STEPS",
     "PHONE_AGENT_MAX_HITL_RESUMES",
     "PHONE_AGENT_BUDGET_WARN_RATIO",
+    "PHONE_AGENT_TOKEN_BUDGET",
+    "PHONE_AGENT_TOKEN_WARN_REMAINING",
+    "PHONE_AGENT_COMPACT",
+    "PHONE_AGENT_COMPACT_WARN_RATIO",
+    "PHONE_AGENT_COMPACT_TRIGGER_RATIO",
+    "PHONE_AGENT_CONTEXT_WINDOW",
     "PHONE_AGENT_IMAGE_KEEP",
     "PHONE_AGENT_OBS_MARKS_KEEP",
     "PHONE_AGENT_GROUNDING_PROVIDER",
@@ -58,9 +64,15 @@ def test_from_env_defaults():
     assert cfg.api_key == "EMPTY"
     assert cfg.model_timeout == 180.0
     assert cfg.model_max_retries == 2
-    assert cfg.max_model_calls == 20
+    assert cfg.max_model_calls == 100
     assert cfg.max_hitl_resumes == 20
     assert cfg.budget_warn_ratio == 0.8
+    assert cfg.token_budget == 1_000_000
+    assert cfg.token_warn_remaining == 100_000
+    assert cfg.compact_enabled is True
+    assert cfg.compact_warn_ratio == 0.75
+    assert cfg.compact_trigger_ratio == 0.92
+    assert cfg.context_window is None
     assert cfg.finish_verify == "auto"
     assert cfg.image_keep == 2
     assert cfg.obs_marks_keep == 2
@@ -111,6 +123,43 @@ def test_budget_and_resume_keys_env_and_override(monkeypatch):
     cfg2 = V2Config.from_env({"max_hitl_resumes": 3, "budget_warn_ratio": 0.9})
     assert cfg2.max_hitl_resumes == 3
     assert cfg2.budget_warn_ratio == 0.9
+
+
+def test_token_budget_keys_env_and_override(monkeypatch):
+    monkeypatch.setenv("PHONE_AGENT_TOKEN_BUDGET", "500000")
+    monkeypatch.setenv("PHONE_AGENT_TOKEN_WARN_REMAINING", "20000")
+    cfg = V2Config.from_env()
+    assert cfg.token_budget == 500_000
+    assert cfg.token_warn_remaining == 20_000
+    # CLI override beats env.
+    cfg2 = V2Config.from_env({"token_budget": 42, "token_warn_remaining": 7})
+    assert cfg2.token_budget == 42
+    assert cfg2.token_warn_remaining == 7
+
+
+def test_compact_keys_env_and_override(monkeypatch):
+    monkeypatch.setenv("PHONE_AGENT_COMPACT", "off")
+    monkeypatch.setenv("PHONE_AGENT_COMPACT_WARN_RATIO", "0.6")
+    monkeypatch.setenv("PHONE_AGENT_COMPACT_TRIGGER_RATIO", "0.88")
+    monkeypatch.setenv("PHONE_AGENT_CONTEXT_WINDOW", "128000")
+    cfg = V2Config.from_env()
+    assert cfg.compact_enabled is False
+    assert cfg.compact_warn_ratio == 0.6
+    assert cfg.compact_trigger_ratio == 0.88
+    assert cfg.context_window == 128000
+    # CLI override beats env.
+    cfg2 = V2Config.from_env(
+        {"compact_enabled": True, "context_window": 262144}
+    )
+    assert cfg2.compact_enabled is True
+    assert cfg2.context_window == 262144
+
+
+def test_max_steps_default_is_loop_fuse_100(monkeypatch):
+    # A4: MAX_STEPS is now a runaway-loop fuse (default 100), not the cost budget.
+    assert V2Config.from_env().max_model_calls == 100
+    monkeypatch.setenv("PHONE_AGENT_MAX_STEPS", "250")
+    assert V2Config.from_env().max_model_calls == 250
 
 
 @pytest.mark.parametrize("raw", ["off", "auto", "always", "ALWAYS", "Off"])

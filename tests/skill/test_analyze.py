@@ -192,3 +192,16 @@ def test_no_board_and_max_steps():
     summary = _summary(events, {"finished": False, "reason": "max_model_calls"})
     assert summary["verdict"] == "max_steps"
     assert summary["taskdoc_final"]["terminal_state"] == "no_board"
+
+
+def test_token_budget_and_loop_fuse_map_to_max_steps():
+    # A4 terminal reasons both map to the analyzer's max_steps verdict.
+    base = [
+        {"event": "run_start", "run_id": "t1", "task_goal_base": "x", "config_digest": {}},
+        {"event": "model_request", "step": 1, "message_count": 1, "image_message_count": 0,
+         "pruned_screen_count": 0, "taskdoc_present": False, "taskdoc_open_items": 0, "context_chars": 10},
+        {"event": "run_end", "steps": 100, "terminal": {"finished": False}},
+    ]
+    for reason in ("token_budget_exhausted", "loop_fuse"):
+        summary = _summary(list(base), {"finished": False, "reason": reason})
+        assert summary["verdict"] == "max_steps", reason

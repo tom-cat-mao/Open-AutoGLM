@@ -93,6 +93,71 @@ def test_validate_rejects_overlong_fact():
 
 
 # --------------------------------------------------------------------------
+# state-transition discipline (A4): compare against the previous doc
+# --------------------------------------------------------------------------
+
+
+def test_validate_rejects_pending_to_completed_jump():
+    previous = TaskDoc(items=[TaskItem("s1", "打开设置", status="pending")])
+    candidate = TaskDoc(
+        items=[TaskItem("s1", "打开设置", status="completed", evidence_note="设置页可见")]
+    )
+    err = candidate.validate(previous=previous)
+    assert err is not None
+    assert "in_progress" in err
+    assert "s1" in err
+
+
+def test_validate_allows_in_progress_to_completed():
+    previous = TaskDoc(items=[TaskItem("s1", "打开设置", status="in_progress")])
+    candidate = TaskDoc(
+        items=[TaskItem("s1", "打开设置", status="completed", evidence_note="设置页可见")]
+    )
+    assert candidate.validate(previous=previous) is None
+
+
+def test_validate_rejects_batch_pending_to_completed():
+    previous = TaskDoc(
+        items=[
+            TaskItem("s1", "A", status="pending"),
+            TaskItem("s2", "B", status="pending"),
+        ]
+    )
+    candidate = TaskDoc(
+        items=[
+            TaskItem("s1", "A", status="completed", evidence_note="proofA"),
+            TaskItem("s2", "B", status="completed", evidence_note="proofB"),
+        ]
+    )
+    err = candidate.validate(previous=previous)
+    assert err is not None
+    assert "批量" in err
+
+
+def test_validate_allows_new_item_added_completed():
+    # A brand-new item (not in previous) added already-completed is not a "jump":
+    # it never existed as pending, so only the structural evidence gate applies.
+    previous = TaskDoc(items=[TaskItem("s1", "A", status="in_progress")])
+    candidate = TaskDoc(
+        items=[
+            TaskItem("s1", "A", status="in_progress"),
+            TaskItem("s2", "B", status="completed", evidence_note="proofB"),
+        ]
+    )
+    assert candidate.validate(previous=previous) is None
+
+
+def test_validate_no_previous_skips_transition_checks():
+    # Backward compat: validate() with no previous doc only does structural checks
+    # (a completed item with evidence is fine even though there's no prior state).
+    candidate = TaskDoc(
+        items=[TaskItem("s1", "A", status="completed", evidence_note="proof")]
+    )
+    assert candidate.validate() is None
+
+
+
+# --------------------------------------------------------------------------
 # open-item queries
 # --------------------------------------------------------------------------
 
@@ -272,6 +337,58 @@ def test_tool_blocked_without_reason_rejected_no_write():
     out = tool.invoke({"items": [{"id": "s1", "content": "登录", "status": "blocked"}]})
     assert out.startswith("未写入")
     assert getattr(session, "task_doc", None) is None or session.task_doc.items == []
+
+
+def test_tool_rejects_pending_to_completed_jump_no_write():
+    # A4: the tool validates against the pre-write board, so a pending item cannot
+    # be marked completed in one write (must pass through in_progress first).
+    session = FakePhoneSession({})
+    session.screen_seq = 1
+    tool = _tool(session)
+    tool.invoke({"items": [{"id": "s1", "content": "打开设置", "status": "pending"}]})
+    out = tool.invoke(
+        {"items": [{"id": "s1", "content": "打开设置", "status": "completed", "evidence_note": "设置页可见"}]}
+    )
+    assert out.startswith("未写入")
+    # The board still holds the original pending item (write rejected).
+    assert session.task_doc.items[0].status == "pending"
+
+
+def test_tool_allows_in_progress_then_completed():
+    session = FakePhoneSession({})
+    session.screen_seq = 1
+    tool = _tool(session)
+    tool.invoke({"items": [{"id": "s1", "content": "打开设置", "status": "pending"}]})
+    tool.invoke({"items": [{"id": "s1", "content": "打开设置", "status": "in_progress"}]})
+    out = tool.invoke(
+        {"items": [{"id": "s1", "content": "打开设置", "status": "completed", "evidence_note": "设置页可见"}]}
+    )
+    assert "已更新任务板" in out
+    assert session.task_doc.items[0].status == "completed"
+
+
+def test_tool_rejects_batch_pending_to_completed_no_write():
+    session = FakePhoneSession({})
+    session.screen_seq = 1
+    tool = _tool(session)
+    tool.invoke(
+        {
+            "items": [
+                {"id": "s1", "content": "A", "status": "pending"},
+                {"id": "s2", "content": "B", "status": "pending"},
+            ]
+        }
+    )
+    out = tool.invoke(
+        {
+            "items": [
+                {"id": "s1", "content": "A", "status": "completed", "evidence_note": "pa"},
+                {"id": "s2", "content": "B", "status": "completed", "evidence_note": "pb"},
+            ]
+        }
+    )
+    assert out.startswith("未写入")
+    assert [i.status for i in session.task_doc.items] == ["pending", "pending"]
 
 
 def test_tool_bad_item_shape_rejected_no_write():

@@ -6,20 +6,28 @@ harness（middleware）只提供工具、安全边界、context 卫生与可观�
 ```
 system(极简契约) + user(task + 首次观测含截图)
   → create_agent tool loop: model → [safety HITL] → tool(s) → model → …
-  → 结束: session.finished | takeover_reason | 无 tool_call | ModelCallLimit
+  → 结束: session.finished | takeover_reason | 无 tool_call | token 预算耗尽 | 死循环保险丝
 ```
 
 - **工具**（`phone_agent/v2/tools/`，15 个）：执行 `tap/long_press/type_text/scroll/swipe/back/home/launch_app/wait`、
   感知 `read_screen/locate`、控制 `finish/ask_user/take_over/update_task_doc`。
   `tap` 双寻址：`target_mark_id` | `target_description`（解析为唯一 mark，歧义/无匹配 fail-closed 不执行）。
 - **TaskDoc 任务板**：目标 / 路线 / 关键事实一个文档，模型经 `update_task_doc` 维护，
-  每轮 pinned 进 context（压缩免疫）；`finish` 在路线未完成时被拒。
+  每轮 pinned 进 context（压缩免疫）；`finish` 在路线未完成时被拒。状态迁移有纪律：
+  不能把 `pending` 直接标 `completed`（须先 `in_progress`），也不能一次批量补标多项 `completed`。
 - **finish 两段式 + 验收器**：`finish` 先给世界镜像复核包（不落定），`finish(confirm=true)` 才定稿；
   高风险目标/硬矛盾坚持 confirm 时过独立 context 验收器（只看目标+证据路线+尾帧截图，不看 actor 自辩），
   REJECT 带内回传、2 次转人工；验收器故障 fail-open（`PHONE_AGENT_FINISH_VERIFY=off|auto|always`，默认 auto）。
 - **Middleware**（`phone_agent/v2/middleware/`）：安全 HITL（分层 `classify_tool_call`：宽召回→精排→硬门；
   硬门=不可逆动词/密码框/凭据/自我申报，软候选默认不弹窗，`PHONE_AGENT_SAFETY_MODE=off|hard|reviewer`）、
-  历史截图剪除、TaskDoc 渲染、JSONL trace（脱敏）、`ModelCallLimit`。
+  两级 auto-compact（接近上下文窗口时折叠远古段）、历史截图剪除 + marks 折叠、TaskDoc 渲染、
+  token 预算（L0 余量镜子 + 硬成本上限）、JSONL trace（脱敏）、`ModelCallLimit`（死循环保险丝）。
+- **预算与 context 卫生**：成本以 **token** 计（累计 `usage_metadata` 的 input+output，缺失回退估算）。
+  `PHONE_AGENT_TOKEN_BUDGET`（默认 1M）为总预算，耗尽即停（终局 `token_budget_exhausted`）；
+  `PHONE_AGENT_TOKEN_WARN_REMAINING`（默认 100k）为绝对余量预警。`PHONE_AGENT_MAX_STEPS`（默认 100）
+  降为防跑飞的死循环保险丝（终局 `loop_fuse`）。两级 auto-compact：`PHONE_AGENT_COMPACT_WARN_RATIO`
+  （默认 0.75）注入"写任务板/收尾探索"提示，`PHONE_AGENT_COMPACT_TRIGGER_RATIO`（默认 0.92）
+  调纯文本 LLM 生成手机版 handoff 摘要替换远古段（切点保 tool_use/tool_result 配对，不切 TaskDoc/pinned）。
 - **保留库**：`phone_agent/adb/`（设备层）、`phone_agent/grounding/`（accessibility tree + LocateAnything）、
   `phone_agent/config/`（policy / app_registry / redact）。
 
@@ -40,7 +48,7 @@ cp .env.example .env   # 填入 base_url / model / api_key
 .venv/bin/pytest tests -q            # 全 fake，无真机无 MLX
 ```
 
-HITL 触发时按提示输入 `approve` / `reject` / 回答文本。退出码：成功 `0` / takeover `2` / 步数上限 `3` / 错误 `1`。
+HITL 触发时按提示输入 `approve` / `reject` / 回答文本。退出码：成功 `0` / takeover `2` / 预算或保险丝耗尽 `3` / 错误 `1`。
 
 ## 配置
 

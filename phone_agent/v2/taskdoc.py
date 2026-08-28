@@ -62,14 +62,28 @@ class TaskDoc:
 
     # -- validation -------------------------------------------------------
 
-    def validate(self) -> str | None:
+    def validate(self, previous: "TaskDoc | None" = None) -> str | None:
         """Return ``None`` when valid, else a human-readable error string.
 
-        Enforces the spec §1 constraints: at most one ``in_progress`` item;
-        at most :data:`MAX_ITEMS` items; every ``blocked`` item carries a
-        ``reason``; every ``completed`` item carries an ``evidence_note``
-        (S2 §2); only known statuses; at most :data:`MAX_FACTS` facts, each
-        at most :data:`MAX_FACT_LEN` characters.
+        Enforces the spec §1 structural constraints: at most one ``in_progress``
+        item; at most :data:`MAX_ITEMS` items; every ``blocked`` item carries a
+        ``reason``; every ``completed`` item carries an ``evidence_note`` (S2 §2);
+        only known statuses; at most :data:`MAX_FACTS` facts, each at most
+        :data:`MAX_FACT_LEN` characters.
+
+        When ``previous`` (the task board *before* this write) is supplied, two
+        A4 **state-transition** disciplines are additionally enforced against it:
+
+        * A single item jumping ``pending`` → ``completed`` (skipping
+          ``in_progress``) is rejected — the model must first mark the item
+          ``in_progress`` (proof it actually worked the step), then complete it.
+        * Marking **multiple** ``pending`` items ``completed`` in one call
+          (batch back-filling to slip past the finish gate) is rejected — items
+          must be advanced one at a time.
+
+        These checks only compare items present in ``previous`` (matched by id):
+        a brand-new item added already-``completed`` still passes the structural
+        ``evidence_note`` gate but is not treated as a pending→completed jump.
         """
 
         if len(self.items) > MAX_ITEMS:
@@ -96,6 +110,36 @@ class TaskDoc:
         for fact in self.facts:
             if len(fact) > MAX_FACT_LEN:
                 return f"关键事实过长（>{MAX_FACT_LEN} 字符）：{fact[:20]!r}…"
+
+        if previous is not None:
+            transition_error = self._validate_transitions(previous)
+            if transition_error is not None:
+                return transition_error
+        return None
+
+    def _validate_transitions(self, previous: "TaskDoc") -> str | None:
+        """Enforce the A4 pending→completed transition discipline (see ``validate``)."""
+
+        prior_status = {item.id: item.status for item in previous.items}
+        jumped: list[str] = []
+        for item in self.items:
+            if item.status != "completed":
+                continue
+            # Only items that existed before are subject to the jump discipline.
+            if prior_status.get(item.id) == "pending":
+                jumped.append(item.id)
+
+        if len(jumped) >= 2:
+            ids = "、".join(repr(i) for i in jumped)
+            return (
+                f"不允许一次把多项 pending 直接标 completed（批量补标）：{ids}。"
+                "请逐项推进：先把当前项标 in_progress、完成后再标 completed（附 evidence_note）。"
+            )
+        if len(jumped) == 1:
+            return (
+                f"不允许把 pending 项 {jumped[0]!r} 直接标 completed。"
+                "请先标 in_progress（表示正在做该步），完成后再标 completed（附 evidence_note）。"
+            )
         return None
 
     # -- open-item queries (finish gate uses these) -----------------------

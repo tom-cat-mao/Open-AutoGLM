@@ -8,7 +8,7 @@ Usage:
 Resolution order: CLI overrides > shell env > project .env > defaults. All flags
 default to ``None`` so unset flags never clobber env-derived values.
 
-Exit codes: success 0 / error 1 / takeover 2 / max_model_calls 3.
+Exit codes: success 0 / error 1 / takeover 2 / budget-or-fuse exhausted 3.
 
 See ``docs/refactor-thin-loop-v2.md`` §11 for the binding contract.
 """
@@ -28,7 +28,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("task", nargs="?", default=None, help="natural-language task description")
     parser.add_argument("--device-id", default=None, help="ADB device serial")
-    parser.add_argument("--max-steps", type=int, default=None, help="max model calls (loop budget)")
+    parser.add_argument("--max-steps", type=int, default=None, help="runaway-loop fuse: max model calls (PHONE_AGENT_MAX_STEPS, default 100)")
     parser.add_argument("--model", default=None, help="model id (PHONE_AGENT_MODEL)")
     parser.add_argument("--base-url", default=None, help="OpenAI-compatible base URL")
     parser.add_argument("--grounding-provider", default=None, help="grounding provider name")
@@ -88,7 +88,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if success:
         return 0
-    if reason == "max_model_calls":
+    if reason in {"token_budget_exhausted", "loop_fuse"}:
         return 3
     if getattr(result, "reason", None) and "takeover" in str(reason).lower():
         return 2

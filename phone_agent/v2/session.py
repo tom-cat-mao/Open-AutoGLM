@@ -57,8 +57,9 @@ class Observation:
     current_app: str
     marks: list[MarkCandidate]
     screen_seq: int
-    # Short sha256 of the screenshot base64 payload; drives same-screen image
-    # dedup in ``tools/_obs.py`` (only re-send the image when the screen changed).
+    # Short sha256 of the screenshot base64 payload. Recorded on the observation
+    # for stagnation detection (``seen_states``) and screen binding; no longer
+    # drives image dedup (A4 removed same-screen image suppression).
     screen_hash: str = ""
     # Screenshot mime type (``image/png`` | ``image/jpeg``) for the data: URL.
     mime_type: str = "image/png"
@@ -92,10 +93,6 @@ class PhoneSession:
         # (review.py). The finish verifier trigger (S2 §4.1.2) reads this to
         # detect "hard contradiction + model still confirms".
         self.finish_hard_doubts: list[str] = []
-        # Last screenshot hash whose image block was actually sent to the model.
-        # Same-screen re-observations reuse the text OBS but drop the image
-        # (see ``tools/_obs.py``); reset to None so the first frame always ships.
-        self.last_image_hash: str | None = None
         # TaskDoc (task board) state: doc is harness-seeded at run start (agent.py);
         # seen_states tracks (current_app, screen_hash) tuples for stagnation
         # detection; nudged fires the stagnation hint at most once per run.

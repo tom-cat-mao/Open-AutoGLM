@@ -14,24 +14,28 @@
   - **grounding**：marks-first；`tap` 双寻址 `target_mark_id` | `target_description`（解析为唯一 mark，歧义/无匹配 fail-closed 不执行）。坐标 0-1000 → 绝对像素只在工具内（`v2/coords.py`）。
   - **Middleware 栈**（`phone_agent/v2/middleware/`）：
     - `safety.py`——分层安全分类 `classify_tool_call → ToolCallVerdict{level: none|recall|reviewer|hard}` + `HumanInTheLoopMiddleware`。宽召回（policy 词表/密码框/自我申报）只产候选（召回≠弹窗）；硬门 = 不可逆动词（提交类动词共现不可逆名词，如"确认支付"）| 密码框 `type_text` | 凭据/验证码输入 | 自我申报；软候选（裸词表如"支付方式"）在 `hard` 档不弹窗、`reviewer` 档过第二模型判可逆性（不可用/异常 fail-closed）。`launch_app` 可逆已移出硬门。`ask_user`→respond，`take_over` 始终 interrupt。安全硬门只活在这里。三档 `PHONE_AGENT_SAFETY_MODE=off|hard|reviewer`（默认 `hard`）。
-    - `images.py`——`before_model` 钩子滚动剪除历史截图，仅保留最新 1 张含图消息，其余 image block 替换为 `[screen#n 已剪除]`。
+    - `compact.py`（A4）——两级 auto-compact，装配在剪除**之前**（粗折叠先于细粒度剪除）。T1（`PHONE_AGENT_COMPACT_WARN_RATIO`，默认 0.75×窗口）注入一次"写任务板/收尾松散探索"提示；T2（`PHONE_AGENT_COMPACT_TRIGGER_RATIO`，默认 0.92×窗口）调纯文本 LLM（`config.memory_model` 回落主模型）生成手机版结构化 handoff 摘要（目标/路线进度/关键事实/动作史/错误与修复/用户补充/当前屏幕/下一步），用 `REMOVE_ALL_MESSAGES` 重建为 系统提示 + `[COMPACT_SUMMARY]` + 近期尾段 + 新鲜观测提示 + pinned TaskDoc；切点保 tool_use/tool_result 配对、不切 pinned；迭代式（旧摘要回喂）、PTL 重试 ≤3（按最旧 turn-group 截断）、fail-open（摘要失败则跳过本轮折叠）。窗口按模型名推断（默认 256k，`PHONE_AGENT_CONTEXT_WINDOW` 覆盖）。总开关 `PHONE_AGENT_COMPACT`（默认 on）。
+    - `images.py`——`before_model` 钩子滚动剪除历史截图，仅保留最新 `PHONE_AGENT_IMAGE_KEEP`（默认 2）张含图消息，更旧 image block 替换为 `[screen#n 已剪除]`，更旧 marks digest 折叠为一行。（A4：工具成功恒发新图，删除同屏去重死代码；总量由历史端 keep 上限兜。）
+    - `budget.py`（A4）——预算改 **token** 制：`after_model` 累计 `AIMessage.usage_metadata` 的 input+output（缺失回退 `len//4`+图 1500 估算），累计计数使其对压缩免疫。`PHONE_AGENT_TOKEN_BUDGET`（默认 1M）耗尽即硬停（`before_model` jump_to end，终局 `token_budget_exhausted`）；`PHONE_AGENT_TOKEN_WARN_REMAINING`（默认 100k）注入一次 L0 余量镜像（给完整选项：finish/写任务板/收敛路线/take_over）。
     - `trace.py`——每次 model/tool 调用写 `<trace_dir>/<run_id>.jsonl`；脱敏（>64 字截断、敏感词 redacted、不记录截图 base64，只记 screen_seq + 字节数）。
-    - `ModelCallLimitMiddleware(thread_limit=max_model_calls, exit_behavior="end")`——到界优雅停止。
-  - **Agent 装配**（`phone_agent/v2/agent.py`）：`ThinPhoneAgent(config, checkpointer=None)` 默认 `MemorySaver`；`run(task, hitl_handler=input)` 返回 `RunResult(success, reason, steps, trace_path)`；结束条件为 `session.finished` | `session.takeover_reason` | 模型无 tool_call | ModelCallLimit。
-  - **配置**（`phone_agent/v2/config.py`）：`V2Config` 三级解析 CLI > shell env > `.env` > 默认；`PHONE_AGENT_VERIFIER_MODEL` / `PHONE_AGENT_SAFETY_REVIEWER_MODEL` 本轮启用（缺省回落链见 `.env.example`），`PHONE_AGENT_MEMORY_MODEL` 仍为预留（只读取不实现）。
+    - `ModelCallLimitMiddleware(thread_limit=max_model_calls, exit_behavior="end")`——A4 起降为**死循环保险丝**（`PHONE_AGENT_MAX_STEPS` 默认 100，终局 `loop_fuse`），不再是成本预算。
+  - **Agent 装配**（`phone_agent/v2/agent.py`）：`ThinPhoneAgent(config, checkpointer=None)` 默认 `MemorySaver`；`run(task, hitl_handler=input)` 返回 `RunResult(success, reason, steps, trace_path)`；结束条件为 `session.finished` | `session.takeover_reason` | 模型无 tool_call | token 预算耗尽（`token_budget_exhausted`）| 死循环保险丝（`loop_fuse`）。中间件顺序：safety → taskdoc → compact → context-pruning → budget → trace → model_limit。
+  - **配置**（`phone_agent/v2/config.py`）：`V2Config` 三级解析 CLI > shell env > `.env` > 默认；`PHONE_AGENT_VERIFIER_MODEL` / `PHONE_AGENT_SAFETY_REVIEWER_MODEL` / `PHONE_AGENT_MEMORY_MODEL`（A4 起 auto-compact 摘要 writer，缺省回落主模型）均已启用。
   - **finish 兜底（S2 已落地）**：`finish` 两段式复核（第一次给世界镜像复核包不落定，`finish(confirm=true)` 才定稿，seq 守卫防陈旧）；`completed` 项强制 `evidence_note`。独立 context **finish verifier**（`phone_agent/v2/verify.py`）在高风险目标（goal 命中 policy 敏感词）/ 硬矛盾坚持 confirm / `FINISH_VERIFY=always` 时触发：只喂权威目标 + 带证据路线 + 尾帧截图，**不喂 actor 自辩**；REJECT 带内回传，累计 2 次转 `take_over`（L2→L3）。与安全门相反，verifier 故障 **fail-open**（L1 两段式已是有效兜底，不因验收器抖动卡死正确完成）。三档 `PHONE_AGENT_FINISH_VERIFY=off|auto|always`（默认 `auto`）。
 - **TaskDoc 任务板已落地**（增量一）：goal 与 plan 合为同一文档的两个段落（目标 / 路线 / 关键事实），形态 = state（`PhoneSession.task_doc`）+ 工具写入（`update_task_doc` 是模型唯一写入者）+ `before_model` 渲染钩子。
   - **播种与写入边界**：run 启动时 harness 播种 `TaskDoc(goal_base=task)`；`goal_base` 只有 harness 能写，模型经 `update_task_doc` 全量替换 items / 追加 amendments / 替换 facts，validate 失败不写入。
+  - **状态迁移纪律**（A4）：`validate(previous=...)` 对照写入前任务板判定——拒绝把 `pending` 直接标 `completed`（须先 `in_progress`，证明确实做过该步），拒绝单次调用批量把多项 `pending` 标 `completed`（补标绕过 finish 门）。新增项直接 `completed` 不算跳变（仍受结构化 `evidence_note` 门约束）。
   - **渲染钩子**（`phone_agent/v2/middleware/taskdoc.py`）：`TaskDocMiddleware.before_model` 在 messages 尾部注入 `[TASK_DOC]\n<render>` system 消息（pinned，压缩免疫，每轮移除旧块重贴新块）；空文档不注入。
   - **停滞轻推**：连续 `PHONE_AGENT_TASKDOC_NUDGE_STEPS`（默认 5）次模型调用 `session.seen_states` 无新增且仍有 open items 时，在渲染块后追加一次非指导性提示（`session.nudged` 保证每 run 至多一次）；`observe()` 记录 `(current_app, screen_hash)`。
   - **finish 守卫**（`phone_agent/v2/tools/control.py`）：evidence 校验保留；新增 `task_doc.has_open_items()` 为真时拒绝 finish 并列出未完成项。
   - **配置**：`PHONE_AGENT_TASKDOC`（默认 true，`0/false/no/off` 关闭时不注册中间件不渲染）、`PHONE_AGENT_TASKDOC_NUDGE_STEPS`（默认 5）。
-- **测试门禁**：`.venv/bin/pytest tests/v2 tests/grounding -q` 全绿（全部 fake，无真机无 MLX）。LangChain 网关兼容 spike：`scripts/spike_langchain_compat.py`。
+- **测试门禁**：`.venv/bin/pytest tests -q` 全绿（全部 fake，无真机无 MLX）。LangChain 网关兼容 spike：`scripts/spike_langchain_compat.py`。
+- **A4 已落地（预算/压缩/迁移纪律/去重删除）**：token 预算（L0 余量镜子 + 硬成本上限）、两级 auto-compact（handoff 摘要）、TaskDoc 状态迁移纪律、删除图片同屏去重死代码，均已合入并有单测覆盖。
 - **本轮不做（后续迭代项）**：
-  - **handoff 压缩 / writer**：`images.py` 目前只做滚动剪除，未做压缩合并；context-window compaction 与摘要 handoff 延后。
-  - **长期记忆文件**：跨 run 持久记忆（`PHONE_AGENT_MEMORY_MODEL` 预留）未实现。
+  - **长期记忆文件**：跨 run 持久记忆（`memory/` 文件 + run 末抽取 + `--dream`）未实现；`PHONE_AGENT_MEMORY_MODEL` 目前仅用于 auto-compact 摘要 writer。
   - **plan 工具**：显式规划/TodoList 工具未纳入本轮。
   - **finish verifier 多帧输入**：verifier 当前默认单帧（`FINISH_VERIFY_K=1`）；`K>1` 需 S1 历史帧保留能力，尾帧多帧输入延后。
+  - **compact 多帧/异步**：auto-compact 当前同步、单次 LLM 调用；异步水位线压缩延后。
 - **已知连带破坏**：`.agents/skills/phone-agent-live-diagnosis/` 依赖 v1 run 结构，需要 v2 适配（本轮不动）。
 
 ---

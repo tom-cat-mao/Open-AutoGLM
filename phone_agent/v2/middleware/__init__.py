@@ -7,7 +7,12 @@ from __future__ import annotations
 
 from phone_agent.v2.middleware.budget import (
     BudgetMiddleware,
+    TOKEN_BUDGET_EXHAUSTED_MARKER,
     build_budget_middleware,
+)
+from phone_agent.v2.middleware.compact import (
+    CompactMiddleware,
+    build_compact_middleware,
 )
 from phone_agent.v2.middleware.diagnostic import (
     DiagnosticEvidenceMiddleware,
@@ -41,6 +46,9 @@ __all__ = [
     "is_sensitive_tool_call",
     "BudgetMiddleware",
     "build_budget_middleware",
+    "TOKEN_BUDGET_EXHAUSTED_MARKER",
+    "CompactMiddleware",
+    "build_compact_middleware",
     "ContextPruningMiddleware",
     "build_context_pruning_middleware",
     "ImagePruningMiddleware",
