@@ -58,9 +58,11 @@ def test_tap_sensitive_by_resolved_mark_text():
     assert not is_sensitive_tool_call(req, benign)
 
 
-def test_launch_app_sensitive():
-    assert is_sensitive_tool_call(_request("launch_app", {"app_name": "招商银行"}))
-    assert is_sensitive_tool_call(_request("launch_app", {"app_name": "Alipay"}))
+def test_launch_app_softened_out_of_default_gate():
+    # S2 §3.6: launching an app is reversible (back/home exits) -> softened out
+    # of the hard gate. is_sensitive_tool_call (hard mode) never gates a launch.
+    assert not is_sensitive_tool_call(_request("launch_app", {"app_name": "招商银行"}))
+    assert not is_sensitive_tool_call(_request("launch_app", {"app_name": "Alipay"}))
     assert not is_sensitive_tool_call(_request("launch_app", {"app_name": "相机"}))
 
 

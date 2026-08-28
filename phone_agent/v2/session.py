@@ -88,6 +88,10 @@ class PhoneSession:
         self.finish_reviewed: bool = False
         self.finish_review_seq: int = -1
         self.finish_dispute_count: int = 0
+        # Hard-contradiction labels captured by the most recent review packet
+        # (review.py). The finish verifier trigger (S2 §4.1.2) reads this to
+        # detect "hard contradiction + model still confirms".
+        self.finish_hard_doubts: list[str] = []
         # Last screenshot hash whose image block was actually sent to the model.
         # Same-screen re-observations reuse the text OBS but drop the image
         # (see ``tools/_obs.py``); reset to None so the first frame always ships.

@@ -318,6 +318,8 @@ class AccessibilityTreeProvider:
                 valid=True,
                 role=item.get("role"),
                 text_summary=item.get("text_summary"),
+                password=bool(item.get("password", False)),
+                editable=bool(item.get("editable", False)),
             )
             for item in mark_dicts
         ]
@@ -434,6 +436,9 @@ def _node_to_mark_from_parts(
     center = [int(round((bbox[0] + bbox[2]) / 2)), int(round((bbox[1] + bbox[3]) / 2))]
     confidence = 1.0 if attrs.get("clickable") == "true" or attrs.get("focusable") == "true" else 0.8
     password = attrs.get("password") == "true"
+    # editable = Android text-input node: an EditText subclass, an explicitly editable
+    # node, or a password field (password fields are always text inputs).
+    editable = role.endswith("EditText") or attrs.get("editable") == "true" or password
     return {
         "mark_id": f"ax_{index}",
         "bbox": bbox,
@@ -447,6 +452,7 @@ def _node_to_mark_from_parts(
         # tautological. `role` travels as its own field, so type info is not lost.
         "text_summary": None if password else text[:MAX_TEXT_SUMMARY_CHARS] or None,
         "password": password,
+        "editable": editable,
     }
 
 

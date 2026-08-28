@@ -17,11 +17,74 @@ single-call landing, ``finish`` is **two-step** (S2 §1): the first call returns
 ``finish(confirm=true)`` to land it. A confirm is only honoured while the review
 is still fresh (``screen_seq == finish_review_seq``); any intervening observation
 invalidates the mirror and re-emits a fresh packet.
+
+On a fresh confirm, an independent-context **verifier** (S2 §4, ``verify.py``) may
+run — for a high-risk goal, a hard-contradiction confirm, or ``FINISH_VERIFY=always``.
+A verifier REJECT is returned in-band (``finished`` stays False); the 2nd rejection
+escalates to human takeover. The verifier is **fail-open**: any setup/call failure
+lands the finish anyway (the L1 two-step already gated it).
 """
 
 from __future__ import annotations
 
 from langchain_core.tools import StructuredTool
+
+
+def _maybe_verify_finish(session, config):
+    """Run the finish verifier when triggered (S2 §4); ``None`` when not triggered.
+
+    Delegates the trigger decision and the independent-context verification to
+    ``phone_agent.v2.verify``. Import is local so ``control.py`` stays importable
+    (and the two-step finish keeps working) even if the verifier module is absent
+    or fails to import — in that case verification is skipped (the L1 two-step
+    confirm still landed the finish; fail-open, S2 §4.5).
+    """
+
+    try:
+        from phone_agent.v2.verify import should_verify_finish, verify_finish
+    except Exception:  # noqa: BLE001 - verifier optional; L1 already gated
+        return None
+    try:
+        if not should_verify_finish(session, config):
+            return None
+        return verify_finish(session, config)
+    except Exception:  # noqa: BLE001 - verifier failure is fail-open (§4.5)
+        return None
+
+
+def _handle_reject(session, verdict):
+    """Handle a verifier REJECT (S2 §4.3/§4.4): in-band verdict or takeover.
+
+    Increments ``finish_dispute_count``; on the 2nd rejection the run escalates
+    to human takeover (L2 -> L3) by setting ``takeover_reason``. Otherwise the
+    verdict is returned in-band (a ToolMessage) so the model can keep operating
+    or add evidence — ``finished`` stays False.
+    """
+
+    from phone_agent.v2.verify import (
+        DISPUTE_TAKEOVER_REASON,
+        DISPUTE_TAKEOVER_THRESHOLD,
+    )
+
+    count = int(getattr(session, "finish_dispute_count", 0) or 0) + 1
+    try:
+        session.finish_dispute_count = count
+    except Exception:  # noqa: BLE001 - best-effort state write
+        pass
+    if count >= DISPUTE_TAKEOVER_THRESHOLD:
+        try:
+            session.takeover_reason = DISPUTE_TAKEOVER_REASON
+        except Exception:  # noqa: BLE001
+            pass
+        return (
+            f"验收器再次驳回（第 {count} 次）：{verdict.reason}。"
+            "已转人工确认（take_over）。"
+        )
+    return (
+        f"验收未通过：{verdict.reason}。"
+        "请补充屏幕证据或继续操作后再 finish(confirm=true)；"
+        "若确信已达成，可再次确认。"
+    )
 
 
 def build_control_tools(session, config) -> list[StructuredTool]:
@@ -84,6 +147,11 @@ def build_control_tools(session, config) -> list[StructuredTool]:
         review_seq = getattr(session, "finish_review_seq", -1)
         current_seq = getattr(session, "screen_seq", 0)
         if confirm and reviewed and current_seq == review_seq:
+            # A fresh confirm. Optionally run the independent-context verifier
+            # (S2 §4): high-risk goal / hard-contradiction confirm / always-mode.
+            verdict = _maybe_verify_finish(session, config)
+            if verdict is not None and not verdict.approve:
+                return _handle_reject(session, verdict)
             session.finished = True
             session.finish_summary = summary
             session.finish_reviewed = False

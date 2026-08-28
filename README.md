@@ -14,7 +14,11 @@ system(极简契约) + user(task + 首次观测含截图)
   `tap` 双寻址：`target_mark_id` | `target_description`（解析为唯一 mark，歧义/无匹配 fail-closed 不执行）。
 - **TaskDoc 任务板**：目标 / 路线 / 关键事实一个文档，模型经 `update_task_doc` 维护，
   每轮 pinned 进 context（压缩免疫）；`finish` 在路线未完成时被拒。
-- **Middleware**（`phone_agent/v2/middleware/`）：安全 HITL（敏感动作人工 approve/reject）、
+- **finish 两段式 + 验收器**：`finish` 先给世界镜像复核包（不落定），`finish(confirm=true)` 才定稿；
+  高风险目标/硬矛盾坚持 confirm 时过独立 context 验收器（只看目标+证据路线+尾帧截图，不看 actor 自辩），
+  REJECT 带内回传、2 次转人工；验收器故障 fail-open（`PHONE_AGENT_FINISH_VERIFY=off|auto|always`，默认 auto）。
+- **Middleware**（`phone_agent/v2/middleware/`）：安全 HITL（分层 `classify_tool_call`：宽召回→精排→硬门；
+  硬门=不可逆动词/密码框/凭据/自我申报，软候选默认不弹窗，`PHONE_AGENT_SAFETY_MODE=off|hard|reviewer`）、
   历史截图剪除、TaskDoc 渲染、JSONL trace（脱敏）、`ModelCallLimit`。
 - **保留库**：`phone_agent/adb/`（设备层）、`phone_agent/grounding/`（accessibility tree + LocateAnything）、
   `phone_agent/config/`（policy / app_registry / redact）。

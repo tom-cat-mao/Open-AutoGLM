@@ -34,7 +34,10 @@ from phone_agent.v2.middleware.trace import (
 )
 
 __all__ = [
+    "ToolCallVerdict",
+    "classify_tool_call",
     "build_hitl_middleware",
+    "build_safety_reviewer",
     "is_sensitive_tool_call",
     "BudgetMiddleware",
     "build_budget_middleware",

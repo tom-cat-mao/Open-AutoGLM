@@ -105,6 +105,7 @@ class FakePhoneSession:
         self.finish_reviewed: bool = False
         self.finish_review_seq: int = -1
         self.finish_dispute_count: int = 0
+        self.finish_hard_doubts: list[str] = []
         self._locate_result = locate_result
         self._locate_error = locate_error
         self.observe_count = 0

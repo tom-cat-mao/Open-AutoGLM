@@ -15,7 +15,7 @@ workflow. The v1 LangGraph node architecture was deleted; `adb/`, `grounding/`, 
 | 1 | **Coordinate** | 0-1000 relative → absolute pixels conversion happens **only inside tools** (`phone_agent/v2/coords.py`). The model never receives absolute pixels. |
 | 2 | **Marks-first Grounding** | Execution actions must bind a mark. `tap` dual addressing: `target_mark_id` (direct) \| `target_description` (resolved to a unique mark, fail-closed on ambiguity/no-match). Raw coordinates only for `swipe` fallback. |
 | 3 | **Image Hygiene** | Historical screenshots are rolled off before each model call (`middleware/images.py`); only the newest image-bearing message keeps its image blocks. |
-| 4 | **HITL Hard Gate** | Dangerous actions (payment/password/verification-code/sensitive-app launch) interrupt via `HumanInTheLoopMiddleware` for approve/reject. `ask_user` → respond; `take_over` → always interrupt. The hard gate lives **only** in `middleware/safety.py`. |
+| 4 | **HITL Hard Gate** | `middleware/safety.py::classify_tool_call` maps a call to `ToolCallVerdict{level: none\|recall\|reviewer\|hard}`. Hard gate (always interrupts): irreversible commit (commit verb + irreversible object, e.g. 确认支付), password-box `type_text`, credential/captcha input, self-declared sensitive. Soft candidates (bare vocab) do **not** popup in `hard` mode; `reviewer` mode routes them to a second model (fail-closed on error). `launch_app` is reversible → softened out of the hard gate. `ask_user` → respond; `take_over` → always interrupt. `PHONE_AGENT_SAFETY_MODE=off\|hard\|reviewer` (default `hard`). The hard gate lives **only** here. |
 | 5 | **Tool Fail-Closed** | Tools return a result **string**; on failure they return an error string and never execute a device action or fake success. Errors stay in the transcript. |
 | 6 | **Trace Redaction** | Every model/tool event is logged to `<trace_dir>/<run_id>.jsonl`: text >64 chars truncated, sensitive substrings redacted via `config/redact.py`, screenshot base64 never logged (only `screen_seq` + byte length). |
 | 7 | **Device via DeviceFactory** | All device ops go through `DeviceFactory` → `phone_agent/adb/`. No direct ADB calls. |
@@ -23,6 +23,7 @@ workflow. The v1 LangGraph node architecture was deleted; `adb/`, `grounding/`, 
 | 9 | **No Force Push** | Never `git push --force` to `main` or `feature/thin-loop-v2`. |
 | 10 | **No Auto-Commit** | Don't create commits unless explicitly requested. |
 | 11 | **TaskDoc Board** | `goal_base` is seeded **only** by the harness at run start; the model writes the board exclusively via `update_task_doc` (never `goal_base`). The `[TASK_DOC]` block is pinned into context before every model call (compression-immune); `finish` is fail-closed while route items are open. |
+| 12 | **Finish Two-Step + Verifier** | `finish` is two-step (review packet → `confirm=true`, seq-guarded); `completed` items require `evidence_note`. The independent-context verifier (`v2/verify.py`) sees only goal + evidence route + trailing screenshot(s), **never the actor transcript**. Unlike the safety gate, the verifier is **fail-open**: any setup/call failure lands the finish (L1 two-step already gated it). `PHONE_AGENT_FINISH_VERIFY=off\|auto\|always` (default `auto`). |
 
 ## Environment Gotchas (things you can't learn from the filesystem)
 
