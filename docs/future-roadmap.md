@@ -36,7 +36,7 @@
   - **plan 工具**：显式规划/TodoList 工具未纳入本轮。
   - **finish verifier 多帧输入**：verifier 当前默认单帧（`FINISH_VERIFY_K=1`）；`K>1` 需 S1 历史帧保留能力，尾帧多帧输入延后。
   - **compact 多帧/异步**：auto-compact 当前同步、单次 LLM 调用；异步水位线压缩延后。
-- **已知连带破坏**：`.agents/skills/phone-agent-live-diagnosis/` 依赖 v1 run 结构，需要 v2 适配（本轮不动）。
+- **实机诊断 skill（v2 已重写 + A5 全保真）**：`.agents/skills/phone-agent-live-diagnosis/` 已完成 v2 薄 loop 适配——生产侧 opt-in `phone_agent/v2/middleware/diagnostic.py`（证据流：多模态 text/image 拆分、JSONL 永不含 base64），skill 侧 scripts 拆包（run_diagnosis / evidence / taxonomy / analyze / sourcemap / report）。A5 把诊断产物改为**本机自用全保真**：`V2Config.diagnostic_unredacted`（env `PHONE_AGENT_DIAG_UNREDACTED`，skill 驱动置真）令证据流不脱敏、不截断；截图解码落盘到 `<run_dir>/screenshots/screen-<seq>.png`（幂等、0600），evidence `image` 增加相对 `path`；`report.html` 逐步回放（真实截图缩略图 + 模型思考全文 + 工具调用/结果/延迟）；`--share` 产出脱敏且无截图引用的 `report-share.html`。生产 `trace.py` 的 P0 #6（64 字截断 + 脱敏 + 无 base64）一字未动，全保真只活在诊断模式。
 
 ---
 

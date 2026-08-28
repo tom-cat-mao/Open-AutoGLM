@@ -46,11 +46,14 @@ def test_dry_run_pipeline(tmp_path, capsys):
     # dry-run disclaimer recorded (does not validate real grounding/finish).
     assert any("dry-run" in note for note in summary.get("notes", []))
 
-    # report: non-empty, base64-free, has the first-page blocks.
+    # report: non-empty, base64-free, has the overview blocks.
     html = report_path.read_text(encoding="utf-8")
     assert len(html) > 5000
     assert "data:image" not in html
-    assert "终局裁定" in html and "TaskDoc 板" in html and "80/20 三件事" in html
+    assert "终局裁定" in html and "任务板终态" in html and "80/20 三件事" in html
+    # the step-by-step replay is embedded (replay list + renderer).
+    assert "逐步回放" in html and "renderReplay" in html
+    assert summary.get("replay"), "summary must carry a per-step replay list"
 
     # status: completed.
     status = json.loads(status_path.read_text(encoding="utf-8"))

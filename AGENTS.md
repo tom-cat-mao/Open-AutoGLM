@@ -50,7 +50,7 @@ workflow. The v1 LangGraph node architecture was deleted; `adb/`, `grounding/`, 
 | Budget / auto-compact internals | `phone_agent/v2/middleware/{budget,compact,_tokens}.py` docstrings |
 | Architecture status & deferred items | `docs/future-roadmap.md` |
 | Module contracts | docstrings in `phone_agent/v2/` (agent, session, tools, middleware) |
-| Real-device diagnosis | `.agents/skills/phone-agent-live-diagnosis/SKILL.md` (v2 rewrite in progress) |
+| Real-device diagnosis | `.agents/skills/phone-agent-live-diagnosis/SKILL.md` (v2; local-first full-fidelity report, screenshots on disk, `--share` redacts) |
 | Historical batch logs (v1 era) | `docs/archive/` |
 
 ## Version Management

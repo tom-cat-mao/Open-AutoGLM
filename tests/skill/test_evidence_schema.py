@@ -234,6 +234,7 @@ def test_stream_is_valid_jsonl_with_known_events(evidence):
     known = {
         "run_start",
         "model_request",
+        "model_response",
         "taskdoc_snapshot",
         "tool_invoke",
         "tool_observation",

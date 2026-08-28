@@ -266,6 +266,46 @@ def _redact(text: str | None) -> str:
         return str(text)
 
 
+# Image keys whose values are screenshot file references; stripped for --share so
+# the shared copy carries no on-disk screenshot pointer.
+_SCREENSHOT_REF_KEYS = {"path"}
+
+
+def _redact_deep(value: Any) -> Any:
+    """Recursively redact strings and strip screenshot references (for --share).
+
+    The default report is full-fidelity (local-first): unredacted text +
+    ``<img src="screenshots/...">`` references. The ``--share`` copy must not
+    leak either, so this pass (a) redacts every string via :func:`_redact` and
+    (b) drops any ``image.path`` screenshot reference so the shared HTML renders
+    no screenshot. Base64 never exists in the summary/evidence to begin with.
+    """
+
+    if isinstance(value, str):
+        return _redact(value)
+    if isinstance(value, dict):
+        out: dict[str, Any] = {}
+        for key, item in value.items():
+            if key in _SCREENSHOT_REF_KEYS and isinstance(item, str):
+                # drop the screenshot file pointer entirely.
+                continue
+            out[str(key)] = _redact_deep(item)
+        return out
+    if isinstance(value, (list, tuple)):
+        return [_redact_deep(item) for item in value]
+    return value
+
+
+def _chmod_600(path: Path) -> None:
+    """Best-effort ``chmod 600`` on a produced artifact (local-first privacy)."""
+
+    try:
+        if path.exists():
+            path.chmod(0o600)
+    except OSError:
+        pass
+
+
 # ---------------------------------------------------------------------------
 # HITL logging handler (writes hitl_decision events into the evidence stream)
 # ---------------------------------------------------------------------------
@@ -279,15 +319,24 @@ def _decision_from_answer(answer: str) -> str:
 
 
 def logging_hitl_handler(
-    evidence_path: str | None, base_handler: Callable[[str], str] = input
+    evidence_path: str | None,
+    base_handler: Callable[[str], str] = input,
+    unredacted: bool = True,
 ) -> Callable[[str], str]:
     """Wrap a HITL handler so each human verdict is appended to the evidence.
 
     A HITL interrupt unwinds the graph, so the diagnostic middleware's
     ``wrap_tool_call`` never sees the human decision (§1). The driver records it
-    here instead: the requested action + the decision + the (redacted) reply are
-    appended as a ``hitl_decision`` event to the same ``<run_id>.evidence.jsonl``.
+    here instead: the requested action + the decision + the reply are appended as
+    a ``hitl_decision`` event to the same ``<run_id>.evidence.jsonl``.
+
+    Local-first full-fidelity (A5): by default (``unredacted``) the prompt/reply
+    are kept verbatim to match the rest of the diagnosis stream; ``--share``
+    deep-redacts the whole summary later. Pass ``unredacted=False`` to redact
+    inline (parity with the pre-A5 behavior).
     """
+
+    text = (lambda s: s) if unredacted else _redact
 
     def handler(prompt: str) -> str:
         answer = str(base_handler(prompt))
@@ -296,9 +345,9 @@ def logging_hitl_handler(
                 "event": "hitl_decision",
                 "ts": time.time(),
                 "tool": None,
-                "requested_action": _redact(prompt),
+                "requested_action": text(prompt),
                 "decision": _decision_from_answer(answer),
-                "response_text": _redact(answer),
+                "response_text": text(answer),
             }
             try:
                 with open(evidence_path, "a", encoding="utf-8") as fh:
@@ -326,21 +375,22 @@ def _returncode_for(success: bool, reason: str, takeover: str | None) -> int:
 def _outcome_from_run(session: Any, result: Any) -> dict[str, Any]:
     """Build the analyzer ``outcome`` dict from a live/ dry run result.
 
-    ``finish_summary`` / ``takeover_reason`` are redacted here so they can never
-    reach ``summary.json`` (and thus the HTML report) unredacted.
+    Local-first full-fidelity (A5): ``finish_summary`` / ``takeover_reason`` are
+    kept verbatim here so the default ``report.html`` shows the real terminal
+    text. The ``--share`` export deep-redacts the whole summary separately; the
+    P0 #6 production trace stays redacted regardless.
     """
 
     finished = bool(getattr(session, "finished", False))
-    takeover = getattr(session, "takeover_reason", None)
-    takeover_r = _redact(takeover) or None
+    takeover = getattr(session, "takeover_reason", None) or None
     reason = str(getattr(result, "reason", "") or "")
     success = bool(getattr(result, "success", False))
     return {
         "finished": finished,
-        "finish_summary": _redact(getattr(session, "finish_summary", None)) or None,
-        "takeover_reason": takeover_r,
+        "finish_summary": getattr(session, "finish_summary", None) or None,
+        "takeover_reason": takeover,
         "reason": reason,
-        "returncode": _returncode_for(success, reason, takeover_r),
+        "returncode": _returncode_for(success, reason, takeover),
         "steps": getattr(result, "steps", None),
     }
 
@@ -395,6 +445,11 @@ def _overrides_from_args(args: argparse.Namespace, run_dir: Path) -> dict[str, A
         "diagnostic_evidence": True,
         "diagnostic_evidence_dir": str(run_dir),
         "trace_dir": str(run_dir / "traces"),
+        # local-first full-fidelity (A5): the diagnosis reader is the device owner
+        # on their own machine, so the evidence stream is UNREDACTED by default.
+        # ``--share`` never touches this — it re-derives a redacted copy from the
+        # full-fidelity artifacts. The P0 #6 production trace stays redacted.
+        "diagnostic_unredacted": True,
     }
     if args.no_taskdoc:
         overrides["taskdoc_enabled"] = False
@@ -605,7 +660,9 @@ def run_dry(args: argparse.Namespace, run_dir: Path) -> tuple[Any, Any]:
         from phone_agent.v2.agent import ThinPhoneAgent
 
         agent = ThinPhoneAgent(config)
-        handler = logging_hitl_handler(agent.evidence_path, base_handler=lambda p: "approve")
+        handler = logging_hitl_handler(
+            agent.evidence_path, base_handler=lambda p: "approve"
+        )
         result = agent.run(args.target, hitl_handler=handler)
     finally:
         for name, prev in saved.items():
@@ -619,6 +676,54 @@ def run_dry(args: argparse.Namespace, run_dir: Path) -> tuple[Any, Any]:
 # ---------------------------------------------------------------------------
 # post-run finalization (shared by run / dry-run)
 # ---------------------------------------------------------------------------
+_ARTIFACT_NAMES = ("summary.json", "report.html", "evidence.jsonl", "status.json")
+
+
+def _lock_down_artifacts(run_dir: Path) -> None:
+    """chmod 600 every produced artifact + screenshot (local-first privacy).
+
+    The default report is full-fidelity (unredacted text + on-disk screenshots),
+    so the run dir carries private data. Tighten file perms to the owner. The
+    screenshots the middleware writes are already 600; re-assert here for any
+    that predate this pass and for the top-level artifacts.
+    """
+
+    for name in _ARTIFACT_NAMES:
+        _chmod_600(run_dir / name)
+    for pattern in ("*.evidence.jsonl", "preflight.json"):
+        for path in run_dir.glob(pattern):
+            _chmod_600(path)
+    shots = run_dir / "screenshots"
+    if shots.is_dir():
+        for png in shots.glob("*.png"):
+            _chmod_600(png)
+
+
+def _write_share_copy(
+    run_dir: Path, summary: dict[str, Any], events: list[dict[str, Any]]
+) -> Path:
+    """Produce the redacted, screenshot-free ``report-share.html`` (A5 §4).
+
+    The default artifacts are local-first full-fidelity. ``--share`` derives a
+    copy safe to hand to someone else: every string is redacted via the
+    production primitive and every ``image.path`` screenshot pointer is dropped,
+    so the shared HTML references no screenshot and leaks no sensitive text. A
+    ``summary-share.json`` is written alongside for parity.
+    """
+
+    share_summary = _redact_deep(summary)
+    share_events = _redact_deep(events)
+    share_summary.setdefault("notes", []).append(
+        "share 副本：全文脱敏、无截图引用；本机全保真产物见 report.html。"
+    )
+    share_report = run_dir / "report-share.html"
+    share_report.write_text(render_html(share_summary, share_events), encoding="utf-8")
+    write_json(run_dir / "summary-share.json", share_summary)
+    _chmod_600(share_report)
+    _chmod_600(run_dir / "summary-share.json")
+    return share_report
+
+
 def _finalize(
     *,
     run_dir: Path,
@@ -629,8 +734,14 @@ def _finalize(
     outcome: dict[str, Any],
     duration_sec: float,
     dry_run: bool,
+    share: bool = False,
 ) -> dict[str, Any]:
-    """Analyze the emitted evidence into summary.json + report.html + status.json."""
+    """Analyze the emitted evidence into summary.json + report.html + status.json.
+
+    Local-first full-fidelity: ``report.html`` is the unredacted primary
+    deliverable and references screenshots on disk. When ``share`` is set an
+    additional redacted, screenshot-free ``report-share.html`` is written.
+    """
 
     events = read_evidence(evidence_path) if evidence_path else []
     view = EvidenceView.from_events(events)
@@ -647,7 +758,7 @@ def _finalize(
         view,
         run_id=run_id,
         created_at=time.strftime("%Y-%m-%dT%H:%M:%S"),
-        target=_redact(target),
+        target=target,
         run_dir=str(run_dir),
         command=command,
         duration_sec=round(duration_sec, 2),
@@ -668,6 +779,9 @@ def _finalize(
     (run_dir / "report.html").write_text(
         render_html(summary, events), encoding="utf-8"
     )
+    share_report: Path | None = None
+    if share:
+        share_report = _write_share_copy(run_dir, summary, events)
     status = {
         "state": "completed" if outcome.get("returncode") == 0 else "failed",
         "run_id": run_id,
@@ -678,7 +792,10 @@ def _finalize(
         "summary_path": str(run_dir / "summary.json"),
         "evidence_path": str(local_evidence),
     }
+    if share_report is not None:
+        status["share_report_path"] = str(share_report)
     write_json(run_dir / "status.json", status)
+    _lock_down_artifacts(run_dir)
     return summary
 
 
@@ -702,7 +819,9 @@ def cmd_run(args: argparse.Namespace) -> int:
     preflight["reset_app"] = reset_app_on_device(args)
     write_json(run_dir / "preflight.json", preflight)
 
-    command = ["run_diagnosis.py", "dry-run" if args.dry_run else "run", _redact(args.target)]
+    # Local-first: the command line is recorded verbatim (the run dir is
+    # owner-private + 600). ``--share`` deep-redacts the whole summary later.
+    command = ["run_diagnosis.py", "dry-run" if args.dry_run else "run", args.target]
     started = time.perf_counter()
     try:
         agent, result = run_dry(args, run_dir) if args.dry_run else run_agent(args, run_dir)
@@ -712,10 +831,11 @@ def cmd_run(args: argparse.Namespace) -> int:
             "state": "error",
             "run_id": run_id,
             "error_type": type(exc).__name__,
-            "error": _redact(str(exc))[:500],
+            "error": str(exc)[:500],
             "duration_sec": round(duration, 2),
         }
         write_json(run_dir / "status.json", error)
+        _chmod_600(run_dir / "status.json")
         print(json.dumps(error, ensure_ascii=False, indent=2), file=sys.stderr)
         return 1
     duration = time.perf_counter() - started
@@ -730,25 +850,23 @@ def cmd_run(args: argparse.Namespace) -> int:
         outcome=outcome,
         duration_sec=duration,
         dry_run=args.dry_run,
+        share=bool(getattr(args, "share", False)),
     )
     if not args.quiet:
-        print(
-            json.dumps(
-                {
-                    "run_id": run_id,
-                    "verdict": summary["verdict"],
-                    "steps": summary.get("steps"),
-                    "run_dir": str(run_dir),
-                    "report_path": str(run_dir / "report.html"),
-                    "summary_path": str(run_dir / "summary.json"),
-                    "top_recommendations": [
-                        r.get("title") for r in summary.get("recommendations", [])[:3]
-                    ],
-                },
-                ensure_ascii=False,
-                indent=2,
-            )
-        )
+        payload = {
+            "run_id": run_id,
+            "verdict": summary["verdict"],
+            "steps": summary.get("steps"),
+            "run_dir": str(run_dir),
+            "report_path": str(run_dir / "report.html"),
+            "summary_path": str(run_dir / "summary.json"),
+            "top_recommendations": [
+                r.get("title") for r in summary.get("recommendations", [])[:3]
+            ],
+        }
+        if getattr(args, "share", False):
+            payload["share_report_path"] = str(run_dir / "report-share.html")
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
     return int(outcome.get("returncode") or 0)
 
 
@@ -797,7 +915,11 @@ def cmd_analyze(args: argparse.Namespace) -> int:
 
 
 def cmd_report(args: argparse.Namespace) -> int:
-    """Re-render report.html from an existing summary.json (no re-run)."""
+    """Re-render report.html from an existing summary.json (no re-run).
+
+    ``--share`` re-derives the redacted, screenshot-free share copy instead of
+    (or alongside) the full-fidelity report, mirroring the ``run --share`` path.
+    """
 
     summary_arg = Path(args.summary)
     summary_path = summary_arg / "summary.json" if summary_arg.is_dir() else summary_arg
@@ -806,6 +928,17 @@ def cmd_report(args: argparse.Namespace) -> int:
     evidence_ref = args.evidence or summary.get("evidence_stream")
     if evidence_ref:
         events = read_evidence(_resolve_evidence_path(evidence_ref))
+    if getattr(args, "share", False):
+        share_summary = _redact_deep(summary)
+        share_events = _redact_deep(events)
+        share_summary.setdefault("notes", []).append(
+            "share 副本：全文脱敏、无截图引用；本机全保真产物见 report.html。"
+        )
+        out = Path(args.output) if args.output else summary_path.with_name("report-share.html")
+        out.write_text(render_html(share_summary, share_events), encoding="utf-8")
+        _chmod_600(out)
+        print(json.dumps({"share_report_path": str(out)}, ensure_ascii=False, indent=2))
+        return 0
     out = Path(args.output) if args.output else summary_path.with_name("report.html")
     out.write_text(render_html(summary, events), encoding="utf-8")
     print(json.dumps({"report_path": str(out)}, ensure_ascii=False, indent=2))
@@ -843,6 +976,12 @@ def _add_run_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--output-dir", default=str(DEFAULT_OUTPUT_DIR))
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument("--reset-app", default=None, help="package to pm-clear before the run")
+    parser.add_argument(
+        "--share",
+        action="store_true",
+        help="also emit a redacted, screenshot-free report-share.html for sharing "
+        "(the default report.html stays local-first full-fidelity)",
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -864,6 +1003,11 @@ def build_parser() -> argparse.ArgumentParser:
     report_p.add_argument("summary", help="path to summary.json")
     report_p.add_argument("--evidence", default=None, help="evidence.jsonl for the timeline/raw tabs")
     report_p.add_argument("--output", default=None, help="report.html output path")
+    report_p.add_argument(
+        "--share",
+        action="store_true",
+        help="render the redacted, screenshot-free share copy instead",
+    )
 
     status_p = sub.add_parser("status", help="print a run directory's status.json")
     status_p.add_argument("path", help="run directory or status.json path")
