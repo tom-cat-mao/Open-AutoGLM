@@ -183,10 +183,19 @@ class V2Config:
     # taskdoc (task board increment)
     taskdoc_enabled: bool = True
     taskdoc_nudge_steps: int = 5
-    # finish verification (S2 §1.6): off|auto|always. This round only wires the
-    # key + two-step review packet; the independent-context verifier itself lands
-    # next relay. ``off`` degrades finish to the pre-two-step single-call behavior.
+    # finish verification (S2 §1.6/§4): off|auto|always. ``off`` degrades finish to
+    # the pre-two-step single-call behavior; ``auto`` runs the independent-context
+    # verifier only on trigger (high-risk goal / hard-contradiction confirm);
+    # ``always`` verifies every confirm.
     finish_verify: str = "auto"
+    # number of trailing screenshots handed to the finish verifier (S2 §4.2). K>1
+    # requires historical-frame retention (S1); K=1 uses the current frame only.
+    finish_verify_k: int = 1
+    # safety gate mode (S2 §3.7): off|hard|reviewer. ``hard`` (default) fires only
+    # the irreversible/password/credential hard gate; soft candidates do NOT popup.
+    # ``reviewer`` additionally routes soft candidates through a second model.
+    # ``off`` disables actuation gating (take_over/ask_user still interrupt).
+    safety_mode: str = "hard"
     # sampling params (temperature/top_p/frequency_penalty) forwarded to the model
     sampling: dict[str, float] | None = None
     # request headers extras
@@ -196,7 +205,11 @@ class V2Config:
     cf_access_client_secret: str | None = None
     # reserved (read-only this round; not implemented)
     memory_model: str | None = None
+    # finish-verifier model (S2 §4.3); falls back to the main model when unset.
     verifier_model: str | None = None
+    # safety-reviewer model (S2 §3.3); falls back to verifier_model then the main
+    # model when unset.
+    safety_reviewer_model: str | None = None
 
     @classmethod
     def from_env(cls, overrides: dict | None = None) -> "V2Config":
@@ -242,6 +255,10 @@ class V2Config:
             finish_verify=_env_choice(
                 "PHONE_AGENT_FINISH_VERIFY", "auto", ("off", "auto", "always")
             ),
+            finish_verify_k=_env_int("PHONE_AGENT_FINISH_VERIFY_K", 1),
+            safety_mode=_env_choice(
+                "PHONE_AGENT_SAFETY_MODE", "hard", ("off", "hard", "reviewer")
+            ),
             sampling=sampling or None,
             user_agent=_env_opt_str("PHONE_AGENT_USER_AGENT"),
             http_headers=http_headers or None,
@@ -249,6 +266,7 @@ class V2Config:
             cf_access_client_secret=cf_secret,
             memory_model=_env_opt_str("PHONE_AGENT_MEMORY_MODEL"),
             verifier_model=_env_opt_str("PHONE_AGENT_VERIFIER_MODEL"),
+            safety_reviewer_model=_env_opt_str("PHONE_AGENT_SAFETY_REVIEWER_MODEL"),
         )
 
         for field_name, value in (overrides or {}).items():

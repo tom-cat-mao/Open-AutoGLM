@@ -68,6 +68,8 @@ class MarkCandidate:
     reason: str | None = None
     role: str | None = None
     text_summary: str | None = None
+    password: bool = False
+    editable: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
