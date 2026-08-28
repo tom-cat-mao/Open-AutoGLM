@@ -125,6 +125,32 @@ class ThinPhoneAgent:
             except Exception:  # noqa: BLE001 - optional increment; never block bring-up
                 pass
 
+        # Diagnostic evidence stream (live-diagnosis skill). Appended LAST so its
+        # before_model sees the post-image-prune + post-TaskDoc context and its
+        # wrap_tool_call is innermost (raw tool return). Default OFF, zero-cost;
+        # guarded like taskdoc so a missing module degrades to a plain thin loop.
+        self._diagnostic = None
+        if getattr(config, "diagnostic_evidence", False):
+            try:
+                from phone_agent.v2.middleware.diagnostic import (
+                    build_diagnostic_middleware,
+                )
+
+                self._diagnostic = build_diagnostic_middleware(
+                    run_id=self.run_id,
+                    evidence_dir=getattr(
+                        config,
+                        "diagnostic_evidence_dir",
+                        "outputs/live-diagnosis/.evidence",
+                    ),
+                    session=self.session,
+                    enabled=True,
+                )
+                middleware.append(self._diagnostic)
+            except Exception:  # noqa: BLE001 - optional increment; never block bring-up
+                self._diagnostic = None
+        self.evidence_path = getattr(self._diagnostic, "evidence_path", None)
+
         from phone_agent.v2.prompts import get_system_prompt
 
         self.agent = create_agent(

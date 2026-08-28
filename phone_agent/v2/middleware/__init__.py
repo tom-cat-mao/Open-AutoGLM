@@ -9,6 +9,10 @@ from phone_agent.v2.middleware.budget import (
     BudgetMiddleware,
     build_budget_middleware,
 )
+from phone_agent.v2.middleware.diagnostic import (
+    DiagnosticEvidenceMiddleware,
+    build_diagnostic_middleware,
+)
 from phone_agent.v2.middleware.images import (
     ContextPruningMiddleware,
     ImagePruningMiddleware,
@@ -43,4 +47,6 @@ __all__ = [
     "TraceMiddleware",
     "build_trace_middleware",
     "redact_args",
+    "DiagnosticEvidenceMiddleware",
+    "build_diagnostic_middleware",
 ]

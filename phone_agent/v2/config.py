@@ -183,10 +183,14 @@ class V2Config:
     # taskdoc (task board increment)
     taskdoc_enabled: bool = True
     taskdoc_nudge_steps: int = 5
-    # finish verification (S2 §1.6): off|auto|always. This round only wires the
-    # key + two-step review packet; the independent-context verifier itself lands
-    # next relay. ``off`` degrades finish to the pre-two-step single-call behavior.
+    # finish verification (S2 §1.6): off|auto|always. ``off`` degrades finish to
+    # the pre-two-step single-call behavior.
     finish_verify: str = "auto"
+    # diagnostic evidence stream (opt-in; default OFF, zero-cost when off).
+    # Enabled by the live-diagnosis skill to emit full-text (bounded) run
+    # evidence to ``<diagnostic_evidence_dir>/<run_id>.evidence.jsonl``.
+    diagnostic_evidence: bool = False
+    diagnostic_evidence_dir: str = "outputs/live-diagnosis/.evidence"
     # sampling params (temperature/top_p/frequency_penalty) forwarded to the model
     sampling: dict[str, float] | None = None
     # request headers extras
@@ -241,6 +245,10 @@ class V2Config:
             taskdoc_nudge_steps=_env_int("PHONE_AGENT_TASKDOC_NUDGE_STEPS", 5),
             finish_verify=_env_choice(
                 "PHONE_AGENT_FINISH_VERIFY", "auto", ("off", "auto", "always")
+            ),
+            diagnostic_evidence=_env_bool("PHONE_AGENT_DIAG_EVIDENCE", False),
+            diagnostic_evidence_dir=_env_str(
+                "PHONE_AGENT_DIAG_EVIDENCE_DIR", "outputs/live-diagnosis/.evidence"
             ),
             sampling=sampling or None,
             user_agent=_env_opt_str("PHONE_AGENT_USER_AGENT"),
