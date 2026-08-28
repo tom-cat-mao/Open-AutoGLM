@@ -525,6 +525,7 @@ def run_dry(args: argparse.Namespace, run_dir: Path) -> tuple[Any, Any]:
                         content=str(it.get("content", "")),
                         status=str(it.get("status", "pending")),
                         reason=it.get("reason"),
+                        evidence_note=it.get("evidence_note"),
                     )
                     for it in items
                 ]
@@ -565,7 +566,7 @@ def run_dry(args: argparse.Namespace, run_dir: Path) -> tuple[Any, Any]:
         _tool_call("read_screen", {}, "c1"),
         _tool_call(
             "update_task_doc",
-            {"items": [{"id": "s1", "content": "打开设置页", "status": "completed"}]},
+            {"items": [{"id": "s1", "content": "打开设置页", "status": "completed", "evidence_note": "screen#1 设置页可见"}]},
             "c2",
         ),
         _tool_call("tap", {"target_mark_id": "ax_1"}, "c3"),

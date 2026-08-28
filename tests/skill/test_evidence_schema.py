@@ -139,6 +139,7 @@ def _build_tools(session: FakeSession):
                     content=str(it.get("content", "")),
                     status=str(it.get("status", "pending")),
                     reason=it.get("reason"),
+                    evidence_note=it.get("evidence_note"),
                 )
                 for it in items
             ]
@@ -211,7 +212,7 @@ def evidence(tmp_path):
         _tool_call("read_screen", {}, "c1"),
         _tool_call(
             "update_task_doc",
-            {"items": [{"id": "s1", "content": "打开设置", "status": "completed"}]},
+            {"items": [{"id": "s1", "content": "打开设置", "status": "completed", "evidence_note": "screen#1 可见"}]},
             "c2",
         ),
         _tool_call("type_text", {"text": f"我的手机号是 {FAKE_PHONE}"}, "c3"),
