@@ -9,6 +9,7 @@ semantics; integration wires the real converter.
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -21,6 +22,11 @@ class FakeObservation:
     current_app: str
     marks: dict[str, MarkCandidate]
     screen_seq: int
+    screenshot_b64: str = ""
+    width: int = 1080
+    height: int = 2400
+    screen_hash: str = ""
+    mime_type: str = "image/png"
 
 
 class FakeDeviceFactory:
@@ -79,6 +85,8 @@ class FakePhoneSession:
         locate_result: MarkCandidate | None = None,
         locate_error: Exception | None = None,
         device_factory: FakeDeviceFactory | None = None,
+        screenshot_b64: str = "QUJD",
+        static_screen: bool = False,
     ) -> None:
         self.config = FakeConfig()
         self.device_factory = device_factory or FakeDeviceFactory()
@@ -90,10 +98,15 @@ class FakePhoneSession:
         self.finished = False
         self.finish_summary: str | None = None
         self.takeover_reason: str | None = None
+        self.last_image_hash: str | None = None
         self._locate_result = locate_result
         self._locate_error = locate_error
         self.observe_count = 0
         self._observe_should_fail = False
+        # screenshot payload: a static screen keeps the same b64 across observes
+        # (drives image-dedup tests); otherwise each observe bumps the payload.
+        self._screenshot_b64 = screenshot_b64
+        self._static_screen = static_screen
 
     # --- §6 surface -----------------------------------------------------
     def resolve_mark(self, mark_id: str) -> MarkCandidate:
@@ -127,10 +140,22 @@ class FakePhoneSession:
         if self._observe_should_fail:
             raise RuntimeError("boom")
         self.screen_seq += 1
+        # Static screen -> constant payload; dynamic -> per-observe payload.
+        b64 = (
+            self._screenshot_b64
+            if self._static_screen
+            else f"{self._screenshot_b64}{self.screen_seq}"
+        )
+        screen_hash = hashlib.sha256(b64.encode("utf-8")).hexdigest()[:16]
         return FakeObservation(
             current_app=self.current_app,
             marks=self.marks,
             screen_seq=self.screen_seq,
+            screenshot_b64=b64,
+            width=self.screen_width,
+            height=self.screen_height,
+            screen_hash=screen_hash,
+            mime_type="image/png",
         )
 
 

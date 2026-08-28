@@ -16,6 +16,8 @@ PHONE_AGENT_KEYS = [
     "PHONE_AGENT_MODEL_MAX_RETRIES",
     "PHONE_AGENT_DEVICE_ID",
     "PHONE_AGENT_MAX_STEPS",
+    "PHONE_AGENT_IMAGE_KEEP",
+    "PHONE_AGENT_OBS_MARKS_KEEP",
     "PHONE_AGENT_GROUNDING_PROVIDER",
     "PHONE_AGENT_ACCESSIBILITY_TIMEOUT",
     "PHONE_AGENT_ACCESSIBILITY_MAX_MARKS",
@@ -54,6 +56,8 @@ def test_from_env_defaults():
     assert cfg.model_timeout == 180.0
     assert cfg.model_max_retries == 2
     assert cfg.max_model_calls == 20
+    assert cfg.image_keep == 2
+    assert cfg.obs_marks_keep == 2
     assert cfg.grounding_provider == "hybrid"
     assert cfg.accessibility_timeout == 3.0
     assert cfg.accessibility_max_marks == 80
@@ -77,6 +81,18 @@ def test_from_env_reads_shell_env(monkeypatch):
     assert cfg.max_model_calls == 7
     assert cfg.device_id == "SERIAL123"
     assert cfg.trace_enabled is False
+
+
+def test_context_pruning_keys_env_and_override(monkeypatch):
+    monkeypatch.setenv("PHONE_AGENT_IMAGE_KEEP", "3")
+    monkeypatch.setenv("PHONE_AGENT_OBS_MARKS_KEEP", "4")
+    cfg = V2Config.from_env()
+    assert cfg.image_keep == 3
+    assert cfg.obs_marks_keep == 4
+    # CLI override beats env.
+    cfg2 = V2Config.from_env({"image_keep": 1, "obs_marks_keep": 5})
+    assert cfg2.image_keep == 1
+    assert cfg2.obs_marks_keep == 5
 
 
 # -- priority: override > shell env > .env > default ---------------------

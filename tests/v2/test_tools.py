@@ -13,6 +13,33 @@ def _tool_map(session, config=None):
     return {t.name: t for t in tools}
 
 
+def _text(out) -> str:
+    """Join the text blocks of a tool result.
+
+    Success paths return a multimodal ``list[dict]`` (text + optional image);
+    error/control paths return a plain ``str``. This helper normalises both to
+    the concatenated text so assertions read uniformly.
+    """
+
+    if isinstance(out, str):
+        return out
+    return "\n".join(
+        b.get("text", "")
+        for b in out
+        if isinstance(b, dict) and b.get("type") == "text"
+    )
+
+
+def _image_blocks(out) -> list[dict]:
+    if not isinstance(out, list):
+        return []
+    return [
+        b
+        for b in out
+        if isinstance(b, dict) and b.get("type") in {"image_url", "image"}
+    ]
+
+
 def test_full_tool_set_present():
     session = FakePhoneSession()
     names = set(_tool_map(session))
@@ -42,8 +69,23 @@ def test_tap_mark_id_coordinate_conversion():
     tools = _tool_map(session)
     out = tools["tap"].invoke({"target_mark_id": "ax_1"})
     assert ("tap", 540, 720) in session.device_factory.calls
-    assert out.startswith("OK.")
-    assert "[OBS]" in out
+    assert _text(out).startswith("OK.")
+    assert "[OBS]" in _text(out)
+
+
+def test_tap_success_returns_multimodal_with_image():
+    marks = {"ax_1": make_mark("ax_1", text="WLAN", center=(500, 300))}
+    session = FakePhoneSession(marks)
+    tools = _tool_map(session)
+    out = tools["tap"].invoke({"target_mark_id": "ax_1"})
+    # Success is a content list: first block is the OK text, an image block follows.
+    assert isinstance(out, list)
+    assert out[0]["type"] == "text"
+    assert out[0]["text"].startswith("OK.")
+    imgs = _image_blocks(out)
+    assert len(imgs) == 1
+    assert imgs[0]["image_url"]["url"].startswith("data:image/png;base64,")
+    assert imgs[0]["screen_seq"] == session.screen_seq
 
 
 def test_tap_appends_observation_block():
@@ -51,7 +93,7 @@ def test_tap_appends_observation_block():
     session = FakePhoneSession(marks)
     tools = _tool_map(session)
     out = tools["tap"].invoke({"target_mark_id": "ax_1"})
-    assert "[OBS] app=com.example.app screen#1" in out
+    assert "[OBS] app=com.example.app screen#1" in _text(out)
     assert session.observe_count == 1
 
 
@@ -59,6 +101,7 @@ def test_tap_stale_mark_hint_no_execution():
     session = FakePhoneSession({})  # no marks -> stale
     tools = _tool_map(session)
     out = tools["tap"].invoke({"target_mark_id": "ax_missing"})
+    assert isinstance(out, str)  # error branch stays str (no image)
     assert "stale mark" in out
     assert session.device_factory.calls == []
 
@@ -71,6 +114,7 @@ def test_tap_ambiguous_description_no_execution():
     session = FakePhoneSession(marks)
     tools = _tool_map(session)
     out = tools["tap"].invoke({"target_description": "设置"})
+    assert isinstance(out, str)
     assert out.startswith("ambiguous:")
     assert session.device_factory.calls == []
 
@@ -80,7 +124,7 @@ def test_tap_description_resolves_and_taps():
     session = FakePhoneSession(marks)
     tools = _tool_map(session)
     out = tools["tap"].invoke({"target_description": "确认付款"})
-    assert out.startswith("OK.")
+    assert _text(out).startswith("OK.")
     assert any(c[0] == "tap" for c in session.device_factory.calls)
 
 
@@ -91,6 +135,7 @@ def test_tap_both_addresses_rejected():
     out = tools["tap"].invoke(
         {"target_mark_id": "ax_1", "target_description": "X"}
     )
+    assert isinstance(out, str)
     assert out.startswith("error:")
     assert session.device_factory.calls == []
 
@@ -99,6 +144,7 @@ def test_tap_no_address_rejected():
     session = FakePhoneSession({})
     tools = _tool_map(session)
     out = tools["tap"].invoke({})
+    assert isinstance(out, str)
     assert out.startswith("error:")
 
 
@@ -122,7 +168,7 @@ def test_type_text_focuses_and_restores_keyboard():
     assert "detect_kbd" in kinds
     assert ("type_text", "hello") in session.device_factory.calls
     assert "restore_kbd" in kinds
-    assert out.startswith("OK.")
+    assert _text(out).startswith("OK.")
 
 
 def test_type_text_without_target_skips_focus_tap():
@@ -140,7 +186,7 @@ def test_scroll_swipes_midscreen():
     out = tools["scroll"].invoke({"direction": "down"})
     swipes = [c for c in session.device_factory.calls if c[0] == "swipe"]
     assert swipes
-    assert out.startswith("OK. scroll down")
+    assert _text(out).startswith("OK. scroll down")
 
 
 def test_swipe_relative_to_absolute():
@@ -154,6 +200,7 @@ def test_swipe_bad_input_no_execution():
     session = FakePhoneSession({})
     tools = _tool_map(session)
     out = tools["swipe"].invoke({"start": [1], "end": [2, 3]})
+    assert isinstance(out, str)
     assert out.startswith("error:")
     assert session.device_factory.calls == []
 
@@ -161,9 +208,9 @@ def test_swipe_bad_input_no_execution():
 def test_back_home_wait():
     session = FakePhoneSession({})
     tools = _tool_map(session)
-    assert tools["back"].invoke({}).startswith("OK. back")
-    assert tools["home"].invoke({}).startswith("OK. home")
-    assert tools["wait"].invoke({"seconds": 0}).startswith("OK. waited")
+    assert _text(tools["back"].invoke({})).startswith("OK. back")
+    assert _text(tools["home"].invoke({})).startswith("OK. home")
+    assert _text(tools["wait"].invoke({"seconds": 0})).startswith("OK. waited")
     kinds = [c[0] for c in session.device_factory.calls]
     assert "back" in kinds and "home" in kinds
 
@@ -172,7 +219,7 @@ def test_launch_app_known_executes():
     session = FakePhoneSession({})
     tools = _tool_map(session)
     out = tools["launch_app"].invoke({"app_name": "微信"})
-    assert out.startswith("OK. launched")
+    assert _text(out).startswith("OK. launched")
     assert session.device_factory.launched == ["微信"]
 
 
@@ -180,6 +227,7 @@ def test_launch_app_unknown_not_executed():
     session = FakePhoneSession({})
     tools = _tool_map(session)
     out = tools["launch_app"].invoke({"app_name": "NoSuchApp_zzz_123"})
+    assert isinstance(out, str)
     assert out.startswith("unknown app")
     assert session.device_factory.launched == []
 
@@ -189,9 +237,11 @@ def test_read_screen_observes():
     session = FakePhoneSession(marks)
     tools = _tool_map(session)
     out = tools["read_screen"].invoke({})
-    assert "[OBS]" in out
-    assert "ax_1" in out
+    assert "[OBS]" in _text(out)
+    assert "ax_1" in _text(out)
     assert session.observe_count == 1
+    # read_screen success carries an image on a fresh screen.
+    assert len(_image_blocks(out)) == 1
 
 
 def test_locate_success_registers_mark():
@@ -265,4 +315,56 @@ def test_actuation_result_contains_obs_block_when_observe_works():
         ("home", {}),
     ]:
         out = tools[name].invoke(args)
-        assert "[OBS]" in out
+        assert "[OBS]" in _text(out)
+
+
+def test_locate_success_returns_str_no_image():
+    located = make_mark("loc_9", text="隐藏按钮", role="ImageView")
+    session = FakePhoneSession({}, locate_result=located)
+    tools = _tool_map(session)
+    out = tools["locate"].invoke({"description": "隐藏按钮"})
+    # locate does not produce a new screen -> str result, never an image.
+    assert isinstance(out, str)
+    assert _image_blocks(out) == []
+
+
+def test_same_screen_dedup_drops_image_second_time():
+    # A static screen keeps the same screenshot hash; the second observation
+    # reuses the text OBS but drops the image and notes it.
+    marks = {"ax_1": make_mark("ax_1", text="X", center=(500, 500))}
+    session = FakePhoneSession(marks, static_screen=True)
+    tools = _tool_map(session)
+
+    first = tools["read_screen"].invoke({})
+    assert len(_image_blocks(first)) == 1
+
+    second = tools["read_screen"].invoke({})
+    assert _image_blocks(second) == []
+    assert "未重复发图" in _text(second)
+
+
+def test_changed_screen_sends_new_image():
+    # A dynamic screen bumps the payload each observe -> hash changes -> image
+    # ships every step and last_image_hash tracks the newest.
+    marks = {"ax_1": make_mark("ax_1", text="X", center=(500, 500))}
+    session = FakePhoneSession(marks, static_screen=False)
+    tools = _tool_map(session)
+
+    first = tools["read_screen"].invoke({})
+    second = tools["read_screen"].invoke({})
+    assert len(_image_blocks(first)) == 1
+    assert len(_image_blocks(second)) == 1
+    assert "未重复发图" not in _text(second)
+
+
+def test_observe_failure_returns_single_text_block_no_image():
+    marks = {"ax_1": make_mark("ax_1", text="X", center=(500, 500))}
+    session = FakePhoneSession(marks)
+    session._observe_should_fail = True
+    tools = _tool_map(session)
+    # tap executes the device action, then re-observation fails -> content list
+    # with only a text block (OK head + re-observation-failed note), no image.
+    out = tools["tap"].invoke({"target_mark_id": "ax_1"})
+    assert _image_blocks(out) == []
+    assert "re-observation failed" in _text(out)
+    assert any(c[0] == "tap" for c in session.device_factory.calls)

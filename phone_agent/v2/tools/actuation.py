@@ -8,8 +8,10 @@ fail-closed:
   black-image path exists.
 - Resolver ambiguity / stale marks / unknown apps return an error string and
   DO NOT execute (the error stays in the transcript for the model to read).
-- On success the tool returns ``"OK. <result>"`` followed by the §7.4 auto
-  observation block (a fresh ``session.observe()`` snapshot).
+- On success the tool returns a multimodal content ``list`` — an ``"OK. <result>"``
+  text block followed by the §7.4 auto observation blocks (text + a fresh
+  screenshot image when the screen changed). Error/ambiguity branches stay a
+  plain ``str`` (fail-closed, no image). See ``tools/_obs.py``.
 
 Tools are built as closures over ``session`` and ``config`` by
 :func:`phone_agent.v2.tools.build_tools`.
@@ -32,6 +34,18 @@ from phone_agent.v2.resolver import (
     resolve_description,
 )
 from phone_agent.v2.tools._obs import auto_observation
+
+
+def _ok_with_obs(head: str, session) -> list[dict]:
+    """Merge an ``OK. <head>`` text block with the multimodal observation blocks.
+
+    Success paths return a content ``list`` (text + image when the screen
+    changed); the observation layer owns image dedup and fail-closed text
+    fallback (``tools/_obs.py``). Error branches stay ``str`` (no image).
+    """
+
+    return [{"type": "text", "text": f"OK. {head}"}, *auto_observation(session)]
+
 
 
 def _resolve_target(
@@ -110,7 +124,7 @@ def build_actuation_tools(session, config) -> list[StructuredTool]:
         action: str,
         target_mark_id: str | None,
         target_description: str | None,
-    ) -> str:
+    ) -> str | list[dict]:
         mark, err = _resolve_target(session, target_mark_id, target_description)
         if err is not None:
             return err
@@ -120,12 +134,12 @@ def build_actuation_tools(session, config) -> list[StructuredTool]:
         else:
             device.tap(x, y, device_id=device_id)
         label = candidate_summary(mark)
-        return f"OK. {action} {label} at ({x},{y})\n" + auto_observation(session)
+        return _ok_with_obs(f"{action} {label} at ({x},{y})", session)
 
     def tap(
         target_mark_id: str | None = None,
         target_description: str | None = None,
-    ) -> str:
+    ) -> str | list[dict]:
         """Tap one on-screen element.
 
         Provide exactly one of ``target_mark_id`` (a mark from the latest
@@ -138,7 +152,7 @@ def build_actuation_tools(session, config) -> list[StructuredTool]:
     def long_press(
         target_mark_id: str | None = None,
         target_description: str | None = None,
-    ) -> str:
+    ) -> str | list[dict]:
         """Long-press one on-screen element (same addressing as ``tap``)."""
 
         return _tap_like("long_press", target_mark_id, target_description)
@@ -147,7 +161,7 @@ def build_actuation_tools(session, config) -> list[StructuredTool]:
         text: str,
         target_mark_id: str | None = None,
         target_description: str | None = None,
-    ) -> str:
+    ) -> str | list[dict]:
         """Type ``text`` into a field.
 
         If a target is given, the field is tapped to focus first. Text is
@@ -174,9 +188,9 @@ def build_actuation_tools(session, config) -> list[StructuredTool]:
                 restore(ime, device_id=device_id)
 
         preview = text if len(text) <= 32 else text[:31] + "…"
-        return f"OK. typed {preview!r}\n" + auto_observation(session)
+        return _ok_with_obs(f"typed {preview!r}", session)
 
-    def scroll(direction: Literal["up", "down", "left", "right"]) -> str:
+    def scroll(direction: Literal["up", "down", "left", "right"]) -> str | list[dict]:
         """Scroll the screen by a mid-screen swipe in ``direction``.
 
         ``direction`` is the content scroll direction (``down`` reveals content
@@ -201,9 +215,9 @@ def build_actuation_tools(session, config) -> list[StructuredTool]:
             )
         sx, sy, ex, ey = moves[direction]
         device.swipe(sx, sy, ex, ey, device_id=device_id)
-        return f"OK. scroll {direction}\n" + auto_observation(session)
+        return _ok_with_obs(f"scroll {direction}", session)
 
-    def swipe(start: list[int], end: list[int]) -> str:
+    def swipe(start: list[int], end: list[int]) -> str | list[dict]:
         """Swipe between two 0-1000 relative points (coordinate fallback).
 
         Prefer ``scroll`` for list navigation. ``start``/``end`` are ``[x, y]``
@@ -217,32 +231,31 @@ def build_actuation_tools(session, config) -> list[StructuredTool]:
         sx, sy = _relative_to_abs(session, int(start[0]), int(start[1]))
         ex, ey = _relative_to_abs(session, int(end[0]), int(end[1]))
         device.swipe(sx, sy, ex, ey, device_id=device_id)
-        return (
-            f"OK. swipe ({start[0]},{start[1]})->({end[0]},{end[1]})\n"
-            + auto_observation(session)
+        return _ok_with_obs(
+            f"swipe ({start[0]},{start[1]})->({end[0]},{end[1]})", session
         )
 
-    def back() -> str:
+    def back() -> str | list[dict]:
         """Press the system Back button."""
 
         device.back(device_id=device_id)
-        return "OK. back\n" + auto_observation(session)
+        return _ok_with_obs("back", session)
 
-    def home() -> str:
+    def home() -> str | list[dict]:
         """Press the system Home button."""
 
         device.home(device_id=device_id)
-        return "OK. home\n" + auto_observation(session)
+        return _ok_with_obs("home", session)
 
-    def wait(seconds: float = 2.0) -> str:
+    def wait(seconds: float = 2.0) -> str | list[dict]:
         """Wait for the UI to settle, then re-observe."""
 
         import time
 
         time.sleep(max(0.0, float(seconds)))
-        return f"OK. waited {seconds}s\n" + auto_observation(session)
+        return _ok_with_obs(f"waited {seconds}s", session)
 
-    def launch_app(app_name: str) -> str:
+    def launch_app(app_name: str) -> str | list[dict]:
         """Launch an installed app by name.
 
         The name is resolved through the app registry / launch policy. Unknown
@@ -253,9 +266,8 @@ def build_actuation_tools(session, config) -> list[StructuredTool]:
         status = resolution.status
         if status == "resolved" and resolution.package_name:
             device.launch_app(app_name, device_id=device_id)
-            return (
-                f"OK. launched {app_name} ({resolution.package_name})\n"
-                + auto_observation(session)
+            return _ok_with_obs(
+                f"launched {app_name} ({resolution.package_name})", session
             )
         if status == "ambiguous":
             names = []

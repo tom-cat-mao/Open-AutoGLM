@@ -57,6 +57,11 @@ class Observation:
     current_app: str
     marks: list[MarkCandidate]
     screen_seq: int
+    # Short sha256 of the screenshot base64 payload; drives same-screen image
+    # dedup in ``tools/_obs.py`` (only re-send the image when the screen changed).
+    screen_hash: str = ""
+    # Screenshot mime type (``image/png`` | ``image/jpeg``) for the data: URL.
+    mime_type: str = "image/png"
 
 
 class PhoneSession:
@@ -74,6 +79,10 @@ class PhoneSession:
         self.finished: bool = False
         self.finish_summary: str | None = None
         self.takeover_reason: str | None = None
+        # Last screenshot hash whose image block was actually sent to the model.
+        # Same-screen re-observations reuse the text OBS but drop the image
+        # (see ``tools/_obs.py``); reset to None so the first frame always ships.
+        self.last_image_hash: str | None = None
         # TaskDoc (task board) state: doc is harness-seeded at run start (agent.py);
         # seen_states tracks (current_app, screen_hash) tuples for stagnation
         # detection; nudged fires the stagnation hint at most once per run.
@@ -150,6 +159,8 @@ class PhoneSession:
             current_app=current_app,
             marks=marks,
             screen_seq=self.screen_seq,
+            screen_hash=screen_hash,
+            mime_type=getattr(shot, "mime_type", None) or "image/png",
         )
 
     # -- mark resolution --------------------------------------------------

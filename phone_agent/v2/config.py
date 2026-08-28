@@ -145,6 +145,9 @@ class V2Config:
     device_id: str | None = None
     # loop
     max_model_calls: int = 20
+    # context hygiene (S1 §1.4/§2): rolling image + OBS-marks pruning windows
+    image_keep: int = 2
+    obs_marks_keep: int = 2
     # grounding
     grounding_provider: str = "hybrid"
     accessibility_timeout: float = 3.0
@@ -197,6 +200,8 @@ class V2Config:
             model_max_retries=_env_int("PHONE_AGENT_MODEL_MAX_RETRIES", 2),
             device_id=_env_opt_str("PHONE_AGENT_DEVICE_ID"),
             max_model_calls=_env_int("PHONE_AGENT_MAX_STEPS", 20),
+            image_keep=_env_int("PHONE_AGENT_IMAGE_KEEP", 2),
+            obs_marks_keep=_env_int("PHONE_AGENT_OBS_MARKS_KEEP", 2),
             grounding_provider=_env_str("PHONE_AGENT_GROUNDING_PROVIDER", "hybrid"),
             accessibility_timeout=_env_float("PHONE_AGENT_ACCESSIBILITY_TIMEOUT", 3.0),
             accessibility_max_marks=_env_int("PHONE_AGENT_ACCESSIBILITY_MAX_MARKS", 80),

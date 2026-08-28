@@ -63,7 +63,7 @@ class ThinPhoneAgent:
         from phone_agent.v2.model import build_chat_model
         from phone_agent.v2.session import PhoneSession
         from phone_agent.v2.tools import build_tools
-        from phone_agent.v2.middleware.images import build_image_middleware
+        from phone_agent.v2.middleware.images import build_context_pruning_middleware
         from phone_agent.v2.middleware.safety import build_hitl_middleware
         from phone_agent.v2.middleware.trace import build_trace_middleware
 
@@ -86,7 +86,10 @@ class ThinPhoneAgent:
 
         middleware = [
             build_hitl_middleware(self.session),
-            build_image_middleware(),
+            build_context_pruning_middleware(
+                keep_images=getattr(config, "image_keep", 2),
+                keep_marks=getattr(config, "obs_marks_keep", 2),
+            ),
             self._trace,
             ModelCallLimitMiddleware(
                 thread_limit=getattr(config, "max_model_calls", 20),

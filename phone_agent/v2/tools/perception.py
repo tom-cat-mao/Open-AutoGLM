@@ -16,11 +16,12 @@ from phone_agent.v2.tools._obs import auto_observation
 def build_perception_tools(session, config) -> list[StructuredTool]:
     """Return the perception tool list bound to ``session``."""
 
-    def read_screen() -> str:
+    def read_screen() -> list[dict]:
         """Re-observe the current screen (no side effects on the device).
 
         Returns the current app and a marks digest so you can pick a
-        ``target_mark_id`` for the next action.
+        ``target_mark_id`` for the next action, plus a fresh screenshot image
+        when the screen changed since the last one sent.
         """
 
         return auto_observation(session)

@@ -10,7 +10,10 @@ from types import SimpleNamespace
 
 from langchain_core.messages import HumanMessage
 
-from phone_agent.v2.middleware.images import ImagePruningMiddleware
+from phone_agent.v2.middleware.images import (
+    ImagePruningMiddleware,
+    build_context_pruning_middleware,
+)
 from phone_agent.v2.middleware.safety import (
     build_hitl_middleware,
     is_sensitive_tool_call,
@@ -79,6 +82,18 @@ def _image_msg(seq: int) -> HumanMessage:
     )
 
 
+def _obs_msg(app: str, seq: int, marks: int = 3) -> HumanMessage:
+    """A ToolMessage-shaped observation: OBS text (with marks) + an image block."""
+
+    digest = " · ".join(f"ax_{i}|Button|t{i}|(0,0)" for i in range(marks))
+    return HumanMessage(
+        content=[
+            {"type": "text", "text": f"[OBS] app={app} screen#{seq}\nmarks ({marks}): {digest}"},
+            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,IMG{seq}"}, "screen_seq": seq},
+        ]
+    )
+
+
 def _count_images(message) -> int:
     return sum(
         1
@@ -87,18 +102,25 @@ def _count_images(message) -> int:
     )
 
 
+def _obs_texts(message) -> list[str]:
+    return [
+        b["text"]
+        for b in message.content
+        if isinstance(b, dict) and b.get("type") == "text" and b["text"].startswith("[OBS] ")
+    ]
+
+
 def test_images_pruning_keeps_only_newest():
     m1, m2, m3 = _image_msg(1), _image_msg(2), _image_msg(3)
     state = {"messages": [m1, m2, m3]}
+    # Legacy alias keeps only the newest image.
     mw = ImagePruningMiddleware()
     result = mw.before_model(state, runtime=None)
 
     assert result is not None
-    # After pruning: only the newest message still carries an image block.
     assert _count_images(m1) == 0
     assert _count_images(m2) == 0
     assert _count_images(m3) == 1
-    # Placeholders reference the pruned screen numbers.
     placeholders = [
         b["text"] for b in m1.content if isinstance(b, dict) and b.get("type") == "text"
     ]
@@ -110,6 +132,82 @@ def test_images_pruning_noop_with_single_image():
     mw = ImagePruningMiddleware()
     assert mw.before_model({"messages": [m]}, runtime=None) is None
     assert _count_images(m) == 1
+
+
+def test_context_pruning_keeps_newest_two_images():
+    m1, m2, m3 = _image_msg(1), _image_msg(2), _image_msg(3)
+    mw = build_context_pruning_middleware(keep_images=2, keep_marks=2)
+    result = mw.before_model({"messages": [m1, m2, m3]}, runtime=None)
+
+    assert result is not None
+    # Newest two keep their image; the oldest is placeholdered.
+    assert _count_images(m1) == 0
+    assert _count_images(m2) == 1
+    assert _count_images(m3) == 1
+    assert any(
+        isinstance(b, dict) and b.get("type") == "text" and "已剪除" in b["text"]
+        for b in m1.content
+    )
+
+
+def test_context_pruning_noop_at_or_below_keep():
+    m1, m2 = _image_msg(1), _image_msg(2)
+    mw = build_context_pruning_middleware(keep_images=2, keep_marks=2)
+    assert mw.before_model({"messages": [m1, m2]}, runtime=None) is None
+    assert _count_images(m1) == 1
+    assert _count_images(m2) == 1
+
+
+def test_context_pruning_folds_old_marks_keeps_newest_two():
+    msgs = [_obs_msg("app", i) for i in range(1, 5)]  # 4 OBS messages
+    mw = build_context_pruning_middleware(keep_images=100, keep_marks=2)
+    result = mw.before_model({"messages": msgs}, runtime=None)
+
+    assert result is not None
+    # Oldest two folded; newest two keep the full marks digest.
+    assert "[marks 已折叠:3]" in _obs_texts(msgs[0])[0]
+    assert "[marks 已折叠:3]" in _obs_texts(msgs[1])[0]
+    assert "marks (3):" in _obs_texts(msgs[2])[0]
+    assert "marks (3):" in _obs_texts(msgs[3])[0]
+    # Folded lines keep the header (app/screen).
+    assert _obs_texts(msgs[0])[0].startswith("[OBS] app=app screen#1")
+
+
+def test_context_pruning_marks_fold_is_idempotent():
+    msgs = [_obs_msg("app", i) for i in range(1, 5)]
+    mw = build_context_pruning_middleware(keep_images=100, keep_marks=2)
+    mw.before_model({"messages": msgs}, runtime=None)
+    snapshot = [list(m.content) for m in msgs]
+    # Second pass must not change already-folded history (stable prefix).
+    second = mw.before_model({"messages": msgs}, runtime=None)
+    assert second is None
+    assert [list(m.content) for m in msgs] == snapshot
+
+
+def test_context_pruning_image_and_marks_same_message_deduped():
+    # Newest keeps both; oldest loses image AND marks in one returned message.
+    msgs = [_obs_msg("app", 1), _obs_msg("app", 2), _obs_msg("app", 3)]
+    mw = build_context_pruning_middleware(keep_images=2, keep_marks=2)
+    result = mw.before_model({"messages": msgs}, runtime=None)
+
+    returned = result["messages"]
+    # msgs[0] was hit by both passes but must appear only once.
+    assert returned.count(msgs[0]) == 1
+    assert _count_images(msgs[0]) == 0
+    assert "[marks 已折叠:3]" in _obs_texts(msgs[0])[0]
+    # Newest message keeps both image and full marks.
+    assert _count_images(msgs[2]) == 1
+    assert "marks (3):" in _obs_texts(msgs[2])[0]
+
+
+def test_context_pruning_first_obs_without_marks_not_folded():
+    # Opening HumanMessage's [OBS] app=... has no marks section -> never folded.
+    opening = HumanMessage(content=[{"type": "text", "text": "[OBS] app=com.x"}])
+    msgs = [opening, _obs_msg("app", 1), _obs_msg("app", 2), _obs_msg("app", 3)]
+    mw = build_context_pruning_middleware(keep_images=100, keep_marks=2)
+    mw.before_model({"messages": msgs}, runtime=None)
+    # The opening block is untouched (no "marks (" marker to fold).
+    assert opening.content[0]["text"] == "[OBS] app=com.x"
 
 
 # --------------------------------------------------------------------------
