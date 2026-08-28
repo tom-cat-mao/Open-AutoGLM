@@ -1,81 +1,125 @@
-# Source Map
+# Source Map (thin-loop v2)
 
-This file maps live diagnosis symptoms to Open-AutoGLM source files. It is the
-reference the SKILL.md "Source Mapping" table and `run_diagnosis.py`
-`SOURCE_RULES` build on.
+This file maps live-diagnosis symptoms to Open-AutoGLM **v2** source files. It is the
+reference behind `scripts/sourcemap.py::V2_SOURCE_RULES` (which the report renders as
+clickable `path:line` anchors) and the taxonomy in `scripts/taxonomy.py`.
 
-## Architecture note
+## Architecture note — there is no graph
 
-The reflection / finish-gate layer replaced the old `phone_agent/graph/task_goal.py`
-module with a declarative `GoalContract` system (see P0 constraint #13a in
-`AGENTS.md`). When a trace surfaces reflection/finish signals, inspect the goal
-files, not `task_goal.py` (which no longer exists).
+The v1 LangGraph node model is **deleted**. Do not map a finding to `goal` / `plan` /
+`execute` / `reflect` / `acceptance` nodes, to `GoalContract` / `goal_evaluator` /
+`goal_requirements`, or to `evals/run_eval.py` — none of them exist in v2.
 
-Reflection and acceptance are two separate nodes (split in commit `46f5bd6`):
+v2 is a **thin loop**: one model call per step on LangChain `create_agent`. The model
+owns the workflow; the harness supplies tools + middleware and records traces. Behavior
+lives in exactly four owners:
 
 ```text
-START → goal → plan → execute → [confirm|takeover|acceptance|reflect|replan|end]
-                                 └ acceptance → after_acceptance → [takeover|replan→goal|end]
+model ──(tool call)──▶ [ safety HITL ] [ image prune ] [ trace ] [ TaskDoc ] [ diagnostic ]
+                              │              │            │           │            │
+                       dangerous→interrupt  keep 1 img   JSONL     pin board   evidence.jsonl
+                                                                                     │
+                                                        tool returns a RESULT STRING ┘
 ```
 
-`reflect` answers "did this action work?" every step. `acceptance` answers "is the
-whole task done?" and only on a finish claim — it is the sole finish gate. Shared
-post-action observation lives in `nodes/observation_capture.py` so the two cannot
-disagree about the current screen. Route finish-gate signals to
-`nodes/acceptance.py`, not `nodes/reflect.py`.
+- **Tools** (`phone_agent/v2/tools/`) — the 15 tools. Each returns a **result string**;
+  its leading text is the loose contract the taxonomy classifies. Fail-closed: an error
+  string, never a faked action or a silent success.
+- **Finish gate** (`tools/control.py::finish`) — the only "is the task done?" authority.
+  Fail-closed: requires non-empty evidence **and** a route with no open TaskDoc items.
+- **TaskDoc board** (`taskdoc.py`, `middleware/taskdoc.py`) — goal + route + facts,
+  pinned every step (compression-immune). `goal_base` is harness-seeded and
+  model-immutable; the model writes only via `update_task_doc`.
+- **Middleware** (`middleware/`) — safety HITL, image pruning, JSONL trace, model-call
+  limit, and the opt-in diagnostic evidence stream.
 
-Finish-gate comparisons run in one value domain: raw observed text. Commit
-`6b133b4` removed the sha256/title-stub projections from `ExpectedOutcome` and
-`object_selected_evidence()` in favour of a bounded raw `evidence_summary`, since
-the compiler was emitting digests while the evaluator compared raw screen text —
-structurally unsatisfiable with a fully green test suite. `sha256:` stubs are still
-accepted as a legacy fallback via `LEGACY_SHA256_STUB_PATTERN`. Prompt/runtime
-carries raw comparison text by design; privacy enforcement is at
-trace/checkpoint/log egress only (see P0 #10).
+Marks-first grounding is the addressing contract: `tap` binds a mark (direct
+`target_mark_id`, or `target_description` resolved to a **unique** mark, fail-closed on
+ambiguity/no-match); raw coordinates are only a `swipe` fallback. 0-1000 → pixel
+conversion happens only inside tools (`coords.py`); the model never sees absolute pixels.
 
-The remote OpenAI-compatible grounding provider was reverted (commit `e0a2e4b`).
-`PHONE_AGENT_REMOTE_GROUNDING_*` env variables are stale and ignored by the current
-grounding factory — do not treat their presence as evidence that remote grounding
-is wired up.
+## Result-prefix → class → category → source
 
-The 9-phase goal/evidence/privacy rebuild (commit `7dc6946`) added new subsystems
-that produce their own failure modes: capability gating (`actions/capability.py`,
-`actions/receipt.py`), goal contract adequacy validation (`graph/goal_requirements.py`),
-versioned safety classification (`config/policy.py`), and HMAC-bound goal resume
-(`checkpoint/goal_resume.py`). Signal rows for these layers are included below.
+The canonical table is `scripts/taxonomy.py::RESULT_CLASSES` (ordered most-specific
+first). A contract test (`tests/skill/test_taxonomy.py`) asserts each prefix literal
+still appears in its source file, so a tool that rewords its return string breaks the
+test rather than the diagnosis.
 
-## Signal → source map
+| Result-text prefix | class | report category | Source: symbol |
+|---|---|---|---|
+| `OK. ` | `success` | success | `tools/actuation.py` `tap/long_press/type_text/scroll/swipe/back/home/wait/launch_app` |
+| `[OBS] app=` | `observation` | success | `tools/_obs.py::auto_observation`; `tools/perception.py::read_screen` |
+| `[OBS] (re-observation failed:` | `obs_capture_failed` | observation | `tools/_obs.py::auto_observation` (swallows ScreenshotError) |
+| `error: pass only one of target_mark_id` | `addressing_conflict` | grounding_addressing | `tools/actuation.py::_resolve_target` |
+| `error: one of target_mark_id or target_description is required` | `addressing_missing` | grounding_addressing | `tools/actuation.py::_resolve_target` |
+| `stale mark:` | `stale_mark` | grounding_addressing | `tools/actuation.py::_resolve_target` ← `resolver.py`/`session.py` StaleMarkError |
+| `ambiguous:` | `ambiguous_resolve` | grounding_addressing | `tools/actuation.py::_resolve_target` ← ResolveAmbiguousError / LocateAmbiguousError |
+| `未定位:` | `locate_no_match` | grounding_addressing | `tools/perception.py::locate` ← LocateAmbiguousError |
+| `定位失败:` | `locate_provider_error` | grounding_addressing | `tools/perception.py::locate` (provider unavailable) |
+| `error: start must be [x, y]` / `error: end must be [x, y]` | `bad_coords` | actuation_arg | `tools/actuation.py::swipe` |
+| `error: unknown direction` | `bad_direction` | actuation_arg | `tools/actuation.py::scroll` |
+| `ambiguous app ` | `ambiguous_app` | launch | `tools/actuation.py::launch_app` |
+| `denied:` | `launch_denied` | launch | `tools/actuation.py::launch_app` |
+| `error: …is not installed` | `app_not_installed` | launch | `tools/actuation.py::launch_app` |
+| `unknown app ` | `unknown_app` | launch | `tools/actuation.py::launch_app` |
+| `未写入（输入无效）：` | `taskdoc_input_invalid` | taskdoc | `tools/taskdoc.py::update_task_doc` |
+| `未写入（校验失败）：` | `taskdoc_validation_failed` | taskdoc | `tools/taskdoc.py::update_task_doc` ← `TaskDoc.validate` |
+| `已更新任务板。` | `taskdoc_ok` | taskdoc | `tools/taskdoc.py::update_task_doc` |
+| `error: finish requires non-empty evidence` | `finish_no_evidence` | finish_gate | `tools/control.py::finish` |
+| `路线仍有未完成项：` | `finish_blocked_open_items` | finish_gate | `tools/control.py::finish` (TaskDoc `has_open_items`) |
+| `已记录完成声明` | `finish_ok` | finish_gate | `tools/control.py::finish` |
+| `[ASK_USER] ` | `ask_user` | hitl | `tools/control.py::ask_user` |
+| `已请求人工接管:` | `takeover_requested` | hitl | `tools/control.py::take_over` |
 
-| Signal | Source Files | Review Focus |
-|---|---|---|
-| `screenshot_unavailable`, `secure_screenshot_blocked`, `adb_screencap_failed`, `screenshot_pull_failed` | `phone_agent/adb/screenshot.py`, `phone_agent/graph/screenshot_status.py`, `phone_agent/graph/nodes/plan.py`, `phone_agent/graph/nodes/reflect.py` | Fail closed before model calls; avoid using placeholder screenshots as valid evidence; compare screenshot dimensions with real device size. |
-| `invalid_json`, `parse_error`, `unsupported_tool_call`, `model_request_failed` | `phone_agent/model/client.py`, `phone_agent/actions/adapter.py`, `phone_agent/graph/nodes/plan.py` | Output mode, response parsing, retry behavior, structured action contract. |
-| `mark_required`, `unknown_mark`, `stale_mark`, `hash_mismatch`, `grounding_no_candidate`, `grounding_no_usable_candidate`, `grounding_ambiguous`, `low_confidence`, `bad_bbox`, `provider_unavailable`, `missing_provider_hash` | `phone_agent/actions/grounding.py`, `phone_agent/grounding/provider.py`, `phone_agent/grounding/fallback.py`, `phone_agent/grounding/accessibility.py`, `phone_agent/grounding/locateanything.py`, `phone_agent/grounding/factory.py`, `phone_agent/graph/observation.py`, `phone_agent/graph/marks.py` | MarkRegistry binding, provider fallback, hint-aware usability, candidate count, hash consistency. |
-| `unknown_app`, `unknown_action`, `missing_field`, `unsafe_value`, `invalid_metadata` | `phone_agent/actions/validator.py`, `phone_agent/actions/repair.py`, `phone_agent/config/apps.py` | Canonical ActionIR validation, app registry normalization, limited repair scope. |
-| `action_safety_rejected`, `confirmation_required`, `sensitive_tap_requires_confirmation`, HITL count unexpected | `phone_agent/actions/safety.py`, `phone_agent/graph/edges.py`, `phone_agent/graph/nodes/confirm.py`, `phone_agent/graph/nodes/takeover.py`, `phone_agent/graph/nodes/execute.py` | confirm/takeover routing, pending_execute, terminal guard ordering. |
-| `dispatch_failed`, `execution_failed`, `missing_action`, tap/swipe no-op | `phone_agent/graph/nodes/execute.py`, `phone_agent/graph/tools/coords.py`, `phone_agent/graph/tools/tap.py`, `phone_agent/graph/tools/swipe.py`, `phone_agent/graph/tools/type_text.py`, `phone_agent/graph/tools/launch.py`, `phone_agent/adb/device.py`, `phone_agent/adb/input.py` | Coordinate conversion, ADB command return codes, keyboard switching, app launch resolution. |
-| `model_reflection_failed`, `repeated_action`, wrong reflection verdict, repeated wait, `postcondition_unverified`, `after_observation_unavailable`, `missing_postconditions`, `dynamic_change_only`, `verifier_unknown`, `verifier_failure`, `context_lost` | `phone_agent/graph/nodes/reflect.py`, `phone_agent/graph/nodes/observation_capture.py`, `phone_agent/graph/verifier.py`, `phone_agent/graph/expected_outcome.py`, `phone_agent/graph/fact_providers.py`, `phone_agent/graph/predicates.py` | Per-step reflection only ("did this action work?"); it no longer decides task completion. Verifier precedence, postcondition matching, failure memory and repeated-failure detection. `after_observation` comes from the shared `nodes/observation_capture.py` and is reused by acceptance, so a reflect/acceptance disagreement about the current screen starts there. `context_lost` is emitted from plan, reflect and acceptance through that shared capture — check which node before attributing it. |
-| `goal_not_satisfied`, `finish_validation_unknown`, `finish_validation_failure`, `needs_recompile`, `matched_terminal_evidence`, `missing_terminal_evidence`, `soft_match_accepted`, `programmatic_contradiction_override`, `acceptance_no_contract`, `acceptance_hard_veto`, `acceptance_error`, `pure_evaluation_degraded`, `typed_fact_not_yet_collected` | `phone_agent/graph/nodes/acceptance.py`, `phone_agent/graph/goal_evaluator.py`, `phone_agent/graph/goal.py`, `phone_agent/graph/verifier.py`, `phone_agent/graph/goal_evidence.py`, `phone_agent/graph/fact_providers.py`, `phone_agent/graph/predicates.py`, `phone_agent/graph/nodes/observation_capture.py`, `phone_agent/graph/compatibility_adapters.py`, `phone_agent/graph/runtime_goal.py` | The finish gate is its own node (`acceptance`), split out of reflect in `46f5bd6`. It runs only on a finish claim, authority ordered hard veto > hard confirm > semantic judgement, fail-closed throughout. A `vlm_judge` criterion not named in `matched_terminal_evidence` is `missing` (hard gate). `acceptance_no_contract` is a fail-closed rejection whose root cause is the goal layer, not this node. `acceptance_hard_veto` / `programmatic_contradiction_override` mean programmatic signals beat the model's self-attestation — trust the programmatic side. `needs_recompile` has no writer today. `soft_match_accepted` means the finish relied on the detail-only soft match (evidence relaxation, no content confirmation) — verify the opened detail page manually. A criterion parked on `typed_fact_not_yet_collected` means predicate and provider disagree; check `value_domain` alignment. |
-| `capability_missing`, `capability_unavailable`, `capability_rejected` | `phone_agent/actions/capability.py`, `phone_agent/actions/receipt.py`, `phone_agent/graph/nodes/execute.py` | ToolCapability registry coverage for the action name; `implementation_status=unavailable` means the stub action now fails closed instead of reporting pseudo-success; ActionReceipt only describes dispatch, never Goal progress. |
-| `unsupported_semantics`, `needs_goal_clarification`, `goal_contract_invalid`, `goal_approval_replacement_inadequate`, `runtime_goal_binding_invalid`, `runtime_goal_binding_unavailable`, `runtime_goal_context_missing`, `task_binding_mismatch`, `required_criteria_missing`, `predicate_unobservable`, `predicate_domain_mismatch`, `contract_adequacy_inadequate`, `contract_adequacy_needs_clarification`, `contract_adequacy_degraded` | `phone_agent/graph/nodes/goal_node.py`, `phone_agent/graph/goal_requirements.py`, `phone_agent/graph/goal_compiler.py`, `phone_agent/graph/goal.py`, `phone_agent/graph/predicates.py`, `phone_agent/graph/fact_providers.py`, `phone_agent/graph/goal_binding.py` | Adequacy has three severities: structural → `inadequate` (takeover), semantic → `degraded` (keep working, weaker verification), ambiguous → `needs_clarification`. `STRUCTURAL_REASON_CODES` = {`task_binding_mismatch`, `required_criteria_missing`, `predicate_unobservable`, `predicate_domain_mismatch`}. `predicate_unobservable` = no fact provider can emit it; `predicate_domain_mismatch` = the predicate's declared `value_domain` (raw_text/digest/identifier/scalar/structured) differs from what the provider actually produces. These two exist to move "this contract can never be satisfied" from latent runtime failure to a compile-time rejection — fix the predicate binding or provider, never widen the gate. Another common root cause: task verb not in `TaskRequirementExtractor._OPERATIONS` (limited zh/en keyword set) → `operation_kind=unknown`. Check `task_requirement_set.safe_projection` in trace before changing code. **`contract_adequacy` only exists on the `goal_compile_result` trace event — `RunResult`/`result.json` do not carry `contract_adequacy_status`.** |
-| `goal_resume_hmac_mismatch`, `goal_resume_rehydration_failed`, `goal_resume_untrusted`, `trusted_goal_resume_invalid` | `phone_agent/checkpoint/goal_resume.py`, `phone_agent/checkpoint/serde.py` | HMAC key consistency across resume; serde collapses `goal_evidence_ledger` to `[]` at checkpoint egress — progress must come from the trusted_goal_resume projection, never from checkpoint content. |
-| `action_safety_rejected`, HITL miscount with policy mismatch | `phone_agent/config/policy.py`, `phone_agent/actions/safety.py` | SafetyPolicyRegistry classification (`policy_match` / `uncertain_fail_closed`); a misrouted HITL with no vocabulary hit usually means a missing term in the versioned registry, not an edges bug. |
-| context metrics missing, prompt pollution | `phone_agent/graph/context.py`, `phone_agent/graph/nodes/plan.py`, `phone_agent/graph/trace.py` | Request-only compaction, privacy redaction, selected_sections, context budget. |
-| result/trace missing | `evals/run_eval.py`, `phone_agent/agent.py`, `phone_agent/graph/trace.py` | RunResult serialization, trace writer, eval summary shape. |
-| `existential_match`, `not_observed_in_view`, `existential_inconclusive`, `same_tier_conflict` | `phone_agent/graph/predicates.py`, `phone_agent/graph/fact_providers.py`, `phone_agent/graph/goal_evaluator.py` | Evidence scope per `(predicate, source)`: per-node accessibility facts fold existentially, so one hit among many non-matching siblings is a match and zero hits is `unknown` — never a contradiction. Summary sources (`visual_region`/`whole_screen`) keep unanimity, where a differing value IS real counter-evidence. `element_scoped` (`ui.toggle_state`, `ui.object_rank`) resolves `unknown` on multi-element screens by design. |
-| `binding_never_observed`, `predicate_unobservable` on a prose binding | `phone_agent/graph/goal_compiler.py`, `phone_agent/graph/goal_requirements.py`, `phone_agent/graph/goal_evidence.py` | Binding provenance: an `expected_value` must be a screen literal (quoted span or entity span), never a criterion description. `binding_never_observed` is `degraded`/diagnostic only and must not veto — the literal may need scrolling. |
-| `advancing` / `exploring` / `stuck`, `novelty_streak`, unexpected takeover | `phone_agent/graph/context.py` (`trajectory_liveness`), `phone_agent/graph/edges.py`, `phone_agent/graph/nodes/reflect.py` | P0 #13b trajectory liveness. Progress is goal-relative only (criterion movement, or a state not visited before); surface/hash/mark changes and `typed_text_present` oscillate and are NOT progress. `exploring` is the intended state for search tasks. `stuck` replans before any takeover. |
-| `observation_retry_count` at limit, `acceptance_round_count` growth | `phone_agent/graph/edges.py`, `phone_agent/graph/nodes/observation_capture.py`, `phone_agent/graph/nodes/acceptance.py`, `phone_agent/config/policy.py` | Three former meanings of `retry_count` are now separate: infrastructure retries (takeover at limit), acceptance rounds (replan, not error), and liveness (see above). `max_steps` exhaustion is an incomplete report, never a takeover. |
+Underlying exception → emitted prefix (the causal chain the report links):
 
-## Remote grounding — explicitly NOT supported
-
-| Stale env var | Status |
+| Exception | → prefix |
 |---|---|
-| `PHONE_AGENT_REMOTE_GROUNDING_BASE_URL` | ignored (provider reverted in `e0a2e4b`) |
-| `PHONE_AGENT_REMOTE_GROUNDING_API_KEY` | ignored |
-| `PHONE_AGENT_REMOTE_GROUNDING_MODEL` | ignored |
-| `PHONE_AGENT_REMOTE_GROUNDING_PROFILE` | ignored |
-| `PHONE_AGENT_REMOTE_GROUNDING_REASONING_EFFORT` | ignored |
+| `StaleMarkError` (`session.py`) | `stale mark:` |
+| `ResolveAmbiguousError` (`resolver.py`) | `ambiguous:` |
+| `LocateAmbiguousError` (`session.py`) | `ambiguous:` (actuation) / `未定位:` (perception) |
+| `ScreenshotError` (`session.py`) | `[OBS] (re-observation failed:` (swallowed by `auto_observation`, not a hard error) |
 
-If a `.env` still contains these, the preflight report should treat them as
-stale configuration noise, not as a working remote-grounding setup.
+## Report category → v2 source (V2_SOURCE_RULES)
+
+| category | layer / severity | Primary files | What to check |
+|---|---|---|---|
+| `grounding_addressing` | grounding / P0 | `tools/actuation.py`, `tools/perception.py`, `resolver.py`, `session.py` | marks-first binding; stale = no `read_screen` before the action; ambiguous = non-unique description; no-match = neither accessibility nor LocateAnything hit (check provider + `max_marks`). |
+| `actuation_arg` | actuation / P1 | `tools/actuation.py`, `coords.py` | `swipe` needs `[x,y]` 0-1000; `scroll` accepts only up/down/left/right; conversion is tool-internal. |
+| `launch` | launch / P1 | `tools/actuation.py`, `config/apps.py`, `config/policy.py` | app registry + launch policy: denied = safety policy, not_installed/unknown = inventory, ambiguous = name too broad. |
+| `finish_gate` | finish / P0 | `tools/control.py`, `taskdoc.py` | fail-closed: non-empty evidence + no open route items. Blocked → complete / mark `blocked` (with reason) / fix the route via `update_task_doc`. Never widen the gate. |
+| `taskdoc` | taskdoc / P2 | `tools/taskdoc.py`, `taskdoc.py` | validation: ≤1 `in_progress`, ≤15 items, `blocked` needs a reason, ≤10 facts ≤120 chars each. |
+| `hitl` | safety / P1 | `tools/control.py`, `middleware/safety.py` | HITL hard gate lives only in `safety.py`. `ask_user` → respond, `take_over` → always interrupt. Mis/under-trigger → `SafetyPolicyRegistry` + `SENSITIVE_APP_KEYWORDS`. |
+| `observation` | observation / P1 | `tools/_obs.py`, `session.py`, `adb/screenshot.py` | `auto_observation` swallows `ScreenshotError` as a note; a successful action with a failed re-observation can mask a later stale mark — watch consecutive `obs_capture_failed`. |
+| `context` | context / P2 | `middleware/images.py`, `middleware/taskdoc.py` | history screenshots pruned to the newest one; TaskDoc re-pinned every step. Peak image-message count should stay 1; `taskdoc_present` should be true every step. |
+| `visual` | visual / P0 | `tools/_obs.py`, `tools/actuation.py`, `middleware/images.py` | D2 visual reflow: tool returns should carry `[OBS text + image block]`. `tool_results_with_image == 0` means screenshots are not reflowing with tool returns and the model is operating blind. |
+| `model` | model / P1 | `model.py`, `agent.py` | gateway behind Cloudflare needs a browser-like UA; sampling caps are model-enforced. High latency → check prompt-prefix cache + image pruning. |
+
+## Where the diagnosis machinery itself lives
+
+| Concern | Files |
+|---|---|
+| Diagnostic evidence stream (opt-in middleware) | `phone_agent/v2/middleware/diagnostic.py` |
+| Shared redaction primitives (base64-drop + sensitive substrings) | `phone_agent/v2/middleware/_redact.py` (delegates to `phone_agent/config/redact.py`) |
+| P0 #6 production trace (64-char, base64-free) | `phone_agent/v2/middleware/trace.py` |
+| Config fields `diagnostic_evidence` / `diagnostic_evidence_dir` | `phone_agent/v2/config.py` |
+| Middleware wiring (diagnostic appended last, guarded) | `phone_agent/v2/agent.py` |
+| Run driver + preflight + subcommands | `scripts/run_diagnosis.py` |
+| Evidence read/index | `scripts/evidence.py` |
+| Taxonomy (result prefix → class) | `scripts/taxonomy.py` |
+| Analysis → summary.json dimensions | `scripts/analyze.py` |
+| Category → v2 source map | `scripts/sourcemap.py` |
+| HTML report | `scripts/report.py` |
+
+## Config surface (all `PHONE_AGENT_*`)
+
+Config resolves CLI > shell env > `.env` > `V2Config` default (`config.py`). Keys the
+diagnosis cares about: `BASE_URL`, `MODEL`, `API_KEY`, `DEVICE_ID`, `MAX_MODEL_CALLS`,
+`GROUNDING_PROVIDER`, `ACCESSIBILITY_TIMEOUT`, `ACCESSIBILITY_MAX_MARKS`,
+`LOCATEANYTHING_MODEL`, `LOCATEANYTHING_MAX_SIZE`, `LANG`, `TASKDOC`,
+`TASKDOC_NUDGE_STEPS`, `TRACE_DIR`, `TRACE`, and the diagnosis-only
+`DIAG_EVIDENCE` / `DIAG_EVIDENCE_DIR` (forced on by the skill; default OFF elsewhere).
+
+There is **no** v1 remote-grounding config (`PHONE_AGENT_REMOTE_GROUNDING_*`) in v2, and
+**no** grounding-sidecar / output-mode / context-mode / thinking knobs. If a `.env`
+still carries those keys, the preflight should treat them as stale noise.

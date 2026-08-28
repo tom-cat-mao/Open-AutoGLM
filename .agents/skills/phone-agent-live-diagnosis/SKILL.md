@@ -1,36 +1,73 @@
 ---
 name: phone-agent-live-diagnosis
 description: >-
-  Use when the user wants to run or monitor Open-AutoGLM PhoneAgent on a real Android
-  device, inspect actual execution effects, correlate trace results with source code,
-  generate code-level modification recommendations, or produce an interactive HTML
-  diagnosis report. Trigger on 实机测试, 监看, 实际效果, 手机任务, live diagnosis,
-  phone agent report, 源码归因, HTML 报告, real device run, trace analysis, or any
-  request to verify what the phone agent actually did on a device.
+  Use when the user wants to run or monitor the Open-AutoGLM thin-loop (v2) PhoneAgent
+  on a real Android device, inspect what the model actually did, correlate the run's
+  evidence stream with v2 source code, generate code-level modification recommendations,
+  or produce an interactive HTML diagnosis report. Trigger on 实机测试, 监看, 实际效果,
+  手机任务, live diagnosis, phone agent report, 源码归因, HTML 报告, real device run,
+  trace analysis, or any request to verify what the phone agent actually did on a device.
 when_to_use: |
-  Real Android device runs of PhoneAgent, post-run trace diagnosis linked to source
-  files, interactive HTML engineering reports, and natural-language test targets
+  Real Android device runs of the v2 thin-loop PhoneAgent, post-run diagnosis linked to
+  v2 source files, interactive HTML engineering reports, and natural-language test targets
   such as "打开设置并进入 Wi-Fi 页面". Do not use for pure unit tests, benchmark-only
   LocateAnything evaluation, or code edits without a diagnosis request.
 ---
 
-# Phone Agent Live Diagnosis
+# Phone Agent Live Diagnosis (thin-loop v2)
 
-Run Open-AutoGLM real-device tasks, collect trace evidence, map failures back to
-source code, and generate an interactive HTML report.
+Run an Open-AutoGLM thin-loop task, collect a diagnostic **evidence stream**, map what
+happened back to v2 source, and render an interactive HTML report.
 
-## Scope
+> This is the **v2 rewrite**. The v1 LangGraph node model (`goal`/`plan`/`execute`/
+> `reflect`/`acceptance` nodes, `evals/run_eval.py`, `PhoneAgent.run_live`) is gone.
+> v2 is a thin loop: one model call per step on LangChain `create_agent`; the harness
+> supplies tools + middleware and records traces, it does **not** route a workflow.
 
-Use this skill for:
+## Mental Model — diagnose a loop, not a graph
 
-- Real Android device execution monitoring for `PhoneAgent`.
-- One-off natural-language test targets such as "打开设置并进入 Wi-Fi 页面".
-- Post-run diagnosis that must explain actual behavior, source-code cause, and
-  modification suggestions.
-- Interactive HTML reports for engineering review.
+There are no nodes to attribute a finding to. Behavior lives in four places, and every
+diagnosis maps to one of them:
 
-Do not use this skill for pure unit-test review, benchmark-only LocateAnything
-evaluation, or code modification without a real or dry-run diagnosis request.
+| Owner | What it is | Where it lives |
+|---|---|---|
+| **Tools** | 15 tools return a **result string**; the leading text is a loose contract for what happened (`OK. `, `未定位:`, `路线仍有未完成项：`, …). Fail-closed: an error string, never a faked action. | `phone_agent/v2/tools/{actuation,perception,control,taskdoc,_obs}.py` |
+| **Finish gate** | `finish` is fail-closed: it requires non-empty evidence **and** an all-clear TaskDoc route. This is the only "is the task done?" authority. | `phone_agent/v2/tools/control.py::finish` |
+| **TaskDoc board** | Goal (`goal_base`, harness-seeded, model-immutable) + route items + facts, pinned into context every step (compression-immune). The model is the single writer via `update_task_doc`. | `phone_agent/v2/taskdoc.py`, `middleware/taskdoc.py` |
+| **Middleware** | Cross-cutting: safety HITL (dangerous action → interrupt), image pruning (keep newest image only), JSONL trace (P0 #6), model-call limit, and — opt-in — the diagnostic evidence stream. | `phone_agent/v2/middleware/*` |
+
+Marks-first grounding is the addressing contract: `tap` binds a mark (`target_mark_id`
+direct, or `target_description` resolved to a **unique** mark, fail-closed on
+ambiguity/no-match). Raw coordinates are only a `swipe` fallback. 0-1000 → pixel
+conversion happens only inside tools; the model never sees absolute pixels.
+
+## How diagnosis works — the evidence stream
+
+The skill turns on an **opt-in** middleware, `DiagnosticEvidenceMiddleware`
+(`phone_agent/v2/middleware/diagnostic.py`), that is **default-OFF and zero-cost** in
+production. It is mounted last, so its `before_model` sees the *final* context the model
+will receive (after image pruning + TaskDoc injection) and its `wrap_tool_call` captures
+the *raw* tool return. It writes one JSON object per line to `<run_id>.evidence.jsonl`:
+
+| event | meaning |
+|---|---|
+| `run_start` | run id, redacted goal, config digest |
+| `model_request` | per step: message/image counts, pruned-screen count, taskdoc presence, context chars |
+| `taskdoc_snapshot` | the task board whenever it changes (goal/route/facts) |
+| `tool_invoke` / `tool_observation` | each tool call: redacted args in, then latency + full-text (bounded) result, parsed `[OBS]` block, and an `image{present,screen_seq,bytes}` summary |
+| `hitl_decision` | human approve/reject/respond at an interrupt (written by the driver) |
+| `stagnation_nudge` | the one-shot "you look stuck" nudge fired |
+| `run_end` | terminal state (finished / takeover_reason / finish_summary) |
+
+It shares the exact redaction primitives with the production trace
+(`phone_agent/v2/middleware/_redact.py`): **sensitive substrings redacted, screenshot
+base64 never written.** The only difference from the P0 trace is that diagnostic keeps
+full text (bounded at `DIAG_MAX_TEXT=4000`) instead of truncating to 64 chars — the
+report is "full picture but bounded", never "raw".
+
+`scripts/analyze.py` classifies each recorded result string against the taxonomy
+(`scripts/taxonomy.py`) **at analysis time** — the middleware records raw text only, so
+the production tools never depend on a classifier.
 
 ## Default Command
 
@@ -40,399 +77,182 @@ From the repository root:
 .venv/bin/python .agents/skills/phone-agent-live-diagnosis/scripts/run_diagnosis.py "测试目标"
 ```
 
-Dry run (no model, no device):
+Offline pipeline check (no model, no device — fastest smoke test of the whole pipeline):
 
 ```bash
 .venv/bin/python .agents/skills/phone-agent-live-diagnosis/scripts/run_diagnosis.py "完成一个本地 smoke 任务" --dry-run
 ```
 
-Interactive HITL resume (confirm/takeover pauses for human input, then the agent
-resumes in place via the checkpointer-backed `run_live` path):
+Re-derive a summary or re-render a report from existing artifacts (no re-run):
 
 ```bash
-.venv/bin/python .agents/skills/phone-agent-live-diagnosis/scripts/run_diagnosis.py "登录后支付" --live
+# re-analyze an evidence stream (accepts the run dir or the .evidence.jsonl path)
+.venv/bin/python .agents/skills/phone-agent-live-diagnosis/scripts/run_diagnosis.py analyze outputs/live-diagnosis/<run_id>
+# re-render HTML from a summary.json (accepts the run dir or the summary.json path)
+.venv/bin/python .agents/skills/phone-agent-live-diagnosis/scripts/run_diagnosis.py report  outputs/live-diagnosis/<run_id>
+# print a run's status.json
+.venv/bin/python .agents/skills/phone-agent-live-diagnosis/scripts/run_diagnosis.py status  outputs/live-diagnosis/<run_id>
 ```
+
+Interactive HITL is native in v2: a dangerous action pauses for human input via the
+checkpointer-backed `agent.run(hitl_handler=…)` path — a plain `run` **is** interactive,
+so there is no separate `--live` flag. The skill wraps `input()` so each human decision
+is appended to the evidence stream as a `hitl_decision` event.
 
 Inspect a long-running job:
 
 ```bash
-.venv/bin/python .agents/skills/phone-agent-live-diagnosis/scripts/run_diagnosis.py --status outputs/live-diagnosis/<run_id>
-tail -f outputs/live-diagnosis/<run_id>/run_output.log
+.venv/bin/python .agents/skills/phone-agent-live-diagnosis/scripts/run_diagnosis.py status outputs/live-diagnosis/<run_id>
+tail -f outputs/live-diagnosis/<run_id>/*.evidence.jsonl
 tail -f outputs/live-diagnosis/<run_id>/traces/*.jsonl
 ```
 
 > This `.agents/skills/...` directory is the canonical copy; `.claude/skills/phone-agent-live-diagnosis`
 > is a symlink to it.
 
-## ZCode Permission & Escalation
+## Permission & Escalation
 
 This skill runs real-device and local-model diagnostics, so some commands need host
-access that ZCode's default Bash sandbox may deny. ZCode does **not** use TraeCLI's
-`sandbox_permissions="require_escalated"` / `prefix_rule` mechanism — those concepts
-are gone. Instead:
-
-When a diagnosis command fails with sandbox-shaped errors such as `Operation not
-permitted`, permission denied while writing outside the workspace, unavailable
-GPU/Metal, blocked device access, DNS/registry/network failures, or inability to
-read user-level config, rerun the same command through the Bash tool with
-`dangerouslyDisableSandbox: true` and include a short user-facing justification in
-the description field. Example:
-
-```text
-command: .venv/bin/python .agents/skills/phone-agent-live-diagnosis/scripts/run_diagnosis.py "打开设置" --grounding-provider hybrid
-description: "ADML device access + hybrid grounding need host ADB/Metal; sandbox reports Operation not permitted"
-dangerouslyDisableSandbox: true
-```
-
-Do not silently retry in-sandbox — that will reproduce the same failure. Do not relax
-the sandbox for destructive commands (`rm`, `git reset --hard`, `git push --force`,
-etc.). Use a narrow approach: only the specific diagnosis command needs the
-elevated rerun.
+access the default Bash sandbox may deny (ADB, Metal/MLX, network). When a command fails
+with sandbox-shaped errors — `Operation not permitted`, permission denied writing outside
+the workspace, `No Metal device available`, blocked device access, DNS/registry failures
+— rerun that **specific** command through the Bash tool with `dangerouslyDisableSandbox:
+true` and a short user-facing justification. Do not silently retry in-sandbox (it
+reproduces the same failure), and never relax the sandbox for destructive commands
+(`rm`, `git reset --hard`, `git push --force`).
 
 Commands that typically need escalation:
 
 - `--grounding-provider hybrid|locateanything|locateanything_mlx|mlx` → needs real
   LocateAnything / MLX / Metal.
 - Any run with `--device-id` → needs host ADB server access.
-- Runs that write status/trace artifacts under `outputs/` inside the repo usually
-  succeed in-sandbox; only escalate when an actual `Operation not permitted` /
-  device-access failure appears.
+- `--dry-run` does **not** need escalation; it runs with no model or device.
 
-`--dry-run` does **not** need escalation; it runs without a model or device and is
-the fastest way to verify the report pipeline.
-
-## Useful Options
+## CLI Flags
 
 ```bash
+--dry-run                    # offline pipeline check (scripted model + fake session)
 --device-id <adb-id>
---max-steps 10
+--max-steps 20               # model-call budget (V2Config.max_model_calls)
 --base-url http://localhost:8000/v1
 --model autoglm-phone-9b
 --apikey EMPTY
---output-mode json_schema            # or tool_calls | auto
---context-mode inject               # off | observe | inject
---grounding-provider hybrid         # off|fake|locateanything|locateanything_mlx|mlx|accessibility|accessibility_tree|uiautomator|hybrid|accessibility_locateanything|uiautomator_locateanything
---accessibility-timeout 3
---accessibility-max-marks 80
---locateanything-context-max-chars 0
---locateanything-structure-mode off # off | target | screen
---locateanything-max-visual-candidates 20
---locateanything-visual-category-budget 8
---locateanything-max-structure-calls 3
+--model-timeout 180 / --model-max-retries 2
+--grounding-provider hybrid  # off|fake|accessibility|accessibility_tree|uiautomator|
+                             # locateanything|locateanything_mlx|mlx|hybrid|
+                             # accessibility_locateanything|uiautomator_locateanything
+--accessibility-timeout 3 / --accessibility-max-marks 80
+--locateanything-model <id> / --locateanything-max-size 960
+--lang cn|en
+--no-taskdoc                 # disable the TaskDoc board (PHONE_AGENT_TASKDOC=false)
+--nudge-steps 5              # stagnation nudge threshold
+--reset-app <package>        # adb pm clear before the run
 --output-dir outputs/live-diagnosis
---trace-raw-model-response          # debug: dump raw model reply text
---trace-request-messages            # debug: dump final request messages
---trace-prompt-blocks               # debug: dump prompt construction blocks
---trace-unredacted-prompt           # DANGEROUS: skip privacy redaction in trace
+--quiet
 ```
+
+The diagnostic evidence stream is forced on for every `run`/`--dry-run` (it writes into
+the run dir); you do not pass a flag for it. There is no v1 grounding-sidecar knob
+(`--locateanything-structure-mode`, …), no `--output-mode`/`--context-mode`/`--thinking-*`,
+and no `--trace-*` debug flag — the diagnostic stream safely supersedes those.
 
 ## Configuration Precedence
 
-`run_diagnosis.py` calls `load_project_env()` before `parse_args()`, so the
-resolution order is:
+`run_diagnosis.py` calls `load_project_env()` before parsing args, so resolution is:
 
-1. Explicit CLI flag.
-2. Shell environment (`PHONE_AGENT_*` already exported — never overwritten).
-3. Project `.env` at the repo root (only keys prefixed `PHONE_AGENT_`, quotes
-   stripped, `export ` prefix tolerated).
-4. The hardcoded argparse default.
+1. explicit CLI flag → 2. shell env (`PHONE_AGENT_*`, never overwritten) →
+3. project `.env` at repo root (keys prefixed `PHONE_AGENT_`) → 4. the `V2Config` default.
 
-So a bare `run_diagnosis.py "目标"` already picks up `.env` values for base URL,
-model, API key, device ID, grounding provider, and the trace debug flags. Verify
-what was actually resolved in `preflight.json` (`device_id`, `grounding_provider`,
-`output_mode`) and in `summary.json` → `command` (API key redacted) rather than
-assuming. Only pass flags you intend to override.
+A bare `run_diagnosis.py "目标"` already picks up `.env` values for base URL, model, key,
+device, and grounding provider. Verify what was actually resolved in `preflight.json` and
+in `summary.json → command` (API key redacted) rather than assuming — pass only flags you
+intend to override.
 
-Two `.env` conditions to call out in the report rather than silently inherit:
-
-- `PHONE_AGENT_TRACE_UNREDACTED_PROMPT=true` — records unredacted prompt text.
-  Surfaces in `summary.json` → `dangerous_debug` and as a red banner in the HTML.
-- `PHONE_AGENT_REMOTE_GROUNDING_*` — dead config (provider reverted in `e0a2e4b`).
-  If a real API key is still sitting in these keys, flag it as a stale secret worth
-  rotating; it has no effect on the run.
-
-## Workflow
-
-1. Confirm the user provided a concrete test target. If not, ask.
-2. Run `scripts/run_diagnosis.py` with the target and any user-provided options.
-3. Read the generated `summary.json` and `report.html` path.
-4. Report the result briefly in Chinese, including:
-   - verdict: success / failed / blocked / uncertain
-   - report path
-   - trace id/path if present
-   - top source-code findings
-
-During long real-device runs, inspect live progress instead of guessing:
-
-```bash
-.venv/bin/python .agents/skills/phone-agent-live-diagnosis/scripts/run_diagnosis.py --status outputs/live-diagnosis/<run_id>
-tail -f outputs/live-diagnosis/<run_id>/run_output.log
-tail -f outputs/live-diagnosis/<run_id>/traces/*.jsonl
-```
-
-## Evidence Contract
-
-The script creates a run folder:
+## Evidence Contract — the run folder
 
 ```text
 outputs/live-diagnosis/<run_id>/
-  task.json
-  preflight.json
-  result.json
-  run_output.log
-  run_error.log
-  status.json
-  trace.jsonl
-  trace_summary.json
-  code_findings.json
-  recommendations.json
-  summary.json
-  report.html
+  preflight.json            # python/.venv, adb + wm size, MLX-Metal (hybrid/LA), config digest
+  <run_id>.evidence.jsonl   # the raw diagnostic stream (middleware output)
+  evidence.jsonl            # stable-named copy of the stream
+  summary.json              # analyzed dimensions (below)
+  report.html               # primary deliverable
+  status.json               # completed|failed|error + verdict + paths
+  traces/<run_id>.jsonl     # the P0 #6 production trace (64-char, base64-free)
 ```
 
-The HTML report is the primary deliverable. It must connect:
+`summary.json` top level: `run_id, created_at, target(redacted goal), verdict
+(success|failed|takeover|max_steps|uncertain), run_dir, command(redacted), duration_sec,
+steps, evidence_stream, trace, artifacts{}`, then these dimension blocks:
 
-- real execution results
-- trace events
-- `error_layer` / `error_code` / `failure_cause`
-- relevant source files and symbols
-- concrete modification suggestions
+- `terminal` — finished / finish_summary / takeover_reason / reason / returncode
+- `finish_gate` — attempted / accepted / blocked_by_open_items / open_items_at_finish / rejections[]
+- `taskdoc_final` — goal_base / amendments / items / facts / counts / open_item_count / terminal_state
+- `stagnation` — nudged / nudge_step / max_seen_states / stagnant_streak_peak
+- `context` — peak_message_count / peak_image_messages / pruned_screen_total / taskdoc_pinned_every_step / avg_context_chars
+- `hitl` — interrupts / decisions[] / approvals / rejections / responds / ask_user_count / take_over_count
+- `tool_health` — total_calls / total_errors / error_rate / by_tool{calls,ok,error,error_classes,avg/p95 latency}
+- `grounding` — mark_addressing / resolve_failures / locate / launch
+- `visual` — tool_results_with_image / total_image_bytes / first_image_step / last_image_step
+- `model` — calls / latency (latency comes from the trace, not this stream)
+- `findings[]` / `recommendations[]` — category → v2 source file, with `path:line` anchors
 
-## Graph Shape
-
-The graph is `START → goal → plan → execute → [confirm|takeover|acceptance|reflect|replan|end]`,
-with `acceptance → after_acceptance → [takeover|replan→goal|end]`.
-
-**Three** questions are answered by three different owners, at three time scales.
-Attributing a finding to the wrong one is the most common diagnosis error here:
-
-- `reflect` — "did this action work?" — runs every step. **Forbidden from judging
-  task progress or human takeover** (P0 #13).
-- `acceptance` — "is the whole task done?" — runs **only** on a finish claim, and
-  is the sole finish gate. Authority is ordered: hard veto > hard confirm >
-  semantic judgement, fail-closed throughout (P0 #13a).
-- `trajectory_liveness` — "is the trajectory advancing, exploring, or stuck?" —
-  a pure function over bounded history in `graph/context.py`, **not a node** and
-  not a counter (P0 #13b). It is the sole input to stuck-based routing and never
-  reads a single-step verdict.
-
-`nodes/observation_capture.py` is shared post-action observation capture, so
-reflect and acceptance cannot disagree about "the screen right now". When the two
-seem to contradict each other, look there first.
-
-Do not attribute finish-gate failures to `nodes/reflect.py` — that split landed in
-commit `46f5bd6`. Likewise do not attribute a stuck/looping trajectory or an
-unexpected takeover to reflect: it no longer owns either. Reflect held a single
-`retry_count` accumulator that never reset on success, so a normally-progressing
-task could be handed to a human; that ownership moved out in this cycle.
-
-## Source Mapping
-
-When diagnosis points to a layer, inspect the corresponding files. The reflection
-row now expands the old `task_goal.py` target into the declarative GoalContract
-system (see P0 constraint #13a in `AGENTS.md`).
-
-| Layer | Primary Files |
-|---|---|
-| screenshot | `phone_agent/adb/screenshot.py`, `phone_agent/graph/screenshot_status.py` |
-| parse/adapter | `phone_agent/model/client.py`, `phone_agent/actions/adapter.py` |
-| validation | `phone_agent/actions/validator.py`, `phone_agent/actions/repair.py` |
-| grounding | `phone_agent/actions/grounding.py`, `phone_agent/grounding/`, `phone_agent/graph/observation.py`, `phone_agent/graph/marks.py` |
-| safety/HITL | `phone_agent/actions/safety.py`, `phone_agent/config/policy.py`, `phone_agent/graph/edges.py`, `phone_agent/graph/nodes/confirm.py`, `phone_agent/graph/nodes/takeover.py` |
-| capability | `phone_agent/actions/capability.py`, `phone_agent/actions/receipt.py`, `phone_agent/graph/nodes/execute.py` |
-| execution | `phone_agent/graph/nodes/execute.py`, `phone_agent/graph/tools/`, `phone_agent/adb/device.py`, `phone_agent/adb/input.py` |
-| goal contract | `phone_agent/graph/nodes/goal_node.py`, `phone_agent/graph/goal_requirements.py`, `phone_agent/graph/goal_compiler.py`, `phone_agent/graph/goal.py`, `phone_agent/graph/predicates.py`, `phone_agent/graph/fact_providers.py`, `phone_agent/graph/goal_binding.py` |
-| reflection (per-step) | `phone_agent/graph/nodes/reflect.py`, `phone_agent/graph/nodes/observation_capture.py`, `phone_agent/graph/verifier.py`, `phone_agent/graph/expected_outcome.py` |
-| acceptance / finish gate | `phone_agent/graph/nodes/acceptance.py`, `phone_agent/graph/goal_evaluator.py`, `phone_agent/graph/goal.py`, `phone_agent/graph/verifier.py`, `phone_agent/graph/fact_providers.py`, `phone_agent/graph/predicates.py`, `phone_agent/graph/goal_evidence.py`, `phone_agent/graph/nodes/observation_capture.py`, `phone_agent/graph/compatibility_adapters.py` |
-| trajectory liveness (P0 #13b) | `phone_agent/graph/context.py` (`trajectory_liveness`), `phone_agent/graph/edges.py`, `phone_agent/config/policy.py` |
-| checkpoint / goal resume | `phone_agent/checkpoint/goal_resume.py`, `phone_agent/checkpoint/serde.py` |
-| context | `phone_agent/graph/context.py`, `phone_agent/graph/nodes/plan.py` |
-| eval/trace | `evals/run_eval.py`, `phone_agent/graph/trace.py`, `phone_agent/agent.py` |
-
-Acceptance / finish-gate signals to surface in the report (all from the
-`acceptance` node, not reflect):
-
-- `goal_not_satisfied` — finish claim rejected by `GoalEvaluator`; replan.
-- `acceptance_no_contract` — verification attempted with no compiled contract.
-  Fail-closed rejection, so the root cause is in the **goal** layer, not here.
-- `acceptance_hard_veto` — programmatic signals contradicted the finish claim
-  outright; trust the programmatic side.
-- `pure_evaluation_degraded` — a criterion was unobservable, so the kept verdict
-  differs from the pure evaluation; report both statuses.
-- `matched_terminal_evidence` — criteria the model named as satisfied.
-- `missing_terminal_evidence` — required criteria the model failed to name
-  (hard gate; never auto-upgrade to success).
-- `needs_recompile` — mid-task contract swap requested (has no writer today; only
-  via `configurable["task_goal_contract_override"]`).
-- `soft_match_accepted` — finish relied on the detail-only soft match (evidence
-  relaxation without content confirmation); verify the opened page manually.
-- `programmatic_contradiction_override` — programmatic signals overrode a
-  `vlm_judge` self-attestation; trust the programmatic side.
-- `typed_fact_not_yet_collected` — if a criterion stays here, the predicate and
-  the fact provider disagree; check `value_domain` alignment (see below).
-- `verifier_status` / `verifier_evidence.matched_postconditions` /
-  `verifier_evidence.missing_postconditions` / `weak_signals` /
-  `dynamic_change_only` / `fallback_chain` when present.
-
-Evidence-resolution signals (per criterion, from `EvidenceAuthorityPolicy`):
-
-- `existential_match` — one authoritative fact matched. For an existential
-  predicate (per-node accessibility facts) a single hit among many non-matching
-  nodes is a match; siblings that do not match contribute no evidence.
-- `not_observed_in_view` — every authoritative fact was searched and none
-  matched. **This is `unknown`, not a contradiction.** "Not found in the current
-  viewport, this instant, via the accessibility channel" also covers offscreen
-  content needing a scroll, text rendered inside an image, and truncated labels.
-  Report it as "not observed yet", never as failure.
-- `existential_inconclusive` — a fact had a type/value problem, so the search
-  itself was unreliable.
-- `same_tier_conflict` — retained for `screen_singular` / `element_scoped`
-  predicates only: same-tier facts disagree about one screen-wide or
-  element-scoped value.
-
-Only a **positive counter-observation** contradicts: a device/summary source that
-read the target and reported a different value (e.g. expected foreground app `A`,
-observed `B`; expected toggle ON, observed OFF). A failed substring search is not
-one, and before commit `3892614` it could hard-veto a genuinely completed task.
-
-Known limitation — `element_scoped` predicates (`ui.toggle_state`,
-`ui.object_rank`) resolve `unknown` on any multi-element screen because evidence
-is not yet scoped to a selected element. Fail-closed and harmless, but those
-criteria do not currently verify; do not report their `unknown` as a defect.
-
-Trajectory liveness signals (`graph/context.py::trajectory_liveness`, P0 #13b):
-
-- `advancing` — a goal criterion moved toward satisfaction.
-- `exploring` — no criterion movement, but a state not visited before was
-  reached. **Legitimate search lives here and must not be reported as failure.**
-- `stuck` — neither, for `novelty_exhaustion_steps` consecutive steps. Oscillation
-  (Back/forward loops) lands here correctly: the surface changes every step but no
-  new state is added.
-- `novelty_streak` / `reasons` — surface these; a rising streak with `exploring`
-  is normal, a rising streak toward `stuck` is the loop signal.
-
-Progress is **goal-relative**: only criterion movement and reaching a new state
-count. Surface change, screen-hash change, new marks and `typed_text_present` are
-NOT progress — they oscillate. Do not read them as advancement in the report.
-
-Split counters (one meaning each; they used to share `retry_count`):
-
-- `observation_retry_count` — consecutive screenshot/observation infrastructure
-  failures. At its limit this routes takeover, because it is unrecoverable.
-- `acceptance_round_count` — finish claims rejected by the gate, i.e. replan
-  rounds. Not an error count.
-- `max_steps` exhaustion is an **incomplete report, never a takeover**: the
-  window ended and the budget-forced acceptance either rejected the claim
-  (→ `goal_not_satisfied`), granted a continuation (trace
-  `continuation_granted`; `max_steps` grew, `budget_acceptance_done` reset), or
-  hit the run's absolute ceiling (`finish_source=absolute_budget_exhausted`).
-  Takeover means only a human can do this (login / captcha / payment /
-  structural infeasibility).
-
-Contract adequacy signals (compile-time, from the `goal_compile_result` trace
-event — **not** present in `result.json`):
-
-- `predicate_unobservable` — no fact provider can ever emit this predicate; also
-  emitted when a `raw_text` expectation cannot be node text (prose, terminal
-  punctuation, screen meta-language, over-long bindings).
-- `binding_never_observed` — a `raw_text` expectation has not appeared in any
-  observation since the target app was entered, so it is probably a compiler
-  artefact. Severity is `degraded` and diagnostic only: it must never hard-veto,
-  because the literal may legitimately require scrolling.
-- `predicate_domain_mismatch` — the predicate's declared `value_domain`
-  (`raw_text`/`digest`/`identifier`/`scalar`/`structured`) does not match what the
-  provider actually produces. Historically the compiler emitted a sha256 digest
-  while the evaluator compared raw screen text, making the criterion structurally
-  unsatisfiable with a green test suite (fixed in `6b133b4`).
-- `task_binding_mismatch` / `required_criteria_missing` — the other two
-  `STRUCTURAL_REASON_CODES` in `graph/goal_requirements.py`.
-
-Structural rejections mean the contract could never be satisfied. Fix the
-predicate binding or the fact provider; never widen the gate to get past them.
-Severity is three-tier: structural → `inadequate` (takeover), semantic →
-`degraded` (keep working, weaker verification), ambiguous → `needs_clarification`.
-
-Other signals from the 9-phase rebuild (commit `7dc6946`):
-
-- `capability_missing` / `capability_unavailable` — capability gate rejected
-  dispatch; check `actions/capability.py` registry coverage before anything else.
-- `unsupported_semantics` / `needs_goal_clarification` — goal contract adequacy
-  rejection; a common root cause is a task verb missing from
-  `TaskRequirementExtractor._OPERATIONS` in `graph/goal_requirements.py`.
-- `goal_resume_*` — HMAC-bound goal resume failures; check
-  `checkpoint/goal_resume.py` key consistency and serde egress collapsing.
+`verdict` order: `takeover_reason` → takeover; `finished` → success; `max_model_calls` →
+max_steps; any tool error / rejected finish → failed; else uncertain.
 
 ## Report Design
 
-Reports must be interactive HTML, not only Markdown. Use a data-dense dashboard
-style:
+Interactive HTML dashboard (primary blue `#1E40AF`, amber `#F59E0B`, Fira Code):
 
-- Primary blue `#1E40AF`, amber accent `#F59E0B`.
-- Fira Code for IDs, paths, timestamps, and code symbols.
-- Tabs: Overview, Timeline, Source Analysis, Recommendations, Raw Evidence.
-- Filters for step, event, layer, severity, and source file.
-- Overview must carry **three** separate verification cards, one per owner, so a
-  finding is never attributed to the wrong layer:
-  1. per-step postcondition verification (reflect),
-  2. the finish gate (acceptance), including `per_criterion` status/reason per
-     criterion and the contract adequacy status/`reason_codes`,
-  3. trajectory liveness — state (`advancing`/`exploring`/`stuck`), `reasons`,
-     `novelty_streak`, plus `observation_retry_count` and
-     `acceptance_round_count` shown as the distinct counters they now are.
-  A finish-gate status string alone is not enough — the reason is what points at
-  the source file. Render `unknown` neutrally (not red): it means "not observed",
-  and only a positive counter-observation is a contradiction.
-- Include `<base target="_blank">`.
-- Apply `word-break: break-all` and `overflow-wrap: break-word` to long paths/URLs.
-- Never include raw screenshot base64, API keys, verification codes, or unredacted
-  private text.
+- Tabs: 终局与首页 / 运行维度 / 决策时间线 / 源码归因 / 修改建议 / 原始证据.
+- The **overview** leads with three first-page blocks:
+  1. **终局裁定** — verdict + terminal + finish-gate outcome (with the open-items banner
+     when `finish` was blocked);
+  2. **TaskDoc 板** — the terminal task board (goal / route items with status / facts);
+  3. **80/20 三件事** — the top recommendations, each with target files + a verify step.
+- `<base target="_blank">`; `word-break: break-all` on long paths; data embedded as a
+  `</`-safe JSON island.
+- **Never** render screenshot base64, API keys, verification codes, or unredacted private
+  text (the stream is already redacted; the report adds nothing back).
+
+## Workflow
+
+1. Confirm the user gave a concrete test target. If not, ask.
+2. Run `scripts/run_diagnosis.py` with the target and any user-provided flags.
+3. Read `summary.json` and the `report.html` path.
+4. Report briefly in Chinese: verdict, report path, trace path, and the top source-code
+   findings. Explain *what actually happened* — never stop at "success=false".
 
 ## Gotchas
 
-- Do not treat `success=false` as enough. Explain what actually happened.
-- Do not call a long run "stuck" until checking `status.json`, latest trace event,
-  and `run_output.log`.
-- Do not propose modifications without linking them to trace evidence and source
-  files.
-- Do not blame `nodes/reflect.py` for a finish-gate rejection. Check the
-  `acceptance` node's own events first (`acceptance_result`,
-  `acceptance_hard_veto`, `acceptance_no_contract`).
-- Do not read a green offline suite as proof a criterion is satisfiable. A
-  value-domain mismatch can make a criterion unsatisfiable at runtime while every
-  test passes; the compile-time adequacy `reason_codes` are the check for that.
-- **Absence of evidence is not contradiction.** Never report `unknown` /
-  `not_observed_in_view` as failure. GUI observation is partially observable: the
-  target may be offscreen, inside an image, or truncated. Only a positive
-  counter-observation contradicts.
-- Do not report `exploring` as a problem. A search-and-browse task must try
-  candidates that do not pan out; that is the intended state, not a defect. Only
-  `stuck` (no new state and no criterion movement) is a loop.
-- Do not report `max_steps` exhaustion as a takeover, and do not report a takeover
-  as "the agent gave up". Takeover means only a human can proceed. A window
-  exhaustion that earned a continuation is progress, not a defect — check the
-  `continuation_granted` / `continuation_denied` traces before attributing.
-- `--dry-run` never enters the graph (`by_node` is just `eval`), so it validates
-  the report pipeline only — never finish-gate or grounding behavior.
-- Do not auto-edit business code from this skill unless the user separately asks
-  for a fix.
-- Prefer `.venv/bin/python`; fall back only if `.venv` is unavailable.
-- Real LocateAnything needs Apple Silicon + Metal. In ZCode's sandbox, MLX may
-  import but fail at runtime with `[metal::load_device] No Metal device available`;
-  when `--grounding-provider hybrid|locateanything` needs real LocateAnything,
-  request an escalated (sandbox-disabled) Bash rerun and record the MLX preflight
-  result instead of calling it a model failure.
-- Reports must surface `ExpectedOutcome`, `verifier_status`,
-  `verifier_evidence.matched_postconditions`,
-  `verifier_evidence.missing_postconditions`, `weak_signals`,
-  `dynamic_change_only`, and provider `fallback_chain` when present.
-- `PHONE_AGENT_REMOTE_GROUNDING_*` env variables no longer have any effect — the
-  remote OpenAI-compatible grounding provider was reverted (commit `e0a2e4b`).
-  Do not rely on `PHONE_AGENT_REMOTE_GROUNDING_BASE_URL` /
-  `PHONE_AGENT_REMOTE_GROUNDING_API_KEY` /
-  `PHONE_AGENT_REMOTE_GROUNDING_MODEL` /
-  `PHONE_AGENT_REMOTE_GROUNDING_PROFILE` /
-  `PHONE_AGENT_REMOTE_GROUNDING_REASONING_EFFORT`. They are stale entries in some
-  `.env` files and will be ignored by the current grounding factory.
-- `PHONE_AGENT_TRACE_UNREDACTED_PROMPT=true` is a *dangerous* local debug mode
-  that records unredacted prompt text. When it is on, the report must flag it
-  loudly and must still strip image payloads from prompt debug traces.
+- **Don't diagnose against v1.** There is no `reflect`/`acceptance` node, no
+  `GoalContract`, no `evals/run_eval.py`. If a finding wants to name a node, it is wrong —
+  map it to a tool, the finish gate, the TaskDoc board, or a middleware (see the table).
+- **`--dry-run` validates the pipeline only.** It injects a scripted model + fake session
+  and runs the real middleware stack, so it proves the evidence → summary → report path is
+  intact. It does **not** exercise real grounding or finish semantics; the report says so.
+- **视觉回流 (visual reflow).** Tool returns are moving to `[OBS 文本 + 截图 image 块]`.
+  The diagnostic stream splits that: text → `result_text`, image → `{present,screen_seq,
+  bytes}` (never base64). If `visual.tool_results_with_image == 0` on a real run, the model
+  is operating blind on a text-only marks summary — the report flags it red. Check
+  `_obs.py` / `actuation.py` for whether the image block is being reflowed.
+- **Absence of evidence is not failure.** A `未定位:` / `not observed` result means the
+  target was not found *this instant via this channel* — it may be offscreen or need a
+  scroll. Only a positive counter-observation (read the target, saw a different value) is a
+  contradiction.
+- **`stagnation` is goal-relative.** A rising `stagnant_streak_peak` with the nudge unfired
+  is normal exploration; the nudge firing is the real "stuck" signal.
+- **Real LocateAnything needs Apple Silicon + Metal.** MLX may import but fail at runtime
+  with `No Metal device available`; when `--grounding-provider hybrid|locateanything` needs
+  it, request an escalated rerun and record the MLX preflight rather than calling it a model
+  failure.
+- **Don't auto-edit business code** from this skill unless the user separately asks for a fix.
+- **Prefer `.venv/bin/python`**; the worktree may not have its own `.venv` — fall back to
+  the main-repo interpreter.
+
+## References
+
+- `references/source-map.md` — the v2 category → source-file map (the report renders this
+  as clickable `path:line` anchors via `scripts/sourcemap.py::V2_SOURCE_RULES`).
+- `scripts/taxonomy.py` — the canonical result-prefix → class → category table (§2), with a
+  contract test that fails if a tool silently rewords its return string.

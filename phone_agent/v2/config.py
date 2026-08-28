@@ -159,6 +159,11 @@ class V2Config:
     # taskdoc (task board increment)
     taskdoc_enabled: bool = True
     taskdoc_nudge_steps: int = 5
+    # diagnostic evidence stream (opt-in; default OFF, zero-cost when off).
+    # Enabled by the live-diagnosis skill to emit full-text (bounded) run
+    # evidence to ``<diagnostic_evidence_dir>/<run_id>.evidence.jsonl``.
+    diagnostic_evidence: bool = False
+    diagnostic_evidence_dir: str = "outputs/live-diagnosis/.evidence"
     # sampling params (temperature/top_p/frequency_penalty) forwarded to the model
     sampling: dict[str, float] | None = None
     # request headers extras
@@ -207,6 +212,10 @@ class V2Config:
             trace_enabled=_env_bool("PHONE_AGENT_TRACE", True),
             taskdoc_enabled=_env_bool_default_true("PHONE_AGENT_TASKDOC", True),
             taskdoc_nudge_steps=_env_int("PHONE_AGENT_TASKDOC_NUDGE_STEPS", 5),
+            diagnostic_evidence=_env_bool("PHONE_AGENT_DIAG_EVIDENCE", False),
+            diagnostic_evidence_dir=_env_str(
+                "PHONE_AGENT_DIAG_EVIDENCE_DIR", "outputs/live-diagnosis/.evidence"
+            ),
             sampling=sampling or None,
             user_agent=_env_opt_str("PHONE_AGENT_USER_AGENT"),
             http_headers=http_headers or None,

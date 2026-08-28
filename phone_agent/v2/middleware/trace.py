@@ -22,51 +22,31 @@ import time
 from typing import Any
 
 from langchain.agents.middleware import AgentMiddleware
-from phone_agent.config.redact import redact_context_text
+
+from phone_agent.v2.middleware._redact import (
+    redact_text as _redact_context_text,
+    redact_value_no_base64,
+)
 
 _MAX_TEXT_CHARS = 64
 
 
 def _redact_text(value: str) -> str:
-    redacted = redact_context_text(value)
+    """P0 #6 trace policy: sensitive-redact, then cap at 64 chars (``…`` suffix)."""
+    redacted = _redact_context_text(value)
     if len(redacted) > _MAX_TEXT_CHARS:
         return redacted[:_MAX_TEXT_CHARS] + "…"
     return redacted
 
 
 def _redact_value(value: Any) -> Any:
-    """Recursively redact a JSON-able value; drop image base64 payloads."""
-    if isinstance(value, str):
-        return _redact_text(value)
-    if isinstance(value, dict):
-        btype = value.get("type")
-        if btype in {"image_url", "image"} or "image_url" in value:
-            payload = value.get("image_url")
-            url = ""
-            if isinstance(payload, dict):
-                url = str(payload.get("url", ""))
-            elif isinstance(payload, str):
-                url = payload
-            return {
-                "type": "image",
-                "screen_seq": value.get("screen_seq"),
-                "bytes": _estimate_image_bytes(url),
-            }
-        return {str(k): _redact_value(v) for k, v in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_redact_value(item) for item in value]
-    return value
+    """Recursively redact a JSON-able value; drop image base64 payloads.
 
-
-def _estimate_image_bytes(url: str) -> int:
-    """Estimate raw byte length of a data: URL without logging its content."""
-    if not url:
-        return 0
-    marker = "base64,"
-    idx = url.find(marker)
-    b64 = url[idx + len(marker) :] if idx != -1 else url
-    # base64 encodes 3 bytes per 4 chars.
-    return (len(b64) * 3) // 4
+    Delegates the recursion + base64-drop to the shared
+    :func:`phone_agent.v2.middleware._redact.redact_value_no_base64`, applying
+    the trace-specific 64-char truncation via ``_redact_text``.
+    """
+    return redact_value_no_base64(value, _redact_text)
 
 
 def redact_args(args: Any) -> Any:
