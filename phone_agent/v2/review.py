@@ -159,6 +159,13 @@ def build_review_package(session: Any, config: Any) -> str:
         obs_error = exc
 
     doubts = finish_doubts(session, obs, obs_error)
+    # Persist the hard-contradiction list so the finish verifier trigger (S2
+    # §4.1.2) can see "hard contradiction + model still confirms". Best-effort:
+    # a session double without a settable attribute must not break the packet.
+    try:
+        session.finish_hard_doubts = list(doubts["hard"])
+    except Exception:  # noqa: BLE001 - best-effort state write
+        pass
     lines: list[str] = [
         "[FINISH 复核包] 已完成前请先核对下列世界事实；确认无误后再调用 "
         "finish(confirm=true, summary=..., evidence=[...]) 定稿。",

@@ -95,7 +95,7 @@ class ThinPhoneAgent:
         )
 
         middleware = [
-            build_hitl_middleware(self.session),
+            build_hitl_middleware(self.session, config),
             build_context_pruning_middleware(
                 keep_images=getattr(config, "image_keep", 2),
                 keep_marks=getattr(config, "obs_marks_keep", 2),
