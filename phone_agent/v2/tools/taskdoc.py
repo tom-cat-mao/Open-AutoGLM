@@ -43,6 +43,8 @@ def make_update_task_doc_tool(session, lang: str) -> StructuredTool:
         items: list[dict] | None = None,
         add_amendments: list[str] | None = None,
         facts: list[str] | None = None,
+        intent: str = "",
+        note: str | None = None,
     ) -> str:
         """维护任务板——目标/路线/关键事实（多步任务的记忆锚点，压缩免疫）。
 
@@ -57,6 +59,8 @@ def make_update_task_doc_tool(session, lang: str) -> StructuredTool:
           完成项（completed）必须写 evidence_note（屏幕上的完成证据）。
         - add_amendments：向"目标.补充"追加条目（只增不改，用于细化理解/记录用户补充）。
         - facts：全量替换关键事实列表。不传则保留现有事实。
+        - intent：本步意图（务必填写，会汇入流程线）。
+        - note：本步发现（可选）。
         目标 base 段不可由本工具修改（仅任务启动时播种）。
         校验不通过（多个 in_progress / 路线超 15 项 / blocked 缺 reason /
         completed 缺 evidence_note / 事实超限 / 把 pending 直接标 completed（须先

@@ -30,7 +30,6 @@ from phone_agent.v2.resolver import (
     LocateAmbiguousError,
     ResolveAmbiguousError,
     StaleMarkError,
-    candidate_summary,
     resolve_description,
 )
 from phone_agent.v2.tools._obs import auto_observation, mark_tool_fail, mark_tool_ok
@@ -129,6 +128,23 @@ def _relative_to_abs(session, rx: int, ry: int) -> tuple[int, int]:
     return int(rx / 1000 * w), int(ry / 1000 * h)
 
 
+def _mark_label(mark) -> str:
+    """Human-facing element label for a receipt: ``「文本」(mark_id)`` or ``(mark_id)``.
+
+    Prefers the mark's visible text so the tool receipt names *what* was acted on
+    (the output-contract receipt, e.g. ``已点击「上海」(ax_3)``); falls back to the
+    bare mark id when the element has no text.
+    """
+
+    text = (getattr(mark, "text_summary", None) or "").strip().replace("\n", " ")
+    mark_id = getattr(mark, "mark_id", "?")
+    if text:
+        if len(text) > 24:
+            text = text[:23] + "…"
+        return f"「{text}」({mark_id})"
+    return f"({mark_id})"
+
+
 def build_actuation_tools(session, config) -> list[StructuredTool]:
     """Return the actuation tool list bound to ``session``/``config``."""
 
@@ -146,20 +162,26 @@ def build_actuation_tools(session, config) -> list[StructuredTool]:
         x, y = session.mark_center_abs(mark)
         if action == "long_press":
             device.long_press(x, y, device_id=device_id)
+            verb = "已长按"
         else:
             device.tap(x, y, device_id=device_id)
-        label = candidate_summary(mark)
-        return _ok_with_obs(f"{action} {label} at ({x},{y})", session)
+            verb = "已点击"
+        return _ok_with_obs(f"{verb}{_mark_label(mark)}", session)
 
     def tap(
         target_mark_id: str | None = None,
         target_description: str | None = None,
+        intent: str = "",
+        note: str | None = None,
     ) -> str | list[dict]:
         """Tap one on-screen element.
 
         Provide exactly one of ``target_mark_id`` (a mark from the latest
         observation) or ``target_description`` (natural language, resolved to a
         unique mark; ambiguity returns candidates and does not tap).
+
+        Always pass ``intent`` (this step's goal, e.g. 把出发地改成上海).
+        ``note`` optionally records what you discovered this step.
         """
 
         return _tap_like("tap", target_mark_id, target_description)
@@ -167,8 +189,14 @@ def build_actuation_tools(session, config) -> list[StructuredTool]:
     def long_press(
         target_mark_id: str | None = None,
         target_description: str | None = None,
+        intent: str = "",
+        note: str | None = None,
     ) -> str | list[dict]:
-        """Long-press one on-screen element (same addressing as ``tap``)."""
+        """Long-press one on-screen element (same addressing as ``tap``).
+
+        Always pass ``intent`` (this step's goal). ``note`` optionally records
+        what you discovered this step.
+        """
 
         return _tap_like("long_press", target_mark_id, target_description)
 
@@ -176,12 +204,17 @@ def build_actuation_tools(session, config) -> list[StructuredTool]:
         text: str,
         target_mark_id: str | None = None,
         target_description: str | None = None,
+        intent: str = "",
+        note: str | None = None,
     ) -> str | list[dict]:
         """Type ``text`` into a field.
 
         If a target is given, the field is tapped to focus first. Text is
         entered through the ADB keyboard (switched in and restored when the
         device layer supports it).
+
+        Always pass ``intent`` (this step's goal). ``note`` optionally records
+        what you discovered this step.
         """
 
         if target_mark_id or target_description:
@@ -203,13 +236,20 @@ def build_actuation_tools(session, config) -> list[StructuredTool]:
                 restore(ime, device_id=device_id)
 
         preview = text if len(text) <= 32 else text[:31] + "…"
-        return _ok_with_obs(f"typed {preview!r}", session)
+        return _ok_with_obs(f"已输入 {preview!r}", session)
 
-    def scroll(direction: Literal["up", "down", "left", "right"]) -> str | list[dict]:
+    def scroll(
+        direction: Literal["up", "down", "left", "right"],
+        intent: str = "",
+        note: str | None = None,
+    ) -> str | list[dict]:
         """Scroll the screen by a mid-screen swipe in ``direction``.
 
         ``direction`` is the content scroll direction (``down`` reveals content
         below by swiping upward).
+
+        Always pass ``intent`` (this step's goal). ``note`` optionally records
+        what you discovered this step.
         """
 
         obs_w, obs_h = _screen_dims(session)
@@ -232,11 +272,19 @@ def build_actuation_tools(session, config) -> list[StructuredTool]:
         device.swipe(sx, sy, ex, ey, device_id=device_id)
         return _ok_with_obs(f"scroll {direction}", session)
 
-    def swipe(start: list[int], end: list[int]) -> str | list[dict]:
+    def swipe(
+        start: list[int],
+        end: list[int],
+        intent: str = "",
+        note: str | None = None,
+    ) -> str | list[dict]:
         """Swipe between two 0-1000 relative points (coordinate fallback).
 
         Prefer ``scroll`` for list navigation. ``start``/``end`` are ``[x, y]``
         in 0-1000 relative coordinates and are converted to absolute pixels.
+
+        Always pass ``intent`` (this step's goal). ``note`` optionally records
+        what you discovered this step.
         """
 
         if not (isinstance(start, (list, tuple)) and len(start) == 2):
@@ -250,31 +298,54 @@ def build_actuation_tools(session, config) -> list[StructuredTool]:
             f"swipe ({start[0]},{start[1]})->({end[0]},{end[1]})", session
         )
 
-    def back() -> str | list[dict]:
-        """Press the system Back button."""
+    def back(intent: str = "", note: str | None = None) -> str | list[dict]:
+        """Press the system Back button.
+
+        Always pass ``intent`` (this step's goal). ``note`` optionally records
+        what you discovered this step.
+        """
 
         device.back(device_id=device_id)
         return _ok_with_obs("back", session)
 
-    def home() -> str | list[dict]:
-        """Press the system Home button."""
+    def home(intent: str = "", note: str | None = None) -> str | list[dict]:
+        """Press the system Home button.
+
+        Always pass ``intent`` (this step's goal). ``note`` optionally records
+        what you discovered this step.
+        """
 
         device.home(device_id=device_id)
         return _ok_with_obs("home", session)
 
-    def wait(seconds: float = 2.0) -> str | list[dict]:
-        """Wait for the UI to settle, then re-observe."""
+    def wait(
+        seconds: float = 2.0,
+        intent: str = "",
+        note: str | None = None,
+    ) -> str | list[dict]:
+        """Wait for the UI to settle, then re-observe.
+
+        Always pass ``intent`` (this step's goal). ``note`` optionally records
+        what you discovered this step.
+        """
 
         import time
 
         time.sleep(max(0.0, float(seconds)))
         return _ok_with_obs(f"waited {seconds}s", session)
 
-    def launch_app(app_name: str) -> str | list[dict]:
+    def launch_app(
+        app_name: str,
+        intent: str = "",
+        note: str | None = None,
+    ) -> str | list[dict]:
         """Launch an installed app by name.
 
         The name is resolved through the app registry / launch policy. Unknown
         or denied apps return an error string and are never launched.
+
+        Always pass ``intent`` (this step's goal). ``note`` optionally records
+        what you discovered this step.
         """
 
         resolution = DEFAULT_LAUNCH_TARGET_RESOLVER.resolve(app_name)

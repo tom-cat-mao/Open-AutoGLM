@@ -16,23 +16,29 @@ from phone_agent.v2.tools._obs import auto_observation, mark_tool_fail, mark_too
 def build_perception_tools(session, config) -> list[StructuredTool]:
     """Return the perception tool list bound to ``session``."""
 
-    def read_screen() -> list[dict]:
+    def read_screen(intent: str = "", note: str | None = None) -> list[dict]:
         """Re-observe the current screen (no side effects on the device).
 
         Returns the current app and a marks digest so you can pick a
         ``target_mark_id`` for the next action, plus a fresh screenshot image
         when the screen changed since the last one sent.
+
+        Always pass ``intent`` (this step's goal). ``note`` optionally records
+        what you discovered this step.
         """
 
         mark_tool_ok(session)
         return auto_observation(session)
 
-    def locate(description: str) -> str:
+    def locate(description: str, intent: str = "", note: str | None = None) -> str:
         """Deep visual localization for a target accessibility marks miss.
 
         On success the located element is registered as a new mark, tappable via
         ``tap(target_mark_id=...)``. Ambiguous/failed localization returns the
         candidates or the failure reason and registers nothing.
+
+        Always pass ``intent`` (this step's goal). ``note`` optionally records
+        what you discovered this step.
         """
 
         try:

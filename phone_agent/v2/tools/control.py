@@ -94,7 +94,13 @@ def build_control_tools(session, config) -> list[StructuredTool]:
     without a config); ``finish`` reads ``finish_verify`` defensively.
     """
 
-    def finish(summary: str, evidence: list[str], confirm: bool = False) -> str:
+    def finish(
+        summary: str,
+        evidence: list[str],
+        confirm: bool = False,
+        intent: str = "",
+        note: str | None = None,
+    ) -> str:
         """Declare the task complete (two-step review; S2 §1).
 
         ``evidence`` is REQUIRED and non-empty: enumerate what was accomplished
@@ -106,6 +112,9 @@ def build_control_tools(session, config) -> list[StructuredTool]:
         ``finish(confirm=true, summary=..., evidence=[...])`` to land the result.
         If any observation happened since the packet was shown, the confirm is
         stale and a fresh packet is returned instead.
+
+        Always pass ``intent`` (this step's goal). ``note`` optionally records
+        what you discovered this step.
         """
 
         items = [str(e).strip() for e in (evidence or []) if str(e).strip()]
@@ -169,20 +178,26 @@ def build_control_tools(session, config) -> list[StructuredTool]:
             pass
         return packet
 
-    def ask_user(question: str) -> str:
+    def ask_user(question: str, intent: str = "", note: str | None = None) -> str:
         """Ask the human operator a question and wait for their answer (HITL).
 
         The safety middleware turns this call into a LangGraph ``interrupt`` and
         resumes with the user's text reply; this body only formats the question.
+
+        Always pass ``intent`` (this step's goal). ``note`` optionally records
+        what you discovered this step.
         """
 
         return f"[ASK_USER] {question}"
 
-    def take_over(reason: str) -> str:
+    def take_over(reason: str, intent: str = "", note: str | None = None) -> str:
         """Request human takeover (login/captcha/blocked flow).
 
         Records the takeover reason and ends the automated run; the middleware
         raises the actual interrupt.
+
+        Always pass ``intent`` (this step's goal). ``note`` optionally records
+        what you discovered this step.
         """
 
         session.takeover_reason = reason
