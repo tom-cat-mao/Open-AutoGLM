@@ -26,6 +26,7 @@ from phone_agent.v2.coords import convert_relative_to_absolute
 
 if TYPE_CHECKING:
     from phone_agent.adb.screenshot import Screenshot
+    from phone_agent.config.app_registry import ForegroundAppObservation
     from phone_agent.grounding.provider import MarkProvider
     from phone_agent.v2.config import V2Config
     from phone_agent.v2.taskdoc import TaskDoc
@@ -214,31 +215,40 @@ class PhoneSession:
         last_error: Exception | None = None
         for _attempt in range(2):
             try:
-                before = self._foreground_component()
+                before = self._foreground_observation()
                 shot = self.screenshot()
                 marks = self.refresh_marks(shot)
-                after = self._foreground_component()
+                after = self._foreground_observation()
             except ScreenshotError as exc:
                 last_error = exc
                 continue
-            if before is not None and after is not None and before != after:
+            before_c = self._component_of(before)
+            after_c = self._component_of(after)
+            if before_c is not None and after_c is not None and before_c != after_c:
                 # Screen moved mid-capture: marks/screenshot may disagree. Retry.
                 last_error = ScreenshotError(
-                    f"observation unstable: foreground {before!r} -> {after!r}"
+                    f"observation unstable: foreground {before_c!r} -> {after_c!r}"
                 )
                 continue
-            return self._commit_observation(shot, marks)
+            # The ``after`` sample is closest to the committed frame — use it for
+            # the display label so the label matches the bracket that verified
+            # stability (no extra device round-trip outside the window).
+            return self._commit_observation(shot, marks, foreground=after)
 
         # Two unstable/invalid attempts: fail closed and drop the whole batch.
         self._invalidate_batch()
         raise last_error or ScreenshotError("observation failed")
 
     def _commit_observation(
-        self, shot: "Screenshot", marks: list[MarkCandidate]
+        self,
+        shot: "Screenshot",
+        marks: list[MarkCandidate],
+        *,
+        foreground: "ForegroundAppObservation | None" = None,
     ) -> Observation:
         """Bump the batch, mint badged marks, and build the Observation."""
 
-        current_app = self._foreground_label()
+        current_app = self._label_of(foreground)
         self.screen_seq += 1
         self.epoch += 1
         minted = self._mint_marks(marks)
@@ -406,32 +416,51 @@ class PhoneSession:
             self.config.device_id, timeout=timeout
         )
 
-    def _foreground_label(self) -> str:
-        try:
-            foreground = self.device_factory.get_foreground_app(self.config.device_id)
-        except Exception:
-            return "unknown"
-        return foreground.display_name or foreground.package_name or "unknown"
+    def _foreground_observation(self) -> "ForegroundAppObservation | None":
+        """Sample the foreground once; ``None`` when it cannot be read.
 
-    def _foreground_component(self) -> str | None:
-        """Foreground component name for the atomic-capture stability bracket.
-
-        Returns the resolved ``package/activity`` component (or a coarser package
-        fallback) so ``observe()`` can detect a screen change *between* the
-        pre-screenshot and post-screenshot samples. ``None`` means the foreground
-        could not be sampled — the bracket then degrades to "assume stable"
-        rather than forcing a retry loop on a device that never reports one.
+        The atomic ``observe()`` window samples this twice (before/after the
+        screenshot) so one device call yields both the stability component and
+        the display label — no extra round-trip outside the window.
         """
 
         try:
-            foreground = self.device_factory.get_foreground_app(self.config.device_id)
+            return self.device_factory.get_foreground_app(self.config.device_id)
         except Exception:
+            return None
+
+    @staticmethod
+    def _component_of(foreground: "ForegroundAppObservation | None") -> str | None:
+        """Component name used as the atomic-capture stability key.
+
+        ``None`` (unsampled foreground) means "assume stable" so a device that
+        never reports a foreground does not force an endless retry loop.
+        """
+
+        if foreground is None:
             return None
         component = getattr(foreground, "component_name", None)
         if component:
             return str(component)
         package = getattr(foreground, "package_name", None)
         return str(package) if package else None
+
+    @staticmethod
+    def _label_of(foreground: "ForegroundAppObservation | None") -> str:
+        """Human display label for the observation (falls back to ``unknown``)."""
+
+        if foreground is None:
+            return "unknown"
+        return (
+            getattr(foreground, "display_name", None)
+            or getattr(foreground, "package_name", None)
+            or "unknown"
+        )
+
+    def _foreground_label(self) -> str:
+        """Sample the foreground and return its display label (standalone call)."""
+
+        return self._label_of(self._foreground_observation())
 
     def _screen_binding(self, shot: "Screenshot") -> ScreenBinding:
         raw_hash = hashlib.sha256(
