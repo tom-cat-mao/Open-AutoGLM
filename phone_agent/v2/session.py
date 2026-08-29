@@ -86,6 +86,9 @@ class Observation:
     current_app: str
     marks: list[MarkCandidate]
     screen_seq: int
+    # U1 observation batch this frame was produced in (session.epoch after the
+    # successful atomic capture). Every mark in ``marks`` carries the same epoch.
+    epoch: int = 0
     # Short sha256 of the screenshot base64 payload. Recorded on the observation
     # for stagnation detection (``seen_states``) and screen binding; no longer
     # drives image dedup (A4 removed same-screen image suppression).
@@ -137,6 +140,10 @@ class PhoneSession:
         # lazy visual locate provider (singleton per session)
         self._locate_provider: "MarkProvider | None" = None
         self._locate_provider_built: bool = False
+        # Frame the last locate() ran its visual model on (U1 same-frame return):
+        # the locate tool renders text + this screenshot instead of re-observing.
+        self._last_locate_shot: "Screenshot | None" = None
+        self._last_locate_app: str = "unknown"
         # last-known dimensions for coordinate conversion
         self._last_width: int = 0
         self._last_height: int = 0
@@ -154,17 +161,21 @@ class PhoneSession:
         self._last_height = int(shot.height)
         return shot
 
-    def refresh_marks(self) -> list[MarkCandidate]:
-        """Produce current-screen accessibility marks; never raises.
+    def refresh_marks(self, shot: "Screenshot | None" = None) -> list[MarkCandidate]:
+        """Produce accessibility marks for a screenshot; never raises.
 
-        Failure (bad screenshot, provider error, empty dump) returns ``[]`` so the
-        caller can fall back to visual locate or a bare screenshot round.
+        U1 single-producer discipline: ``observe()`` passes the screenshot it
+        already captured so marks are extracted against *that* frame — no second
+        screenshot is taken. When ``shot`` is ``None`` (a bare external call) one
+        is captured for backward compatibility. Failure (bad screenshot, provider
+        error, empty dump) returns ``[]``; the caller decides how to degrade.
         """
 
-        try:
-            shot = self.screenshot()
-        except ScreenshotError:
-            return []
+        if shot is None:
+            try:
+                shot = self.screenshot()
+            except ScreenshotError:
+                return []
         try:
             binding = self._screen_binding(shot)
             provider = AccessibilityTreeProvider(
@@ -184,13 +195,54 @@ class PhoneSession:
         return list(result.marks)
 
     def observe(self) -> Observation:
-        """Full observation: screenshot + marks + foreground; updates session state."""
+        """Atomic single-producer observation (U1).
 
-        shot = self.screenshot()
-        marks = self.refresh_marks()
+        One consistent frame is assembled in a single sampling window:
+        foreground-before → screenshot → accessibility dump (marks, reusing that
+        one screenshot) → foreground-after. If the foreground component changed
+        between the before/after brackets the frame is inconsistent (the screen
+        moved mid-capture): the whole window is retried **once**. A second
+        instability is an observation failure — :class:`ScreenshotError` is raised
+        and the entire mark batch is invalidated (``marks`` cleared, no epoch
+        bump) so no stale addressing authority survives a failed observation.
+
+        On success the batch counter (``epoch``) increments and every mark is
+        minted with the batch badge (``ax_1@e<epoch>``); the provider-internal id
+        stays as the pre-badge prefix (provenance only).
+        """
+
+        last_error: Exception | None = None
+        for _attempt in range(2):
+            try:
+                before = self._foreground_component()
+                shot = self.screenshot()
+                marks = self.refresh_marks(shot)
+                after = self._foreground_component()
+            except ScreenshotError as exc:
+                last_error = exc
+                continue
+            if before is not None and after is not None and before != after:
+                # Screen moved mid-capture: marks/screenshot may disagree. Retry.
+                last_error = ScreenshotError(
+                    f"observation unstable: foreground {before!r} -> {after!r}"
+                )
+                continue
+            return self._commit_observation(shot, marks)
+
+        # Two unstable/invalid attempts: fail closed and drop the whole batch.
+        self._invalidate_batch()
+        raise last_error or ScreenshotError("observation failed")
+
+    def _commit_observation(
+        self, shot: "Screenshot", marks: list[MarkCandidate]
+    ) -> Observation:
+        """Bump the batch, mint badged marks, and build the Observation."""
+
         current_app = self._foreground_label()
         self.screen_seq += 1
-        self.marks = {mark.mark_id: mark for mark in marks}
+        self.epoch += 1
+        minted = self._mint_marks(marks)
+        self.marks = {mark.mark_id: mark for mark in minted}
         # Record (current_app, screen_hash) for TaskDoc stagnation detection.
         # screen_hash is a short sha256 of the screenshot base64 payload.
         screen_hash = hashlib.sha256(
@@ -202,11 +254,17 @@ class PhoneSession:
             width=int(shot.width),
             height=int(shot.height),
             current_app=current_app,
-            marks=marks,
+            marks=minted,
             screen_seq=self.screen_seq,
+            epoch=self.epoch,
             screen_hash=screen_hash,
             mime_type=getattr(shot, "mime_type", None) or "image/png",
         )
+
+    def _invalidate_batch(self) -> None:
+        """Drop every current-batch mark (no stale authority after a failure)."""
+
+        self.marks = {}
 
     # -- mark resolution --------------------------------------------------
 
@@ -261,9 +319,14 @@ class PhoneSession:
     def locate(self, description: str) -> MarkCandidate:
         """Visual deep-locate ``description`` -> one confident mark (fail-closed).
 
-        Registers the resolved mark into ``self.marks`` and returns it. Zero or
-        multiple confident candidates raise :class:`LocateAmbiguousError` with a
-        candidate summary; nothing is registered and nothing executes.
+        The resolved mark is **minted into the current batch** (badged with the
+        session's current ``epoch``) and registered into ``self.marks`` — no epoch
+        bump, so it joins the batch produced by the last ``observe()`` rather than
+        starting a new one. The single screenshot the visual model ran on is
+        stashed (``_last_locate_shot`` / ``_last_locate_app``) so the locate tool
+        can return that **same frame** without a second capture. Zero or multiple
+        confident candidates raise :class:`LocateAmbiguousError`; nothing is
+        registered and nothing executes.
         """
 
         provider = self._get_locate_provider()
@@ -289,9 +352,16 @@ class PhoneSession:
                 f"ambiguous match for {description!r}: {len(executable)} candidates",
                 candidates=executable,
             )
-        mark = executable[0]
-        self.marks[mark.mark_id] = mark
-        return mark
+        raw = executable[0]
+        minted = replace(
+            raw, mark_id=mint_badge(raw.mark_id, self.epoch), epoch=self.epoch
+        )
+        self.marks[minted.mark_id] = minted
+        # Stash the locate frame so the tool returns the same screenshot without
+        # a fresh observe (single-producer: one screenshot per locate call).
+        self._last_locate_shot = shot
+        self._last_locate_app = self._foreground_label()
+        return minted
 
     # -- marks digest -----------------------------------------------------
 
@@ -324,6 +394,26 @@ class PhoneSession:
         except Exception:
             return "unknown"
         return foreground.display_name or foreground.package_name or "unknown"
+
+    def _foreground_component(self) -> str | None:
+        """Foreground component name for the atomic-capture stability bracket.
+
+        Returns the resolved ``package/activity`` component (or a coarser package
+        fallback) so ``observe()`` can detect a screen change *between* the
+        pre-screenshot and post-screenshot samples. ``None`` means the foreground
+        could not be sampled — the bracket then degrades to "assume stable"
+        rather than forcing a retry loop on a device that never reports one.
+        """
+
+        try:
+            foreground = self.device_factory.get_foreground_app(self.config.device_id)
+        except Exception:
+            return None
+        component = getattr(foreground, "component_name", None)
+        if component:
+            return str(component)
+        package = getattr(foreground, "package_name", None)
+        return str(package) if package else None
 
     def _screen_binding(self, shot: "Screenshot") -> ScreenBinding:
         raw_hash = hashlib.sha256(
