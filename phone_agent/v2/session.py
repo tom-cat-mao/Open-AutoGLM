@@ -31,6 +31,7 @@ if TYPE_CHECKING:
     from phone_agent.v2.config import V2Config
     from phone_agent.v2.appkb import AppKnowledge, AppKnowledgeStore
     from phone_agent.v2.taskdoc import TaskDoc
+    from phone_agent.v2.usage import UsageLedger
 
 
 class ScreenshotError(RuntimeError):
@@ -109,6 +110,10 @@ class PhoneSession:
     ) -> None:
         self.config = config
         self.device_factory = device_factory or get_device_factory()
+        # Shared per-run model-cost ledger. ThinPhoneAgent installs the concrete
+        # ledger after constructing the session; the slot always exists for side
+        # calls and duck-typed integrations to probe safely.
+        self.usage_ledger: "UsageLedger | None" = None
         # App-KB is an optional enhancement. Keep stable public slots but defer
         # imports and filesystem creation until sync or prompt lookup needs it.
         self.app_store: "AppKnowledgeStore | None" = None

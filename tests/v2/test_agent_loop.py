@@ -191,6 +191,7 @@ def test_first_observation_includes_marks_digest():
 
 def test_thin_loop_read_tap_finish(scripted_agent):
     agent, session = scripted_agent
+    assert agent.session.usage_ledger is agent.usage_ledger
     result = agent.run("打开设置", hitl_handler=lambda prompt: "approve")
 
     assert result.success is True

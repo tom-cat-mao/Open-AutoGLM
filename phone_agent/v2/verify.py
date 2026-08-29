@@ -27,6 +27,10 @@ from typing import Any
 
 from phone_agent.config.policy import DEFAULT_SAFETY_POLICY, SafetyPolicyRegistry
 from phone_agent.config.redact import redact_context_text
+from phone_agent.v2.middleware._tokens import (
+    estimate_context_tokens,
+    estimate_message_tokens,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -237,6 +241,14 @@ def verify_finish(session: Any, config: Any, *, model: Any | None = None) -> Ver
     except Exception as exc:  # noqa: BLE001 - call failure -> fail-open
         logger.warning("finish verifier call failed, fail-open: %s", exc)
         return Verdict(True, f"验收器调用失败，已放行（fail-open）：{exc}")
+
+    ledger = getattr(session, "usage_ledger", None)
+    if ledger is not None:
+        try:
+            estimate = estimate_context_tokens(messages) + estimate_message_tokens(resp)
+            ledger.record("verifier", resp, estimate_tokens=estimate)
+        except Exception:  # noqa: BLE001 - accounting must never alter the verdict
+            pass
 
     return _parse_verdict(_content_text(resp))
 
