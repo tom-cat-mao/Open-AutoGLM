@@ -113,11 +113,13 @@ class ThinPhoneAgent:
         middleware = [
             build_hitl_middleware(self.session, config),
         ]
-        # TaskDoc render/nudge middleware (task-board increment). Guarded so a
-        # missing taskdoc module (e.g. this file imported before the concurrent
+        # TaskDoc render + flow-line middleware (task-board increment). Guarded so
+        # a missing taskdoc module (e.g. this file imported before the concurrent
         # W1 worktree lands) degrades gracefully to a plain thin loop. Kept before
         # compact so the pinned [TASK_DOC] block exists when compact chooses its
-        # cut point (compact never folds the pinned block).
+        # cut point (compact never folds the pinned block). ``nudge_steps`` is a
+        # deprecated no-op kwarg (U3 removed the stagnation nudge) kept for
+        # backward-compatible construction.
         if getattr(config, "taskdoc_enabled", True):
             try:
                 from phone_agent.v2.middleware.taskdoc import build_taskdoc_middleware

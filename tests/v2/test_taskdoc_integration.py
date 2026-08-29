@@ -1,4 +1,4 @@
-"""W2 TaskDoc integration tests (spec §3 W2): renderer, nudge, finish guard, seeding.
+"""W2 TaskDoc integration tests (spec §3 W2): renderer, flow line, finish guard, seeding.
 
 All fakes — no real device, MLX, or network. ``phone_agent.v2.taskdoc`` is owned
 by the concurrent W1 worktree and may not exist here, so these tests use a local
@@ -8,6 +8,10 @@ by the concurrent W1 worktree and may not exist here, so these tests use a local
 and, for the seeding test, inject a fake ``phone_agent.v2.taskdoc`` module into
 ``sys.modules`` (the same technique ``tests/v2/test_agent_loop.py`` uses for the
 core/tools modules).
+
+U3 removed the stagnation nudge (``seen_states``/``nudged``); the pinned block
+now carries a transcript-derived flow line instead — covered by
+``tests/v2/test_flow_line.py``.
 """
 
 from __future__ import annotations
@@ -76,8 +80,6 @@ class FakeSession:
     """Minimal §6 surface the TaskDoc middleware / finish guard read."""
 
     task_doc: Any = None
-    seen_states: set = field(default_factory=set)
-    nudged: bool = False
     finished: bool = False
     finish_summary: str | None = None
     # finish two-step review state (S2 §1.2): the first finish() call records the
@@ -113,7 +115,7 @@ def _done_doc() -> FakeTaskDoc:
 # §2.3 render hook: non-empty doc injects [TASK_DOC]; empty doc does not.
 # --------------------------------------------------------------------------
 def test_render_injects_taskdoc_block_at_tail():
-    session = FakeSession(task_doc=_open_doc(), seen_states={("app", "h1")})
+    session = FakeSession(task_doc=_open_doc())
     mw = build_taskdoc_middleware(session, lang="cn", nudge_steps=5)
 
     result = mw.before_model({"messages": []}, runtime=None)
@@ -132,7 +134,7 @@ def test_render_injects_taskdoc_block_at_tail():
 
 
 def test_render_no_injection_for_empty_doc():
-    session = FakeSession(task_doc=FakeTaskDoc(), seen_states={("app", "h1")})
+    session = FakeSession(task_doc=FakeTaskDoc())
     mw = build_taskdoc_middleware(session, lang="cn")
     assert mw.before_model({"messages": []}, runtime=None) is None
 
@@ -144,7 +146,7 @@ def test_render_no_injection_when_task_doc_missing():
 
 
 def test_render_refreshes_pinned_block_removing_stale_copy():
-    session = FakeSession(task_doc=_open_doc(), seen_states={("app", "h1")})
+    session = FakeSession(task_doc=_open_doc())
     mw = build_taskdoc_middleware(session, lang="cn", nudge_steps=99)
 
     first = mw.before_model({"messages": []}, runtime=None)
@@ -159,62 +161,6 @@ def test_render_refreshes_pinned_block_removing_stale_copy():
     assert isinstance(second["messages"][-1], SystemMessage)
     assert second["messages"][-1].id != first_id
     assert first_id not in [second["messages"][-1].id]
-
-
-# --------------------------------------------------------------------------
-# §2.3 stagnation nudge: fires once when seen_states is stable + open items.
-# --------------------------------------------------------------------------
-def test_nudge_fires_exactly_once_on_stagnation():
-    # seen_states never grows; open items present -> nudge after nudge_steps.
-    session = FakeSession(task_doc=_open_doc(), seen_states={("app", "h1")})
-    mw = build_taskdoc_middleware(session, lang="cn", nudge_steps=5)
-
-    nudged_turns = []
-    for turn in range(10):
-        result = mw.before_model({"messages": []}, runtime=None)
-        text = result["messages"][-1].content
-        if "无新状态" in text:
-            nudged_turns.append(turn)
-
-    assert len(nudged_turns) == 1, nudged_turns
-    assert session.nudged is True
-
-
-def test_nudge_suppressed_without_open_items():
-    # All items completed -> has_open_items False -> never nudge even if stagnant.
-    session = FakeSession(task_doc=_done_doc(), seen_states={("app", "h1")})
-    mw = build_taskdoc_middleware(session, lang="cn", nudge_steps=3)
-
-    for _ in range(10):
-        result = mw.before_model({"messages": []}, runtime=None)
-        assert "无新状态" not in result["messages"][-1].content
-    assert session.nudged is False
-
-
-def test_nudge_reset_when_new_state_appears():
-    # A growing seen_states resets the stagnation counter, so no nudge yet.
-    session = FakeSession(task_doc=_open_doc(), seen_states=set())
-    mw = build_taskdoc_middleware(session, lang="cn", nudge_steps=3)
-
-    for step in range(6):
-        # Add a new state every turn -> never stagnant.
-        session.seen_states.add(("app", f"h{step}"))
-        result = mw.before_model({"messages": []}, runtime=None)
-        assert "无新状态" not in result["messages"][-1].content
-    assert session.nudged is False
-
-
-def test_nudge_text_is_non_directive_option_list():
-    session = FakeSession(task_doc=_open_doc(), seen_states={("app", "h1")})
-    mw = build_taskdoc_middleware(session, lang="cn", nudge_steps=1)
-    # nudge_steps=1: first call establishes max_seen (stagnant=0), second nudges.
-    mw.before_model({"messages": []}, runtime=None)
-    result = mw.before_model({"messages": []}, runtime=None)
-    text = result["messages"][-1].content
-    assert "无新状态" in text
-    # Non-directive: lists the option space, no imperative command.
-    for option in ("update_task_doc", "locate", "ask_user", "take_over", "finish"):
-        assert option in text
 
 
 # --------------------------------------------------------------------------
@@ -317,12 +263,9 @@ class _SeedFakeSession:
     finish_summary: str | None = None
     takeover_reason: str | None = None
     task_doc: Any = None
-    seen_states: set = field(default_factory=set)
-    nudged: bool = False
 
     def observe(self) -> _SeedFakeObservation:
         self.screen_seq += 1
-        self.seen_states.add(("com.android.settings", f"h{self.screen_seq}"))
         return _SeedFakeObservation(screen_seq=self.screen_seq)
 
 

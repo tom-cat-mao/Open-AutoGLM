@@ -57,9 +57,9 @@ class Observation:
     current_app: str
     marks: list[MarkCandidate]
     screen_seq: int
-    # Short sha256 of the screenshot base64 payload. Recorded on the observation
-    # for stagnation detection (``seen_states``) and screen binding; no longer
-    # drives image dedup (A4 removed same-screen image suppression).
+    # Short sha256 of the screenshot base64 payload. Kept for screen binding and
+    # audit; it no longer drives any stagnation set (U3 removed seen_states) nor
+    # image dedup (A4 removed same-screen image suppression).
     screen_hash: str = ""
     # Screenshot mime type (``image/png`` | ``image/jpeg``) for the data: URL.
     mime_type: str = "image/png"
@@ -93,12 +93,11 @@ class PhoneSession:
         # (review.py). The finish verifier trigger (S2 §4.1.2) reads this to
         # detect "hard contradiction + model still confirms".
         self.finish_hard_doubts: list[str] = []
-        # TaskDoc (task board) state: doc is harness-seeded at run start (agent.py);
-        # seen_states tracks (current_app, screen_hash) tuples for stagnation
-        # detection; nudged fires the stagnation hint at most once per run.
+        # TaskDoc (task board) state: doc is harness-seeded at run start (agent.py).
+        # The model is its sole writer via update_task_doc; the pinned render +
+        # transcript-derived flow line live in middleware/taskdoc.py (U3 removed the
+        # seen_states/nudged stagnation machinery — no session state backs it now).
         self.task_doc: "TaskDoc | None" = None
-        self.seen_states: set[tuple[str, str]] = set()
-        self.nudged: bool = False
         # lazy visual locate provider (singleton per session)
         self._locate_provider: "MarkProvider | None" = None
         self._locate_provider_built: bool = False
@@ -156,12 +155,12 @@ class PhoneSession:
         current_app = self._foreground_label()
         self.screen_seq += 1
         self.marks = {mark.mark_id: mark for mark in marks}
-        # Record (current_app, screen_hash) for TaskDoc stagnation detection.
-        # screen_hash is a short sha256 of the screenshot base64 payload.
+        # screen_hash is a short sha256 of the screenshot base64 payload, kept on
+        # the Observation for screen binding / audit only (U3 removed the
+        # seen_states stagnation set that used to consume it).
         screen_hash = hashlib.sha256(
             (shot.base64_data or "").encode("utf-8")
         ).hexdigest()[:16]
-        self.seen_states.add((current_app, screen_hash))
         return Observation(
             screenshot_b64=shot.base64_data,
             width=int(shot.width),

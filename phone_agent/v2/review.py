@@ -92,9 +92,6 @@ def finish_doubts(session: Any, obs: Any, obs_error: Exception | None) -> dict[s
     if obs is not None and count < 2:
         soft.append(f"当前屏幕可交互 marks 极少（{count}）")
 
-    if getattr(session, "nudged", False):
-        soft.append("此前已触发停滞轻推（seen_states 长期无增长）")
-
     doc = getattr(session, "task_doc", None)
     if doc is not None:
         items = list(getattr(doc, "items", []) or [])
