@@ -16,6 +16,7 @@ from dataclasses import asdict
 from typing import Any, Callable
 
 from langchain.agents.middleware import AgentMiddleware
+from langchain.agents.middleware.types import hook_config
 
 from phone_agent.v2.agent import RunResult, ThinPhoneAgent
 from phone_agent.v2.config import V2Config, load_project_env
@@ -112,6 +113,20 @@ class WebEventMiddleware(AgentMiddleware):
         self._tokens = 0
         self._last_taskdoc: str | None = None
         self._last_screen_key: tuple[str, Any] | None = None
+        # Soft-stop: the bridge sets the flag; the next before_model ends the run
+        # through the existing takeover channel (no new terminal mechanism).
+        self._session: Any | None = None
+        self._stop_requested = False
+
+    def attach_session(self, session: Any) -> None:
+        """Bind the run's session (for soft-stop) once the agent exists."""
+
+        self._session = session
+
+    def request_stop(self) -> None:
+        """Ask the run to stop after the current step (web console 停止 button)."""
+
+        self._stop_requested = True
 
     @property
     def step(self) -> int:
@@ -125,8 +140,17 @@ class WebEventMiddleware(AgentMiddleware):
         event.setdefault("ts", time.time())
         self.events.put(event)
 
+    @hook_config(can_jump_to=["end"])
     def before_model(self, state, runtime) -> dict[str, Any] | None:  # noqa: ANN001
         try:
+            if self._stop_requested:
+                if self._session is not None:
+                    try:
+                        self._session.takeover_reason = "用户从 Web 控制台停止"
+                    except Exception:  # noqa: BLE001 - best-effort flag only
+                        pass
+                self._emit({"event": "stopping", "step": self._step})
+                return {"jump_to": "end"}
             messages = state.get("messages", []) if isinstance(state, dict) else []
             taskdoc = _taskdoc_from_messages(messages or [])
             if taskdoc is not None and taskdoc != self._last_taskdoc:
@@ -149,6 +173,10 @@ class WebEventMiddleware(AgentMiddleware):
         self, state, runtime
     ) -> dict[str, Any] | None:  # noqa: ANN001
         return self.before_model(state, runtime)
+
+    @property
+    def stop_requested(self) -> bool:
+        return self._stop_requested
 
     def _record_model(self, response: Any, latency_ms: int, error: str | None) -> None:
         self._step += 1
@@ -356,6 +384,7 @@ class WebRunBridge:
         self.overrides = dict(overrides or {})
         self._config_factory = config_factory
         self._agent_factory = agent_factory
+        self._config: Any | None = None
         self._lock = threading.RLock()
         self._events: queue.Queue[dict[str, Any]] = queue.Queue()
         self._thread: threading.Thread | None = None
@@ -369,6 +398,7 @@ class WebRunBridge:
         self.current_screen: str | None = None
         self.current_app: str | None = None
         self.screen_seq: int | None = None
+        self.screens: list[dict[str, Any]] = []
         self.steps: list[dict[str, Any]] = []
         self.task_board = ""
         self.status = "idle"
@@ -388,7 +418,11 @@ class WebRunBridge:
                 "waiting_hitl",
             }
 
-    def start(self, task: str, overrides: dict[str, Any] | None = None) -> str:
+    def start(
+        self,
+        task: str,
+        overrides: dict[str, Any] | None = None,
+    ) -> str:
         clean_task = str(task).strip()
         if not clean_task:
             raise ValueError("任务不能为空")
@@ -420,8 +454,10 @@ class WebRunBridge:
         try:
             load_project_env()
             config = self._config_factory(overrides)
+            self._config = config
             agent = self._agent_factory(config, extra_middleware=[middleware])
             self._agent = agent
+            middleware.attach_session(getattr(agent, "session", None))
             with self._lock:
                 self.run_id = getattr(agent, "run_id", None)
                 self.status = "running"
@@ -454,6 +490,63 @@ class WebRunBridge:
             self.status = "running"
         return answer
 
+    # -- App-KB view / dream ---------------------------------------------
+    def _kb_store(self) -> Any | None:
+        """Best-effort store: the live run's store, else the on-disk KB."""
+
+        agent = self._agent
+        store = getattr(getattr(agent, "session", None), "app_store", None)
+        if store is not None:
+            return store
+        try:
+            from pathlib import Path
+
+            from phone_agent.v2.appkb import AppKnowledgeStore
+
+            config = self._config
+            if config is None:
+                config = self._config_factory(dict(self.overrides))
+            memory_dir = getattr(config, "memory_dir", "memory")
+            if not (Path(memory_dir) / "app_kb" / "kb.json").exists():
+                return None
+            return AppKnowledgeStore(memory_dir)
+        except Exception:  # noqa: BLE001 - KB view is optional
+            return None
+
+    def kb_entries(self) -> list[dict[str, Any]]:
+        """Current App-KB entries for the 应用库 tab (empty when unavailable)."""
+
+        store = self._kb_store()
+        if store is None:
+            return []
+        try:
+            return [dict(entry) for entry in store.entries(include_stale=True)]
+        except Exception:  # noqa: BLE001
+            return []
+
+    def run_dream(self) -> dict[str, Any]:
+        """Run one full rule-based consolidation on the App-KB (manual dream)."""
+
+        store = self._kb_store()
+        if store is None:
+            return {"status": "skipped", "reason": "app_kb_empty"}
+        try:
+            from phone_agent.v2.dream import consolidate
+
+            return consolidate(store, inventory=None, light=False)
+        except Exception as exc:  # noqa: BLE001 - maintenance never breaks the UI
+            return {"status": "skipped", "reason": type(exc).__name__}
+
+    def request_stop(self) -> bool:
+        """Ask the running task to stop after the current step (soft stop)."""
+
+        with self._lock:
+            middleware = self._middleware
+            if middleware is None or not self.running:
+                return False
+            middleware.request_stop()
+            return True
+
     def submit_hitl(self, answer: str) -> None:
         clean_answer = str(answer).strip()
         if not clean_answer:
@@ -480,6 +573,9 @@ class WebRunBridge:
             "ok": None,
             "latency_ms": 0,
             "status": "running",
+            "args": {},
+            "model_latency_ms": 0,
+            "tool_latency_ms": 0,
         }
         self.steps.append(step)
         self.steps.sort(key=lambda item: item["step"])
@@ -501,6 +597,7 @@ class WebRunBridge:
         if kind == "model_call":
             step = self._step(int(event.get("step", 0)))
             step["latency_ms"] = int(event.get("latency_ms", 0))
+            step["model_latency_ms"] = int(event.get("latency_ms", 0))
             if event.get("error"):
                 step.update(result=str(event["error"]), ok=False, status="error")
             self.tokens = int(event.get("tokens_total", self.tokens))
@@ -512,21 +609,36 @@ class WebRunBridge:
                 tool=str(event.get("tool", "")),
                 target=self._target(args),
                 status="running",
+                args=args,
             )
         elif kind == "tool_result":
             step = self._step(int(event.get("step", 0)))
             ok = bool(event.get("ok"))
             result_text = event.get("text") or event.get("error") or ""
             step.update(
-                result=str(result_text), ok=ok, status="success" if ok else "error"
+                result=str(result_text),
+                ok=ok,
+                status="success" if ok else "error",
+                tool_latency_ms=int(event.get("latency_ms", 0)),
             )
         elif kind == "safety_warning":
             step = self._step(int(event.get("step", 0)))
             step.update(result=str(event.get("text", "")), ok=False, status="warning")
         elif kind == "screen":
-            self.current_screen = str(event.get("image", "")) or None
+            image = str(event.get("image", "")) or None
+            self.current_screen = image
             self.current_app = event.get("current_app") or self.current_app
             self.screen_seq = event.get("screen_seq")
+            if image:
+                self.screens.append(
+                    {
+                        "seq": self.screen_seq,
+                        "app": self.current_app,
+                        "image": image,
+                    }
+                )
+                if len(self.screens) > 30:
+                    del self.screens[: len(self.screens) - 30]
         elif kind == "taskdoc_snapshot":
             self.task_board = str(event.get("text", ""))
         elif kind == "run_end":
@@ -557,6 +669,14 @@ class WebRunBridge:
     def snapshot(self) -> dict[str, Any]:
         self._drain_events()
         with self._lock:
+            usage: dict[str, int] = {}
+            agent = self._agent
+            ledger = getattr(getattr(agent, "session", None), "usage_ledger", None)
+            if ledger is not None:
+                try:
+                    usage = ledger.by_role()
+                except Exception:  # noqa: BLE001 - usage display is best-effort
+                    usage = {}
             return {
                 "run_id": self.run_id,
                 "task": self.task,
@@ -564,6 +684,7 @@ class WebRunBridge:
                 "current_screen": self.current_screen,
                 "current_app": self.current_app,
                 "screen_seq": self.screen_seq,
+                "screens": list(self.screens),
                 "steps": [dict(step) for step in self.steps],
                 "task_board": self.task_board,
                 "pending_hitl_prompt": self.pending_hitl_prompt,
@@ -571,6 +692,7 @@ class WebRunBridge:
                     asdict(self.final_result) if self.final_result else None
                 ),
                 "tokens": self.tokens,
+                "usage": usage,
                 "error": self.error,
             }
 
