@@ -1,8 +1,11 @@
 """Device control utilities for Android automation."""
 
+import hashlib
 import re
+import shlex
 import subprocess
 import time
+from dataclasses import dataclass
 from typing import Any, Iterable
 
 from phone_agent.config.app_registry import (
@@ -12,6 +15,23 @@ from phone_agent.config.app_registry import (
 from phone_agent.config.apps import DEFAULT_APP_REGISTRY, DEFAULT_LAUNCH_TARGET_RESOLVER
 from phone_agent.config.timing import TIMING_CONFIG
 from phone_agent.grounding.accessibility import parse_uiautomator_marks
+
+
+@dataclass(frozen=True)
+class AppLabelEntry:
+    """A launchable Android package and its user-visible application label."""
+
+    package: str
+    label: str
+
+
+_APP_LABEL_CACHE: dict[
+    tuple[str | None, str], tuple[AppLabelEntry, ...]
+] = {}
+_PACKAGE_NAME_RE = re.compile(r"[A-Za-z0-9_]+(?:\.[A-Za-z0-9_]+)+")
+_COMPONENT_RE = re.compile(
+    r"([A-Za-z0-9_]+(?:\.[A-Za-z0-9_]+)+)/[A-Za-z0-9_.$]+"
+)
 
 
 def get_current_app(device_id: str | None = None) -> str:
@@ -74,6 +94,121 @@ def get_installed_app_inventory(device_id: str | None = None) -> InstalledAppInv
         if line.startswith("package:") and line.removeprefix("package:").strip()
     }
     return InstalledAppInventory(frozenset(packages), device_id=device_id)
+
+
+def get_app_labels(
+    device_id: str | None = None, *, timeout: float = 30.0
+) -> list[AppLabelEntry]:
+    """Return launchable packages with localized device application labels.
+
+    Label lookup uses one remote shell loop and is cached until the observed package
+    set changes. Any ADB or parsing failure degrades to an empty enhancement result.
+    """
+
+    try:
+        packages = _get_launchable_packages(device_id, timeout=timeout)
+        if not packages:
+            return []
+
+        sorted_packages = sorted(packages)
+        package_digest = hashlib.sha256(
+            "\n".join(sorted_packages).encode("utf-8")
+        ).hexdigest()
+        cache_key = (device_id, package_digest)
+        cached = _APP_LABEL_CACHE.get(cache_key)
+        if cached is not None:
+            return list(cached)
+
+        package_words = " ".join(shlex.quote(package) for package in sorted_packages)
+        script = (
+            f"for pkg in {package_words}; do "
+            'if ! label="$(pm get-application-label \"$pkg\")"; '
+            "then exit 1; fi; "
+            "printf '%s\\t%s\\n' \"$pkg\" \"$label\"; "
+            "done"
+        )
+        output = _run_adb_shell_text(device_id, [script], timeout=timeout)
+        if not output:
+            return []
+
+        entries = _parse_app_label_output(output, packages)
+        if entries is None:
+            return []
+        _APP_LABEL_CACHE[cache_key] = tuple(entries)
+        return entries
+    except Exception:
+        return []
+
+
+def _get_launchable_packages(
+    device_id: str | None, *, timeout: float
+) -> set[str]:
+    """Query launcher activities, falling back to third-party packages."""
+
+    intent_args = [
+        "-a",
+        "android.intent.action.MAIN",
+        "-c",
+        "android.intent.category.LAUNCHER",
+    ]
+    launcher_queries = (
+        ["cmd", "package", "query-activities", "--brief", *intent_args],
+        ["pm", "query-activities", "--brief", *intent_args],
+        ["pm", "query-activities", *intent_args, "--brief"],
+    )
+    for query in launcher_queries:
+        output = _run_adb_shell_text(device_id, query, timeout=timeout)
+        packages = _parse_component_packages(output)
+        if packages:
+            return packages
+
+    output = _run_adb_shell_text(
+        device_id, ["pm", "list", "packages", "-3"], timeout=timeout
+    )
+    return _parse_package_list(output)
+
+
+def _parse_component_packages(output: str) -> set[str]:
+    """Extract bare package names from package/activity component lines."""
+
+    return {match.group(1) for match in _COMPONENT_RE.finditer(output)}
+
+
+def _parse_package_list(output: str) -> set[str]:
+    """Parse ``pm list packages`` output without accepting diagnostics."""
+
+    packages: set[str] = set()
+    for line in output.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("package:"):
+            continue
+        package = stripped.removeprefix("package:").strip()
+        if _PACKAGE_NAME_RE.fullmatch(package):
+            packages.add(package)
+    return packages
+
+
+def _parse_app_label_output(
+    output: str, expected_packages: set[str]
+) -> list[AppLabelEntry] | None:
+    """Parse one label-loop response, rejecting incomplete or foreign output."""
+
+    entries: list[AppLabelEntry] = []
+    seen: set[str] = set()
+    for line in output.splitlines():
+        if not line.strip():
+            continue
+        package, separator, label = line.partition("\t")
+        package = package.strip()
+        if not separator or package not in expected_packages or package in seen:
+            return None
+        seen.add(package)
+        label = label.strip()
+        if label:
+            entries.append(AppLabelEntry(package=package, label=label))
+    if seen != expected_packages:
+        return None
+    return entries
 
 
 def is_keyboard_visible(device_id: str | None = None) -> bool:
