@@ -129,7 +129,10 @@ def get_app_labels(
     """Return launchable packages with localized device application labels.
 
     Label lookup uses one remote shell loop and is cached until the observed package
-    set changes. Any ADB or parsing failure degrades to an empty enhancement result.
+    set changes. Some OEM ROMs (e.g. ColorOS) strip ``pm get-application-label``:
+    when the label loop is unavailable/fails we degrade to *package-as-label*
+    entries (the caller still learns what is installed and launchable). Only when
+    no launchable package can be listed at all do we return an empty result.
     """
 
     try:
@@ -155,12 +158,14 @@ def get_app_labels(
             "done"
         )
         output = _run_adb_shell_text(device_id, [script], timeout=timeout)
-        if not output:
-            return []
-
-        entries = _parse_app_label_output(output, packages)
+        entries = _parse_app_label_output(output, packages) if output else None
         if entries is None:
-            return []
+            # Label command unavailable/stripped (ColorOS, …) or garbled output:
+            # degrade to package-as-label so callers still get the install facts.
+            entries = [
+                AppLabelEntry(package=package, label=package)
+                for package in sorted_packages
+            ]
         _APP_LABEL_CACHE[cache_key] = tuple(entries)
         return entries
     except Exception:

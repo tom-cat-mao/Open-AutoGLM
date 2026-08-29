@@ -93,15 +93,35 @@ def test_get_app_labels_adb_failure_returns_empty(monkeypatch) -> None:
     monkeypatch.setattr(device, "_APP_LABEL_CACHE", {})
 
     def fake_run(command, **kwargs):
-        if "query-activities" in command:
-            return FakeCompletedProcess(stdout="com.example.app/.MainActivity\n")
-        if "get-application-label" in command[-1]:
-            return FakeCompletedProcess(stderr="device offline", returncode=1)
-        raise AssertionError(f"Unexpected ADB command: {command}")
+        return FakeCompletedProcess(stderr="device offline", returncode=1)
 
     monkeypatch.setattr(subprocess, "run", fake_run)
 
     assert device.get_app_labels() == []
+
+
+def test_get_app_labels_label_command_stripped_degrades_to_packages(monkeypatch) -> None:
+    """OEM-stripped ``pm get-application-label`` (e.g. ColorOS): still return the
+    launchable install facts with the package name as the label."""
+
+    monkeypatch.setattr(device, "_APP_LABEL_CACHE", {})
+
+    def fake_run(command, **kwargs):
+        if "query-activities" in command:
+            return FakeCompletedProcess(
+                stdout="com.example.one/.MainActivity\ncom.example.two/.MainActivity\n"
+            )
+        if "get-application-label" in command[-1]:
+            return FakeCompletedProcess(stderr="Unknown command", returncode=1)
+        raise AssertionError(f"Unexpected ADB command: {command}")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    entries = device.get_app_labels()
+    assert entries == [
+        device.AppLabelEntry(package="com.example.one", label="com.example.one"),
+        device.AppLabelEntry(package="com.example.two", label="com.example.two"),
+    ]
 
 
 def test_get_app_labels_cache_avoids_second_label_lookup(monkeypatch) -> None:
