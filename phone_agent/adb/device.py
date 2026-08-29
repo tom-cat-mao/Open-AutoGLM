@@ -96,6 +96,33 @@ def get_installed_app_inventory(device_id: str | None = None) -> InstalledAppInv
     return InstalledAppInventory(frozenset(packages), device_id=device_id)
 
 
+def get_serial_number(device_id: str | None = None) -> str | None:
+    """Return the device serial via ``adb get-serialno`` (None when unavailable).
+
+    Used to namespace per-device state (e.g. App-KB scopes) when the caller did
+    not configure an explicit serial (the single-device default).
+    """
+
+    adb_prefix = _get_adb_prefix(device_id)
+    try:
+        result = subprocess.run(
+            adb_prefix + ["get-serialno"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=5,
+        )
+    except subprocess.TimeoutExpired:
+        return None
+    if result.returncode != 0:
+        return None
+    serial = (result.stdout or "").strip()
+    if not serial or serial.lower() in {"unknown", "unauthorized"}:
+        return None
+    return serial
+
+
 def get_app_labels(
     device_id: str | None = None, *, timeout: float = 30.0
 ) -> list[AppLabelEntry]:

@@ -113,6 +113,9 @@ class PhoneSession:
         # imports and filesystem creation until sync or prompt lookup needs it.
         self.app_store: "AppKnowledgeStore | None" = None
         self.app_knowledge: "AppKnowledge | None" = None
+        # Cached device serial resolved via adb when config.device_id is unset
+        # (the single-device default); None means "not resolved yet" (retried).
+        self._kb_serial: str | None = None
         self.marks: dict[str, MarkCandidate] = {}
         self.screen_seq: int = 0
         # U1 observation batch counter ("work-badge epoch"). Bumped once per
@@ -155,6 +158,28 @@ class PhoneSession:
 
     # -- app knowledge ---------------------------------------------------
 
+    def _kb_device_id(self) -> str | None:
+        """Device namespace for App-KB: configured serial, else the live one.
+
+        ``config.device_id`` wins; when unset (single-device default) the serial
+        is resolved once via the device layer and cached. Resolution failures
+        return None (retried next call) so a transient adb hiccup disables
+        nothing permanently.
+        """
+
+        serial = getattr(self.config, "device_id", None) or self._kb_serial
+        if serial:
+            return serial
+        getter = getattr(self.device_factory, "get_serial_number", None)
+        if callable(getter):
+            try:
+                serial = getter(None)
+            except Exception:  # noqa: BLE001 - best-effort serial resolution
+                serial = None
+        if serial:
+            self._kb_serial = serial
+        return serial
+
     def _ensure_app_knowledge(
         self,
     ) -> tuple["AppKnowledgeStore | None", "AppKnowledge | None"]:
@@ -171,7 +196,7 @@ class PhoneSession:
                 str(getattr(self.config, "memory_dir", "memory"))
             )
             knowledge = AppKnowledge(
-                store, device_id=getattr(self.config, "device_id", None)
+                store, device_id=self._kb_device_id()
             )
         except Exception:  # noqa: BLE001 - memory is an optional enhancement
             self.app_store = None
@@ -195,10 +220,11 @@ class PhoneSession:
             if store is None:
                 return False
             labels = self.device_factory.get_app_labels(self.config.device_id)
-            if not labels or not self.config.device_id:
+            serial = self._kb_device_id()
+            if not labels or not serial:
                 return False
             store.sync_device(
-                self.config.device_id,
+                serial,
                 [(entry.package, entry.label) for entry in labels],
             )
             return True
@@ -220,7 +246,7 @@ class PhoneSession:
         if store is None:
             return ""
         try:
-            device_id = getattr(self.config, "device_id", None)
+            device_id = self._kb_device_id()
             device_entries = (
                 store.entries(scope=f"device:{device_id}") if device_id else []
             )

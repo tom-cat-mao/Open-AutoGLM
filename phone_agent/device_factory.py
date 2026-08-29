@@ -149,6 +149,12 @@ class DeviceFactory:
             return InstalledAppInventory(frozenset(), device_id=device_id)
         return self.module.get_installed_app_inventory(device_id)
 
+    def get_serial_number(self, device_id: str | None = None) -> str | None:
+        """Return the device serial when the module exposes it (else None)."""
+        if not hasattr(self.module, "get_serial_number"):
+            return None
+        return self.module.get_serial_number(device_id)
+
     def get_app_labels(self, device_id: str | None = None) -> list[Any]:
         """Return device-reported launchable app labels when available."""
 

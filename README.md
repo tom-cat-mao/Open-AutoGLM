@@ -34,8 +34,13 @@ cp .env.example .env  # 填写模型网关、模型名与 API Key
 ```bash
 .venv/bin/python main_v2.py "打开设置进入 WLAN" --device-id <serial>
 .venv/bin/python main_v2.py "在飞猪查询 10 月 2 日上海飞桃仙的最低价机票" --max-steps 40
+.venv/bin/python -m phone_agent.web --device-id <serial> --port 8080   # Web 控制台
+.venv/bin/python main_v2.py --dream    # 手动整理本地 App-KB
 .venv/bin/pytest tests -q
 ```
+
+Web 控制台默认只监听 `127.0.0.1:8080`：输入任务后可实时查看手机画面、步骤时间线、任务板与终局状态，
+并处理 `ask_user` / `take_over` / hard 档安全确认。Web 是可选观察层，无界面用法不变。
 
 ## 文档
 

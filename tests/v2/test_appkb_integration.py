@@ -85,6 +85,29 @@ def test_sync_app_knowledge_fails_open_when_labels_unavailable(tmp_path):
     assert session.app_list_for_prompt(10) == "Global App"
 
 
+def test_sync_resolves_serial_when_device_id_unset(tmp_path):
+    """Default single-device config (no serial) must still feed the App-KB:
+    the serial is resolved from the device itself and used as the scope."""
+
+    class _SerialDevice(_LabelDevice):
+        def get_serial_number(self, device_id=None):
+            return "auto-serial"
+
+    config = _config(tmp_path)
+    config.device_id = None
+    device = _SerialDevice([AppLabelEntry("com.example.one", "One")])
+    session = PhoneSession(config, device_factory=device)
+
+    assert session.sync_app_knowledge() is True
+    store = session.app_store
+    assert store is not None
+    device_entries = store.entries(scope="device:auto-serial")
+    assert [entry["label"] for entry in device_entries] == ["One"]
+    assert session.app_list_for_prompt(10) == "One"
+    assert session.app_knowledge is not None
+    assert session.app_knowledge.lookup("One") == "com.example.one"
+
+
 def test_sync_and_prompt_list_are_device_first_and_bounded(tmp_path):
     device = _LabelDevice(
         [

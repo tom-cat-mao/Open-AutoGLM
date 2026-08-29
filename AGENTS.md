@@ -9,6 +9,9 @@ tools — one model call per step, on LangChain `create_agent`. The harness only
 enforces safety boundaries, keeps context hygienic, and records traces. It does **not** route a
 workflow. The v1 LangGraph node architecture was deleted; `adb/`, `grounding/`, and
 `config/{policy,app_registry,redact}` are retained as libraries used by `phone_agent/v2/`.
+The optional `phone_agent/web/` NiceGUI frontend observes runs through
+`ThinPhoneAgent(extra_middleware=...)`; it must not own device access, tool execution, or workflow
+routing, and the headless `ThinPhoneAgent.run(...)` path must remain usable without the web layer.
 
 ## Development Commands
 
@@ -86,6 +89,7 @@ The v1 routed LangGraph workflow and its `graph/`, `actions/`, `checkpoint/`, ol
 | Architecture status & deferred items | `docs/future-roadmap.md` |
 | Module contracts | docstrings in `phone_agent/v2/` (agent, session, tools, middleware) |
 | Real-device diagnosis | `.agents/skills/phone-agent-live-diagnosis/SKILL.md` (v2; local-first full-fidelity report, screenshots on disk, `--share` redacts) |
+| Local Web watch/steer UI | `README.md`, `phone_agent/web/{bridge,app}.py` docstrings |
 | Historical batch logs (v1 era) | `docs/archive/` |
 
 ## Version Management
