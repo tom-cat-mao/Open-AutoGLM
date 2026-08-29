@@ -45,7 +45,10 @@ from langchain_core.messages import (
     ToolMessage,
 )
 
-from phone_agent.v2.middleware._tokens import estimate_context_tokens
+from phone_agent.v2.middleware._tokens import (
+    estimate_context_tokens,
+    estimate_message_tokens,
+)
 
 # Pinned-block id prefixes the fold must preserve verbatim (never summarise): the
 # TaskDoc board (taskdoc middleware) and this module's own prior summary.
@@ -394,10 +397,25 @@ class CompactMiddleware(AgentMiddleware):
                 resp = model.invoke(messages)
             except Exception:  # noqa: BLE001 - too-long / flaky -> retry smaller
                 continue
+            self._record_usage(resp, messages)
             text = _content_text(resp).strip()
             if text:
                 return text
         return None
+
+    def _record_usage(self, response: Any, messages: list[Any]) -> None:
+        """Best-effort accounting for one successful summariser call."""
+
+        ledger = getattr(self.session, "usage_ledger", None)
+        if ledger is None:
+            return
+        try:
+            estimate = estimate_context_tokens(messages) + estimate_message_tokens(
+                response
+            )
+            ledger.record("compact", response, estimate_tokens=estimate)
+        except Exception:  # noqa: BLE001 - accounting must never break compaction
+            pass
 
     def _build_summary_messages(
         self, ancient: list[Any], prior_summary: str | None

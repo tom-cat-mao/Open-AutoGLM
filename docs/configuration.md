@@ -54,6 +54,8 @@
 | `PHONE_AGENT_CONTEXT_WINDOW` | 按模型推断，兜底 `256000` | 手动覆盖上下文窗口 token 数。 |
 | `PHONE_AGENT_MEMORY_MODEL` | 主模型 | auto-compact 的纯文本摘要模型。 |
 
+单次运行的 token 预算统一计入 actor 与 side model 调用（auto-compact 摘要器、finish verifier、安全 reviewer）；provider 未返回 usage metadata 时使用本地估算。
+
 ## 上下文卫生与 Grounding
 
 | 变量 | 默认值 | 说明 |

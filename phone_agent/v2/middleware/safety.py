@@ -57,6 +57,10 @@ from phone_agent.config.policy import (
     _term_matches,
 )
 from phone_agent.config.redact import SENSITIVE_PATTERN, redact_context_text
+from phone_agent.v2.middleware._tokens import (
+    estimate_context_tokens,
+    estimate_message_tokens,
+)
 
 # Deviation (§9.1): policy.py has no sensitive-app table, so launch_app targets
 # are matched against this curated CN+EN keyword set for banking/payment apps
@@ -417,7 +421,9 @@ def is_sensitive_tool_call(
     ).should_gate
 
 
-def build_safety_reviewer(config: Any | None) -> Callable[[str, str], bool] | None:
+def build_safety_reviewer(
+    config: Any | None, session: Any | None = None
+) -> Callable[[str, str], bool] | None:
     """Build the reviewer callable for soft-candidate precision (S2 §3.3).
 
     Returns ``reviewer(tool_name, target_text) -> bool`` (``True`` == reversible,
@@ -460,7 +466,17 @@ def build_safety_reviewer(config: Any | None) -> Callable[[str, str], bool] | No
         human = HumanMessage(
             content=f"工具：{tool_name}\n目标文本：{summary}\n该动作是否不可逆？"
         )
-        resp = model.invoke([system, human])
+        messages = [system, human]
+        resp = model.invoke(messages)
+        ledger = getattr(session, "usage_ledger", None)
+        if ledger is not None:
+            try:
+                estimate = estimate_context_tokens(messages) + estimate_message_tokens(
+                    resp
+                )
+                ledger.record("reviewer", resp, estimate_tokens=estimate)
+            except Exception:  # noqa: BLE001 - accounting must not change safety
+                pass
         content = getattr(resp, "content", resp)
         if isinstance(content, list):
             content = " ".join(
@@ -632,7 +648,9 @@ def build_safety_warning_middleware(
     mode = _safety_mode(config)
     if mode not in {"wary", "reviewer"}:
         return None
-    reviewer = build_safety_reviewer(config) if mode == "reviewer" else None
+    reviewer = (
+        build_safety_reviewer(config, session=session) if mode == "reviewer" else None
+    )
     return SafetyWarningMiddleware(session, config, reviewer=reviewer)
 
 

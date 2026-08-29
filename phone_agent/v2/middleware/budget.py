@@ -15,22 +15,23 @@ bills per token, so tokens are the meaningful ceiling. This middleware owns the
 
 Cumulative accounting is compaction-proof: the auto-compact middleware replaces
 old ``AIMessage``s (and their ``usage_metadata``) with a summary, so re-summing
-the live transcript would *undercount* the cost already billed. Instead this
-middleware accumulates each turn's usage in ``after_model`` into an instance
-counter (``_used_tokens``), keyed by the newest AI message id to avoid
-double-counting. Usage prefers ``AIMessage.usage_metadata`` (input + output) and
-falls back to a crude content estimate when the provider omits it.
+the live transcript would *undercount* the cost already billed. With a shared
+``UsageLedger``, actor turns and side-model calls contribute to one per-run total;
+without one, the original private actor counter remains the compatibility path.
 """
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from langchain.agents.middleware import AgentMiddleware
 from langchain.agents.middleware.types import hook_config
 from langchain_core.messages import AIMessage, SystemMessage
 
 from phone_agent.v2.middleware._tokens import estimate_message_tokens, usage_tokens
+
+if TYPE_CHECKING:
+    from phone_agent.v2.usage import UsageLedger
 
 # Terminal marker text the hard ceiling injects; agent._build_result keys on the
 # instance flag, not this string, but it keeps the transcript self-describing.
@@ -72,6 +73,7 @@ class BudgetMiddleware(AgentMiddleware):
         token_budget: int = 1_000_000,
         warn_remaining: int = 100_000,
         lang: str = "cn",
+        ledger: UsageLedger | None = None,
     ) -> None:
         super().__init__()
         self.token_budget = max(1, int(token_budget))
@@ -82,6 +84,7 @@ class BudgetMiddleware(AgentMiddleware):
             warn = min(100_000, self.token_budget)
         self.warn_remaining = warn
         self.lang = lang
+        self.ledger = ledger
         self._warned = False
         self._exhausted = False
         self._used_tokens = 0
@@ -94,11 +97,15 @@ class BudgetMiddleware(AgentMiddleware):
         self._exhausted = False
         self._used_tokens = 0
         self._counted_id = None
+        if self.ledger is not None:
+            self.ledger.reset()
 
     @property
     def used_tokens(self) -> int:
         """Cumulative billed tokens accounted so far (compaction-proof)."""
 
+        if self.ledger is not None:
+            return self.ledger.total
         return self._used_tokens
 
     @property
@@ -125,27 +132,30 @@ class BudgetMiddleware(AgentMiddleware):
         # to always counting the newest — after_model runs once per model call.
         if msg_id is not None and msg_id == self._counted_id:
             return
-        reported = usage_tokens(newest)
-        self._used_tokens += (
-            reported if reported is not None else estimate_message_tokens(newest)
-        )
+        estimate = estimate_message_tokens(newest)
+        if self.ledger is not None:
+            self.ledger.record("actor", newest, estimate_tokens=estimate)
+        else:
+            reported = usage_tokens(newest)
+            self._used_tokens += reported if reported is not None else estimate
         self._counted_id = msg_id
 
     def _warn_text(self) -> str:
         template = _WARN_TEXT.get(self.lang, _WARN_TEXT["cn"])
-        remaining = max(0, self.token_budget - self._used_tokens)
+        used = self.used_tokens
+        remaining = max(0, self.token_budget - used)
         return template.format(
-            used=self._used_tokens, budget=self.token_budget, remaining=remaining
+            used=used, budget=self.token_budget, remaining=remaining
         )
 
     def _exhausted_text(self) -> str:
         template = _EXHAUSTED_TEXT.get(self.lang, _EXHAUSTED_TEXT["cn"])
-        return template.format(used=self._used_tokens, budget=self.token_budget)
+        return template.format(used=self.used_tokens, budget=self.token_budget)
 
     # ------------------------------------------------------------------
     @hook_config(can_jump_to=["end"])
     def before_model(self, state, runtime) -> dict[str, Any] | None:  # noqa: ANN001
-        remaining = self.token_budget - self._used_tokens
+        remaining = self.token_budget - self.used_tokens
         # Hard cost ceiling: stop the run once the budget is fully spent.
         if remaining <= 0:
             if not self._exhausted:
@@ -178,11 +188,15 @@ def build_budget_middleware(
     token_budget: int = 1_000_000,
     warn_remaining: int = 100_000,
     lang: str = "cn",
+    ledger: UsageLedger | None = None,
 ) -> BudgetMiddleware:
     """Build a :class:`BudgetMiddleware` from the resolved config values."""
 
     return BudgetMiddleware(
-        token_budget=token_budget, warn_remaining=warn_remaining, lang=lang
+        token_budget=token_budget,
+        warn_remaining=warn_remaining,
+        lang=lang,
+        ledger=ledger,
     )
 
 

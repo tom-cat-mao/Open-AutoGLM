@@ -113,6 +113,7 @@ class ThinPhoneAgent:
         from phone_agent.v2.model import build_chat_model
         from phone_agent.v2.session import PhoneSession
         from phone_agent.v2.tools import build_tools
+        from phone_agent.v2.usage import UsageLedger
         from phone_agent.v2.middleware.budget import build_budget_middleware
         from phone_agent.v2.middleware.images import build_context_pruning_middleware
         from phone_agent.v2.middleware.safety import (
@@ -128,6 +129,8 @@ class ThinPhoneAgent:
         self.checkpointer = checkpointer
 
         self.session = PhoneSession(config)
+        self.usage_ledger = UsageLedger()
+        self.session.usage_ledger = self.usage_ledger
         self.model = build_chat_model(config)
         self.tools = build_tools(self.session, config)
 
@@ -146,6 +149,7 @@ class ThinPhoneAgent:
             token_budget=getattr(config, "token_budget", 1_000_000),
             warn_remaining=getattr(config, "token_warn_remaining", 100_000),
             lang=getattr(config, "lang", "cn"),
+            ledger=self.usage_ledger,
         )
 
         # Two-threshold auto-compact (A4 §3): T1 warn + T2 forced handoff summary.
@@ -368,6 +372,9 @@ class ThinPhoneAgent:
         # (S1 R7): the HITL-exhaustion terminal flag, the token-budget state, and
         # the compaction middleware's per-run counters.
         self._hitl_exhausted = False
+        usage_ledger = getattr(self, "usage_ledger", None)
+        if usage_ledger is not None:
+            usage_ledger.reset()
         if getattr(self, "_budget", None) is not None:
             self._budget.reset()
         if getattr(self, "_compact", None) is not None:
