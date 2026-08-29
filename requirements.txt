@@ -1,5 +1,6 @@
 Pillow>=12.0.0
 openai>=2.9.0
+nicegui>=3.0.0
 
 # For LangGraph Agent Architecture
 langgraph>=0.2.0

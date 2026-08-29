@@ -87,9 +87,21 @@ def _first_observation_content(
 
 
 class ThinPhoneAgent:
-    """Thin-loop phone agent built on ``create_agent`` + v2 middleware."""
+    """Thin-loop phone agent built on ``create_agent`` + v2 middleware.
 
-    def __init__(self, config: Any, checkpointer: Any | None = None) -> None:
+    ``extra_middleware`` is an optional observability extension point for
+    add-ons such as the local web UI. Extra middleware is appended to the
+    built-in observation stack, before the safety-warning wrapper, so it can
+    observe both ordinary tool results and calls short-circuited by safety.
+    The core agent remains fully headless when the argument is omitted.
+    """
+
+    def __init__(
+        self,
+        config: Any,
+        checkpointer: Any | None = None,
+        extra_middleware: list[Any] | None = None,
+    ) -> None:
         self.config = config
         self.run_id = uuid.uuid4().hex
 
@@ -219,6 +231,11 @@ class ThinPhoneAgent:
             except Exception:  # noqa: BLE001 - optional increment; never block bring-up
                 self._diagnostic = None
         self.evidence_path = getattr(self._diagnostic, "evidence_path", None)
+
+        # Optional add-ons may observe the run without coupling the core to a UI
+        # or transport. Place them outside the final safety wrapper so a blocked
+        # warning result remains visible to observers.
+        middleware.extend(list(extra_middleware or []))
 
         # Safety warning flow (U2). In wary/reviewer mode a risky execution call
         # is short-circuited with a warning ToolMessage instead of being executed

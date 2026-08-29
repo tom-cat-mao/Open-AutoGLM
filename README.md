@@ -55,9 +55,15 @@ cp .env.example .env   # 填入 base_url / model / api_key
 ```bash
 .venv/bin/python main_v2.py "打开设置进入WLAN" --device-id <serial>
 .venv/bin/python main_v2.py "在飞猪查10月2日上海飞桃仙的最低价机票" --max-steps 40
+.venv/bin/python -m phone_agent.web --device-id <serial> --port 8080
 .venv/bin/python main_v2.py --dream  # 手动整理本地 App-KB
 .venv/bin/pytest tests -q            # 全 fake，无真机无 MLX
 ```
+
+Web 控制台默认只监听 `127.0.0.1:8080`，浏览器打开该地址即可输入任务、查看最新手机截图、
+步骤时间线、TaskDoc 与 token/终局状态，并处理 `ask_user`、`take_over` 或 hard 安全模式产生的
+人工确认。可用 `--model` 覆盖模型；其余运行配置仍统一读取 `PHONE_AGENT_*` 环境变量与 `.env`。
+Web 是可选观察层：`main_v2.py` 与 `ThinPhoneAgent.run(...)` 的无界面用法不变。
 
 默认 `wary` 预警制下，风险执行动作会被拦下并要求模型带 `confirm_irreversible=true` 重发（无需人工）；
 `hard` 档 HITL 触发时按提示输入 `approve` / `reject` / 回答文本。退出码：成功 `0` / takeover `2` / 预算或保险丝耗尽 `3` / 错误 `1`。
