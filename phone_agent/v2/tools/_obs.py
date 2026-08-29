@@ -124,3 +124,39 @@ def auto_observation(session) -> list[dict]:
             "screen_seq": seq,
         },
     ]
+
+
+def locate_observation(session, head: str) -> list[dict]:
+    """Return the locate tool's same-frame observation (U1).
+
+    ``locate`` runs the visual model on exactly one screenshot; the tool ships
+    *that* frame back (text describing the registered mark + the screenshot the
+    model located on) without a second ``observe()`` — single-producer
+    discipline. When the session exposes no stashed locate frame (test doubles /
+    text-only bring-up) it degrades to a single text block; a fake image is never
+    emitted (fail-closed).
+    """
+
+    blocks: list[dict] = [{"type": "text", "text": head}]
+    getter = getattr(session, "last_locate_frame", None)
+    frame = None
+    if callable(getter):
+        try:
+            frame = getter()
+        except Exception:  # noqa: BLE001 - degrade to text-only, never crash
+            frame = None
+    if not frame:
+        return blocks
+    b64 = frame.get("b64") if isinstance(frame, dict) else None
+    if not b64:
+        return blocks
+    mime = (frame.get("mime") if isinstance(frame, dict) else None) or "image/png"
+    seq = frame.get("screen_seq", getattr(session, "screen_seq", 0))
+    blocks.append(
+        {
+            "type": "image_url",
+            "image_url": {"url": f"data:{mime};base64,{b64}"},
+            "screen_seq": seq,
+        }
+    )
+    return blocks

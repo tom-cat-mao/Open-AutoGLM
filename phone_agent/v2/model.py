@@ -54,6 +54,14 @@ def build_chat_model(config: "V2Config") -> "BaseChatModel":
     from langchain_openai import ChatOpenAI
 
     sampling = dict(config.sampling or {})
+    # U1: disable server-side parallel tool calls. create_agent re-binds tools
+    # each turn via ``model.bind_tools(...)`` without passing this flag, so we set
+    # it as a model default (model_kwargs) that survives every re-bind. The thin
+    # loop is strictly one-observation-one-action; a parallel batch would address
+    # marks the first action already invalidated (batch-badge freshness gate).
+    model_kwargs: dict[str, object] = {}
+    if not getattr(config, "parallel_tool_calls", False):
+        model_kwargs["parallel_tool_calls"] = False
     return ChatOpenAI(
         base_url=config.base_url,
         model=config.model_name,
@@ -61,5 +69,6 @@ def build_chat_model(config: "V2Config") -> "BaseChatModel":
         timeout=config.model_timeout,
         max_retries=config.model_max_retries,
         default_headers=build_default_headers(config),
+        model_kwargs=model_kwargs,
         **sampling,
     )

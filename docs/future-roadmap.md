@@ -37,6 +37,15 @@
   - **finish verifier 多帧输入**：verifier 当前默认单帧（`FINISH_VERIFY_K=1`）；`K>1` 需 S1 历史帧保留能力，尾帧多帧输入延后。
   - **compact 多帧/异步**：auto-compact 当前同步、单次 LLM 调用；异步水位线压缩延后。
 - **实机诊断 skill（v2 已重写 + A5 全保真）**：`.agents/skills/phone-agent-live-diagnosis/` 已完成 v2 薄 loop 适配——生产侧 opt-in `phone_agent/v2/middleware/diagnostic.py`（证据流：多模态 text/image 拆分、JSONL 永不含 base64），skill 侧 scripts 拆包（run_diagnosis / evidence / taxonomy / analyze / sourcemap / report）。A5 把诊断产物改为**本机自用全保真**：`V2Config.diagnostic_unredacted`（env `PHONE_AGENT_DIAG_UNREDACTED`，skill 驱动置真）令证据流不脱敏、不截断；截图解码落盘到 `<run_dir>/screenshots/screen-<seq>.png`（幂等、0600），evidence `image` 增加相对 `path`；`report.html` 逐步回放（真实截图缩略图 + 模型思考全文 + 工具调用/结果/延迟）；`--share` 产出脱敏且无截图引用的 `report-share.html`。生产 `trace.py` 的 P0 #6（64 字截断 + 脱敏 + 无 base64）一字未动，全保真只活在诊断模式。
+- **U1 观测生命周期已落地（地基）**：把观测收束为**唯一原子生产者 + 批次工牌 + 验鲜**，杜绝"marks 一帧、像素另一帧"的 TOCTOU 错位。
+  - **原子 `observe()`（单一生产者）**：一个采样窗口内取齐 foreground-before → 截图 → accessibility dump（`refresh_marks(shot)` 复用同一张截图，不再二次截图）→ foreground-after。前后台组件在窗口内变化 = 帧不一致，整窗**重试一次**；再不稳 = 观测失败，抛 `ScreenshotError`。`refresh_marks()` 保留无参形态（外部裸调用自取一张）向后兼容。
+  - **批次工牌（epoch）**：`PhoneSession.epoch` 每次成功 `observe()` +1；对外 mark ID 带批次后缀 `ax_1@e12`（provider 内部 ID 仅作 provenance 前缀），`MarkCandidate.epoch` / `Observation.epoch` / `ScreenBinding.observation_epoch` 同步写入。
+  - **验鲜门（fail-closed）**：`resolve_mark` 先解析工牌批次，非当前 epoch 直接抛 `StaleMarkError`（先于 marks 查表，即使同名 provider id 在新批次复现也不误命中）；工具层照旧返回 stale 提示且不执行设备动作。
+  - **失败整批作废**：观测失败（截图无效 / 持续不稳）时 `marks` 清空、不 bump epoch——绝不残留旧批次寻址权限。
+  - **locate 同批次 + 同帧**：`locate` 把命中 mark 铸入**当前批次**（带当前 epoch 工牌，不 bump），并暂存其视觉模型所用截图；locate 工具经 `last_locate_frame()` 直接回该同帧（text + 该截图），不额外 `observe`。
+  - **禁并行 tool calls**：`build_chat_model` 以 `model_kwargs={"parallel_tool_calls": False}` 下发（`create_agent` 每轮 `bind_tools` 不带该 flag，故设为模型默认使其跨 rebind 存活）；`PHONE_AGENT_PARALLEL_TOOL_CALLS`（默认 false）可在网关拒绝该参数时置真退出。
+  - **剪除联动不动**：`images.py` 仍保留最新 2 张含图消息，U1 只改生产侧原子性，不动历史端剪除。
+  - **测试**：`tests/v2/test_observation_lifecycle.py`（真 `PhoneSession` + fake 设备）覆盖原子性/单生产者/工牌不复用/验鲜拒点/重试一次/持续不稳与截图失败作废/locate 同批次同帧；全套 402 绿。
 
 ---
 

@@ -65,10 +65,13 @@ HITL 触发时按提示输入 `approve` / `reject` / 回答文本。退出码：
 
 ## Grounding
 
-marks-first：执行动作必须绑定 mark。marks 来自 `session.refresh_marks()`（Android accessibility tree，
-随观测自动附带）；树上没有的目标用 `locate(描述)` 走本地 LocateAnything（MLX，Apple Silicon），
-定位后注册为 mark 再点击。`PHONE_AGENT_GROUNDING_PROVIDER=hybrid`（默认）= accessibility 优先、
-LocateAnything 兜底。Benchmark 见 `bench/grounding/`。
+marks-first：执行动作必须绑定 mark。观测是**唯一原子生产者** `session.observe()`——一个采样窗口内
+foreground → 截图 → accessibility dump（复用同一张截图）→ foreground 取齐，不稳重试一次、再不稳观测失败。
+每次成功观测把批次计数 `epoch` +1，对外 mark ID 带**批次工牌** `ax_1@e<epoch>`；`tap` 引用非当前批次的
+工牌会在 `resolve_mark` 处 fail-closed（`StaleMarkError`），观测失败则整批 marks 作废、不留旧寻址权限。
+树上没有的目标用 `locate(描述)` 走本地 LocateAnything（MLX，Apple Silicon），命中后铸入**当前批次**并原帧返回、
+再点击。`PHONE_AGENT_GROUNDING_PROVIDER=hybrid`（默认）= accessibility 优先、LocateAnything 兜底。
+薄环一次观测一次动作，缺省关闭并行 tool calls（`PHONE_AGENT_PARALLEL_TOOL_CALLS=false`）。Benchmark 见 `bench/grounding/`。
 
 ## 文档
 
