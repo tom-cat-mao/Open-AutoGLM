@@ -70,6 +70,11 @@ class MarkCandidate:
     text_summary: str | None = None
     password: bool = False
     editable: bool = False
+    # Observation batch this mark belongs to (U1 batch-badge). Providers emit 0;
+    # ``PhoneSession`` stamps the current batch number when it mints the mark's
+    # external badged id (``ax_1@e12``). ``resolve_mark`` uses it as the freshness
+    # gate — a mark whose ``epoch`` is not the session's current batch is stale.
+    epoch: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

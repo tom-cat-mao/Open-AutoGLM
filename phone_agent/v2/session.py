@@ -11,7 +11,7 @@ See ``docs/refactor-thin-loop-v2.md`` §6 for the binding contract.
 from __future__ import annotations
 
 import hashlib
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
 from phone_agent.device_factory import DeviceFactory, get_device_factory
@@ -47,6 +47,35 @@ class LocateAmbiguousError(RuntimeError):
         self.candidates = candidates or []
 
 
+# U1 batch-badge separator: external mark ids are ``<provider_id>@e<epoch>``
+# (e.g. ``ax_1@e12``). The provider-internal id (``ax_1``) is kept only as
+# provenance; every id the model ever sees carries the batch suffix so a stale
+# reference is structurally detectable in ``resolve_mark``.
+_BADGE_SEP = "@e"
+
+
+def mint_badge(provider_id: str, epoch: int) -> str:
+    """Return the external badged mark id for a provider id in a given batch."""
+
+    return f"{provider_id}{_BADGE_SEP}{int(epoch)}"
+
+
+def parse_badge(mark_id: str) -> tuple[str, int | None]:
+    """Split an external badged id into ``(provider_id, epoch)``.
+
+    An id without the ``@e`` suffix (or a non-integer suffix) yields an epoch of
+    ``None`` so callers can treat it as unbadged / structurally stale.
+    """
+
+    base, sep, suffix = str(mark_id or "").rpartition(_BADGE_SEP)
+    if not sep:
+        return mark_id, None
+    try:
+        return base, int(suffix)
+    except ValueError:
+        return mark_id, None
+
+
 @dataclass
 class Observation:
     """Node-local observation snapshot; never serialized to trace/checkpoint."""
@@ -77,6 +106,12 @@ class PhoneSession:
         self.device_factory = device_factory or get_device_factory()
         self.marks: dict[str, MarkCandidate] = {}
         self.screen_seq: int = 0
+        # U1 observation batch counter ("work-badge epoch"). Bumped once per
+        # successful ``observe()``; every mark minted in that batch carries the
+        # counter in its external id (``ax_1@e12``) and in ``MarkCandidate.epoch``.
+        # A fresh observation invalidates every prior badge; an observation
+        # *failure* clears ``marks`` entirely (no stale authority survives).
+        self.epoch: int = 0
         self.finished: bool = False
         self.finish_summary: str | None = None
         self.takeover_reason: str | None = None
@@ -175,9 +210,37 @@ class PhoneSession:
 
     # -- mark resolution --------------------------------------------------
 
-    def resolve_mark(self, mark_id: str) -> MarkCandidate:
-        """Return the current-screen mark for ``mark_id`` or raise StaleMarkError."""
+    def _mint_marks(self, marks: list[MarkCandidate]) -> list[MarkCandidate]:
+        """Stamp raw provider marks with the current batch badge.
 
+        Each mark's external id becomes ``<provider_id>@e<epoch>`` and its
+        ``epoch`` field is set to ``self.epoch``. The provider-internal id is
+        preserved via ``source``-independent provenance (the pre-badge id is the
+        prefix before ``@e``). Returns the re-stamped list; ``self.marks`` is the
+        caller's responsibility to rebuild.
+        """
+
+        minted: list[MarkCandidate] = []
+        for mark in marks:
+            badged_id = mint_badge(mark.mark_id, self.epoch)
+            minted.append(replace(mark, mark_id=badged_id, epoch=self.epoch))
+        return minted
+
+    def resolve_mark(self, mark_id: str) -> MarkCandidate:
+        """Return the current-batch mark for ``mark_id`` or raise StaleMarkError.
+
+        Freshness gate (U1): a badged id from a superseded batch (its ``@e``
+        epoch != the session's current ``epoch``) is rejected *before* the marks
+        lookup, so a stale reference never resolves even if a same-provider-id
+        mark happens to exist in the new batch.
+        """
+
+        _base, badge_epoch = parse_badge(mark_id)
+        if badge_epoch is not None and badge_epoch != self.epoch:
+            raise StaleMarkError(
+                f"mark {mark_id!r} is from batch e{badge_epoch}, current batch is "
+                f"e{self.epoch}; re-observe (read_screen) and use a fresh mark id"
+            )
         mark = self.marks.get(mark_id)
         if mark is None:
             raise StaleMarkError(
