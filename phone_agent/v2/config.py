@@ -191,6 +191,13 @@ class V2Config:
     accessibility_max_marks: int = 80
     locateanything_model: str | None = None
     locateanything_max_size: int = 960
+    # tool-call concurrency (U1): the thin loop is one-observation-one-action, so
+    # parallel tool calls are disabled — a batch of calls issued against a single
+    # observation would act on marks that a mid-batch action already invalidated
+    # (the batch-badge freshness gate would then reject the later calls anyway).
+    # False (default) forwards ``parallel_tool_calls=False`` to the gateway via
+    # model_kwargs. Set True only if a gateway rejects the param.
+    parallel_tool_calls: bool = False
     # i18n / misc
     lang: str = "cn"
     # trace
@@ -283,6 +290,7 @@ class V2Config:
             accessibility_max_marks=_env_int("PHONE_AGENT_ACCESSIBILITY_MAX_MARKS", 80),
             locateanything_model=_env_opt_str("PHONE_AGENT_LOCATEANYTHING_MODEL"),
             locateanything_max_size=_env_int("PHONE_AGENT_LOCATEANYTHING_MAX_SIZE", 960),
+            parallel_tool_calls=_env_bool("PHONE_AGENT_PARALLEL_TOOL_CALLS", False),
             lang=_env_str("PHONE_AGENT_LANG", "cn"),
             trace_dir=_env_str("PHONE_AGENT_TRACE_DIR", ".traces"),
             trace_enabled=_env_bool("PHONE_AGENT_TRACE", True),

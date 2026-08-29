@@ -443,6 +443,7 @@ class PhoneSession:
             width=int(shot.width),
             height=int(shot.height),
             current_app=None,
+            observation_epoch=self.epoch,
         )
 
     def _get_locate_provider(self) -> "MarkProvider | None":
