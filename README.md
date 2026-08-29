@@ -1,90 +1,55 @@
-# Phone Agent
+# Open-AutoGLM
 
-薄 loop（thin-loop v2）Android 手机智能助理：视觉语言模型每步一次调用，通过工具感知和操作真实设备。
-harness（middleware）只提供工具、安全边界、context 卫生与可观测，不做工作流路由。
+LLM 驱动的安卓手机操作 Agent：看一眼屏幕、想一步、动一下，带安全预警与自积累记忆。
 
-```
-system(极简契约) + user(task + 首次观测含截图)
-  → create_agent tool loop: model → [safety 预警/HITL] → tool(s) → model → …
-  → 结束: session.finished | takeover_reason | 无 tool_call | token 预算耗尽 | 死循环保险丝
-```
+[![License](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](LICENSE)
+[![Python](https://img.shields.io/badge/Python-%E2%89%A53.10-3776AB?logo=python&logoColor=white)](setup.py)
+[![CI](https://img.shields.io/badge/CI-GitHub_Actions-lightgrey?logo=githubactions)](https://github.com/tom-cat-mao/Open-AutoGLM/actions)
 
-- **工具**（`phone_agent/v2/tools/`，15 个）：执行 `tap/long_press/type_text/scroll/swipe/back/home/launch_app/wait`、
-  感知 `read_screen/locate`、控制 `finish/ask_user/take_over/update_task_doc`。
-  `tap` 双寻址：`target_mark_id` | `target_description`（解析为唯一 mark，歧义/无匹配 fail-closed 不执行）。
-- **输出契约（intent 入 args）**：每个工具都带 `intent`（本步意图，必填）+ `note`（本步发现，可选）；
-  工具回执写实际执行内容（如 tap 回 `已点击「上海」(ax_3)`）。harness 从 transcript 的 tool_call/tool_result
-  派生一条"流程线"钉进 context（`#3 把出发地改成上海 → tap「上海」→ ok`，最近 8 条），
-  帮模型看清轨迹、避免原地打转；intent 缺失记"（未声明）"。已删除旧的 seen_states/nudge 停滞检测机制。
-- **TaskDoc 任务板**：目标 / 路线 / 关键事实一个文档，模型经 `update_task_doc` 维护，
-  每轮 pinned 进 context（压缩免疫，块尾附流程线）；`finish` 在路线未完成时被拒。状态迁移有纪律：
-  不能把 `pending` 直接标 `completed`（须先 `in_progress`），也不能一次批量补标多项 `completed`。
-- **finish 两段式 + 验收器**：`finish` 先给世界镜像复核包（不落定），`finish(confirm=true)` 才定稿；
-  高风险目标/硬矛盾坚持 confirm 时过独立 context 验收器（只看目标+证据路线+尾帧截图，不看 actor 自辩），
-  REJECT 带内回传、2 次转人工；验收器故障 fail-open（`PHONE_AGENT_FINISH_VERIFY=off|auto|always`，默认 auto）。
-- **Middleware**（`phone_agent/v2/middleware/`）：安全预警制（分层 `classify_tool_call`：宽召回→精排→硬信号；
-  硬信号=不可逆动词/密码框/凭据/自我申报，软候选默认不预警）。`wary`（默认）下检出的风险执行类调用
-  **不执行、不叫人**——工具返回预警文本（世界事实+选项空间），模型带 `confirm_irreversible=true` 重发才执行；
-  `hard` 保留旧 HITL 硬拦（人工 approve/reject，挂机用），`off` 全关，`reviewer` = wary + 软候选过第二模型精排。
-  `ask_user`/`take_over` 任何档都仍中断。`PHONE_AGENT_SAFETY_MODE=off|wary|hard|reviewer`（默认 wary）。此外还有
-  两级 auto-compact（接近上下文窗口时折叠远古段）、历史截图剪除 + marks 折叠、TaskDoc 渲染 + 流程线，
-  token 预算（L0 余量镜子 + 硬成本上限）、JSONL trace（脱敏）、`ModelCallLimit`（死循环保险丝）。
-- **预算与 context 卫生**：成本以 **token** 计（累计 `usage_metadata` 的 input+output，缺失回退估算）。
-  `PHONE_AGENT_TOKEN_BUDGET`（默认 1M）为总预算，耗尽即停（终局 `token_budget_exhausted`）；
-  `PHONE_AGENT_TOKEN_WARN_REMAINING`（默认 100k）为绝对余量预警。`PHONE_AGENT_MAX_STEPS`（默认 100）
-  降为防跑飞的死循环保险丝（终局 `loop_fuse`）。两级 auto-compact：`PHONE_AGENT_COMPACT_WARN_RATIO`
-  （默认 0.75）注入"写任务板/收尾探索"提示，`PHONE_AGENT_COMPACT_TRIGGER_RATIO`（默认 0.92）
-  调纯文本 LLM 生成手机版 handoff 摘要替换远古段（切点保 tool_use/tool_result 配对，不切 TaskDoc/pinned）。
-- **保留库**：`phone_agent/adb/`（设备层）、`phone_agent/grounding/`（accessibility tree + LocateAnything）、
-  `phone_agent/config/`（policy / app_registry / redact）。
-- **App-KB**：每次 run 开始从设备同步可启动应用的本地化名称，并向 system prompt 注入有界名称清单；
-  `launch_app` 在静态表未知时可用持久别名补齐解析，失败回执附本机候选名。知识仅落本地
-  `memory/app_kb/`；`.venv/bin/python main_v2.py --dream` 可手动合并、对账和清理。
+Open-AutoGLM 采用 thin-loop v2：模型每轮观察真实设备、决定一个工具调用并执行一步；harness 只负责工具、安全边界、上下文卫生和可观测性，不替模型编排工作流。
+
+## Demo
+
+<!-- TODO(owner): 将下方截图替换为真实任务的 GIF 录屏。 -->
+![Open-AutoGLM Android demo](resources/screenshot-20251209-181423.png)
+
+## Features
+
+- **Marks-first grounding**：执行动作绑定当前屏幕元素，过期、歧义或未命中的目标会 fail-closed。
+- **安全预警制**：风险动作先返回警告与选项，模型明确确认后才执行（confirm-to-execute）。
+- **可信完成**：TaskDoc 任务板与流程线持续记录进度；finish 两段式确认，并可交给独立上下文验收器复核。
+- **App-KB 自积累记忆**：同步本机应用名称与别名，在多次运行间持续完善应用知识。
+- **长任务可控**：token 预算限制成本，两级 auto-compact 在接近上下文窗口时保留关键状态。
 
 ## 快速开始
 
-```bash
-python -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
-cp .env.example .env   # 填入 base_url / model / api_key
-```
-
-设备：Android 7.0+，开 USB 调试，`adb devices` 可见；文本输入需装
-[ADBKeyboard](https://github.com/senzhk/ADBKeyBoard/blob/master/ADBKeyboard.apk)。
+需要 Python 3.10+；Android 7.0+ 设备需开启 USB 调试、能被 `adb devices` 识别，并安装 [ADBKeyboard](https://github.com/senzhk/ADBKeyBoard/blob/master/ADBKeyboard.apk)。
 
 ```bash
-.venv/bin/python main_v2.py "打开设置进入WLAN" --device-id <serial>
-.venv/bin/python main_v2.py "在飞猪查10月2日上海飞桃仙的最低价机票" --max-steps 40
-.venv/bin/python main_v2.py --dream  # 手动整理本地 App-KB
-.venv/bin/pytest tests -q            # 全 fake，无真机无 MLX
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
+cp .env.example .env  # 填写模型网关、模型名与 API Key
 ```
 
-默认 `wary` 预警制下，风险执行动作会被拦下并要求模型带 `confirm_irreversible=true` 重发（无需人工）；
-`hard` 档 HITL 触发时按提示输入 `approve` / `reject` / 回答文本。退出码：成功 `0` / takeover `2` / 预算或保险丝耗尽 `3` / 错误 `1`。
-
-## 配置
-
-全部走 `PHONE_AGENT_*` 环境变量（`.env` 只加载该前缀，shell 优先）+ CLI 覆盖。完整键表见
-[`.env.example`](.env.example) 与 `phone_agent/v2/config.py`。常用：`PHONE_AGENT_BASE_URL` / `PHONE_AGENT_MODEL` /
-`PHONE_AGENT_API_KEY` / `PHONE_AGENT_DEVICE_ID` / `PHONE_AGENT_GROUNDING_PROVIDER`（默认 `hybrid`）。
-App-KB 使用 `PHONE_AGENT_MEMORY_DIR`（默认 `memory`）、`PHONE_AGENT_APP_KB`（默认 true）、
-`PHONE_AGENT_APP_LIST_MAX`（默认 40）和 `PHONE_AGENT_DREAM=off|auto|manual`（默认 manual）。
-
-网关注意：自建网关若在 Cloudflare 后，需要浏览器 UA 头（`v2/model.py` 已处理）；部分模型有采样参数限制，
-用 `PHONE_AGENT_TEMPERATURE` / `PHONE_AGENT_TOP_P` / `PHONE_AGENT_FREQUENCY_PENALTY` 覆盖。
-
-## Grounding
-
-marks-first：执行动作必须绑定 mark。观测是**唯一原子生产者** `session.observe()`——一个采样窗口内
-foreground → 截图 → accessibility dump（复用同一张截图）→ foreground 取齐，不稳重试一次、再不稳观测失败。
-每次成功观测把批次计数 `epoch` +1，对外 mark ID 带**批次工牌** `ax_1@e<epoch>`；`tap` 引用非当前批次的
-工牌会在 `resolve_mark` 处 fail-closed（`StaleMarkError`），观测失败则整批 marks 作废、不留旧寻址权限。
-树上没有的目标用 `locate(描述)` 走本地 LocateAnything（MLX，Apple Silicon），命中后铸入**当前批次**并原帧返回、
-再点击。`PHONE_AGENT_GROUNDING_PROVIDER=hybrid`（默认）= accessibility 优先、LocateAnything 兜底。
-薄环一次观测一次动作，缺省关闭并行 tool calls（`PHONE_AGENT_PARALLEL_TOOL_CALLS=false`）。Benchmark 见 `bench/grounding/`。
+```bash
+.venv/bin/python main_v2.py "打开设置进入 WLAN" --device-id <serial>
+.venv/bin/python main_v2.py "在飞猪查询 10 月 2 日上海飞桃仙的最低价机票" --max-steps 40
+.venv/bin/pytest tests -q
+```
 
 ## 文档
 
-- 架构状态与后续迭代：`docs/future-roadmap.md`
-- Agent 工作约定（P0 约束）：`AGENTS.md`
-- 后续迭代（含工具扩展理念）：`docs/future-roadmap.md`
+| 主题 | 入口 |
+|---|---|
+| 配置 | [完整配置说明](docs/configuration.md) · [`.env` 模板](.env.example) |
+| App-KB 设计 | [docs/app-kb-memory-design.md](docs/app-kb-memory-design.md) |
+| 架构状态与路线图 | [docs/future-roadmap.md](docs/future-roadmap.md) |
+| Agent 开发约定 | [AGENTS.md](AGENTS.md) |
+
+## Contributing
+
+欢迎提交 Issue 和 Pull Request；开始编码前请先阅读 [AGENTS.md](AGENTS.md) 的开发契约与 P0 约束。
+
+## License
+
+本项目基于 [Apache License 2.0](LICENSE) 开源。
