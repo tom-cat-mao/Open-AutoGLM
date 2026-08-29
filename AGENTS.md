@@ -1,12 +1,28 @@
 # Open-AutoGLM Agent Guide
 
+> LLM 驱动的安卓手机操作 Agent：看一眼屏幕、想一步、动一下；编码前先读本文件，P0 约束不可违反。
+
 ## What This Is
 
 Open-AutoGLM is a **thin-loop (v2)** Android phone agent: an LLM drives a real device through
 tools — one model call per step, on LangChain `create_agent`. The harness only supplies tools,
 enforces safety boundaries, keeps context hygienic, and records traces. It does **not** route a
 workflow. The v1 LangGraph node architecture was deleted; `adb/`, `grounding/`, and
-`config/{policy,app_registry,redact}` are retained as libraries under `phone_agent/v2/`.
+`config/{policy,app_registry,redact}` are retained as libraries used by `phone_agent/v2/`.
+
+## Development Commands
+
+```bash
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
+
+.venv/bin/pytest tests -q
+.venv/bin/python -m pytest tests -q
+.venv/bin/ruff check .
+```
+
+Real-device diagnosis starts from `.agents/skills/phone-agent-live-diagnosis/SKILL.md`; read the
+skill before running or monitoring a device task.
 
 ## P0 Constraints (Must Never Violate)
 
@@ -29,6 +45,23 @@ workflow. The v1 LangGraph node architecture was deleted; `adb/`, `grounding/`, 
 | 14 | **Two-Threshold Auto-Compact** | `middleware/compact.py` runs **before** context-pruning. T1 (`PHONE_AGENT_COMPACT_WARN_RATIO`, 0.75 of the window) injects a one-time "write facts into TaskDoc / wind down exploration" hint. T2 (`PHONE_AGENT_COMPACT_TRIGGER_RATIO`, 0.92) calls a text-only LLM (`config.memory_model`→main) for a structured phone hand-off summary and rebuilds the transcript via `REMOVE_ALL_MESSAGES` (system prompt + `[COMPACT_SUMMARY]` + recent tail + fresh-observation hint + pinned TaskDoc). The cut never splits a `tool_use`/`tool_result` pair, never folds pinned blocks; iterative (prior summary fed back), PTL retry ≤3 by dropping the oldest turn-group, **fail-open** (skip the fold if the summariser fails). Window inferred from model name (256k default, `PHONE_AGENT_CONTEXT_WINDOW` override). Master switch `PHONE_AGENT_COMPACT` (default on). |
 | 15 | **Atomic Observation Lifecycle (U1)** | `session.observe()` is the **single observation producer**: one sampling window takes foreground-before → screenshot → accessibility dump (`refresh_marks(shot)` reuses that one screenshot, no 2nd capture) → foreground-after; a mid-capture foreground change retries the window **once**, a second instability raises `ScreenshotError`. Each success bumps `session.epoch` (+1) and mints every external mark id as a **batch badge** `ax_1@e<epoch>` (`MarkCandidate.epoch`/`Observation.epoch`/`ScreenBinding.observation_epoch` set); the provider-internal id is the pre-`@e` prefix (provenance only). `resolve_mark` is the **freshness gate**: a badged id from a superseded batch fails closed (`StaleMarkError`) *before* the marks lookup. An observation failure **invalidates the whole batch** (`marks` cleared, epoch frozen) — no stale addressing authority survives. `locate` mints its hit into the **current** batch (no epoch bump) and its tool returns the **same frame** the visual model ran on (via `last_locate_frame()`, no extra observe). **Parallel tool calls are disabled** (`build_chat_model` sets `model_kwargs={"parallel_tool_calls": False}` so it survives `create_agent`'s per-turn `bind_tools`; `PHONE_AGENT_PARALLEL_TOOL_CALLS` default false, opt-out true). |
 
+## Architecture Map
+
+| Area | Contract |
+|---|---|
+| `main_v2.py` | CLI entry; resolves CLI overrides and starts one thin-loop run or App-KB dream pass. |
+| `phone_agent/v2/agent.py` | Assembles LangChain `create_agent`, middleware, tools, checkpointer, and terminal result. |
+| `phone_agent/v2/session.py` | Owns device/session state and the atomic observation lifecycle. |
+| `phone_agent/v2/tools/` | Perception, mark-bound actuation, TaskDoc updates, finish, user query, and takeover. |
+| `phone_agent/v2/middleware/` | Safety, TaskDoc pinning, image hygiene, compaction, token budget, trace, and diagnostics. |
+| `phone_agent/v2/{taskdoc,resolver,review,verify}.py` | Task state, unique mark resolution, finish review packet, and independent verification. |
+| `phone_agent/v2/{model,config,prompts}.py` | Model transport, `V2Config`, and the thin-loop system contract. |
+| `phone_agent/v2/{appkb,dream}.py` | Persistent local application knowledge and maintenance/consolidation. |
+| `phone_agent/{adb,grounding,config}/` + `device_factory.py` | Retained device, grounding, policy/registry/redaction libraries; v2 consumes them through their contracts. |
+
+The v1 routed LangGraph workflow and its `graph/`, `actions/`, `checkpoint/`, old `agent.py`, old
+`main.py`, and `evals/` paths were deleted. Do not recreate or route new v2 behavior through them.
+
 ## Environment Gotchas (things you can't learn from the filesystem)
 
 - **Always `.venv/bin/python` / `.venv/bin/pytest` / `.venv/bin/pip`** — never system Python.
@@ -48,7 +81,7 @@ workflow. The v1 LangGraph node architecture was deleted; `adb/`, `grounding/`, 
 | When you need... | Load... |
 |---|---|
 | Install / run / CLI flags / examples | `README.md`, `.venv/bin/python main_v2.py --help` |
-| Config keys (all `PHONE_AGENT_*`) | `.env.example` + `phone_agent/v2/config.py` docstrings |
+| Config keys (all `PHONE_AGENT_*`) | `docs/configuration.md`; sources: `.env.example` + `phone_agent/v2/config.py` docstrings |
 | Budget / auto-compact internals | `phone_agent/v2/middleware/{budget,compact,_tokens}.py` docstrings |
 | Architecture status & deferred items | `docs/future-roadmap.md` |
 | Module contracts | docstrings in `phone_agent/v2/` (agent, session, tools, middleware) |
