@@ -25,10 +25,10 @@
 - **TaskDoc 任务板已落地**（增量一）：goal 与 plan 合为同一文档的两个段落（目标 / 路线 / 关键事实），形态 = state（`PhoneSession.task_doc`）+ 工具写入（`update_task_doc` 是模型唯一写入者）+ `before_model` 渲染钩子。
   - **播种与写入边界**：run 启动时 harness 播种 `TaskDoc(goal_base=task)`；`goal_base` 只有 harness 能写，模型经 `update_task_doc` 全量替换 items / 追加 amendments / 替换 facts，validate 失败不写入。
   - **状态迁移纪律**（A4）：`validate(previous=...)` 对照写入前任务板判定——拒绝把 `pending` 直接标 `completed`（须先 `in_progress`，证明确实做过该步），拒绝单次调用批量把多项 `pending` 标 `completed`（补标绕过 finish 门）。新增项直接 `completed` 不算跳变（仍受结构化 `evidence_note` 门约束）。
-  - **渲染钩子**（`phone_agent/v2/middleware/taskdoc.py`）：`TaskDocMiddleware.before_model` 在 messages 尾部注入 `[TASK_DOC]\n<render>` system 消息（pinned，压缩免疫，每轮移除旧块重贴新块）；空文档不注入。
-  - **停滞轻推**：连续 `PHONE_AGENT_TASKDOC_NUDGE_STEPS`（默认 5）次模型调用 `session.seen_states` 无新增且仍有 open items 时，在渲染块后追加一次非指导性提示（`session.nudged` 保证每 run 至多一次）；`observe()` 记录 `(current_app, screen_hash)`。
+  - **渲染钩子 + 流程线**（`phone_agent/v2/middleware/taskdoc.py`）：`TaskDocMiddleware.before_model` 在 messages 尾部注入 `[TASK_DOC]\n<render>` system 消息（pinned，压缩免疫，每轮移除旧块重贴新块）；空文档不注入。块尾附一条**流程线**（U3）：从 transcript 的 `AIMessage.tool_calls`（含 U3 输出契约的 `intent`/`note`）+ 匹配 `ToolMessage` 回执**纯派生**，渲染 `#N <intent> → <tool><target> → <result>`（最近 8 条），intent 缺失记"（未声明）"，无需任何新 session 字段。
+  - **输出契约（intent 入 args，U3）**：所有工具签名加 `intent: str`（本步意图，system prompt 要求必填）+ `note: str | None`（本步发现）；执行类工具回执写实际执行内容（如 `已点击「上海」(ax_3)`），供流程线派生真实"账"。**删除停滞轻推**：旧 `session.seen_states`/`session.nudged`/`PHONE_AGENT_TASKDOC_NUDGE_STEPS` 检测机制已删除（`observe()` 仍算 `screen_hash` 仅供审计/screen binding）；持续可见的流程线是比一次性 nudge 更强、且不依赖启发式的非指导性防打转信号。`taskdoc_nudge_steps` 配置字段保留但标注废弃、构造 kwarg 变 no-op。
   - **finish 守卫**（`phone_agent/v2/tools/control.py`）：evidence 校验保留；新增 `task_doc.has_open_items()` 为真时拒绝 finish 并列出未完成项。
-  - **配置**：`PHONE_AGENT_TASKDOC`（默认 true，`0/false/no/off` 关闭时不注册中间件不渲染）、`PHONE_AGENT_TASKDOC_NUDGE_STEPS`（默认 5）。
+  - **配置**：`PHONE_AGENT_TASKDOC`（默认 true，`0/false/no/off` 关闭时不注册中间件不渲染）、`PHONE_AGENT_TASKDOC_NUDGE_STEPS`（**已废弃/no-op**，U3 用流程线替代停滞轻推，保留仅为兼容）。
 - **测试门禁**：`.venv/bin/pytest tests -q` 全绿（全部 fake，无真机无 MLX）。LangChain 网关兼容 spike：`scripts/spike_langchain_compat.py`。
 - **A4 已落地（预算/压缩/迁移纪律/去重删除）**：token 预算（L0 余量镜子 + 硬成本上限）、两级 auto-compact（handoff 摘要）、TaskDoc 状态迁移纪律、删除图片同屏去重死代码，均已合入并有单测覆盖。
 - **本轮不做（后续迭代项）**：

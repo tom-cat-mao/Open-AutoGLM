@@ -12,15 +12,19 @@ system(极简契约) + user(task + 首次观测含截图)
 - **工具**（`phone_agent/v2/tools/`，15 个）：执行 `tap/long_press/type_text/scroll/swipe/back/home/launch_app/wait`、
   感知 `read_screen/locate`、控制 `finish/ask_user/take_over/update_task_doc`。
   `tap` 双寻址：`target_mark_id` | `target_description`（解析为唯一 mark，歧义/无匹配 fail-closed 不执行）。
+- **输出契约（intent 入 args）**：每个工具都带 `intent`（本步意图，必填）+ `note`（本步发现，可选）；
+  工具回执写实际执行内容（如 tap 回 `已点击「上海」(ax_3)`）。harness 从 transcript 的 tool_call/tool_result
+  派生一条"流程线"钉进 context（`#3 把出发地改成上海 → tap「上海」→ ok`，最近 8 条），
+  帮模型看清轨迹、避免原地打转；intent 缺失记"（未声明）"。已删除旧的 seen_states/nudge 停滞检测机制。
 - **TaskDoc 任务板**：目标 / 路线 / 关键事实一个文档，模型经 `update_task_doc` 维护，
-  每轮 pinned 进 context（压缩免疫）；`finish` 在路线未完成时被拒。状态迁移有纪律：
+  每轮 pinned 进 context（压缩免疫，块尾附流程线）；`finish` 在路线未完成时被拒。状态迁移有纪律：
   不能把 `pending` 直接标 `completed`（须先 `in_progress`），也不能一次批量补标多项 `completed`。
 - **finish 两段式 + 验收器**：`finish` 先给世界镜像复核包（不落定），`finish(confirm=true)` 才定稿；
   高风险目标/硬矛盾坚持 confirm 时过独立 context 验收器（只看目标+证据路线+尾帧截图，不看 actor 自辩），
   REJECT 带内回传、2 次转人工；验收器故障 fail-open（`PHONE_AGENT_FINISH_VERIFY=off|auto|always`，默认 auto）。
 - **Middleware**（`phone_agent/v2/middleware/`）：安全 HITL（分层 `classify_tool_call`：宽召回→精排→硬门；
   硬门=不可逆动词/密码框/凭据/自我申报，软候选默认不弹窗，`PHONE_AGENT_SAFETY_MODE=off|hard|reviewer`）、
-  两级 auto-compact（接近上下文窗口时折叠远古段）、历史截图剪除 + marks 折叠、TaskDoc 渲染、
+  两级 auto-compact（接近上下文窗口时折叠远古段）、历史截图剪除 + marks 折叠、TaskDoc 渲染 + 流程线，
   token 预算（L0 余量镜子 + 硬成本上限）、JSONL trace（脱敏）、`ModelCallLimit`（死循环保险丝）。
 - **预算与 context 卫生**：成本以 **token** 计（累计 `usage_metadata` 的 input+output，缺失回退估算）。
   `PHONE_AGENT_TOKEN_BUDGET`（默认 1M）为总预算，耗尽即停（终局 `token_budget_exhausted`）；
