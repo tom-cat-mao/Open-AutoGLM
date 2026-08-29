@@ -5,7 +5,7 @@ harness（middleware）只提供工具、安全边界、context 卫生与可观�
 
 ```
 system(极简契约) + user(task + 首次观测含截图)
-  → create_agent tool loop: model → [safety HITL] → tool(s) → model → …
+  → create_agent tool loop: model → [safety 预警/HITL] → tool(s) → model → …
   → 结束: session.finished | takeover_reason | 无 tool_call | token 预算耗尽 | 死循环保险丝
 ```
 
@@ -22,8 +22,11 @@ system(极简契约) + user(task + 首次观测含截图)
 - **finish 两段式 + 验收器**：`finish` 先给世界镜像复核包（不落定），`finish(confirm=true)` 才定稿；
   高风险目标/硬矛盾坚持 confirm 时过独立 context 验收器（只看目标+证据路线+尾帧截图，不看 actor 自辩），
   REJECT 带内回传、2 次转人工；验收器故障 fail-open（`PHONE_AGENT_FINISH_VERIFY=off|auto|always`，默认 auto）。
-- **Middleware**（`phone_agent/v2/middleware/`）：安全 HITL（分层 `classify_tool_call`：宽召回→精排→硬门；
-  硬门=不可逆动词/密码框/凭据/自我申报，软候选默认不弹窗，`PHONE_AGENT_SAFETY_MODE=off|hard|reviewer`）、
+- **Middleware**（`phone_agent/v2/middleware/`）：安全预警制（分层 `classify_tool_call`：宽召回→精排→硬信号；
+  硬信号=不可逆动词/密码框/凭据/自我申报，软候选默认不预警）。`wary`（默认）下检出的风险执行类调用
+  **不执行、不叫人**——工具返回预警文本（世界事实+选项空间），模型带 `confirm_irreversible=true` 重发才执行；
+  `hard` 保留旧 HITL 硬拦（人工 approve/reject，挂机用），`off` 全关，`reviewer` = wary + 软候选过第二模型精排。
+  `ask_user`/`take_over` 任何档都仍中断。`PHONE_AGENT_SAFETY_MODE=off|wary|hard|reviewer`（默认 wary）。此外还有
   两级 auto-compact（接近上下文窗口时折叠远古段）、历史截图剪除 + marks 折叠、TaskDoc 渲染 + 流程线，
   token 预算（L0 余量镜子 + 硬成本上限）、JSONL trace（脱敏）、`ModelCallLimit`（死循环保险丝）。
 - **预算与 context 卫生**：成本以 **token** 计（累计 `usage_metadata` 的 input+output，缺失回退估算）。
@@ -52,7 +55,8 @@ cp .env.example .env   # 填入 base_url / model / api_key
 .venv/bin/pytest tests -q            # 全 fake，无真机无 MLX
 ```
 
-HITL 触发时按提示输入 `approve` / `reject` / 回答文本。退出码：成功 `0` / takeover `2` / 预算或保险丝耗尽 `3` / 错误 `1`。
+默认 `wary` 预警制下，风险执行动作会被拦下并要求模型带 `confirm_irreversible=true` 重发（无需人工）；
+`hard` 档 HITL 触发时按提示输入 `approve` / `reject` / 回答文本。退出码：成功 `0` / takeover `2` / 预算或保险丝耗尽 `3` / 错误 `1`。
 
 ## 配置
 

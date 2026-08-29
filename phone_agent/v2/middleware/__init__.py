@@ -25,7 +25,10 @@ from phone_agent.v2.middleware.images import (
     build_image_middleware,
 )
 from phone_agent.v2.middleware.safety import (
+    SafetyWarningMiddleware,
     build_hitl_middleware,
+    build_safety_warning_middleware,
+    format_warning,
     is_sensitive_tool_call,
 )
 from phone_agent.v2.middleware.taskdoc import (
@@ -43,6 +46,9 @@ __all__ = [
     "classify_tool_call",
     "build_hitl_middleware",
     "build_safety_reviewer",
+    "build_safety_warning_middleware",
+    "SafetyWarningMiddleware",
+    "format_warning",
     "is_sensitive_tool_call",
     "BudgetMiddleware",
     "build_budget_middleware",
