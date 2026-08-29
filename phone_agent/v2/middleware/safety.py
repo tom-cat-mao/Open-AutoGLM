@@ -1,28 +1,40 @@
-"""Safety middleware: layered classification behind a human interrupt (S2 §3).
+"""Safety middleware: risk detection behind a **warning** flow (U2 §3).
 
-The v2 hard gate lives **only** here. A tool call is run through a three-layer
-cascade — broad *recall* → optional *reviewer* → *hard* gate — and mapped to a
-:class:`ToolCallVerdict`. Only a ``should_gate`` verdict routes the call through
-``HumanInTheLoopMiddleware`` for an ``approve``/``reject`` decision.
+The v2 safety layer no longer hard-blocks by default. A tool call is run through
+the same three-layer detection cascade — broad *recall* → optional *reviewer* →
+*hard* signal — and mapped to a :class:`ToolCallVerdict`. But what a
+``should_gate`` verdict *does* now depends on the safety mode:
 
-Cascade (S2 §3.1)::
+* ``wary`` (default, U2): the warning system. A risky execution call
+  (``tap``/``long_press``/``type_text``/``launch_app``) is **not executed and no
+  human is summoned**. :class:`SafetyWarningMiddleware` short-circuits it and
+  returns a warning ``ToolMessage`` (world fact + option space). The model must
+  resend the same call with ``confirm_irreversible=true`` to actually act. A
+  non-blocking notice is printed to stdout and the warning lands in the trace as
+  the tool result.
+* ``reviewer``: ``wary`` plus a second model that precision-ranks soft candidates
+  (bare policy vocab) for reversibility before deciding whether to warn.
+* ``hard``: the legacy HITL. Risky execution calls interrupt for a human
+  ``approve``/``reject`` (for unattended runs). No warning middleware.
+* ``off``: no gate at all.
+
+Detection cascade (unchanged from S2 §3.1)::
 
     recall(policy vocab / password box / self-declaration)
         no candidate                          -> pass (level="none")
         candidate:
             hard(commit+irreversible-object | password box | credential input
-                 | policy takeover | self-declared)   -> hard gate (L4, always)
+                 | policy takeover | self-declared)   -> should_gate (hard signal)
             soft candidate (bare policy vocab, e.g. "确认" / "支付方式"):
-                SAFETY_MODE=reviewer + reviewer   -> second model judges reversibility
-                SAFETY_MODE=hard / no reviewer    -> pass (hard mode) or
-                                                     fail-closed gate (reviewer mode,
-                                                     reviewer unavailable)
+                mode=reviewer + reviewer     -> second model judges reversibility
+                mode=wary/hard / no reviewer -> pass (no warning) or fail-closed
+                                                (reviewer mode, reviewer unavailable)
 
-Design intent (S2 §3.2 refinement + benchmark): broad vocab only produces
-*candidates* — a recall hit is **not** an automatic popup ("召回≠弹窗"). A weak
-verb only escalates to a hard gate when it co-occurs with an irreversible
-object, so ``确认支付`` / ``立即支付`` hard-gate while ``支付方式`` / ``支付宝红包`` /
-``删除`` stay soft candidates (reviewer-judged, no popup in the default hard mode).
+Design intent (S2 §3.2 + benchmark): broad vocab only produces *candidates* — a
+recall hit is **not** an automatic warning ("召回≠预警"). A weak verb only
+escalates to a hard signal when it co-occurs with an irreversible object, so
+``确认支付`` / ``立即支付`` warn while ``支付方式`` / ``支付宝红包`` / ``删除`` stay
+soft candidates (reviewer-judged, no warning in the default wary mode).
 
 Vocabulary is read from ``phone_agent.config.policy.DEFAULT_SAFETY_POLICY``
 (the multilingual, versioned safety registry). ``launch_app`` additionally
@@ -35,6 +47,9 @@ from __future__ import annotations
 import unicodedata
 from dataclasses import dataclass
 from typing import Any, Callable
+
+from langchain.agents.middleware import AgentMiddleware
+from langchain_core.messages import ToolMessage
 
 from phone_agent.config.policy import (
     DEFAULT_SAFETY_POLICY,
@@ -170,11 +185,11 @@ def _extract_call(request: Any) -> tuple[str, dict[str, Any]]:
 
 
 def _safety_mode(config: Any | None) -> str:
-    """Resolve the safety mode (off|hard|reviewer); default ``hard`` (§3.7)."""
+    """Resolve the safety mode (off|wary|hard|reviewer); default ``wary`` (U2 §3)."""
 
-    mode = getattr(config, "safety_mode", None) or "hard"
+    mode = getattr(config, "safety_mode", None) or "wary"
     mode = str(mode).strip().lower()
-    return mode if mode in {"off", "hard", "reviewer"} else "hard"
+    return mode if mode in {"off", "wary", "hard", "reviewer"} else "wary"
 
 
 def _normalize(text: str | None) -> str:
@@ -292,11 +307,12 @@ def _soft_or_reviewer(
     route: str | None,
     reason: str,
 ) -> ToolCallVerdict:
-    """Resolve a soft candidate: reviewer-judged (reviewer mode) or pass (hard).
+    """Resolve a soft candidate: reviewer-judged (reviewer mode) or pass (wary/hard).
 
     In ``reviewer`` mode the second model judges reversibility; an unavailable
-    or throwing reviewer is fail-closed (gate). In ``hard`` mode soft candidates
-    do NOT popup (§3.7) — only the hard gate fires.
+    or throwing reviewer is fail-closed (gate/warn). In ``wary``/``hard`` mode
+    soft candidates do NOT warn or popup (§3.7, 召回≠预警) — only a hard signal
+    escalates.
     """
 
     if mode == "reviewer":
@@ -309,8 +325,8 @@ def _soft_or_reviewer(
         if reversible:
             return ToolCallVerdict(False, "reviewer", route, "reviewer_reversible")
         return ToolCallVerdict(True, "reviewer", route, "reviewer_irreversible")
-    # hard mode (default): recall candidate does not gate (§3.7).
-    return ToolCallVerdict(False, "recall", route, reason + "_hard_pass")
+    # wary / hard mode: a recall candidate does not gate (§3.7).
+    return ToolCallVerdict(False, "recall", route, reason + "_soft_pass")
 
 
 def classify_tool_call(
@@ -337,6 +353,11 @@ def classify_tool_call(
     if name not in ACTUATION_GATED_TOOLS:
         return ToolCallVerdict(False, "none", None, "not_actuation")
 
+    # Self-declared sensitivity always escalates (§3.4) — checked first so it
+    # covers every actuation tool, including the otherwise-reversible launch_app.
+    if _self_declared_sensitive(args):
+        return ToolCallVerdict(True, "hard", "takeover", "self_declared")
+
     # launch_app is reversible -> recall-only soft candidate, never hard (§3.6).
     if name == "launch_app":
         app_name = str(args.get("app_name", ""))
@@ -352,10 +373,6 @@ def classify_tool_call(
             return ToolCallVerdict(True, "hard", "takeover", "password_field")
         if _is_credential_text(args.get("text"), policy=policy):
             return ToolCallVerdict(True, "hard", "takeover", "credential_input")
-
-    # Self-declared sensitivity always escalates (§3.4).
-    if _self_declared_sensitive(args):
-        return ToolCallVerdict(True, "hard", "takeover", "self_declared")
 
     target_text = (
         str(args.get("text", "") or "")
@@ -386,12 +403,13 @@ def is_sensitive_tool_call(
     *,
     policy: SafetyPolicyRegistry = DEFAULT_SAFETY_POLICY,
 ) -> bool:
-    """Backward-compat thin wrapper over :func:`classify_tool_call` (hard mode).
+    """Backward-compat thin wrapper over :func:`classify_tool_call`.
 
-    Equivalent to ``classify_tool_call(request, session, config=None).should_gate``
-    — the default (``config=None``) resolves to the ``hard`` safety mode, so this
-    reports only the hard-gate decision (no reviewer). Retained to keep the older
-    predicate call sites and tests stable (§3.2).
+    Equivalent to ``classify_tool_call(request, session, config=None).should_gate``.
+    With ``config=None`` the mode resolves to the default (``wary``), which shares
+    the ``hard``-mode detection outcome (soft candidates never gate; hard signals
+    always do; no reviewer), so this still reports the hard-signal decision only.
+    Retained to keep the older predicate call sites and tests stable (§3.2).
     """
 
     return classify_tool_call(
@@ -466,39 +484,191 @@ def _parse_reversible(text: str) -> bool:
     return False
 
 
-def build_hitl_middleware(session: Any | None = None, config: Any | None = None):
-    """Build the ``HumanInTheLoopMiddleware`` configured for v2 tools (S2 §3.3).
+def _confirmed_irreversible(args: dict[str, Any]) -> bool:
+    """True when the model re-sent the call with an explicit confirm flag (U2 §1).
 
+    In the warning flow the actor reads the warning and re-issues the SAME call
+    with ``confirm_irreversible=true`` to actually execute it. A truthy flag lets
+    the warning middleware pass the call straight through to the tool.
+    """
+
+    return bool(args.get("confirm_irreversible"))
+
+
+def format_warning(name: str, args: dict[str, Any], verdict: ToolCallVerdict) -> str:
+    """Build the warning text returned in place of a risky execution (U2 §1).
+
+    The message states the **world fact** (what the target is and why it is
+    risky) and the **option space** (confirm / abandon / ask a human) — no
+    device action is taken. Kept terse and redacted so it is cheap to carry in
+    the transcript and safe to log.
+    """
+
+    reason_facts = {
+        "irreversible_commit": "该操作疑似『不可逆提交』（如支付/转账/下单/删除等确认动作）",
+        "password_field": "目标是『密码输入框』",
+        "credential_input": "输入内容疑似『凭据/验证码』等敏感信息",
+        "policy_takeover": "目标命中『凭据/验证码』敏感域",
+        "self_declared": "你已自行申报本步为敏感操作",
+        "reviewer_irreversible": "复核模型判定该操作『不可逆』",
+        "sensitive_app": "目标疑似『支付/银行类』敏感应用",
+    }
+    fact = reason_facts.get(verdict.reason, "该操作被判定为敏感/高风险")
+
+    target = _describe_target(name, args)
+    head = f"⚠️ 已拦截（未执行）：{name}"
+    if target:
+        head += f" → {target}"
+    body = (
+        f"世界事实：{fact}。\n"
+        "选项：\n"
+        f"  1) 确认执行：带 confirm_irreversible=true 重新调用同一工具（其余参数不变）。\n"
+        "  2) 放弃：改做其它操作或重新观测。\n"
+        "  3) 交人工：调用 ask_user 询问，或 take_over 请求人工接管。"
+    )
+    return f"{head}\n{body}"
+
+
+def _describe_target(name: str, args: dict[str, Any]) -> str:
+    """A short, redacted target descriptor for a warning message."""
+
+    if name == "type_text":
+        text = redact_context_text(str(args.get("text", "")))[:32]
+        return f"输入「{text}」" if text else "输入"
+    if name == "launch_app":
+        return f"「{str(args.get('app_name', ''))[:24]}」"
+    desc = args.get("target_description")
+    if desc:
+        return f"「{redact_context_text(str(desc))[:24]}」"
+    mark = args.get("target_mark_id")
+    return f"({mark})" if mark else ""
+
+
+class SafetyWarningMiddleware(AgentMiddleware):
+    """Warning-flow safety gate (U2 §1): warn-not-execute, confirm-to-act.
+
+    In ``wary``/``reviewer`` mode this middleware wraps every tool call. When
+    :func:`classify_tool_call` flags a risky execution call AND the model did not
+    pass ``confirm_irreversible=true``, the call is **short-circuited**: no device
+    action runs, and a warning :class:`ToolMessage` (built by
+    :func:`format_warning`) is returned as the tool result. A non-blocking notice
+    is also printed to stdout (harness-side awareness, no desktop popup). The
+    model resends with ``confirm_irreversible=true`` to actually execute.
+
+    This never touches ``ask_user``/``take_over`` (control interrupts owned by the
+    HITL middleware) nor non-actuation tools; it is a pure pass-through for them.
+    """
+
+    def __init__(
+        self,
+        session: Any | None,
+        config: Any | None,
+        *,
+        reviewer: Callable[[str, str], bool] | None = None,
+        notify: Callable[[str], None] | None = None,
+    ) -> None:
+        super().__init__()
+        self.session = session
+        self.config = config
+        self._reviewer = reviewer
+        self._notify = notify if notify is not None else _default_notify
+
+    def _warn_message(self, request: Any) -> ToolMessage | None:
+        """Return a warning ToolMessage if the call must be blocked, else ``None``."""
+
+        name, args = _extract_call(request)
+        if name not in ACTUATION_GATED_TOOLS:
+            return None
+        if _confirmed_irreversible(args):
+            return None
+        verdict = classify_tool_call(
+            request, self.session, self.config, reviewer=self._reviewer
+        )
+        if not verdict.should_gate:
+            return None
+        text = format_warning(name, args, verdict)
+        try:
+            self._notify(f"[safety] {name}: {verdict.reason} — 已拦截，等待模型确认")
+        except Exception:  # noqa: BLE001 - notification must never break the loop
+            pass
+        tool_call = getattr(request, "tool_call", {}) or {}
+        call_id = tool_call.get("id") if isinstance(tool_call, dict) else None
+        return ToolMessage(
+            content=text,
+            tool_call_id=str(call_id or ""),
+            name=name,
+            status="error",
+        )
+
+    def wrap_tool_call(self, request, handler):  # noqa: ANN001
+        warning = self._warn_message(request)
+        if warning is not None:
+            return warning
+        return handler(request)
+
+    async def awrap_tool_call(self, request, handler):  # noqa: ANN001
+        warning = self._warn_message(request)
+        if warning is not None:
+            return warning
+        return await handler(request)
+
+
+def _default_notify(message: str) -> None:
+    """Default non-blocking notice: print to stdout (no desktop notification)."""
+
+    print(message, flush=True)
+
+
+def build_safety_warning_middleware(
+    session: Any | None = None, config: Any | None = None
+) -> SafetyWarningMiddleware | None:
+    """Build the warning middleware for ``wary``/``reviewer`` mode, else ``None``.
+
+    ``off``/``hard`` mode returns ``None`` (``off`` has no gate; ``hard`` uses the
+    legacy HITL interrupt instead of the warning flow). In ``reviewer`` mode a
+    lazily built second-model reviewer is attached for soft-candidate precision.
+    """
+
+    mode = _safety_mode(config)
+    if mode not in {"wary", "reviewer"}:
+        return None
+    reviewer = build_safety_reviewer(config) if mode == "reviewer" else None
+    return SafetyWarningMiddleware(session, config, reviewer=reviewer)
+
+
+def build_hitl_middleware(session: Any | None = None, config: Any | None = None):
+    """Build the ``HumanInTheLoopMiddleware`` for v2 control + legacy hard mode.
+
+    Two responsibilities, split by safety mode (U2 §5):
+
+    * ``ask_user`` / ``take_over`` **always** interrupt, in every mode — these are
+      control interrupts (the human answers / takes over), never softened.
     * Actuation tools (``tap``/``long_press``/``type_text``/``launch_app``)
-      interrupt only when :func:`classify_tool_call` gates the call, and the
-      human may ``approve`` or ``reject``. The classifier reads ``config`` for the
-      safety mode and, in ``reviewer`` mode, consults a lazily built reviewer.
-    * ``ask_user`` interrupts always with a ``respond`` decision (the human
-      answers on the tool's behalf).
-    * ``take_over`` interrupts always (human must ``approve`` before the agent
-      hands control over).
+      interrupt for ``approve``/``reject`` **only in ``hard`` mode** (the legacy
+      unattended-run HITL). In ``wary``/``reviewer``/``off`` mode they carry no
+      ``when`` predicate here — the warning flow (:class:`SafetyWarningMiddleware`)
+      owns risk handling for those modes instead.
 
     ``config`` is optional for backward compatibility: ``build_hitl_middleware()``
-    and ``build_hitl_middleware(session)`` still work (they resolve to hard mode).
+    and ``build_hitl_middleware(session)`` resolve to the default ``wary`` mode
+    (actuation tools not interrupted here; only ask_user/take_over).
     """
     from langchain.agents.middleware import HumanInTheLoopMiddleware
 
-    reviewer = (
-        build_safety_reviewer(config)
-        if _safety_mode(config) == "reviewer"
-        else None
-    )
+    mode = _safety_mode(config)
+    interrupt_on: dict[str, Any] = {}
 
-    def _gate(req: Any) -> bool:
-        return classify_tool_call(req, session, config, reviewer=reviewer).should_gate
+    if mode == "hard":
+        reviewer = None  # hard mode keeps the classic hard-signal gate, no reviewer
+        def _gate(req: Any) -> bool:
+            return classify_tool_call(req, session, config, reviewer=reviewer).should_gate
 
-    interrupt_on: dict[str, Any] = {
-        tool: {
-            "when": _gate,
-            "allowed_decisions": ["approve", "reject"],
-        }
-        for tool in ACTUATION_GATED_TOOLS
-    }
+        for tool in ACTUATION_GATED_TOOLS:
+            interrupt_on[tool] = {
+                "when": _gate,
+                "allowed_decisions": ["approve", "reject"],
+            }
+
     interrupt_on["ask_user"] = {"allowed_decisions": ["respond"]}
     interrupt_on["take_over"] = {"allowed_decisions": ["approve", "reject"]}
 
@@ -511,6 +681,9 @@ __all__ = [
     "is_sensitive_tool_call",
     "build_safety_reviewer",
     "build_hitl_middleware",
+    "SafetyWarningMiddleware",
+    "build_safety_warning_middleware",
+    "format_warning",
     "SENSITIVE_APP_KEYWORDS",
     "ACTUATION_GATED_TOOLS",
 ]

@@ -196,7 +196,7 @@ def test_launch_app_soft_in_hard_mode_passes():
     v = classify_tool_call(_request("launch_app", {"app_name": "招商银行"}), None, _Cfg("hard"))
     assert v.should_gate is False
     assert v.level == "recall"
-    assert v.reason == "sensitive_app_hard_pass"
+    assert v.reason == "sensitive_app_soft_pass"
 
 
 def test_launch_app_reviewer_mode_delegates():

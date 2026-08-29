@@ -67,13 +67,31 @@ def test_launch_app_softened_out_of_default_gate():
 
 
 def test_build_hitl_middleware_config():
+    # Default (no config) resolves to wary mode (U2): actuation tools are NOT
+    # interrupted here — the warning flow owns them; only ask_user/take_over.
     mw = build_hitl_middleware()
-    assert set(mw.interrupt_on) >= {"tap", "long_press", "type_text", "launch_app", "ask_user", "take_over"}
+    assert set(mw.interrupt_on) == {"ask_user", "take_over"}
     # ask_user is respond-only; take_over always interrupts (no when predicate).
     assert mw.interrupt_on["ask_user"]["allowed_decisions"] == ["respond"]
     assert "when" not in mw.interrupt_on["take_over"]
-    # Actuation tools carry a sensitivity predicate.
+
+
+def test_build_hitl_middleware_hard_mode_gates_actuation():
+    # In hard mode the legacy HITL interrupt still guards actuation tools.
+    from types import SimpleNamespace
+
+    cfg = SimpleNamespace(safety_mode="hard", safety_reviewer_model=None, verifier_model=None)
+    mw = build_hitl_middleware(session=None, config=cfg)
+    assert set(mw.interrupt_on) >= {
+        "tap",
+        "long_press",
+        "type_text",
+        "launch_app",
+        "ask_user",
+        "take_over",
+    }
     assert callable(mw.interrupt_on["tap"]["when"])
+    assert "when" not in mw.interrupt_on["take_over"]
 
 
 # --------------------------------------------------------------------------

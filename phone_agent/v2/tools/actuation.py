@@ -173,6 +173,8 @@ def build_actuation_tools(session, config) -> list[StructuredTool]:
         target_description: str | None = None,
         intent: str = "",
         note: str | None = None,
+        confirm_irreversible: bool = False,
+        sensitive: bool = False,
     ) -> str | list[dict]:
         """Tap one on-screen element.
 
@@ -182,6 +184,11 @@ def build_actuation_tools(session, config) -> list[StructuredTool]:
 
         Always pass ``intent`` (this step's goal, e.g. 把出发地改成上海).
         ``note`` optionally records what you discovered this step.
+
+        Safety (wary mode): if the target looks risky (irreversible commit /
+        credential field), the call is NOT executed and a warning is returned
+        instead — resend with ``confirm_irreversible=true`` to actually act. Set
+        ``sensitive=true`` to self-declare a call you want double-checked.
         """
 
         return _tap_like("tap", target_mark_id, target_description)
@@ -191,11 +198,14 @@ def build_actuation_tools(session, config) -> list[StructuredTool]:
         target_description: str | None = None,
         intent: str = "",
         note: str | None = None,
+        confirm_irreversible: bool = False,
+        sensitive: bool = False,
     ) -> str | list[dict]:
         """Long-press one on-screen element (same addressing as ``tap``).
 
         Always pass ``intent`` (this step's goal). ``note`` optionally records
-        what you discovered this step.
+        what you discovered this step. Resend with ``confirm_irreversible=true``
+        after a safety warning; set ``sensitive=true`` to self-declare.
         """
 
         return _tap_like("long_press", target_mark_id, target_description)
@@ -206,6 +216,8 @@ def build_actuation_tools(session, config) -> list[StructuredTool]:
         target_description: str | None = None,
         intent: str = "",
         note: str | None = None,
+        confirm_irreversible: bool = False,
+        sensitive: bool = False,
     ) -> str | list[dict]:
         """Type ``text`` into a field.
 
@@ -214,7 +226,8 @@ def build_actuation_tools(session, config) -> list[StructuredTool]:
         device layer supports it).
 
         Always pass ``intent`` (this step's goal). ``note`` optionally records
-        what you discovered this step.
+        what you discovered this step. Resend with ``confirm_irreversible=true``
+        after a safety warning; set ``sensitive=true`` to self-declare.
         """
 
         if target_mark_id or target_description:
@@ -338,6 +351,8 @@ def build_actuation_tools(session, config) -> list[StructuredTool]:
         app_name: str,
         intent: str = "",
         note: str | None = None,
+        confirm_irreversible: bool = False,
+        sensitive: bool = False,
     ) -> str | list[dict]:
         """Launch an installed app by name.
 
@@ -345,7 +360,8 @@ def build_actuation_tools(session, config) -> list[StructuredTool]:
         or denied apps return an error string and are never launched.
 
         Always pass ``intent`` (this step's goal). ``note`` optionally records
-        what you discovered this step.
+        what you discovered this step. Resend with ``confirm_irreversible=true``
+        after a safety warning; set ``sensitive=true`` to self-declare.
         """
 
         resolution = DEFAULT_LAUNCH_TARGET_RESOLVER.resolve(app_name)

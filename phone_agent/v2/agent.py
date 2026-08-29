@@ -65,7 +65,10 @@ class ThinPhoneAgent:
         from phone_agent.v2.tools import build_tools
         from phone_agent.v2.middleware.budget import build_budget_middleware
         from phone_agent.v2.middleware.images import build_context_pruning_middleware
-        from phone_agent.v2.middleware.safety import build_hitl_middleware
+        from phone_agent.v2.middleware.safety import (
+            build_hitl_middleware,
+            build_safety_warning_middleware,
+        )
         from phone_agent.v2.middleware.trace import build_trace_middleware
 
         if checkpointer is None:
@@ -178,6 +181,16 @@ class ThinPhoneAgent:
             except Exception:  # noqa: BLE001 - optional increment; never block bring-up
                 self._diagnostic = None
         self.evidence_path = getattr(self._diagnostic, "evidence_path", None)
+
+        # Safety warning flow (U2). In wary/reviewer mode a risky execution call
+        # is short-circuited with a warning ToolMessage instead of being executed
+        # or human-interrupted; the model resends with confirm_irreversible=true.
+        # Appended LAST so it is the innermost wrap_tool_call — trace + diagnostic
+        # (outer) still record the blocked call as the tool result. Returns None in
+        # off/hard mode (hard mode uses the HITL interrupt instead).
+        self._safety_warning = build_safety_warning_middleware(self.session, config)
+        if self._safety_warning is not None:
+            middleware.append(self._safety_warning)
 
         from phone_agent.v2.prompts import get_system_prompt
 

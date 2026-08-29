@@ -213,8 +213,14 @@ class V2Config:
     finish_verify: str = "auto"
     # number of trailing screenshots handed to the finish verifier (S2 §4.2).
     finish_verify_k: int = 1
-    # safety gate mode (S2 §3.7): off|hard|reviewer.
-    safety_mode: str = "hard"
+    # safety mode (U2): off|wary|hard|reviewer. ``wary`` (default) is the warning
+    # system — a risky execution call (tap/long_press/type_text/launch_app) is NOT
+    # executed and NOT human-interrupted; the tool returns a warning (world fact +
+    # option space) and the model must resend with ``confirm_irreversible=true`` to
+    # act. ``hard`` keeps the legacy HITL interrupt (approve/reject) for unattended
+    # runs. ``off`` disables the gate. ``reviewer`` is ``wary`` plus second-model
+    # precision-ranking of soft candidates (§3.3; semantics unchanged from S2).
+    safety_mode: str = "wary"
     # diagnostic evidence stream (opt-in; default OFF, zero-cost when off).
     # Enabled by the live-diagnosis skill to emit full-text (bounded) run
     # evidence to ``<diagnostic_evidence_dir>/<run_id>.evidence.jsonl``.
