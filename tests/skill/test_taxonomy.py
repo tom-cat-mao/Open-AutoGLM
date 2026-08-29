@@ -56,7 +56,8 @@ from taxonomy import (
         ("error: unknown direction 'sideways'; use up|down", "bad_direction", "actuation_arg"),
         ("ambiguous app '微信': 微信, 企业微信 — be more specific", "ambiguous_app", "launch"),
         ("denied: '支付宝' is not launch-authorized", "launch_denied", "launch"),
-        ("error: 'com.foo' is not installed on this device", "app_not_installed", "launch"),
+        ("error: '淘宝' 未安装在这台设备上（com.taobao.taobao），无法启动。", "app_not_installed", "launch"),
+        ("error: 未能启动 '微信'（com.tencent.mm）——设备返回启动失败", "launch_failed", "launch"),
         ("unknown app 'zzz': not in registry/inventory — cannot launch", "unknown_app", "launch"),
         ("未写入（输入无效）：item id 缺失", "taskdoc_input_invalid", "taskdoc"),
         ("未写入（校验失败）：至多一个 in_progress 项", "taskdoc_validation_failed", "taskdoc"),
@@ -90,7 +91,7 @@ def test_unknown_and_empty():
 
 
 def test_app_not_installed_requires_contains():
-    # Bare ``error: `` without the ``is not installed`` marker must NOT be
+    # Bare ``error: `` without the ``未安装`` marker must NOT be
     # classified as app_not_installed (it should fall through to unknown here).
     assert classify_result("error: something unrelated") == UNKNOWN_CLASS
 

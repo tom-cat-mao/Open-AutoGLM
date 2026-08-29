@@ -232,6 +232,57 @@ def test_launch_app_unknown_not_executed():
     assert session.device_factory.launched == []
 
 
+def test_launch_app_unknown_error_includes_available_names():
+    session = FakePhoneSession({})
+    session.app_knowledge = type(
+        "Knowledge",
+        (),
+        {
+            "lookup": lambda self, term: None,
+            "snapshot": lambda self: {
+                "微信": "com.tencent.mm",
+                "淘宝": "com.taobao.taobao",
+            },
+        },
+    )()
+    tools = _tool_map(session)
+    out = tools["launch_app"].invoke({"app_name": "NoSuchApp_zzz_123"})
+    assert isinstance(out, str)
+    assert "本机可用应用" in out
+    assert "微信" in out
+    assert "淘宝" in out
+
+
+def test_launch_app_device_failure_reported():
+    """P0 #5: a failed device launch must surface as an error, never fake OK."""
+    from tests.v2._doubles import FakeDeviceFactory
+
+    session = FakePhoneSession({}, device_factory=FakeDeviceFactory(launch_result=False))
+    tools = _tool_map(session)
+    out = tools["launch_app"].invoke({"app_name": "微信"})
+    assert isinstance(out, str)
+    assert "未能启动" in out
+    assert session.device_factory.launched == []
+
+
+def test_launch_app_not_installed_reported():
+    """A registry app missing from the device inventory -> not_installed, no launch."""
+    from tests.v2._doubles import FakeDeviceFactory
+
+    session = FakePhoneSession(
+        {}, device_factory=FakeDeviceFactory(installed=frozenset({"com.tencent.mm"}))
+    )
+    tools = _tool_map(session)
+    # 微信 resolves against an inventory that contains it -> launches.
+    out = tools["launch_app"].invoke({"app_name": "微信"})
+    assert _text(out).startswith("OK. launched")
+    # 淘宝 is in the static registry but NOT in the inventory -> honest error.
+    out = tools["launch_app"].invoke({"app_name": "淘宝"})
+    assert isinstance(out, str)
+    assert "未安装" in out
+    assert session.device_factory.launched == ["微信"]
+
+
 def test_read_screen_observes():
     marks = {"ax_1": make_mark("ax_1", text="WLAN", center=(500, 300))}
     session = FakePhoneSession(marks)

@@ -30,11 +30,32 @@ class FakeObservation:
 
 
 class FakeDeviceFactory:
-    """Records every device call for assertions; performs no real I/O."""
+    """Records every device call for assertions; performs no real I/O.
 
-    def __init__(self) -> None:
+    ``launch_result`` controls the bool ``launch_app`` returns (the tool must
+    honor it — P0 #5). ``installed`` set to a frozenset enables the optional
+    ``get_installed_app_inventory`` capability; left ``None`` the fake has no
+    inventory (the tool then resolves without one, best-effort).
+    """
+
+    def __init__(self, launch_result: bool = True, installed: frozenset | None = None) -> None:
         self.calls: list[tuple] = []
         self.launched: list[str] = []
+        self._launch_result = launch_result
+        self._installed = installed
+
+    def launch_app(self, app_name, device_id=None, delay=None, **kwargs):
+        self.calls.append(("launch_app", app_name))
+        if self._launch_result:
+            self.launched.append(app_name)
+        return self._launch_result
+
+    def get_installed_app_inventory(self, device_id=None):
+        from phone_agent.config.app_registry import InstalledAppInventory
+
+        if self._installed is None:
+            raise RuntimeError("inventory unavailable on this fake")
+        return InstalledAppInventory(self._installed, device_id=device_id)
 
     def tap(self, x, y, device_id=None, delay=None):
         self.calls.append(("tap", x, y))
@@ -60,11 +81,6 @@ class FakeDeviceFactory:
 
     def restore_keyboard(self, ime, device_id=None):
         self.calls.append(("restore_kbd", ime))
-
-    def launch_app(self, app_name, device_id=None, delay=None, **kwargs):
-        self.calls.append(("launch_app", app_name))
-        self.launched.append(app_name)
-        return True
 
 
 @dataclass

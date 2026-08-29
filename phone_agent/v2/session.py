@@ -11,8 +11,8 @@ See ``docs/refactor-thin-loop-v2.md`` §6 for the binding contract.
 from __future__ import annotations
 
 import hashlib
-from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING
+from dataclasses import dataclass, replace
+from typing import TYPE_CHECKING, Any
 
 from phone_agent.device_factory import DeviceFactory, get_device_factory
 from phone_agent.grounding.accessibility import AccessibilityTreeProvider
@@ -29,6 +29,7 @@ if TYPE_CHECKING:
     from phone_agent.config.app_registry import ForegroundAppObservation
     from phone_agent.grounding.provider import MarkProvider
     from phone_agent.v2.config import V2Config
+    from phone_agent.v2.appkb import AppKnowledge, AppKnowledgeStore
     from phone_agent.v2.taskdoc import TaskDoc
 
 
@@ -108,6 +109,10 @@ class PhoneSession:
     ) -> None:
         self.config = config
         self.device_factory = device_factory or get_device_factory()
+        # App-KB is an optional enhancement. Keep stable public slots but defer
+        # imports and filesystem creation until sync or prompt lookup needs it.
+        self.app_store: "AppKnowledgeStore | None" = None
+        self.app_knowledge: "AppKnowledge | None" = None
         self.marks: dict[str, MarkCandidate] = {}
         self.screen_seq: int = 0
         # U1 observation batch counter ("work-badge epoch"). Bumped once per
@@ -147,6 +152,109 @@ class PhoneSession:
         # last-known dimensions for coordinate conversion
         self._last_width: int = 0
         self._last_height: int = 0
+
+    # -- app knowledge ---------------------------------------------------
+
+    def _ensure_app_knowledge(
+        self,
+    ) -> tuple["AppKnowledgeStore | None", "AppKnowledge | None"]:
+        """Lazily open the local App-KB; setup failures degrade to off."""
+
+        if not getattr(self.config, "app_kb_enabled", True):
+            return None, None
+        if self.app_store is not None and self.app_knowledge is not None:
+            return self.app_store, self.app_knowledge
+        try:
+            from phone_agent.v2.appkb import AppKnowledge, AppKnowledgeStore
+
+            store = AppKnowledgeStore(
+                str(getattr(self.config, "memory_dir", "memory"))
+            )
+            knowledge = AppKnowledge(
+                store, device_id=getattr(self.config, "device_id", None)
+            )
+        except Exception:  # noqa: BLE001 - memory is an optional enhancement
+            self.app_store = None
+            self.app_knowledge = None
+            return None, None
+        self.app_store = store
+        self.app_knowledge = knowledge
+        return store, knowledge
+
+    def sync_app_knowledge(self) -> bool:
+        """Refresh device-scoped App-KB facts from launchable app labels.
+
+        Device access, an absent explicit serial, or local-store errors all fail
+        open: the run continues and persisted global knowledge remains usable.
+        """
+
+        if not getattr(self.config, "app_kb_enabled", True):
+            return False
+        try:
+            store, _knowledge = self._ensure_app_knowledge()
+            if store is None:
+                return False
+            labels = self.device_factory.get_app_labels(self.config.device_id)
+            if not labels or not self.config.device_id:
+                return False
+            store.sync_device(
+                self.config.device_id,
+                [(entry.package, entry.label) for entry in labels],
+            )
+            return True
+        except Exception:  # noqa: BLE001 - App-KB must never block run start
+            return False
+
+    def app_list_for_prompt(self, max_n: int) -> str:
+        """Return bounded canonical labels, device-scope before global."""
+
+        if not getattr(self.config, "app_kb_enabled", True):
+            return ""
+        try:
+            limit = int(max_n)
+        except (TypeError, ValueError):
+            return ""
+        if limit <= 0:
+            return ""
+        store, _knowledge = self._ensure_app_knowledge()
+        if store is None:
+            return ""
+        try:
+            device_id = getattr(self.config, "device_id", None)
+            device_entries = (
+                store.entries(scope=f"device:{device_id}") if device_id else []
+            )
+            global_entries = store.entries(scope="global")
+        except Exception:  # noqa: BLE001 - prompt enrichment is fail-open
+            return ""
+
+        def rank(entry: dict[str, Any]) -> tuple[int, str, str]:
+            return (
+                -int(entry.get("success_count", 0)),
+                str(entry.get("label", "")).casefold(),
+                str(entry.get("package", "")),
+            )
+
+        labels: list[str] = []
+        seen: set[str] = set()
+        ordered = [
+            *sorted(device_entries, key=rank),
+            *sorted(global_entries, key=rank),
+        ]
+        for entry in ordered:
+            label = str(entry.get("label", "")).strip()
+            key = label.casefold()
+            if not label or key in seen:
+                continue
+            seen.add(key)
+            labels.append(label)
+
+        if not labels:
+            return ""
+        rendered = "，".join(labels[:limit])
+        if len(labels) > limit:
+            rendered += f"，…等 {len(labels)} 个，可用 launch_app 尝试其它名称"
+        return rendered
 
     # -- device state -----------------------------------------------------
 
@@ -191,7 +299,7 @@ class PhoneSession:
         except Exception:
             return []
         if not result.success:
-            return list(result.marks)
+            return []
         return list(result.marks)
 
     def observe(self) -> Observation:
@@ -312,6 +420,34 @@ class PhoneSession:
                 f"mark {mark_id!r} is not on the current screen; re-observe first"
             )
         return mark
+
+    # -- screen geometry (tools read these for swipe/scroll math) ----------
+
+    @property
+    def screen_width(self) -> int:
+        """Last observed screen width in px (0 before the first screenshot)."""
+
+        return self._last_width
+
+    @property
+    def screen_height(self) -> int:
+        """Last observed screen height in px (0 before the first screenshot)."""
+
+        return self._last_height
+
+    def relative_to_abs(self, rx: int, ry: int) -> tuple[int, int]:
+        """Convert a 0-1000 relative point to absolute pixels on the real screen.
+
+        Uses the last observed dimensions; captures a screenshot first when no
+        dimensions are known yet (same fallback as ``mark_center_abs``).
+        """
+
+        width = self._last_width
+        height = self._last_height
+        if width <= 0 or height <= 0:
+            shot = self.screenshot()
+            width, height = int(shot.width), int(shot.height)
+        return convert_relative_to_absolute([rx, ry], width, height)
 
     def mark_center_abs(self, mark: MarkCandidate) -> tuple[int, int]:
         """Convert a mark's 0-1000 center to absolute device pixels."""

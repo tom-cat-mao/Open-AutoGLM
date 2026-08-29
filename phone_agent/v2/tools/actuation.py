@@ -35,6 +35,28 @@ from phone_agent.v2.resolver import (
 from phone_agent.v2.tools._obs import auto_observation, mark_tool_fail, mark_tool_ok
 
 
+def _available_app_names(session, *, max_n: int) -> str:
+    """Best-effort bounded app-name hint for launch resolution failures."""
+
+    render = getattr(session, "app_list_for_prompt", None)
+    if callable(render):
+        try:
+            rendered = render(max_n)
+            if rendered:
+                return str(rendered)
+        except Exception:  # noqa: BLE001 - feedback enrichment is optional
+            pass
+    knowledge = getattr(session, "app_knowledge", None)
+    snapshot = getattr(knowledge, "snapshot", None)
+    if callable(snapshot):
+        try:
+            names = sorted(str(name) for name in snapshot())[:max_n]
+            return "，".join(names)
+        except Exception:  # noqa: BLE001 - preserve the original launch failure
+            pass
+    return ""
+
+
 def _ok_with_obs(head: str, session) -> list[dict]:
     """Merge an ``OK. <head>`` text block with the multimodal observation blocks.
 
@@ -364,10 +386,35 @@ def build_actuation_tools(session, config) -> list[StructuredTool]:
         after a safety warning; set ``sensitive=true`` to self-declare.
         """
 
-        resolution = DEFAULT_LAUNCH_TARGET_RESOLVER.resolve(app_name)
+        # Resolve against the device's real installed inventory (fail-closed):
+        # without it a static-registry app that is NOT installed would read as
+        # "resolved" and the launch failure would be swallowed (P0 #5).
+        inventory = None
+        get_inventory = getattr(device, "get_installed_app_inventory", None)
+        if callable(get_inventory):
+            try:
+                inventory = get_inventory(device_id)
+            except Exception:  # noqa: BLE001 - best-effort; resolver degrades to static
+                inventory = None
+
+        learning = getattr(session, "app_knowledge", None)
+        resolution = DEFAULT_LAUNCH_TARGET_RESOLVER.resolve(
+            app_name, inventory=inventory, learning=learning
+        )
         status = resolution.status
         if status == "resolved" and resolution.package_name:
-            device.launch_app(app_name, device_id=device_id)
+            launched = device.launch_app(
+                app_name,
+                device_id=device_id,
+                inventory=inventory,
+                learning=learning,
+            )
+            if not launched:
+                return _fail(
+                    session,
+                    f"error: 未能启动 {app_name!r}（{resolution.package_name}）——设备返回启动失败，"
+                    "可 read_screen 重新观测后重试。",
+                )
             return _ok_with_obs(
                 f"launched {app_name} ({resolution.package_name})", session
             )
@@ -375,17 +422,26 @@ def build_actuation_tools(session, config) -> list[StructuredTool]:
             names = []
             for cand in resolution.candidates[:5]:
                 names.append(getattr(cand, "canonical_id", str(cand)))
+            available = _available_app_names(session, max_n=10)
+            suffix = f"；本机可用应用：{available}" if available else ""
             return _fail(
                 session,
-                f"ambiguous app {app_name!r}: {', '.join(names)} — be more specific",
+                f"ambiguous app {app_name!r}: {', '.join(names)} — be more specific"
+                f"{suffix}",
             )
         if status == "denied":
             return _fail(session, f"denied: {app_name!r} is not launch-authorized")
         if status == "not_installed":
-            return _fail(session, f"error: {app_name!r} is not installed on this device")
+            return _fail(
+                session,
+                f"error: {app_name!r} 未安装在这台设备上（{resolution.package_name}），无法启动。",
+            )
+        available = _available_app_names(session, max_n=10)
+        suffix = f"；本机可用应用：{available}" if available else ""
         return _fail(
             session,
-            f"unknown app {app_name!r}: not in registry/inventory — cannot launch",
+            f"unknown app {app_name!r}: not in registry/inventory — cannot launch"
+            f"{suffix}",
         )
 
     return [

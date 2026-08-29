@@ -132,6 +132,21 @@ def test_parse_badge_unbadged_returns_none():
     assert epoch is None
 
 
+def test_session_exposes_real_screen_geometry_for_swipe_scroll():
+    """Bugfix regression: the swipe/scroll tools read ``screen_width`` /
+    ``screen_height`` / ``relative_to_abs`` off the session. These must reflect
+    the real screenshot dimensions — before this fix the real session lacked
+    the interface and the tools silently fell back to a hardcoded 1080x2400.
+    """
+
+    session = _session()
+    session.observe()  # FakeShot is 1080x2400
+    assert session.screen_width == 1080
+    assert session.screen_height == 2400
+    assert session.relative_to_abs(500, 500) == (540, 1200)
+    assert session.relative_to_abs(0, 1000) == (0, 2400)
+
+
 # --------------------------------------------------------------------------
 # Atomicity + single producer.
 # --------------------------------------------------------------------------

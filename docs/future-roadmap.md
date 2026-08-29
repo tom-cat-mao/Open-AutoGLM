@@ -31,8 +31,9 @@
   - **配置**：`PHONE_AGENT_TASKDOC`（默认 true，`0/false/no/off` 关闭时不注册中间件不渲染）、`PHONE_AGENT_TASKDOC_NUDGE_STEPS`（**已废弃/no-op**，U3 用流程线替代停滞轻推，保留仅为兼容）。
 - **测试门禁**：`.venv/bin/pytest tests -q` 全绿（全部 fake，无真机无 MLX）。LangChain 网关兼容 spike：`scripts/spike_langchain_compat.py`。
 - **A4 已落地（预算/压缩/迁移纪律/去重删除）**：token 预算（L0 余量镜子 + 硬成本上限）、两级 auto-compact（handoff 摘要）、TaskDoc 状态迁移纪律、删除图片同屏去重死代码，均已合入并有单测覆盖。
+- **App-KB 骨架已落地**：设备可启动应用 label 在 run 首同步到本地 `memory/app_kb/`，system prompt 注入有界规范名清单，`launch_app` 通过持久 `AppKnowledge` 别名槽解析并在失败时回传候选；支持 `--dream` 手动整理和 `PHONE_AGENT_DREAM=auto` 的 run 后轻量合并+对账（不删除）。`get_app_labels` 已由 fake ADB 测试覆盖，**真机输出格式、耗时与 MAIN+LAUNCHER query flag 验证仍 pending**。
 - **本轮不做（后续迭代项）**：
-  - **长期记忆文件**：跨 run 持久记忆（`memory/` 文件 + run 末抽取 + `--dream`）未实现；`PHONE_AGENT_MEMORY_MODEL` 目前仅用于 auto-compact 摘要 writer。
+  - **通用长期记忆**：App-KB 的结构化跨 run 骨架已落地；任务经验等非 App 知识的 run 末抽取与通用 memory/dream 尚未实现。`PHONE_AGENT_MEMORY_MODEL` 目前仅用于 auto-compact 摘要 writer。
   - **plan 工具**：显式规划/TodoList 工具未纳入本轮。
   - **finish verifier 多帧输入**：verifier 当前默认单帧（`FINISH_VERIFY_K=1`）；`K>1` 需 S1 历史帧保留能力，尾帧多帧输入延后。
   - **compact 多帧/异步**：auto-compact 当前同步、单次 LLM 调用；异步水位线压缩延后。

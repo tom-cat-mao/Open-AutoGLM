@@ -155,6 +155,40 @@ def scripted_agent(tmp_path, monkeypatch):
     return agent, session
 
 
+def test_first_observation_includes_marks_digest():
+    """The opening user message must carry the marks digest (same [OBS] shape
+    as the tool path) so the model can address ``target_mark_id`` from step 1
+    instead of burning a read_screen."""
+
+    from phone_agent.grounding.provider import MarkCandidate
+    from phone_agent.v2.agent import _first_observation_content
+
+    obs = SimpleNamespace(
+        screenshot_b64="QUJD",
+        screen_seq=1,
+        current_app="com.android.settings",
+        marks=[
+            MarkCandidate(
+                mark_id="ax_1@e1",
+                bbox=[0, 100, 1080, 300],
+                center=[500, 300],
+                role="TextView",
+                text_summary="WLAN",
+                epoch=1,
+            )
+        ],
+        mime_type="image/png",
+    )
+    content = _first_observation_content(obs, "打开WLAN")
+    texts = [b["text"] for b in content if b.get("type") == "text"]
+    assert texts[0] == "打开WLAN"
+    obs_block = texts[1]
+    assert "[OBS] app=com.android.settings screen#1" in obs_block
+    assert "marks (1)" in obs_block
+    assert "ax_1@e1" in obs_block
+    assert "WLAN" in obs_block
+
+
 def test_thin_loop_read_tap_finish(scripted_agent):
     agent, session = scripted_agent
     result = agent.run("打开设置", hitl_handler=lambda prompt: "approve")
@@ -185,6 +219,83 @@ def test_thin_loop_call_sequence_recorded(scripted_agent):
     tool_names = [e["tool"] for e in events if e["event"] == "tool_call"]
     assert tool_names == ["read_screen", "tap", "finish"]
     assert any(e["event"] == "run_end" for e in events)
+
+
+def test_fake_run_launches_static_unknown_alias_through_app_kb(tmp_path, monkeypatch):
+    """Full fake loop: model term -> KB learning slot -> package -> device."""
+
+    from phone_agent.config.apps import DEFAULT_APP_REGISTRY
+    from phone_agent.v2.appkb import AppKnowledge, AppKnowledgeStore
+    from tests.v2._doubles import FakeDeviceFactory, FakePhoneSession
+
+    assert DEFAULT_APP_REGISTRY.resolve_term("哔哩哔哩").status == "unknown"
+
+    store = AppKnowledgeStore(str(tmp_path / "memory"))
+    timestamp = "2026-01-01T00:00:00+00:00"
+    store.upsert(
+        {
+            "term": "哔哩哔哩",
+            "label": "哔哩哔哩",
+            "package": "tv.danmaku.bili",
+            "kind": "alias",
+            "scope": "global",
+            "confidence": 0.9,
+            "success_count": 1,
+            "first_seen": timestamp,
+            "last_seen": timestamp,
+            "stale": False,
+        }
+    )
+    device = FakeDeviceFactory(installed=frozenset({"tv.danmaku.bili"}))
+    session = FakePhoneSession({}, device_factory=device)
+    session.app_store = store
+    session.app_knowledge = AppKnowledge(store, device_id="serial-1")
+
+    model = ScriptedToolModel(
+        responses=[
+            _ai_tool_call(
+                "launch_app",
+                {"app_name": "哔哩哔哩", "intent": "打开视频应用"},
+                "launch",
+            ),
+            _ai_tool_call(
+                "finish",
+                {
+                    "summary": "已打开哔哩哔哩",
+                    "evidence": ["launch_app 返回成功"],
+                    "intent": "结束任务",
+                },
+                "finish",
+            ),
+        ]
+    )
+    model_mod = types.ModuleType("phone_agent.v2.model")
+    model_mod.build_chat_model = lambda config: model
+    session_mod = types.ModuleType("phone_agent.v2.session")
+    session_mod.PhoneSession = lambda config: session
+    prompts_mod = types.ModuleType("phone_agent.v2.prompts")
+    prompts_mod.get_system_prompt = lambda lang="cn": "你是手机智能体。"
+    for name, mod in [
+        ("phone_agent.v2.model", model_mod),
+        ("phone_agent.v2.session", session_mod),
+        ("phone_agent.v2.prompts", prompts_mod),
+    ]:
+        monkeypatch.setitem(sys.modules, name, mod)
+
+    from phone_agent.v2.agent import ThinPhoneAgent
+
+    config = FakeConfig(trace_dir=str(tmp_path), trace_enabled=False)
+    config.device_id = "serial-1"
+    config.app_kb_enabled = True
+    config.taskdoc_enabled = False
+    config.finish_verify = "off"
+    config.safety_mode = "off"
+    agent = ThinPhoneAgent(config)
+
+    result = agent.run("打开哔哩哔哩")
+
+    assert result.success is True
+    assert device.launched == ["哔哩哔哩"]
 
 
 # --------------------------------------------------------------------------

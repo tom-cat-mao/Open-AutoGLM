@@ -296,7 +296,7 @@ const CLASS_LABEL = {
   addressing_conflict: '寻址冲突', addressing_missing: '缺寻址', stale_mark: 'stale mark',
   ambiguous_resolve: '描述歧义', locate_no_match: '未定位', locate_provider_error: '定位失败',
   bad_coords: '坐标非法', bad_direction: '方向非法', ambiguous_app: 'app 歧义',
-  launch_denied: '启动被拒', app_not_installed: '未安装', unknown_app: '未知 app',
+  launch_denied: '启动被拒', app_not_installed: '未安装', launch_failed: '启动失败', unknown_app: '未知 app',
   taskdoc_input_invalid: '任务板输入无效', taskdoc_validation_failed: '任务板校验失败',
   taskdoc_ok: '任务板已更新', finish_no_evidence: 'finish 无证据',
   finish_blocked_open_items: 'finish 被拦截', finish_ok: 'finish 通过',
@@ -305,7 +305,7 @@ const CLASS_LABEL = {
 const ERROR_CLASSES = new Set([
   'obs_capture_failed','addressing_conflict','addressing_missing','stale_mark','ambiguous_resolve',
   'locate_no_match','locate_provider_error','bad_coords','bad_direction','ambiguous_app',
-  'launch_denied','app_not_installed','unknown_app','taskdoc_input_invalid','taskdoc_validation_failed',
+  'launch_denied','app_not_installed','launch_failed','unknown_app','taskdoc_input_invalid','taskdoc_validation_failed',
   'finish_no_evidence','finish_blocked_open_items',
 ]);
 function esc(v) {

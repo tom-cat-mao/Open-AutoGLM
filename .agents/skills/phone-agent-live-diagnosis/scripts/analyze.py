@@ -305,6 +305,7 @@ _ERROR_CLASSES = {
     "ambiguous_app",
     "launch_denied",
     "app_not_installed",
+    "launch_failed",
     "unknown_app",
     "taskdoc_input_invalid",
     "taskdoc_validation_failed",
@@ -326,7 +327,7 @@ def build_grounding(view: EvidenceView) -> dict[str, Any]:
     locate_success = 0
     locate_no_match = 0
     locate_provider_error = 0
-    launch = {"resolved": 0, "denied": 0, "unknown": 0, "not_installed": 0, "ambiguous": 0}
+    launch = {"resolved": 0, "denied": 0, "unknown": 0, "not_installed": 0, "ambiguous": 0, "failed": 0}
 
     for call in view.tool_calls:
         tool = call.get("tool")
@@ -364,6 +365,8 @@ def build_grounding(view: EvidenceView) -> dict[str, Any]:
                 launch["denied"] += 1
             elif cls == "app_not_installed":
                 launch["not_installed"] += 1
+            elif cls == "launch_failed":
+                launch["failed"] += 1
             elif cls == "ambiguous_app":
                 launch["ambiguous"] += 1
             elif cls == "unknown_app":

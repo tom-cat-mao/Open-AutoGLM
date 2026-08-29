@@ -6,7 +6,6 @@ import os
 from typing import Any
 
 from phone_agent.grounding.accessibility import AccessibilityTreeProvider
-from phone_agent.grounding.fallback import FallbackMarkProvider
 from phone_agent.grounding.fake import FakeGroundingProvider
 from phone_agent.grounding.locateanything import DEFAULT_LOCATEANYTHING_MAX_SIZE, LocateAnythingMLXProvider
 from phone_agent.grounding.provider import MarkProvider
@@ -98,66 +97,6 @@ def build_locate_provider(config: dict[str, Any] | None = None) -> MarkProvider 
     # off/fake/accessibility-only configurations: fall back to the generic
     # single provider so dry runs and tests can still exercise the tool.
     return build_mark_provider(cfg)
-
-
-def build_mark_providers(config: dict[str, Any] | None = None) -> list[MarkProvider]:
-    cfg = config or {}
-    providers = cfg.get("mark_providers") or cfg.get("grounding_providers")
-    if providers:
-        return [provider for provider in providers if provider is not None]
-    provider = cfg.get("mark_provider") or cfg.get("grounding_provider")
-    if provider is not None:
-        return [provider]
-    name = str(
-        cfg.get("grounding_provider_name")
-        or os.getenv("PHONE_AGENT_GROUNDING_PROVIDER", DEFAULT_GROUNDING_PROVIDER_NAME)
-    ).lower()
-    if name in {"hybrid", "accessibility_locateanything", "uiautomator_locateanything"}:
-        built: list[MarkProvider] = []
-        dump_tree = cfg.get("accessibility_tree_dump") or cfg.get("uiautomator_dump")
-        skip_reason: str | None = None
-        if cfg.get("skip_accessibility_provider"):
-            skip_reason = "skip_accessibility_provider"
-        elif dump_tree is None:
-            skip_reason = "accessibility_dump_callback_missing"
-        if dump_tree is not None and skip_reason is None:
-            built.append(
-                AccessibilityTreeProvider(
-                    dump_tree=dump_tree,
-                    max_marks=_resolve_positive_int(
-                        cfg.get("accessibility_max_marks") or os.getenv("PHONE_AGENT_ACCESSIBILITY_MAX_MARKS"),
-                        default=80,
-                    ),
-                )
-            )
-        # A-lite: after a successful Locate, the next observation skips the
-        # automatic LocateAnything provider (churn + poisoned-text source both
-        # disappear for that round; the explicit locate tool still works).
-        # P2: the LA model instance is a singleton injected through
-        # config["locate_provider"] (built once in agent.py) and reused by the
-        # plan/observation/locate paths — the accessibility child provider still
-        # needs a fresh per-step lambda (dump callback), so only the LA
-        # instance is reused.
-        if not cfg.get("skip_locateanything"):
-            injected = cfg.get("locate_provider")
-            if isinstance(injected, LocateAnythingMLXProvider):
-                built.append(injected)
-            else:
-                built.append(_build_locateanything_provider(cfg))
-        provider_order = [provider.name for provider in built]
-        return [
-            FallbackMarkProvider(
-                built,
-                composition_metadata={
-                    "hybrid_mode": True,
-                    "accessibility_child_enabled": skip_reason is None,
-                    "accessibility_child_skip_reason": skip_reason,
-                    "provider_order": provider_order,
-                },
-            )
-        ]
-    provider = build_mark_provider(cfg)
-    return [provider] if provider is not None else []
 
 
 def _build_locateanything_provider(cfg: dict[str, Any]) -> LocateAnythingMLXProvider:

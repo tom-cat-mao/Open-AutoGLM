@@ -16,7 +16,9 @@ See ``docs/refactor-thin-loop-v2.md`` §11 for the binding contract.
 from __future__ import annotations
 
 import argparse
+import json
 import sys
+from typing import Any
 
 from phone_agent.v2.config import V2Config, load_project_env
 
@@ -34,6 +36,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--grounding-provider", default=None, help="grounding provider name")
     parser.add_argument("--lang", default=None, help="prompt language (cn/en)")
     parser.add_argument("--trace-dir", default=None, help="trace output directory")
+    parser.add_argument(
+        "--dream",
+        action="store_true",
+        help="consolidate the local App-KB instead of running a phone task",
+    )
     return parser
 
 
@@ -51,15 +58,57 @@ def _overrides_from_args(args: argparse.Namespace) -> dict:
     }
 
 
+def _device_inventory(config: V2Config) -> set[str] | None:
+    """Return the current installed-package set, or None when unavailable."""
+
+    try:
+        from phone_agent.device_factory import get_device_factory
+
+        inventory = get_device_factory().get_installed_app_inventory(config.device_id)
+        packages = set(getattr(inventory, "packages", ()) or ())
+        return packages or None
+    except Exception:  # noqa: BLE001 - dream is fail-open when the device is absent
+        return None
+
+
+def _run_dream(
+    config: V2Config,
+    *,
+    light: bool,
+    store: Any | None = None,
+) -> dict[str, Any]:
+    """Consolidate App-KB and always return a printable summary."""
+
+    try:
+        from phone_agent.v2.appkb import AppKnowledgeStore
+        from phone_agent.v2.dream import consolidate
+
+        active_store = (
+            store if store is not None else AppKnowledgeStore(config.memory_dir)
+        )
+        return consolidate(
+            active_store, inventory=_device_inventory(config), light=light
+        )
+    except Exception as exc:  # noqa: BLE001 - maintenance never masks run outcome
+        return {"status": "skipped", "reason": type(exc).__name__}
+
+
+def _print_dream_summary(summary: dict[str, Any]) -> None:
+    print(f"dream: {json.dumps(summary, ensure_ascii=False, sort_keys=True)}")
+
+
 def main(argv: list[str] | None = None) -> int:
     load_project_env()
     parser = build_parser()
     args = parser.parse_args(argv)
 
-    if not args.task:
+    if not args.task and not args.dream:
         parser.error("a task description is required")
 
     config = V2Config.from_env(_overrides_from_args(args))
+    if args.dream:
+        _print_dream_summary(_run_dream(config, light=False))
+        return 0
 
     # ThinPhoneAgent is delivered by the integration/middleware workstream
     # (phone_agent/v2/agent.py). Guard the import so the CLI skeleton lands and
@@ -76,6 +125,12 @@ def main(argv: list[str] | None = None) -> int:
 
     agent = ThinPhoneAgent(config)
     result = agent.run(args.task)
+    if config.app_kb_enabled and config.dream_mode == "auto":
+        _print_dream_summary(
+            _run_dream(
+                config, light=True, store=getattr(agent.session, "app_store", None)
+            )
+        )
 
     steps = getattr(result, "steps", None)
     reason = getattr(result, "reason", "")

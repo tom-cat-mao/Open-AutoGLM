@@ -152,3 +152,30 @@ def test_consolidate_keeps_high_confidence_stale_entry(tmp_path):
     assert result == {"merged": 0, "staled": 1, "deleted": 0, "kept": 1}
     assert store.entries(include_stale=True)[0]["stale"] is True
     assert store.entries() == []
+
+
+def test_light_consolidate_reconciles_without_deleting(tmp_path):
+    store = AppKnowledgeStore(str(tmp_path))
+    store.upsert(
+        _entry(
+            "Gone",
+            "com.example.gone",
+            label="Gone",
+            kind="device",
+            scope="device:one",
+            confidence=0.1,
+            success_count=0,
+            first_seen="2020-01-01T00:00:00+00:00",
+            last_seen="2020-01-01T00:00:00+00:00",
+        )
+    )
+
+    result = consolidate(
+        store,
+        inventory=set(),
+        now=datetime(2026, 6, 15, tzinfo=timezone.utc),
+        light=True,
+    )
+
+    assert result == {"merged": 0, "staled": 1, "deleted": 0, "kept": 1}
+    assert store.entries(include_stale=True)[0]["stale"] is True

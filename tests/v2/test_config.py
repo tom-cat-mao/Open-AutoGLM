@@ -15,6 +15,10 @@ PHONE_AGENT_KEYS = [
     "PHONE_AGENT_MODEL_TIMEOUT",
     "PHONE_AGENT_MODEL_MAX_RETRIES",
     "PHONE_AGENT_DEVICE_ID",
+    "PHONE_AGENT_MEMORY_DIR",
+    "PHONE_AGENT_APP_KB",
+    "PHONE_AGENT_APP_LIST_MAX",
+    "PHONE_AGENT_DREAM",
     "PHONE_AGENT_MAX_STEPS",
     "PHONE_AGENT_MAX_HITL_RESUMES",
     "PHONE_AGENT_BUDGET_WARN_RATIO",
@@ -84,6 +88,10 @@ def test_from_env_defaults():
     assert cfg.trace_dir == ".traces"
     assert cfg.trace_enabled is True
     assert cfg.device_id is None
+    assert cfg.memory_dir == "memory"
+    assert cfg.app_kb_enabled is True
+    assert cfg.app_list_max == 40
+    assert cfg.dream_mode == "manual"
     assert cfg.sampling is None
 
 
@@ -111,6 +119,30 @@ def test_context_pruning_keys_env_and_override(monkeypatch):
     cfg2 = V2Config.from_env({"image_keep": 1, "obs_marks_keep": 5})
     assert cfg2.image_keep == 1
     assert cfg2.obs_marks_keep == 5
+
+
+@pytest.mark.parametrize("raw", ["0", "false", "NO", "off"])
+def test_app_kb_opt_out_tokens(monkeypatch, raw):
+    monkeypatch.setenv("PHONE_AGENT_APP_KB", raw)
+    assert V2Config.from_env().app_kb_enabled is False
+
+
+def test_app_kb_config_keys_parse(monkeypatch):
+    monkeypatch.setenv("PHONE_AGENT_MEMORY_DIR", "/tmp/phone-memory")
+    monkeypatch.setenv("PHONE_AGENT_APP_KB", "yes")
+    monkeypatch.setenv("PHONE_AGENT_APP_LIST_MAX", "12")
+    monkeypatch.setenv("PHONE_AGENT_DREAM", "AUTO")
+    cfg = V2Config.from_env()
+    assert cfg.memory_dir == "/tmp/phone-memory"
+    assert cfg.app_kb_enabled is True
+    assert cfg.app_list_max == 12
+    assert cfg.dream_mode == "auto"
+
+
+@pytest.mark.parametrize("raw", ["", "bogus", "always"])
+def test_dream_illegal_value_falls_back_to_manual(monkeypatch, raw):
+    monkeypatch.setenv("PHONE_AGENT_DREAM", raw)
+    assert V2Config.from_env().dream_mode == "manual"
 
 
 def test_budget_and_resume_keys_env_and_override(monkeypatch):

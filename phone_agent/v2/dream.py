@@ -14,12 +14,14 @@ def consolidate(
     inventory: set[str] | None = None,
     now: datetime | None = None,
     max_age_days: int = 90,
+    light: bool = False,
 ) -> dict[str, int]:
     """Merge, reconcile, prune, and compact one App-KB store.
 
     Device inventory, when supplied, is authoritative for device entries.
     Deletion remains conservative: only stale or aged entries below 0.5
-    confidence are pruned.
+    confidence are pruned. ``light=True`` performs only merge + reconciliation
+    for automatic post-run maintenance and never deletes an entry.
     """
 
     if max_age_days < 0:
@@ -40,15 +42,18 @@ def consolidate(
                 entry["stale"] = True
                 staled_count += 1
 
-    cutoff = current_time - timedelta(days=max_age_days)
     kept: list[dict[str, Any]] = []
     deleted_count = 0
-    for entry in merged_entries:
-        unused = _parse_iso(entry["last_seen"]) < cutoff
-        if (entry["stale"] or unused) and entry["confidence"] < 0.5:
-            deleted_count += 1
-            continue
-        kept.append(entry)
+    if light:
+        kept = merged_entries
+    else:
+        cutoff = current_time - timedelta(days=max_age_days)
+        for entry in merged_entries:
+            unused = _parse_iso(entry["last_seen"]) < cutoff
+            if (entry["stale"] or unused) and entry["confidence"] < 0.5:
+                deleted_count += 1
+                continue
+            kept.append(entry)
 
     kept.sort(key=_sort_key)
     store._compact(kept, timestamp=current_time.isoformat())

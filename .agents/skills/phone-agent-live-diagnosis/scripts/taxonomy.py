@@ -72,12 +72,13 @@ RESULT_CLASSES: tuple[ResultClass, ...] = (
     # --- launch ----------------------------------------------------------
     ResultClass("ambiguous app ", "ambiguous_app", "launch", SRC_ACTUATION),
     ResultClass("denied:", "launch_denied", "launch", SRC_ACTUATION),
+    ResultClass("error: 未能启动", "launch_failed", "launch", SRC_ACTUATION),
     ResultClass(
         "error: ",
         "app_not_installed",
         "launch",
         SRC_ACTUATION,
-        contains="is not installed",
+        contains="未安装",
     ),
     ResultClass("unknown app ", "unknown_app", "launch", SRC_ACTUATION),
     # --- taskdoc ---------------------------------------------------------

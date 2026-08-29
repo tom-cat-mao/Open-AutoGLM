@@ -8,11 +8,13 @@ from phone_agent.adb.connection import (
     quick_connect,
 )
 from phone_agent.adb.device import (
+    AppLabelEntry,
     back,
     double_tap,
     dump_uiautomator_xml,
     get_current_app,
     get_foreground_app,
+    get_app_labels,
     get_installed_app_inventory,
     get_focused_window_or_app,
     get_screen_marks,
@@ -43,6 +45,8 @@ __all__ = [
     # Device control
     "get_current_app",
     "get_foreground_app",
+    "get_app_labels",
+    "AppLabelEntry",
     "get_installed_app_inventory",
     "get_focused_window_or_app",
     "get_top_activity",

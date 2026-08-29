@@ -157,6 +157,12 @@ class V2Config:
     model_max_retries: int = 2
     # device
     device_id: str | None = None
+    # local App-KB (device labels + persistent aliases). PhoneSession opens the
+    # store lazily so disabling it performs no filesystem writes.
+    memory_dir: str = "memory"
+    app_kb_enabled: bool = True
+    app_list_max: int = 40
+    dream_mode: str = "manual"
     # loop
     max_model_calls: int = 100
     # HITL resume budget (S1 §3.3): outer-loop cap on human-in-the-loop resumes,
@@ -274,6 +280,12 @@ class V2Config:
             model_timeout=_env_float("PHONE_AGENT_MODEL_TIMEOUT", 180.0),
             model_max_retries=_env_int("PHONE_AGENT_MODEL_MAX_RETRIES", 2),
             device_id=_env_opt_str("PHONE_AGENT_DEVICE_ID"),
+            memory_dir=_env_str("PHONE_AGENT_MEMORY_DIR", "memory"),
+            app_kb_enabled=_env_bool_default_true("PHONE_AGENT_APP_KB", True),
+            app_list_max=_env_int("PHONE_AGENT_APP_LIST_MAX", 40),
+            dream_mode=_env_choice(
+                "PHONE_AGENT_DREAM", "manual", ("off", "auto", "manual")
+            ),
             max_model_calls=_env_int("PHONE_AGENT_MAX_STEPS", 100),
             max_hitl_resumes=_env_int("PHONE_AGENT_MAX_HITL_RESUMES", 20),
             budget_warn_ratio=_env_float("PHONE_AGENT_BUDGET_WARN_RATIO", 0.8),

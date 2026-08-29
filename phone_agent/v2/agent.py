@@ -30,8 +30,37 @@ class RunResult:
     trace_path: str | None = None
 
 
-def _first_observation_content(observation: Any, task: str) -> list[dict[str, Any]]:
-    """Build the initial user message content: task text + screenshot image."""
+def _marks_digest_lines(marks: Any, max_items: int = 40) -> str:
+    """Render ``mark_id | role | text | center`` lines (mirrors session digest).
+
+    Used only as a fallback when the session does not expose
+    ``format_marks_digest`` (e.g. duck-typed test doubles).
+    """
+
+    items = list(marks.values()) if isinstance(marks, dict) else list(marks or [])
+    lines: list[str] = []
+    for mark in items[:max_items]:
+        role = (getattr(mark, "role", None) or "?")[:24]
+        text = (getattr(mark, "text_summary", None) or "").replace("\n", " ").strip()[:32]
+        center = tuple(getattr(mark, "center", None) or ())
+        mark_id = getattr(mark, "mark_id", "?")
+        lines.append(f"{mark_id} | {role} | {text} | {center}")
+    if len(items) > max_items:
+        lines.append(f"... (+{len(items) - max_items} more)")
+    return "\n".join(lines)
+
+
+def _first_observation_content(
+    observation: Any, task: str, session: Any = None
+) -> list[dict[str, Any]]:
+    """Build the initial user message: task text + screenshot + marks digest.
+
+    The ``[OBS]`` text block mirrors the tool-path observation shape
+    (``tools/_obs.py``: ``app=... screen#...`` + a marks digest) so the model
+    sees the current screen's marks — and can address ``target_mark_id`` —
+    from the very first step, instead of having to burn a ``read_screen``.
+    """
+
     content: list[dict[str, Any]] = [{"type": "text", "text": task}]
     b64 = getattr(observation, "screenshot_b64", None)
     if b64:
@@ -42,9 +71,18 @@ def _first_observation_content(observation: Any, task: str) -> list[dict[str, An
                 "screen_seq": getattr(observation, "screen_seq", 0),
             }
         )
-    digest = getattr(observation, "current_app", None)
-    if digest:
-        content.append({"type": "text", "text": f"[OBS] app={digest}"})
+    marks = getattr(observation, "marks", None) or []
+    items = list(marks.values()) if isinstance(marks, dict) else list(marks)
+    digest_fn = getattr(session, "format_marks_digest", None)
+    digest = digest_fn(items) if callable(digest_fn) else _marks_digest_lines(items)
+    current_app = getattr(observation, "current_app", None) or "?"
+    seq = getattr(observation, "screen_seq", 0)
+    content.append(
+        {
+            "type": "text",
+            "text": f"[OBS] app={current_app} screen#{seq}\nmarks ({len(items)}): {digest}",
+        }
+    )
     return content
 
 
@@ -200,13 +238,14 @@ class ThinPhoneAgent:
             middleware=middleware,
             checkpointer=checkpointer,
         )
-        self._system_prompt = get_system_prompt(getattr(config, "lang", "cn"))
+        self._base_system_prompt = get_system_prompt(getattr(config, "lang", "cn"))
+        self._system_prompt = self._base_system_prompt
 
     # ------------------------------------------------------------------
     def _initial_messages(self, task: str) -> list[Any]:
         try:
             observation = self.session.observe()
-            content = _first_observation_content(observation, task)
+            content = _first_observation_content(observation, task, session=self.session)
         except Exception:
             # Observation failure -> text-only start (fail-open on bring-up).
             content = [{"type": "text", "text": task}]
@@ -214,6 +253,34 @@ class ThinPhoneAgent:
             SystemMessage(content=self._system_prompt),
             HumanMessage(content=content),
         ]
+
+    def _prepare_app_knowledge(self) -> None:
+        """Sync App-KB once and rebuild this run's bounded prompt suffix."""
+
+        base_prompt = getattr(
+            self, "_base_system_prompt", getattr(self, "_system_prompt", "")
+        )
+        self._base_system_prompt = base_prompt
+        self._system_prompt = base_prompt
+        if not getattr(self.config, "app_kb_enabled", True):
+            return
+        try:
+            sync = getattr(self.session, "sync_app_knowledge", None)
+            if callable(sync):
+                sync()
+            render = getattr(self.session, "app_list_for_prompt", None)
+            app_list = (
+                render(getattr(self.config, "app_list_max", 40))
+                if callable(render)
+                else ""
+            )
+            if app_list:
+                self._system_prompt += (
+                    "\n\n# 本机可启动应用（launch_app 请用这些名字）\n"
+                    f"{app_list}"
+                )
+        except Exception:  # noqa: BLE001 - prompt enrichment never blocks a run
+            self._system_prompt = base_prompt
 
     @staticmethod
     def _extract_interrupts(result: Any) -> tuple[Any, ...]:
@@ -279,6 +346,7 @@ class ThinPhoneAgent:
         from langgraph.types import Command
 
         self._seed_task_doc(task)
+        self._prepare_app_knowledge()
         # Reset per-run one-shot flags so a reused agent behaves like a fresh run
         # (S1 R7): the HITL-exhaustion terminal flag, the token-budget state, and
         # the compaction middleware's per-run counters.

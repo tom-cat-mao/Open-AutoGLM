@@ -60,7 +60,8 @@ test rather than the diagnosis.
 | `error: unknown direction` | `bad_direction` | actuation_arg | `tools/actuation.py::scroll` |
 | `ambiguous app ` | `ambiguous_app` | launch | `tools/actuation.py::launch_app` |
 | `denied:` | `launch_denied` | launch | `tools/actuation.py::launch_app` |
-| `error: …is not installed` | `app_not_installed` | launch | `tools/actuation.py::launch_app` |
+| `error: 未能启动` | `launch_failed` | launch | `tools/actuation.py::launch_app` |
+| `error: …未安装` | `app_not_installed` | launch | `tools/actuation.py::launch_app` |
 | `unknown app ` | `unknown_app` | launch | `tools/actuation.py::launch_app` |
 | `未写入（输入无效）：` | `taskdoc_input_invalid` | taskdoc | `tools/taskdoc.py::update_task_doc` |
 | `未写入（校验失败）：` | `taskdoc_validation_failed` | taskdoc | `tools/taskdoc.py::update_task_doc` ← `TaskDoc.validate` |

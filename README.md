@@ -37,6 +37,9 @@ system(极简契约) + user(task + 首次观测含截图)
   调纯文本 LLM 生成手机版 handoff 摘要替换远古段（切点保 tool_use/tool_result 配对，不切 TaskDoc/pinned）。
 - **保留库**：`phone_agent/adb/`（设备层）、`phone_agent/grounding/`（accessibility tree + LocateAnything）、
   `phone_agent/config/`（policy / app_registry / redact）。
+- **App-KB**：每次 run 开始从设备同步可启动应用的本地化名称，并向 system prompt 注入有界名称清单；
+  `launch_app` 在静态表未知时可用持久别名补齐解析，失败回执附本机候选名。知识仅落本地
+  `memory/app_kb/`；`.venv/bin/python main_v2.py --dream` 可手动合并、对账和清理。
 
 ## 快速开始
 
@@ -52,6 +55,7 @@ cp .env.example .env   # 填入 base_url / model / api_key
 ```bash
 .venv/bin/python main_v2.py "打开设置进入WLAN" --device-id <serial>
 .venv/bin/python main_v2.py "在飞猪查10月2日上海飞桃仙的最低价机票" --max-steps 40
+.venv/bin/python main_v2.py --dream  # 手动整理本地 App-KB
 .venv/bin/pytest tests -q            # 全 fake，无真机无 MLX
 ```
 
@@ -63,6 +67,8 @@ cp .env.example .env   # 填入 base_url / model / api_key
 全部走 `PHONE_AGENT_*` 环境变量（`.env` 只加载该前缀，shell 优先）+ CLI 覆盖。完整键表见
 [`.env.example`](.env.example) 与 `phone_agent/v2/config.py`。常用：`PHONE_AGENT_BASE_URL` / `PHONE_AGENT_MODEL` /
 `PHONE_AGENT_API_KEY` / `PHONE_AGENT_DEVICE_ID` / `PHONE_AGENT_GROUNDING_PROVIDER`（默认 `hybrid`）。
+App-KB 使用 `PHONE_AGENT_MEMORY_DIR`（默认 `memory`）、`PHONE_AGENT_APP_KB`（默认 true）、
+`PHONE_AGENT_APP_LIST_MAX`（默认 40）和 `PHONE_AGENT_DREAM=off|auto|manual`（默认 manual）。
 
 网关注意：自建网关若在 Cloudflare 后，需要浏览器 UA 头（`v2/model.py` 已处理）；部分模型有采样参数限制，
 用 `PHONE_AGENT_TEMPERATURE` / `PHONE_AGENT_TOP_P` / `PHONE_AGENT_FREQUENCY_PENALTY` 覆盖。
