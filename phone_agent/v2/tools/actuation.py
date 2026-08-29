@@ -24,8 +24,10 @@ from typing import Literal
 from langchain_core.tools import StructuredTool
 
 from phone_agent.config.apps import DEFAULT_LAUNCH_TARGET_RESOLVER
+from phone_agent.config.redact import SENSITIVE_PATTERN
 from phone_agent.grounding.provider import MarkCandidate
 
+from phone_agent.v2.appkb import should_save
 from phone_agent.v2.resolver import (
     LocateAmbiguousError,
     ResolveAmbiguousError,
@@ -55,6 +57,73 @@ def _available_app_names(session, *, max_n: int) -> str:
         except Exception:  # noqa: BLE001 - preserve the original launch failure
             pass
     return ""
+
+
+def _record_verified_launch(
+    session, config, *, app_name: str, resolution, kb_match
+) -> None:
+    """Best-effort App-KB feedback after a device-confirmed launch."""
+
+    if not getattr(config, "app_kb_enabled", True):
+        return
+    store = getattr(session, "app_store", None)
+    knowledge = getattr(session, "app_knowledge", None)
+    if store is None or knowledge is None:
+        return
+
+    try:
+        package = str(resolution.package_name or "").strip()
+        if kb_match is not None:
+            matched_term = str(kb_match.get("term", ""))
+            matched_kind = str(kb_match.get("kind", ""))
+            sensitive = SENSITIVE_PATTERN.search(matched_term) is not None
+            if should_save(matched_kind, durable=True, sensitive=sensitive):
+                store.record_success(matched_term, package)
+            return
+
+        used_term = str(app_name or "").strip()
+        canonical_label = ""
+        device_id_getter = getattr(session, "_kb_device_id", None)
+        device_id = device_id_getter() if callable(device_id_getter) else None
+        if device_id:
+            device_entries = store.entries(
+                scope=f"device:{device_id}", kind="device"
+            )
+            canonical_label = next(
+                (
+                    str(entry.get("label", "")).strip()
+                    for entry in device_entries
+                    if entry.get("package") == package
+                    and str(entry.get("label", "")).strip()
+                ),
+                "",
+            )
+        if not canonical_label and resolution.identity is not None:
+            canonical_label = str(resolution.identity.display_name or "").strip()
+        if (
+            not used_term
+            or not canonical_label
+            or used_term.casefold() == canonical_label.casefold()
+        ):
+            return
+
+        sensitive = SENSITIVE_PATTERN.search(used_term) is not None
+        if not should_save("learned", durable=True, sensitive=sensitive):
+            return
+        store.upsert(
+            {
+                "term": used_term,
+                "label": canonical_label,
+                "package": package,
+                "kind": "learned",
+                "scope": "global",
+                "confidence": 0.9,
+                "success_count": 1,
+                "stale": False,
+            }
+        )
+    except Exception:  # noqa: BLE001 - memory feedback must never break launch
+        return
 
 
 def _ok_with_obs(head: str, session) -> list[dict]:
@@ -401,6 +470,11 @@ def build_actuation_tools(session, config) -> list[StructuredTool]:
         resolution = DEFAULT_LAUNCH_TARGET_RESOLVER.resolve(
             app_name, inventory=inventory, learning=learning
         )
+        kb_match = (
+            getattr(learning, "last_match", None)
+            if resolution.identity is None and learning is not None
+            else None
+        )
         status = resolution.status
         if status == "resolved" and resolution.package_name:
             launched = device.launch_app(
@@ -415,6 +489,13 @@ def build_actuation_tools(session, config) -> list[StructuredTool]:
                     f"error: 未能启动 {app_name!r}（{resolution.package_name}）——设备返回启动失败，"
                     "可 read_screen 重新观测后重试。",
                 )
+            _record_verified_launch(
+                session,
+                config,
+                app_name=app_name,
+                resolution=resolution,
+                kb_match=kb_match,
+            )
             return _ok_with_obs(
                 f"launched {app_name} ({resolution.package_name})", session
             )

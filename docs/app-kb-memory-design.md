@@ -160,6 +160,10 @@ KB 明细只在 resolver 内部与失败回执里出现；日志无限增长由 
 - **WP-C（主树，待 WP-A/B 合入后）**：集成——resolver 接 KB 槽位、run 首设备同步 +
   system prompt 清单注入、`launch_app` 失败回执附候选、配置键、`--dream` CLI、
   README/AGENTS 同步、全量测试。
+- **WP-F（worktree `wp/appkb-write-closure`）**：闭合验证启动写路径——KB 命中成功后通过
+  `upsert` 事件累计 `success_count`，静态解析或设备事实命中成功后将非敏感的新说法写为
+  `kind=learned, scope=global`；所有写回失败均 fail-open，不改变启动回执。用户明确纠正写
+  `kind=user` 仍留待具备纠正信号的后续入口。
 
 ## 12. 验收标准
 
@@ -169,7 +173,9 @@ KB 明细只在 resolver 内部与失败回执里出现；日志无限增长由 
    dream 合并/对账/清理行为正确；
 4. WP-C：端到端 fake run 里——首条 system/上下文含 App 清单；"哔哩哔哩"经 KB 别名命中
    `tv.danmaku.bili`；launch 失败回执含候选；`PHONE_AGENT_APP_KB=0` 全关后行为退化为现状；
-5. 真机冒烟（设备接上后）：`get_app_labels` 真机输出格式核验通过。
+5. WP-F：fake launch 下新说法同时落入 `kb.json` / `events.jsonl`；既有 KB 命中只累计
+   `success_count`，同名、敏感说法和关闭 App-KB 均不写，写回异常不影响成功回执；
+6. 真机冒烟（设备接上后）：`get_app_labels` 真机输出格式核验通过。
 
 ## 附录 A：与 Claude Code memory 的机制对照
 

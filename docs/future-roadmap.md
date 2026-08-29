@@ -32,7 +32,7 @@
 - **测试门禁**：`.venv/bin/pytest tests -q` 全绿（全部 fake，无真机无 MLX）。LangChain 网关兼容 spike：`scripts/spike_langchain_compat.py`。
 - **WP-D 可选本地 Web UI 已落地**：`phone_agent/web/` 以 NiceGUI 提供中文实时控制台，后台线程运行原生 `ThinPhoneAgent.run`，`WebEventMiddleware` 只镜像 model/tool/screen/safety/TaskDoc/run_end 事件到内存队列；页面展示最新截图、步骤账本、任务板与 token/终局状态，并通过 `threading.Event` 回答 HITL。Web 层不直接访问 ADB、不写工作流状态；入口为 `python -m phone_agent.web [--device-id X] [--model M] [--port 8080]`，默认仅监听 `127.0.0.1`。
 - **A4 已落地（预算/压缩/迁移纪律/去重删除）**：token 预算（L0 余量镜子 + 硬成本上限）、两级 auto-compact（handoff 摘要）、TaskDoc 状态迁移纪律、删除图片同屏去重死代码，均已合入并有单测覆盖。
-- **App-KB 骨架已落地**：设备可启动应用 label 在 run 首同步到本地 `memory/app_kb/`，system prompt 注入有界规范名清单，`launch_app` 通过持久 `AppKnowledge` 别名槽解析并在失败时回传候选；支持 `--dream` 手动整理和 `PHONE_AGENT_DREAM=auto` 的 run 后轻量合并+对账（不删除）。`get_app_labels` 已由 fake ADB 测试覆盖，**真机输出格式、耗时与 MAIN+LAUNCHER query flag 验证仍 pending**。
+- **App-KB 骨架与验证启动写回已落地**：设备可启动应用 label 在 run 首同步到本地 `memory/app_kb/`，system prompt 注入有界规范名清单，`launch_app` 通过持久 `AppKnowledge` 别名槽解析并在失败时回传候选；设备确认启动成功后，KB 命中会追加成功计数，非敏感的新说法会沉淀为 `kind=learned` 全局别名。支持 `--dream` 手动整理和 `PHONE_AGENT_DREAM=auto` 的 run 后轻量合并+对账（不删除）。显式用户纠正写 `kind=user` 尚未接入；`get_app_labels` 已由 fake ADB 测试覆盖，**真机输出格式、耗时与 MAIN+LAUNCHER query flag 验证仍 pending**。
 - **本轮不做（后续迭代项）**：
   - **通用长期记忆**：App-KB 的结构化跨 run 骨架已落地；任务经验等非 App 知识的 run 末抽取与通用 memory/dream 尚未实现。`PHONE_AGENT_MEMORY_MODEL` 目前仅用于 auto-compact 摘要 writer。
   - **plan 工具**：显式规划/TodoList 工具未纳入本轮。
