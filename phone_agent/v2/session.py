@@ -363,6 +363,24 @@ class PhoneSession:
         self._last_locate_app = self._foreground_label()
         return minted
 
+    def last_locate_frame(self) -> dict | None:
+        """Return the stashed locate screenshot as a same-frame render payload.
+
+        ``{"b64", "mime", "screen_seq", "app"}`` for the frame the most recent
+        ``locate()`` ran its visual model on, or ``None`` if no locate has run
+        (so the tool degrades to text-only rather than fabricating an image).
+        """
+
+        shot = self._last_locate_shot
+        if shot is None or not getattr(shot, "base64_data", None):
+            return None
+        return {
+            "b64": shot.base64_data,
+            "mime": getattr(shot, "mime_type", None) or "image/png",
+            "screen_seq": self.screen_seq,
+            "app": self._last_locate_app,
+        }
+
     # -- marks digest -----------------------------------------------------
 
     @staticmethod

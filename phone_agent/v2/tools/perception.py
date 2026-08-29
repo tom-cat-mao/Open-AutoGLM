@@ -10,7 +10,12 @@ from __future__ import annotations
 from langchain_core.tools import StructuredTool
 
 from phone_agent.v2.resolver import LocateAmbiguousError, candidate_summary
-from phone_agent.v2.tools._obs import auto_observation, mark_tool_fail, mark_tool_ok
+from phone_agent.v2.tools._obs import (
+    auto_observation,
+    locate_observation,
+    mark_tool_fail,
+    mark_tool_ok,
+)
 
 
 def build_perception_tools(session, config) -> list[StructuredTool]:
@@ -27,7 +32,7 @@ def build_perception_tools(session, config) -> list[StructuredTool]:
         mark_tool_ok(session)
         return auto_observation(session)
 
-    def locate(description: str) -> str:
+    def locate(description: str) -> str | list[dict]:
         """Deep visual localization for a target accessibility marks miss.
 
         On success the located element is registered as a new mark, tappable via
@@ -44,10 +49,12 @@ def build_perception_tools(session, config) -> list[StructuredTool]:
             mark_tool_fail(session)
             return f"定位失败: {exc}"
         mark_tool_ok(session)
-        return (
+        head = (
             f"已定位并注册为 mark {mark.mark_id}，可用 "
             f"tap(target_mark_id={mark.mark_id!r}) 点击 [{candidate_summary(mark)}]"
         )
+        # U1: return the same frame the visual model located on (no extra observe).
+        return locate_observation(session, head)
 
     return [
         StructuredTool.from_function(read_screen, parse_docstring=True),

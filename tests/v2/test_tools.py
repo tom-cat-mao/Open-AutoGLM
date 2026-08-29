@@ -249,7 +249,7 @@ def test_locate_success_registers_mark():
     session = FakePhoneSession({}, locate_result=located)
     tools = _tool_map(session)
     out = tools["locate"].invoke({"description": "隐藏按钮"})
-    assert "已定位并注册为 mark loc_9" in out
+    assert "已定位并注册为 mark loc_9" in _text(out)
     assert "loc_9" in session.marks
 
 
@@ -355,14 +355,17 @@ def test_actuation_result_contains_obs_block_when_observe_works():
         assert "[OBS]" in _text(out)
 
 
-def test_locate_success_returns_str_no_image():
+def test_locate_success_no_frame_degrades_to_text_only():
+    # U1: locate returns the same frame the visual model ran on. A session
+    # double that exposes no ``last_locate_frame`` degrades to a text-only block
+    # (fail-closed, never a fabricated image). Real same-frame image return is
+    # covered in test_observation_lifecycle.py against the real PhoneSession.
     located = make_mark("loc_9", text="隐藏按钮", role="ImageView")
     session = FakePhoneSession({}, locate_result=located)
     tools = _tool_map(session)
     out = tools["locate"].invoke({"description": "隐藏按钮"})
-    # locate does not produce a new screen -> str result, never an image.
-    assert isinstance(out, str)
     assert _image_blocks(out) == []
+    assert "已定位并注册为 mark loc_9" in _text(out)
 
 
 def test_static_screen_still_sends_image_each_time():
