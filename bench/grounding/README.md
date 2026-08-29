@@ -2,7 +2,7 @@
 
 ## 目标
 
-- 评估 `phone_agent/grounding/` 中 description → bbox 的小 VLM provider 能力；runtime 会把 provider 输出转成 MarkRegistry candidates，而不是直接执行 description target。
+- 评估 `phone_agent/grounding/` 中 description → bbox 的小 VLM provider 能力；runtime 会把 provider 输出转成 `MarkCandidate`（由 `PhoneSession` 消费），而不是直接执行 description target。
 - 覆盖三类正确性：
   - **元素是否都被框到**：required UI 元素召回率。
   - **坐标是否正确**：IoU、中心点是否落入 GT、点击可用性。
@@ -162,7 +162,7 @@ summary JSON 包含：
 - **Level 3：文字理解**
   - “包含 XX 文案的按钮/输入框/列表项”；看 text F1 + bbox。
 - **Level 4：真实任务回放**
-  - 使用 trace 中的 screenshot + provider hint / mark candidate，测 provider 是否能支撑最终 MarkRegistry 生成。
+  - 使用 trace 中的 screenshot + provider hint / mark candidate，测 provider 是否能支撑最终 `MarkCandidate` 生成。
 
 ## 落地建议
 

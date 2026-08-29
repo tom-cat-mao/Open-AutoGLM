@@ -46,6 +46,11 @@
   - **禁并行 tool calls**：`build_chat_model` 以 `model_kwargs={"parallel_tool_calls": False}` 下发（`create_agent` 每轮 `bind_tools` 不带该 flag，故设为模型默认使其跨 rebind 存活）；`PHONE_AGENT_PARALLEL_TOOL_CALLS`（默认 false）可在网关拒绝该参数时置真退出。
   - **剪除联动不动**：`images.py` 仍保留最新 2 张含图消息，U1 只改生产侧原子性，不动历史端剪除。
   - **测试**：`tests/v2/test_observation_lifecycle.py`（真 `PhoneSession` + fake 设备）覆盖原子性/单生产者/工牌不复用/验鲜拒点/重试一次/持续不稳与截图失败作废/locate 同批次同帧；全套 402 绿。
+- **U4 grounding 死代码清除已落地**：删除 v1 退役时搬来的 `phone_agent/grounding/marks.py`（`Mark`/`MarkRegistry`/`build_screen_id`/`build_mark_topology_digest`/`build_ax_mark_digest` 等，503 行）与 `objects.py`（`StructureNode`/`ScreenStructure`/`ScreenObject`/`ObjectRegistry`/`build_object_registry` 等，1119 行）整文件——v2 薄 loop 从不消费这两者（`session.refresh_marks` 只取 `result.marks`）。
+  - **accessibility.py 改造**：删除 `screen_structure` sidecar 构建链（`_structure_from_root` / `parse_uiautomator_structure` / `parse_uiautomator_summary` 里的 `structure_node_count` / 死路径 helper `_normalize_bounds`/`_safe_node_summary`/`_hash_value`/`_node_to_mark`）；provider 只产 `MarkCandidate`，`MarkProviderResult.screen_structure(s)` 契约字段保留但恒 `None`/`[]`（`fallback`/`locateanything` 的 visual structure 活路径不动）。失败码 `accessibility_structure_missing` 随 sidecar 一并移除。
+  - **policy.py 清理**：删除仅服务 `marks.py` 的验证阈值 `mark_min_confidence` / `perceptual_hash_max_distance` 与常量 `LOCATE_INHERIT_PHASH_MAX_DISTANCE`（全仓无其它消费者）。
+  - **测试**：`tests/grounding/test_fallback_usability.py` 无需改写（不触 structure sidecar），`tests/test_policy_registry.py` 结构性断言仍绿；全套 412 绿。共删 1622 行遗留代码。
+
 
 ---
 

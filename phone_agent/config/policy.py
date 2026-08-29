@@ -69,16 +69,6 @@ def resolve_locate_la_max_size(overrides: dict[str, Any] | None = None) -> int:
 # returned mark is mapped back to full-screen 0-1000 coordinates.
 LOCATE_SCOPE_PADDING_RATIO = 0.05
 
-# D2: relaxed locate-inheritance gate. A locate_N mark bound to a previous
-# screen_id may be inherited (re-bound to the new screen_id) only when the
-# semantic screen matches AND (the ax structure digest matches OR the 8x8 mean
-# perceptual hash hamming distance is at most this many bits). The in-repo
-# 8x8 mean hash is degenerate on light large-block pages (all-zero/all-one
-# bitmasks), so the threshold stays at the same conservative value as
-# ``perceptual_hash_max_distance`` (8): it is a tie-breaker for tiny ax-tree
-# jitter, never an independent screen-identity oracle.
-LOCATE_INHERIT_PHASH_MAX_DISTANCE = 8
-
 # User-domain fuses. `max_steps` is retained by public callers as a compatibility
 # input, but state/routing consume `step_cap`.
 PROGRESS_EVIDENCE_HORIZON = 6
@@ -262,20 +252,6 @@ DEFAULT_VERIFICATION_POLICY = VerificationPolicy(
     profile_id="conservative_default",
     version="verification_policy_v1",
     thresholds={
-        "mark_min_confidence": _threshold(
-            "mark_min_confidence",
-            0.3,
-            unit="probability",
-            rationale="Reject weak grounding candidates before execution.",
-            boundary="below rejects grounding",
-        ),
-        "perceptual_hash_max_distance": _threshold(
-            "perceptual_hash_max_distance",
-            8,
-            unit="hamming_bits",
-            rationale="Reject mark registries from materially different screenshots.",
-            boundary="above rejects binding",
-        ),
         "fact_min_confidence": _threshold(
             "fact_min_confidence",
             0.6,
