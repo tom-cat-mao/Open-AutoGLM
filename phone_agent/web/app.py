@@ -263,7 +263,13 @@ def run(
     overrides = {"device_id": device_id, "model_name": model}
     config = V2Config.from_env(overrides)
     bridge = WebRunBridge(overrides)
-    create_ui(bridge, config=config)
+
+    @ui.page("/")
+    def _index() -> None:
+        # Explicit page registration: the auto-index page would re-execute
+        # ``sys.argv[0]`` per request, which breaks ``python -m phone_agent.web``.
+        create_ui(bridge, config=config)
+
     ui.run(
         host=host,
         port=port,
