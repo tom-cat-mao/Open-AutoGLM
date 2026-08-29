@@ -36,7 +36,7 @@
 | 变量 | 默认值 | 说明 |
 |---|---:|---|
 | `PHONE_AGENT_MEMORY_DIR` | `memory` | 本地记忆根目录，App-KB 写入其 `app_kb/` 子目录。 |
-| `PHONE_AGENT_APP_KB` | `true` | App-KB 总开关；关闭后不进行同步、读取或 prompt 注入。 |
+| `PHONE_AGENT_APP_KB` | `true` | App-KB 总开关；关闭后不进行同步、读取、验证启动写回或 prompt 注入。 |
 | `PHONE_AGENT_APP_LIST_MAX` | `40` | 注入 system prompt 的本机应用规范名数量上限。 |
 | `PHONE_AGENT_DREAM` | `manual` | `off` / `auto` / `manual`；`auto` 在运行后轻量合并，`manual` 仅由 `--dream` 触发。 |
 

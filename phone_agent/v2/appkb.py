@@ -183,6 +183,35 @@ class AppKnowledgeStore:
             self._append_event("upsert", candidate)
             self._write_materialized()
 
+    def record_success(self, term: str, package: str) -> bool:
+        """Record a verified launch against exact, non-stale matches.
+
+        Every updated entry is persisted through a normal ``upsert`` event so
+        the append-only log remains authoritative.  ``False`` means no current
+        entry matched the exact term/package pair.
+        """
+
+        wanted_term = str(term)
+        wanted_package = str(package)
+        timestamp = _iso_now()
+        with self._lock:
+            matches = [
+                (key, entry)
+                for key, entry in self._entries.items()
+                if entry["term"] == wanted_term
+                and entry["package"] == wanted_package
+                and not entry["stale"]
+            ]
+            for key, entry in matches:
+                updated = dict(entry)
+                updated["success_count"] += 1
+                updated["last_seen"] = timestamp
+                self._entries[key] = updated
+                self._append_event("upsert", updated)
+            if matches:
+                self._write_materialized()
+        return bool(matches)
+
     def mark_stale(self, term: str, package: str | None = None) -> None:
         """Mark matching entries stale, appending one event per changed entry."""
 
@@ -356,10 +385,18 @@ class AppKnowledge:
             else AppKnowledgeStore(str(store))
         )
         self.device_id = None if device_id is None else str(device_id)
+        self._last_match: dict[str, Any] | None = None
+
+    @property
+    def last_match(self) -> dict[str, Any] | None:
+        """Return a copy of the entry matched by the latest lookup."""
+
+        return None if self._last_match is None else dict(self._last_match)
 
     def lookup(self, term: str) -> str | None:
         """Resolve a term through exact, normalized, substring, then alias tiers."""
 
+        self._last_match = None
         query = str(term or "")
         if not query:
             return None
@@ -367,6 +404,7 @@ class AppKnowledge:
         direct = [entry for entry in applicable if entry["kind"] != "alias"]
         matched = self._match_direct(query, direct)
         if matched is not None:
+            self._last_match = dict(matched)
             return matched["package"]
         return self._lookup_alias(query, applicable)
 
@@ -432,6 +470,7 @@ class AppKnowledge:
         alias = self._match_direct(query, aliases)
         if alias is None:
             return None
+        self._last_match = dict(alias)
 
         normalized_label = _normalize_term(alias["label"])
         bridged = [

@@ -59,7 +59,7 @@ skill before running or monitoring a device task.
 | `phone_agent/v2/middleware/` | Safety, TaskDoc pinning, image hygiene, compaction, token budget, trace, and diagnostics. |
 | `phone_agent/v2/{taskdoc,resolver,review,verify}.py` | Task state, unique mark resolution, finish review packet, and independent verification. |
 | `phone_agent/v2/{model,config,prompts}.py` | Model transport, `V2Config`, and the thin-loop system contract. |
-| `phone_agent/v2/{appkb,dream}.py` | Persistent local application knowledge and maintenance/consolidation. |
+| `phone_agent/v2/{appkb,dream}.py` | Persistent local application knowledge, append-only mutation history, verified-launch feedback, and maintenance/consolidation. |
 | `phone_agent/{adb,grounding,config}/` + `device_factory.py` | Retained device, grounding, policy/registry/redaction libraries; v2 consumes them through their contracts. |
 
 The v1 routed LangGraph workflow and its `graph/`, `actions/`, `checkpoint/`, old `agent.py`, old
