@@ -307,7 +307,7 @@ class V2Config:
             ),
             finish_verify_k=_env_int("PHONE_AGENT_FINISH_VERIFY_K", 1),
             safety_mode=_env_choice(
-                "PHONE_AGENT_SAFETY_MODE", "hard", ("off", "hard", "reviewer")
+                "PHONE_AGENT_SAFETY_MODE", "wary", ("off", "wary", "hard", "reviewer")
             ),
             diagnostic_evidence=_env_bool("PHONE_AGENT_DIAG_EVIDENCE", False),
             diagnostic_evidence_dir=_env_str(
