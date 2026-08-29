@@ -149,6 +149,16 @@ class DeviceFactory:
             return InstalledAppInventory(frozenset(), device_id=device_id)
         return self.module.get_installed_app_inventory(device_id)
 
+    def get_app_labels(self, device_id: str | None = None) -> list[Any]:
+        """Return device-reported launchable app labels when available."""
+
+        if hasattr(self.module, "get_app_labels"):
+            return self.module.get_app_labels(device_id)
+        device_module = getattr(self.module, "device", None)
+        if not hasattr(device_module, "get_app_labels"):
+            return []
+        return device_module.get_app_labels(device_id)
+
     def get_focused_window_or_app(self, device_id: str | None = None) -> str | None:
         """Get the focused Android window/app diagnostic line."""
         if not hasattr(self.module, "get_focused_window_or_app"):
