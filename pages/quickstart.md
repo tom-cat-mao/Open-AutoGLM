@@ -25,8 +25,8 @@ PHONE_AGENT_MODEL="你的模型id"
 PHONE_AGENT_API_KEY="你的key"
 ```
 
-!!! tip "网关在 Cloudflare 后面？"
-    保留默认的浏览器风格 User-Agent 即可（代码已内置）；若网关有 Cloudflare Access，需成对配置 `PHONE_AGENT_CF_ACCESS_CLIENT_ID` / `PHONE_AGENT_CF_ACCESS_CLIENT_SECRET`。
+!!! tip "网关不通？"
+    先用 `curl $PHONE_AGENT_BASE_URL/models` 验证网关可达；采样参数限制、自定义请求头等部署差异都有对应的 `PHONE_AGENT_*` 覆盖键，见[配置参考](configuration.md)。
 
 ## 跑第一个任务
 
