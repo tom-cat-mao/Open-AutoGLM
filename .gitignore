@@ -90,3 +90,10 @@ memory/
 
 # Local working documents — never tracked
 docs/
+
+# Local-only working dirs — never tracked
+.codex/
+examples/
+resources/
+tests/
+bench/
