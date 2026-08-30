@@ -178,6 +178,11 @@ class V2Config:
     experience_dir: str = "memory/experience"
     episode_keep: int = 500
     episode_archive_days: int = 90
+    # Offline lesson evolution. This is CLI-only and never participates in the
+    # actor run path. Manual enables explicit maintenance commands; off refuses
+    # distillation. Lessons remain proposals until a human approves.
+    evolution_mode: str = "manual"
+    lessons_dir: str = "memory/lessons"
     # Rebuildable semantic recall. ``shadow`` retrieves and evaluates candidates
     # without changing actor messages; ``on`` is reserved and currently has no
     # injection behavior. The MLX model itself remains lazy until first embed.
@@ -278,7 +283,8 @@ class V2Config:
     http_headers: dict[str, str] | None = None
     cf_access_client_id: str | None = None
     cf_access_client_secret: str | None = None
-    # reserved (read-only this round; not implemented)
+    # Side-model used by auto-compact and offline lesson distillation; each
+    # falls back to the main model when unset.
     memory_model: str | None = None
     # finish-verifier model (S2 §4.3); falls back to the main model when unset.
     verifier_model: str | None = None
@@ -334,6 +340,10 @@ class V2Config:
             experience_dir=_env_str("PHONE_AGENT_EXPERIENCE_DIR", "memory/experience"),
             episode_keep=_env_int("PHONE_AGENT_EPISODE_KEEP", 500),
             episode_archive_days=_env_int("PHONE_AGENT_EPISODE_ARCHIVE_DAYS", 90),
+            evolution_mode=_env_choice(
+                "PHONE_AGENT_EVOLUTION", "manual", ("off", "manual")
+            ),
+            lessons_dir=_env_str("PHONE_AGENT_LESSONS_DIR", "memory/lessons"),
             memory_rag=_env_choice(
                 "PHONE_AGENT_MEMORY_RAG", "shadow", ("off", "shadow", "on")
             ),

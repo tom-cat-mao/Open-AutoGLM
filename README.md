@@ -21,6 +21,7 @@ TaskWizard 采用 thin-loop v2：模型每轮观察真实设备、决定一个�
 - **可信完成**：TaskDoc 任务板与流程线持续记录进度；finish 两段式确认，并可交给独立上下文验收器复核。
 - **App-KB 自积累记忆**：同步本机应用名称；验证启动成功后沉淀非敏感别名，并累计成功反馈。同一 run 中未知中文名失败、回执列出的包名随后启动成功时，自动把该中文名写为 `learned` 别名（隐式纠正，证据闭环）。
 - **经验数据面**：每次 run 结束以严格隐私白名单落盘 episode outcome 与工具结果分类，持久化分角色 token 账本；全程 observe-only，不向 actor 回注。
+- **经验提炼与晋升**：离线 `--distill` 从证据充足的 episode 组生成 proposed lesson；Rule-of-3 通过后仍须人工 approve。lesson 永不进入 actor 上下文。
 - **RAG shadow 召回**：sqlite-vec + FTS5 混合检索历史 episode 与 App 别名；默认只写 trace 并按实际启动应用统计命中率，绝不注入 actor 上下文。
 - **能力注册表**：每个能力（App-KB/dream/经验/回想/安全/压缩/验收…）有稳定 id、档位与依赖声明；依赖缺失可见待岗；每次 run 的能力快照写入 trace 与 episode，可审计可复盘。
 - **长任务可控**：token 预算限制成本，两级 auto-compact 在接近上下文窗口时保留关键状态。
@@ -44,8 +45,12 @@ cp .env.example .env  # 填写模型网关、模型名与 API Key
 .venv/bin/python main_v2.py "在飞猪查询 10 月 2 日上海飞桃仙的最低价机票" --max-steps 40
 .venv/bin/python -m phone_agent.web --device-id <serial> --port 8080   # Web 控制台
 .venv/bin/python main_v2.py --dream    # 手动整理本地 App-KB 与经验库
-.venv/bin/python main_v2.py --dream    # 手动整理本地 App-KB
 .venv/bin/python main_v2.py --rebuild-vec  # 从 episode/App-KB 全量重建语义索引
+.venv/bin/python main_v2.py --distill     # 离线蒸馏，只写 proposed lesson
+.venv/bin/python main_v2.py --review-lessons
+.venv/bin/python main_v2.py --approve-lesson <lesson-id>
+.venv/bin/python main_v2.py --revoke-lesson <lesson-id> "原因"
+.venv/bin/python main_v2.py --supersede-lesson <lesson-id> "修订后的规则"
 .venv/bin/pytest tests -q
 ```
 
@@ -59,6 +64,11 @@ Web 控制台默认只监听 `127.0.0.1:8080`：输入任务后可实时查看�
 经验数据默认写入 `memory/experience/{events.jsonl,episodes.json}`；前者是追加式事实日志，后者是按
 `run_id` 索引、可重建的物化视图。`PHONE_AGENT_EXPERIENCE=off` 可完全关闭写入；`--dream` 按
 `PHONE_AGENT_EPISODE_KEEP` / `PHONE_AGENT_EPISODE_ARCHIVE_DAYS` 将旧全文折叠为无原文的类别成功率统计。
+
+`PHONE_AGENT_EVOLUTION=manual` 仅开放显式离线命令；候选写入
+`memory/lessons/{events.jsonl,lessons.json}`。蒸馏只看到隐私最小化的 episode 摘要，输出先经严格
+schema、证据、scope 与原文泄漏检查，再以 proposed 状态落盘；Rule-of-3 也只产生“可供人工晋升”结论。
+该管线和 approved lesson 都不参与 actor prompt，`PHONE_AGENT_MEMORY_RAG` 继续保持 shadow 语义。
 
 ## 文档
 

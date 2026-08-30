@@ -36,15 +36,43 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--grounding-provider", default=None, help="grounding provider name")
     parser.add_argument("--lang", default=None, help="prompt language (cn/en)")
     parser.add_argument("--trace-dir", default=None, help="trace output directory")
-    parser.add_argument(
+    maintenance = parser.add_mutually_exclusive_group()
+    maintenance.add_argument(
         "--dream",
         action="store_true",
         help="consolidate the local App-KB instead of running a phone task",
     )
-    parser.add_argument(
+    maintenance.add_argument(
         "--rebuild-vec",
         action="store_true",
         help="rebuild the semantic recall index from episode/App-KB JSONL",
+    )
+    maintenance.add_argument(
+        "--distill",
+        action="store_true",
+        help="distill episode outcomes into proposed lessons (offline)",
+    )
+    maintenance.add_argument(
+        "--review-lessons",
+        action="store_true",
+        help="interactively review proposed lessons",
+    )
+    maintenance.add_argument(
+        "--approve-lesson",
+        metavar="ID",
+        help="approve one Rule-of-3-qualified lesson",
+    )
+    maintenance.add_argument(
+        "--revoke-lesson",
+        nargs=2,
+        metavar=("ID", "REASON"),
+        help="revoke one lesson with a reason",
+    )
+    maintenance.add_argument(
+        "--supersede-lesson",
+        nargs=2,
+        metavar=("ID", "TEXT"),
+        help="create a proposed next version of a lesson",
     )
     return parser
 
@@ -119,13 +147,78 @@ def _print_dream_summary(summary: dict[str, Any]) -> None:
     print(f"dream: {json.dumps(summary, ensure_ascii=False, sort_keys=True)}")
 
 
+def _lesson_store(config: V2Config) -> Any:
+    from phone_agent.v2.evolution import LessonStore
+
+    return LessonStore(config.lessons_dir)
+
+
+def _approve_lesson(config: V2Config, lesson_id: str) -> dict[str, Any]:
+    from phone_agent.v2.evolution import approve_if_eligible, read_episode_outcomes
+
+    candidate = approve_if_eligible(
+        _lesson_store(config),
+        lesson_id,
+        read_episode_outcomes(config.experience_dir),
+    )
+    return candidate.to_dict()
+
+
+def _review_lessons(config: V2Config) -> dict[str, int]:
+    """Interactively approve/revoke proposals; skip leaves the log untouched."""
+
+    from phone_agent.v2.evolution import evaluate_promotion, read_episode_outcomes
+
+    store = _lesson_store(config)
+    episodes = read_episode_outcomes(config.experience_dir)
+    reviewed = approved = revoked = 0
+    for candidate in store.lessons(status="proposed"):
+        evaluation = evaluate_promotion(
+            candidate,
+            episodes,
+            approved_lessons=store.lessons(status="approved"),
+        )
+        print(json.dumps(evaluation.candidate.to_dict(), ensure_ascii=False, indent=2))
+        verdict = input("[a]pprove / [r]evoke / [s]kip: ").strip().lower()
+        reviewed += 1
+        if verdict in {"a", "approve"}:
+            if not evaluation.eligible:
+                print("blocked: " + ", ".join(evaluation.reasons), file=sys.stderr)
+                continue
+            store.approve(candidate.lesson_id)
+            approved += 1
+        elif verdict in {"r", "revoke"}:
+            reason = input("reason: ").strip()
+            try:
+                store.revoke(candidate.lesson_id, reason)
+            except ValueError as exc:
+                print(f"blocked: {exc}", file=sys.stderr)
+            else:
+                revoked += 1
+    return {"reviewed": reviewed, "approved": approved, "revoked": revoked}
+
+
+def _maintenance_requested(args: argparse.Namespace) -> bool:
+    return bool(
+        args.dream
+        or args.rebuild_vec
+        or args.distill
+        or args.review_lessons
+        or args.approve_lesson
+        or args.revoke_lesson
+        or args.supersede_lesson
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     load_project_env()
     parser = build_parser()
     args = parser.parse_args(argv)
 
-    if not args.task and not args.dream and not args.rebuild_vec:
+    if not args.task and not _maintenance_requested(args):
         parser.error("a task description is required")
+    if args.task and _maintenance_requested(args):
+        parser.error("task description cannot be combined with a maintenance command")
 
     config = V2Config.from_env(_overrides_from_args(args))
     if args.dream:
@@ -137,6 +230,61 @@ def main(argv: list[str] | None = None) -> int:
         print(
             "vec: "
             + json.dumps(rebuild_index(config), ensure_ascii=False, sort_keys=True)
+        )
+        return 0
+    if args.distill:
+        if config.evolution_mode == "off":
+            print("error: PHONE_AGENT_EVOLUTION=off disables --distill", file=sys.stderr)
+            return 1
+        from phone_agent.v2.evolution import build_distill_model, distill_lessons
+
+        result = distill_lessons(
+            f"{config.experience_dir}/events.jsonl",
+            config.lessons_dir,
+            model=build_distill_model(config),
+            token_budget=config.token_budget,
+        )
+        print(
+            "distill: "
+            + json.dumps(result.to_dict(), ensure_ascii=False, sort_keys=True)
+        )
+        return 0
+    if args.review_lessons:
+        print(
+            "review: "
+            + json.dumps(_review_lessons(config), ensure_ascii=False, sort_keys=True)
+        )
+        return 0
+    if args.approve_lesson:
+        try:
+            lesson = _approve_lesson(config, args.approve_lesson)
+        except (KeyError, ValueError) as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        print("lesson: " + json.dumps(lesson, ensure_ascii=False, sort_keys=True))
+        return 0
+    if args.revoke_lesson:
+        lesson_id, reason = args.revoke_lesson
+        try:
+            lesson = _lesson_store(config).revoke(lesson_id, reason)
+        except (KeyError, ValueError) as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        print(
+            "lesson: "
+            + json.dumps(lesson.to_dict(), ensure_ascii=False, sort_keys=True)
+        )
+        return 0
+    if args.supersede_lesson:
+        lesson_id, text = args.supersede_lesson
+        try:
+            lesson = _lesson_store(config).supersede(lesson_id, text)
+        except (KeyError, ValueError) as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        print(
+            "lesson: "
+            + json.dumps(lesson.to_dict(), ensure_ascii=False, sort_keys=True)
         )
         return 0
 
