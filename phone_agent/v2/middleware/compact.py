@@ -233,6 +233,7 @@ class CompactMiddleware(AgentMiddleware):
         config: Any,
         *,
         model: Any | None = None,
+        memory_state_provider: Any | None = None,
         warn_ratio: float = 0.75,
         trigger_ratio: float = 0.92,
         keep_ratio: float = 0.5,
@@ -244,6 +245,7 @@ class CompactMiddleware(AgentMiddleware):
         self.session = session
         self.config = config
         self._main_model = model
+        self._memory_state_provider = memory_state_provider
         self.warn_ratio = _clamp_ratio(warn_ratio, 0.75)
         self.trigger_ratio = _clamp_ratio(trigger_ratio, 0.92)
         # Keep-ratio: how much of the window the recent verbatim tail may occupy
@@ -307,6 +309,7 @@ class CompactMiddleware(AgentMiddleware):
         summary_text = self._summarise(ancient, prior_summary)
         if not summary_text:
             return None  # fail-open: summariser failed -> skip the fold this turn
+        summary_text += self._memory_state_section()
 
         summary_msg = SystemMessage(
             content="[COMPACT_SUMMARY]\n" + summary_text, id=_new_compact_id()
@@ -354,7 +357,9 @@ class CompactMiddleware(AgentMiddleware):
             mid = getattr(msg, "id", None) or ""
             if mid.startswith(_COMPACT_ID_PREFIX):
                 # Iterative: feed the prior summary text back in, drop the message.
-                prior_summary = _strip_marker(_text_of(msg))
+                prior_summary = _strip_memory_state_section(
+                    _strip_marker(_text_of(msg))
+                )
                 continue
             if mid.startswith(_TASKDOC_ID_PREFIX):
                 pinned.append(msg)
@@ -468,6 +473,45 @@ class CompactMiddleware(AgentMiddleware):
             "\n".join(facts) or "（无事实）",
         )
 
+    def _memory_state_section(self) -> str:
+        """Render the agent-owned memory/capability snapshot deterministically.
+
+        This data never enters the summariser prompt.  If the owning agent cannot
+        provide its run-start snapshot, omit the whole section without affecting
+        the otherwise successful fold.
+        """
+
+        provider = self._memory_state_provider
+        if not callable(provider):
+            return ""
+        try:
+            snapshot = provider()
+            capabilities = snapshot.get("capabilities")
+            if not isinstance(capabilities, dict):
+                return ""
+            generation = snapshot.get("memory_generation")
+            candidate_ids = snapshot.get("shadow_candidate_ids") or []
+            lines = [
+                "",
+                "## 记忆与能力" if _is_cn(self.lang) else "## Memory and capabilities",
+                "- 能力状态："
+                + _stable_json(capabilities)
+                if _is_cn(self.lang)
+                else "- Capability states: " + _stable_json(capabilities),
+                "- 记忆代际："
+                + _stable_json(generation)
+                if _is_cn(self.lang)
+                else "- Memory generation: " + _stable_json(generation),
+            ]
+            if candidate_ids:
+                lines.append(
+                    ("- Shadow recall 候选 ID：" if _is_cn(self.lang) else "- Shadow recall candidate IDs: ")
+                    + _stable_json(list(candidate_ids))
+                )
+            return "\n" + "\n".join(lines)
+        except Exception:  # noqa: BLE001 - metadata enrichment is fail-open
+            return ""
+
     def _get_memory_model(self) -> Any | None:
         """Lazily resolve the summariser model (memory_model or the main model)."""
 
@@ -524,6 +568,26 @@ def _strip_marker(text: str) -> str:
     return stripped
 
 
+def _strip_memory_state_section(text: str) -> str:
+    """Remove our deterministic suffix before an iterative LLM re-summary."""
+
+    for heading in ("## 记忆与能力", "## Memory and capabilities"):
+        marker = "\n" + heading
+        if marker in text:
+            return text.split(marker, 1)[0].rstrip()
+        if text.startswith(heading):
+            return ""
+    return text
+
+
+def _stable_json(value: Any) -> str:
+    import json
+
+    return json.dumps(
+        value, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    )
+
+
 def _new_compact_id() -> str:
     import uuid
 
@@ -531,7 +595,11 @@ def _new_compact_id() -> str:
 
 
 def build_compact_middleware(
-    session: Any, config: Any, *, model: Any | None = None
+    session: Any,
+    config: Any,
+    *,
+    model: Any | None = None,
+    memory_state_provider: Any | None = None,
 ) -> CompactMiddleware:
     """Build a :class:`CompactMiddleware` from resolved config values."""
 
@@ -539,6 +607,7 @@ def build_compact_middleware(
         session,
         config,
         model=model,
+        memory_state_provider=memory_state_provider,
         warn_ratio=getattr(config, "compact_warn_ratio", 0.75),
         trigger_ratio=getattr(config, "compact_trigger_ratio", 0.92),
         lang=getattr(config, "lang", "cn"),

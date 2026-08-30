@@ -22,11 +22,13 @@ without one, the original private actor counter remains the compatibility path.
 
 from __future__ import annotations
 
+import hashlib
+import json
 from typing import TYPE_CHECKING, Any
 
 from langchain.agents.middleware import AgentMiddleware
 from langchain.agents.middleware.types import hook_config
-from langchain_core.messages import AIMessage, SystemMessage
+from langchain_core.messages import AIMessage, BaseMessage, SystemMessage
 
 from phone_agent.v2.middleware._tokens import estimate_message_tokens, usage_tokens
 
@@ -74,6 +76,7 @@ class BudgetMiddleware(AgentMiddleware):
         warn_remaining: int = 100_000,
         lang: str = "cn",
         ledger: UsageLedger | None = None,
+        trace_recorder: Any | None = None,
     ) -> None:
         super().__init__()
         self.token_budget = max(1, int(token_budget))
@@ -85,10 +88,12 @@ class BudgetMiddleware(AgentMiddleware):
         self.warn_remaining = warn
         self.lang = lang
         self.ledger = ledger
+        self._trace_recorder = trace_recorder
         self._warned = False
         self._exhausted = False
         self._used_tokens = 0
         self._counted_id: str | None = None
+        self._previous_input_blocks: tuple[str, str, tuple[str, ...]] | None = None
 
     def reset(self) -> None:
         """Clear per-run state so a reused agent budgets the next run from zero."""
@@ -97,6 +102,7 @@ class BudgetMiddleware(AgentMiddleware):
         self._exhausted = False
         self._used_tokens = 0
         self._counted_id = None
+        self._previous_input_blocks = None
         if self.ledger is not None:
             self.ledger.reset()
 
@@ -152,6 +158,24 @@ class BudgetMiddleware(AgentMiddleware):
         template = _EXHAUSTED_TEXT.get(self.lang, _EXHAUSTED_TEXT["cn"])
         return template.format(used=self.used_tokens, budget=self.token_budget)
 
+    def _record_first_diff(self, request: Any) -> None:
+        """Trace the first changed coarse input block between model calls."""
+
+        current = _input_block_hashes(request)
+        previous = self._previous_input_blocks
+        self._previous_input_blocks = current
+        if previous is None:
+            return
+        first_diff = _first_diff_block(previous, current)
+        if first_diff is None or not callable(self._trace_recorder):
+            return
+        try:
+            self._trace_recorder(
+                "model_input_first_diff", first_diff_block=first_diff
+            )
+        except Exception:  # noqa: BLE001 - cache telemetry must never affect a call
+            pass
+
     # ------------------------------------------------------------------
     @hook_config(can_jump_to=["end"])
     def before_model(self, state, runtime) -> dict[str, Any] | None:  # noqa: ANN001
@@ -183,12 +207,109 @@ class BudgetMiddleware(AgentMiddleware):
     async def aafter_model(self, state, runtime) -> dict[str, Any] | None:  # noqa: ANN001
         return self.after_model(state, runtime)
 
+    def wrap_model_call(self, request, handler):  # noqa: ANN001
+        self._record_first_diff(request)
+        return handler(request)
+
+    async def awrap_model_call(self, request, handler):  # noqa: ANN001
+        self._record_first_diff(request)
+        return await handler(request)
+
+
+def _input_block_hashes(request: Any) -> tuple[str, str, tuple[str, ...]]:
+    """Hash system / pinned TaskDoc / remaining message blocks separately."""
+
+    messages = list(getattr(request, "messages", None) or [])
+    system_message = getattr(request, "system_message", None)
+    system_index: int | None = None
+    if system_message is None:
+        for index, message in enumerate(messages):
+            if isinstance(message, SystemMessage) and not _is_taskdoc(message):
+                system_message = message
+                system_index = index
+                break
+
+    taskdoc_messages: list[Any] = []
+    tail: list[Any] = []
+    for index, message in enumerate(messages):
+        if index == system_index:
+            continue
+        if _is_taskdoc(message):
+            taskdoc_messages.append(message)
+        else:
+            tail.append(message)
+
+    return (
+        _block_hash(system_message),
+        _block_hash(taskdoc_messages),
+        tuple(_block_hash(message) for message in tail),
+    )
+
+
+def _first_diff_block(
+    previous: tuple[str, str, tuple[str, ...]],
+    current: tuple[str, str, tuple[str, ...]],
+) -> str | None:
+    if previous[0] != current[0]:
+        return "system"
+    if previous[1] != current[1]:
+        return "taskdoc"
+    old_messages, new_messages = previous[2], current[2]
+    for index, (old, new) in enumerate(zip(old_messages, new_messages)):
+        if old != new:
+            return f"messages[{index}]"
+    if len(old_messages) != len(new_messages):
+        return f"messages[{min(len(old_messages), len(new_messages))}]"
+    return None
+
+
+def _is_taskdoc(message: Any) -> bool:
+    message_id = str(getattr(message, "id", None) or "")
+    if message_id.startswith("__taskdoc__"):
+        return True
+    content = getattr(message, "content", "")
+    return isinstance(content, str) and content.startswith("[TASK_DOC]")
+
+
+def _block_hash(value: Any) -> str:
+    encoded = json.dumps(
+        _hashable_value(value),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _hashable_value(value: Any) -> Any:
+    """Keep only provider-relevant message data; never persist the result."""
+
+    if isinstance(value, BaseMessage):
+        return {
+            "type": value.type,
+            "content": _hashable_value(value.content),
+            "name": getattr(value, "name", None),
+            "tool_calls": _hashable_value(getattr(value, "tool_calls", None)),
+            "tool_call_id": getattr(value, "tool_call_id", None),
+            "additional_kwargs": _hashable_value(
+                getattr(value, "additional_kwargs", None)
+            ),
+        }
+    if isinstance(value, dict):
+        return {str(key): _hashable_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_hashable_value(item) for item in value]
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    return str(value)
+
 
 def build_budget_middleware(
     token_budget: int = 1_000_000,
     warn_remaining: int = 100_000,
     lang: str = "cn",
     ledger: UsageLedger | None = None,
+    trace_recorder: Any | None = None,
 ) -> BudgetMiddleware:
     """Build a :class:`BudgetMiddleware` from the resolved config values."""
 
@@ -197,6 +318,7 @@ def build_budget_middleware(
         warn_remaining=warn_remaining,
         lang=lang,
         ledger=ledger,
+        trace_recorder=trace_recorder,
     )
 
 

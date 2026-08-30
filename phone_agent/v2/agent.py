@@ -158,6 +158,8 @@ class ThinPhoneAgent:
         ):
             self.capability_registry.register(spec)
         self._run_capabilities: dict[str, str] = {}
+        self._run_memory_generation: dict[str, Any] | None = None
+        self._run_capability_snapshot_ready = False
 
         # Lazy imports: these modules are produced by the concurrent core/tools
         # worktrees and may not exist when this module is first imported.
@@ -219,6 +221,7 @@ class ThinPhoneAgent:
             warn_remaining=getattr(config, "token_warn_remaining", 100_000),
             lang=getattr(config, "lang", "cn"),
             ledger=self.usage_ledger,
+            trace_recorder=getattr(self._trace, "record_event", None),
         )
 
         # Two-threshold auto-compact (A4 §3): T1 warn + T2 forced handoff summary.
@@ -231,7 +234,10 @@ class ThinPhoneAgent:
                 from phone_agent.v2.middleware.compact import build_compact_middleware
 
                 self._compact = build_compact_middleware(
-                    self.session, config, model=self.model
+                    self.session,
+                    config,
+                    model=self.model,
+                    memory_state_provider=self._compact_memory_state,
                 )
             except Exception:  # noqa: BLE001 - optional increment; never block bring-up
                 self._compact = None
@@ -506,8 +512,12 @@ class ThinPhoneAgent:
             self._run_capabilities = {
                 str(row["cap_id"]): str(row["state"]) for row in statuses
             }
+            self._run_memory_generation = self._app_kb_generation()
+            self._run_capability_snapshot_ready = True
         except Exception:  # noqa: BLE001 - architecture telemetry is fail-open
             self._run_capabilities = {}
+            self._run_memory_generation = None
+            self._run_capability_snapshot_ready = False
             return
         try:
             record = getattr(self._trace, "record_event", None)
@@ -515,10 +525,33 @@ class ThinPhoneAgent:
                 record(
                     "capability_snapshot",
                     capabilities=statuses,
-                    memory_generation=self._app_kb_generation(),
+                    memory_generation=self._run_memory_generation,
                 )
         except Exception:  # noqa: BLE001 - trace failure must not erase episode data
             pass
+
+    def _compact_memory_state(self) -> dict[str, Any] | None:
+        """Expose the run snapshot used by compact's deterministic suffix."""
+
+        capabilities = getattr(self, "_run_capabilities", None)
+        if not getattr(self, "_run_capability_snapshot_ready", False) or not isinstance(
+            capabilities, dict
+        ):
+            return None
+        candidate_ids: list[str] = []
+        for candidate in getattr(self, "_shadow_candidates", []) or []:
+            if not isinstance(candidate, dict):
+                continue
+            ref_id = candidate.get("ref_id", candidate.get("id"))
+            if ref_id is not None:
+                candidate_ids.append(str(ref_id))
+        return {
+            "capabilities": dict(capabilities),
+            "memory_generation": getattr(
+                self, "_run_memory_generation", None
+            ),
+            "shadow_candidate_ids": candidate_ids,
+        }
 
     @staticmethod
     def _extract_interrupts(result: Any) -> tuple[Any, ...]:
