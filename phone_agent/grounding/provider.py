@@ -17,10 +17,13 @@ class MarkProviderHint:
     role: str | None = None
     intent: str | None = None
     action: str | None = None
+    visible_text_hint: str | None = None
 
     def description(self) -> str:
         parts = [self.role, self.text, self.intent]
-        return " ".join(str(part).strip() for part in parts if str(part or "").strip())
+        return " ".join(
+            str(part).strip() for part in parts if str(part or "").strip()
+        )
 
     def redacted_summary(self) -> dict[str, Any]:
         return {
@@ -31,6 +34,8 @@ class MarkProviderHint:
             "role_length": len(self.role or ""),
             "has_intent": bool(self.intent),
             "intent_length": len(self.intent or ""),
+            "has_visible_text_hint": bool(self.visible_text_hint),
+            "visible_text_hint_length": len(self.visible_text_hint or ""),
             "action": self.action,
         }
 
@@ -178,5 +183,6 @@ class MarkProvider(Protocol):
         screen_binding: ScreenBinding,
         hints: list[MarkProviderHint] | None = None,
         timeout: float | None = None,
+        max_size: int | None = None,
     ) -> MarkProviderResult:
         """Return screen-bound mark candidates for the current observation."""

@@ -10,8 +10,7 @@ semantics; integration wires the real converter.
 from __future__ import annotations
 
 import hashlib
-from dataclasses import dataclass, field
-from typing import Any
+from dataclasses import dataclass
 
 from phone_agent.grounding.provider import MarkCandidate
 from phone_agent.v2.resolver import LocateAmbiguousError, StaleMarkError
@@ -86,6 +85,8 @@ class FakeDeviceFactory:
 @dataclass
 class FakeConfig:
     device_id: str | None = None
+    locate_max_size: int = 0
+    scope_padding_ratio: float = 0.05
 
 
 class FakePhoneSession:
@@ -149,7 +150,16 @@ class FakePhoneSession:
             int(ry / 1000 * self.screen_height),
         )
 
-    def locate(self, description: str) -> MarkCandidate:
+    def locate(
+        self,
+        description: str,
+        *,
+        visible_text_hint: str | None = None,
+        intent: str | None = None,
+        scope_mark_id: str | None = None,
+        scope_start_mark_id: str | None = None,
+        scope_end_mark_id: str | None = None,
+    ) -> MarkCandidate:
         if self._locate_error is not None:
             raise self._locate_error
         if self._locate_result is None:

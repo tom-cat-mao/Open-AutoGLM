@@ -54,6 +54,15 @@ def redact_args(args: Any) -> Any:
     return _redact_value(args)
 
 
+def _tool_artifact(result: Any) -> Any:
+    """Return a tool artifact, including tuple-style test integrations."""
+
+    artifact = getattr(result, "artifact", None)
+    if artifact is None and isinstance(result, tuple) and len(result) == 2:
+        artifact = result[1]
+    return artifact
+
+
 class TraceMiddleware(AgentMiddleware):
     """Append redacted model/tool events to a per-run JSONL trace file."""
 
@@ -153,6 +162,7 @@ class TraceMiddleware(AgentMiddleware):
             )
             raise
         content = getattr(result, "content", None)
+        artifact = _tool_artifact(result)
         self._write(
             {
                 "event": "tool_result",
@@ -160,6 +170,7 @@ class TraceMiddleware(AgentMiddleware):
                 "tool": name,
                 "latency_ms": int((time.perf_counter() - started) * 1000),
                 "result": _redact_value(content) if content is not None else None,
+                "artifact": _redact_value(artifact) if artifact is not None else None,
                 "error": None,
             }
         )
@@ -180,6 +191,7 @@ class TraceMiddleware(AgentMiddleware):
         started = time.perf_counter()
         result = await handler(request)
         content = getattr(result, "content", None)
+        artifact = _tool_artifact(result)
         self._write(
             {
                 "event": "tool_result",
@@ -187,6 +199,7 @@ class TraceMiddleware(AgentMiddleware):
                 "tool": name,
                 "latency_ms": int((time.perf_counter() - started) * 1000),
                 "result": _redact_value(content) if content is not None else None,
+                "artifact": _redact_value(artifact) if artifact is not None else None,
                 "error": None,
             }
         )

@@ -17,6 +17,7 @@ from phone_agent.grounding.provider import MarkCandidate, MarkProviderHint, Mark
 
 
 DEFAULT_LOCATEANYTHING_MAX_SIZE = 960
+DEFAULT_LOCATEANYTHING_CONTEXT_MAX_CHARS = 200
 LOCATEANYTHING_STRUCTURE_MODES = {"off", "target", "screen"}
 DEFAULT_VISUAL_CATEGORIES = ("button", "text", "input", "card", "image")
 
@@ -39,7 +40,7 @@ class LocateAnythingMLXProvider:
         model_path: str | Path = "models/LocateAnything-3B-4bit",
         *,
         max_size: int | None = DEFAULT_LOCATEANYTHING_MAX_SIZE,
-        context_max_chars: int = 0,
+        context_max_chars: int = DEFAULT_LOCATEANYTHING_CONTEXT_MAX_CHARS,
         structure_mode: str = "off",
         max_visual_candidates: int = 30,
         visual_category_budget: int = 5,
@@ -109,13 +110,18 @@ class LocateAnythingMLXProvider:
             return self._failure("unsupported_platform", screen_binding, started)
         if not self.model_path.exists():
             return self._failure("model_not_found", screen_binding, started)
-        descriptions = [hint.description() for hint in hints or [] if hint.description()]
+        descriptions = [
+            str(hint.text or "").strip()
+            for hint in hints or []
+            if str(hint.text or "").strip()
+        ]
         if not descriptions:
             return self._failure("missing_hint", screen_binding, started)
         all_candidates: list[MarkCandidate] = []
         provider_input_hash: str | None = None
         visual_structure_candidates: list[MarkCandidate] = []
         ambiguous_for_execution = False
+        provider_input_size_px: list[int] | None = None
         try:
             # R1: the per-call tier is passed only when the caller overrides it
             # (default None keeps the historic single-arg call shape, so
@@ -125,13 +131,27 @@ class LocateAnythingMLXProvider:
                 image, provider_input_hash = self._prepare_image(screenshot)
             else:
                 image, provider_input_hash = self._prepare_image(screenshot, max_size=max_size)
+            provider_input_size_px = [int(image.width), int(image.height)]
             hint_items = hints or []
             for hint_index, description in enumerate(descriptions, start=1):
-                context = self._context_for_hint(hint_items[hint_index - 1] if len(hint_items) >= hint_index else None)
+                hint = hint_items[hint_index - 1] if len(hint_items) >= hint_index else None
+                context = self._context_for_hint(hint)
+                visible_text_hint = self._visible_text_for_hint(hint)
                 if context:
-                    output = self._run_model(image, description, timeout=timeout, context=context)
+                    output = self._run_model(
+                        image,
+                        description,
+                        timeout=timeout,
+                        context=context,
+                        visible_text_hint=visible_text_hint,
+                    )
                 else:
-                    output = self._run_model(image, description, timeout=timeout)
+                    output = self._run_model(
+                        image,
+                        description,
+                        timeout=timeout,
+                        visible_text_hint=visible_text_hint,
+                    )
                 parsed_set = parse_box_candidates(output)
                 valid_candidates = parsed_set.valid_candidates
                 candidates = [
@@ -156,6 +176,7 @@ class LocateAnythingMLXProvider:
                             started,
                             message="multiple valid bboxes",
                             candidates=all_candidates + candidates,
+                            provider_input_size_px=provider_input_size_px,
                         )
                     ambiguous_for_execution = True
                     visual_structure_candidates.extend([candidate for candidate in candidates if candidate.valid])
@@ -165,17 +186,44 @@ class LocateAnythingMLXProvider:
                     self._screen_structure_candidates(image, timeout=timeout)[: self.max_visual_candidates]
                 )
         except GroundingParseError as exc:
-            return self._failure(exc.code, screen_binding, started, message=str(exc))
+            return self._failure(
+                exc.code,
+                screen_binding,
+                started,
+                message=str(exc),
+                provider_input_size_px=provider_input_size_px,
+            )
         except ImportError:
-            return self._failure("import_error", screen_binding, started)
+            return self._failure(
+                "import_error",
+                screen_binding,
+                started,
+                provider_input_size_px=provider_input_size_px,
+            )
         except TimeoutError:
-            return self._failure("timeout", screen_binding, started)
+            return self._failure(
+                "timeout",
+                screen_binding,
+                started,
+                provider_input_size_px=provider_input_size_px,
+            )
         except Exception as exc:
-            return self._failure("provider_error", screen_binding, started, message=type(exc).__name__)
+            return self._failure(
+                "provider_error",
+                screen_binding,
+                started,
+                message=type(exc).__name__,
+                provider_input_size_px=provider_input_size_px,
+            )
         valid_marks = [candidate for candidate in all_candidates if candidate.valid]
         if len(valid_marks) == 0:
             return self._failure(
-                "grounding_no_candidate", screen_binding, started, message="no valid bbox", candidates=all_candidates
+                "grounding_no_candidate",
+                screen_binding,
+                started,
+                message="no valid bbox",
+                candidates=all_candidates,
+                provider_input_size_px=provider_input_size_px,
             )
         executable_marks = valid_marks if self.structure_mode == "off" else ([] if ambiguous_for_execution else valid_marks[:1])
         visual_candidates = (visual_structure_candidates or valid_marks)[: self.max_visual_candidates]
@@ -209,6 +257,7 @@ class LocateAnythingMLXProvider:
                 "executable_mark_count": len(executable_marks),
                 "non_executable_candidate_count": max(0, len(visual_candidates) - len(executable_marks)),
                 "ambiguous_for_execution": ambiguous_for_execution,
+                "provider_input_size_px": provider_input_size_px,
                 "visual_structure_failure_codes": getattr(self, "_last_screen_structure_failures", []),
                 "visual_structure_partial": bool(getattr(self, "_last_screen_structure_failures", [])),
             },
@@ -307,7 +356,10 @@ class LocateAnythingMLXProvider:
         tier = self.max_size if max_size is None else max_size
         raw = base64.b64decode(getattr(screenshot, "base64_data", ""))
         image = Image.open(BytesIO(raw)).convert("RGB")
-        if tier is not None:
+        # Explicit per-call ``0`` is the locate-tool sentinel for full
+        # resolution. ``None`` deliberately keeps the historic instance-tier
+        # fallback used by other provider callers.
+        if tier is not None and tier > 0:
             image.thumbnail((tier, tier))
         buffered = BytesIO()
         image.save(buffered, format="PNG", optimize=True)
@@ -321,13 +373,16 @@ class LocateAnythingMLXProvider:
         *,
         timeout: float | None = None,
         context: str | None = None,
+        visible_text_hint: str | None = None,
     ) -> str:
         # Lazy import keeps default CI and non-MLX installs independent of the optional extra.
         from mlx_vlm import generate, load  # type: ignore
 
         if self._model is None or self._processor is None:
             self._model, self._processor = load(str(self.model_path))
-        prompt = self._build_prompt(description, context=context)
+        prompt = self._build_prompt(
+            description, context=context, visible_text_hint=visible_text_hint
+        )
 
         pbd_generate = getattr(self._model, "pbd_generate", None)
         if callable(pbd_generate):
@@ -363,8 +418,16 @@ class LocateAnythingMLXProvider:
         )
         return str(self._processor.decode(tokens, skip_special_tokens=False))
 
-    def _build_prompt(self, description: str, *, context: str | None = None) -> str:
-        instruction = self._build_instruction(description, context=context)
+    def _build_prompt(
+        self,
+        description: str,
+        *,
+        context: str | None = None,
+        visible_text_hint: str | None = None,
+    ) -> str:
+        instruction = self._build_instruction(
+            description, context=context, visible_text_hint=visible_text_hint
+        )
         try:
             from mlx_vlm.prompt_utils import apply_chat_template  # type: ignore
         except ImportError:
@@ -380,8 +443,17 @@ class LocateAnythingMLXProvider:
             )
         )
 
-    def _build_instruction(self, description: str, *, context: str | None = None) -> str:
+    def _build_instruction(
+        self,
+        description: str,
+        *,
+        context: str | None = None,
+        visible_text_hint: str | None = None,
+    ) -> str:
         instruction = f"Locate the region that matches the following description: {description}."
+        bounded_text = self._bound_context(visible_text_hint)
+        if bounded_text:
+            instruction += f"\nText on or near the target: {bounded_text}"
         bounded_context = self._bound_context(context)
         if bounded_context:
             return f"{instruction}\nContext: {bounded_context}"
@@ -390,9 +462,12 @@ class LocateAnythingMLXProvider:
     def _context_for_hint(self, hint: MarkProviderHint | None) -> str | None:
         if hint is None or self.context_max_chars <= 0:
             return None
-        pieces = [hint.role, hint.intent, hint.action]
-        context = " ".join(str(piece).strip() for piece in pieces if str(piece or "").strip())
-        return self._bound_context(context)
+        return self._bound_context(hint.intent)
+
+    def _visible_text_for_hint(self, hint: MarkProviderHint | None) -> str | None:
+        if hint is None or self.context_max_chars <= 0:
+            return None
+        return self._bound_context(hint.visible_text_hint)
 
     def _bound_context(self, context: str | None) -> str:
         if self.context_max_chars <= 0 or not context:
@@ -407,6 +482,7 @@ class LocateAnythingMLXProvider:
         *,
         message: str | None = None,
         candidates: list[MarkCandidate] | None = None,
+        provider_input_size_px: list[int] | None = None,
     ) -> MarkProviderResult:
         return MarkProviderResult(
             success=False,
@@ -423,6 +499,7 @@ class LocateAnythingMLXProvider:
             metadata={
                 "structure_mode": self.structure_mode,
                 "invalid_structure_mode": self.invalid_structure_mode,
+                "provider_input_size_px": provider_input_size_px,
             },
         )
 

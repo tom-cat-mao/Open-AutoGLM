@@ -35,6 +35,9 @@ PHONE_AGENT_KEYS = [
     "PHONE_AGENT_ACCESSIBILITY_MAX_MARKS",
     "PHONE_AGENT_LOCATEANYTHING_MODEL",
     "PHONE_AGENT_LOCATEANYTHING_MAX_SIZE",
+    "PHONE_AGENT_LOCATEANYTHING_CONTEXT_MAX_CHARS",
+    "PHONE_AGENT_LOCATE_MAX_SIZE",
+    "PHONE_AGENT_SCOPE_PADDING_RATIO",
     "PHONE_AGENT_LANG",
     "PHONE_AGENT_TRACE_DIR",
     "PHONE_AGENT_TRACE",
@@ -84,6 +87,9 @@ def test_from_env_defaults():
     assert cfg.accessibility_timeout == 3.0
     assert cfg.accessibility_max_marks == 80
     assert cfg.locateanything_max_size == 960
+    assert cfg.locateanything_context_max_chars == 200
+    assert cfg.locate_max_size == 0
+    assert cfg.scope_padding_ratio == 0.05
     assert cfg.lang == "cn"
     assert cfg.trace_dir == ".traces"
     assert cfg.trace_enabled is True
@@ -107,6 +113,35 @@ def test_from_env_reads_shell_env(monkeypatch):
     assert cfg.max_model_calls == 7
     assert cfg.device_id == "SERIAL123"
     assert cfg.trace_enabled is False
+
+
+def test_locate_resolution_and_scope_padding_config(monkeypatch):
+    monkeypatch.setenv("PHONE_AGENT_LOCATE_MAX_SIZE", "1536")
+    monkeypatch.setenv("PHONE_AGENT_SCOPE_PADDING_RATIO", "0.08")
+    monkeypatch.setenv("PHONE_AGENT_LOCATEANYTHING_CONTEXT_MAX_CHARS", "180")
+    cfg = V2Config.from_env()
+    assert cfg.locate_max_size == 1536
+    assert cfg.scope_padding_ratio == 0.08
+    assert cfg.locateanything_context_max_chars == 180
+
+    overridden = V2Config.from_env(
+        {"locate_max_size": 0, "scope_padding_ratio": 0.02}
+    )
+    assert overridden.locate_max_size == 0
+    assert overridden.scope_padding_ratio == 0.02
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("PHONE_AGENT_LOCATE_MAX_SIZE", "-1"),
+        ("PHONE_AGENT_SCOPE_PADDING_RATIO", "-0.01"),
+    ],
+)
+def test_invalid_locate_config_is_rejected(monkeypatch, key, value):
+    monkeypatch.setenv(key, value)
+    with pytest.raises(ValueError):
+        V2Config.from_env()
 
 
 def test_context_pruning_keys_env_and_override(monkeypatch):

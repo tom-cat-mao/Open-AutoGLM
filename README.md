@@ -16,6 +16,7 @@ Open-AutoGLM 采用 thin-loop v2：模型每轮观察真实设备、决定一个
 ## Features
 
 - **Marks-first grounding**：执行动作绑定当前屏幕元素，过期、歧义或未命中的目标会 fail-closed。
+- **高精度视觉定位**：`locate` 默认把原分辨率截图交给视觉定位器，优先利用“外观 + 可见文字 + 相对位置”提示；歧义时可用当前批次的容器或上下锚点 mark 做原图 scope 裁剪，结果仿射回映射为全屏 mark。
 - **安全预警制**：风险动作先返回警告与选项，模型明确确认后才执行（confirm-to-execute）。
 - **可信完成**：TaskDoc 任务板与流程线持续记录进度；finish 两段式确认，并可交给独立上下文验收器复核。
 - **App-KB 自积累记忆**：同步本机应用名称；验证启动成功后沉淀非敏感别名，并累计既有别名的成功反馈。
@@ -30,6 +31,8 @@ python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
 cp .env.example .env  # 填写模型网关、模型名与 API Key
 ```
+
+`PHONE_AGENT_LOCATE_MAX_SIZE=0` 保持 `locate` 原图输入；低配机器可设为正整数限制最长边。`PHONE_AGENT_LOCATEANYTHING_CONTEXT_MAX_CHARS` 限制 intent/可见文字提示长度，`PHONE_AGENT_SCOPE_PADDING_RATIO` 控制可选 scope 裁剪的边缘扩展比例。
 
 ```bash
 .venv/bin/python main_v2.py "打开设置进入 WLAN" --device-id <serial>

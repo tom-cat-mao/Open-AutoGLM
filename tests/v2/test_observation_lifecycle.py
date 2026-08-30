@@ -68,6 +68,9 @@ class FakeConfig:
     accessibility_timeout = 3.0
     grounding_provider = "accessibility"
     locateanything_max_size = 960
+    locateanything_context_max_chars = 200
+    locate_max_size = 0
+    scope_padding_ratio = 0.05
     locateanything_model = None
 
 
@@ -293,7 +296,9 @@ class _StubLocateProvider:
     name = "stub-locate"
     version = "test"
 
-    def provide_marks(self, screenshot, screen_binding, hints=None, timeout=None):
+    def provide_marks(
+        self, screenshot, screen_binding, hints=None, timeout=None, max_size=None
+    ):
         mark = MarkCandidate(
             mark_id="loc_1",
             bbox=[10, 10, 90, 90],

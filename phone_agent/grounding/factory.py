@@ -7,7 +7,11 @@ from typing import Any
 
 from phone_agent.grounding.accessibility import AccessibilityTreeProvider
 from phone_agent.grounding.fake import FakeGroundingProvider
-from phone_agent.grounding.locateanything import DEFAULT_LOCATEANYTHING_MAX_SIZE, LocateAnythingMLXProvider
+from phone_agent.grounding.locateanything import (
+    DEFAULT_LOCATEANYTHING_CONTEXT_MAX_CHARS,
+    DEFAULT_LOCATEANYTHING_MAX_SIZE,
+    LocateAnythingMLXProvider,
+)
 from phone_agent.grounding.provider import MarkProvider
 
 DEFAULT_GROUNDING_PROVIDER_NAME = "hybrid"
@@ -112,7 +116,7 @@ def _build_locateanything_provider(cfg: dict[str, Any]) -> LocateAnythingMLXProv
     )
     context_max_chars = _resolve_positive_int(
         cfg.get("locateanything_context_max_chars") or os.getenv("PHONE_AGENT_LOCATEANYTHING_CONTEXT_MAX_CHARS"),
-        default=0,
+        default=DEFAULT_LOCATEANYTHING_CONTEXT_MAX_CHARS,
     )
     structure_mode, invalid_structure_mode = _resolve_structure_mode(cfg)
     return LocateAnythingMLXProvider(

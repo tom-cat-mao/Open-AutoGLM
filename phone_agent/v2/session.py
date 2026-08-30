@@ -23,6 +23,12 @@ from phone_agent.grounding.provider import (
     ScreenBinding,
 )
 from phone_agent.v2.coords import convert_relative_to_absolute
+from phone_agent.v2.locate_scope import (
+    ScopeCrop,
+    build_scope_crop,
+    interval_region_1000,
+    is_container_like,
+)
 
 if TYPE_CHECKING:
     from phone_agent.adb.screenshot import Screenshot
@@ -45,9 +51,16 @@ class StaleMarkError(RuntimeError):
 class LocateAmbiguousError(RuntimeError):
     """Raised when visual locate returns zero or multiple confident candidates."""
 
-    def __init__(self, message: str, *, candidates: list[MarkCandidate] | None = None) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        candidates: list[MarkCandidate] | None = None,
+        failure_code: str = "no_candidate",
+    ) -> None:
         super().__init__(message)
         self.candidates = candidates or []
+        self.failure_code = failure_code
 
 
 # U1 batch-badge separator: external mark ids are ``<provider_id>@e<epoch>``
@@ -157,6 +170,7 @@ class PhoneSession:
         # the locate tool renders text + this screenshot instead of re-observing.
         self._last_locate_shot: "Screenshot | None" = None
         self._last_locate_app: str = "unknown"
+        self._last_locate_metadata: dict[str, Any] = {}
         # last-known dimensions for coordinate conversion
         self._last_width: int = 0
         self._last_height: int = 0
@@ -490,7 +504,16 @@ class PhoneSession:
             width, height = int(shot.width), int(shot.height)
         return convert_relative_to_absolute(list(mark.center), width, height)
 
-    def locate(self, description: str) -> MarkCandidate:
+    def locate(
+        self,
+        description: str,
+        *,
+        visible_text_hint: str | None = None,
+        intent: str | None = None,
+        scope_mark_id: str | None = None,
+        scope_start_mark_id: str | None = None,
+        scope_end_mark_id: str | None = None,
+    ) -> MarkCandidate:
         """Visual deep-locate ``description`` -> one confident mark (fail-closed).
 
         The resolved mark is **minted into the current batch** (badged with the
@@ -503,30 +526,103 @@ class PhoneSession:
         registered and nothing executes.
         """
 
+        self._last_locate_metadata = {}
+        if scope_end_mark_id and not scope_start_mark_id:
+            raise ValueError("scope_end_mark_id requires scope_start_mark_id")
+        if scope_mark_id and (scope_start_mark_id or scope_end_mark_id):
+            raise ValueError("scope_mark_id cannot be combined with interval scope")
+
+        scope_mark = self.resolve_mark(scope_mark_id) if scope_mark_id else None
+        scope_start = (
+            self.resolve_mark(scope_start_mark_id) if scope_start_mark_id else None
+        )
+        scope_end = self.resolve_mark(scope_end_mark_id) if scope_end_mark_id else None
+
         provider = self._get_locate_provider()
         if provider is None:
-            raise LocateAmbiguousError("visual locate provider is unavailable")
+            raise LocateAmbiguousError(
+                "visual locate provider is unavailable",
+                failure_code="provider_unavailable",
+            )
         shot = self.screenshot()
         binding = self._screen_binding(shot)
-        hint = MarkProviderHint(text=description, source="tool", action="locate")
+        scope_crop: ScopeCrop | None = None
+        provider_shot = shot
+        if scope_mark is not None:
+            region = scope_mark.bbox
+        elif scope_start is not None:
+            region = interval_region_1000(scope_start, scope_end)
+        else:
+            region = None
+        if region is not None:
+            scope_crop = build_scope_crop(
+                shot,
+                session=self,
+                region_bbox_1000=region,
+                padding_ratio=self.config.scope_padding_ratio,
+            )
+            provider_shot = scope_crop.crop
+
+        hint = MarkProviderHint(
+            text=description,
+            source="tool",
+            intent=intent,
+            action="locate",
+            visible_text_hint=visible_text_hint,
+        )
         result = provider.provide_marks(
-            shot,
+            provider_shot,
             binding,
             hints=[hint],
             timeout=self.config.accessibility_timeout,
+            max_size=self.config.locate_max_size,
         )
+        metadata = dict(getattr(result, "metadata", {}) or {})
+        input_size = metadata.get("provider_input_size_px")
+        if not input_size:
+            input_w, input_h = int(provider_shot.width), int(provider_shot.height)
+            tier = int(self.config.locate_max_size)
+            if tier > 0 and max(input_w, input_h) > tier:
+                scale = tier / max(input_w, input_h)
+                input_w = max(1, round(input_w * scale))
+                input_h = max(1, round(input_h * scale))
+            input_size = [input_w, input_h]
+        self._last_locate_metadata = {
+            "provider_input_size_px": input_size,
+            "full_frame_size_px": [int(shot.width), int(shot.height)],
+            "scope_bbox_1000": list(scope_crop.bbox_1000) if scope_crop else None,
+            "scope_mark_id": scope_mark_id,
+            "scope_start_mark_id": scope_start_mark_id,
+            "scope_end_mark_id": scope_end_mark_id,
+        }
         executable = [mark for mark in result.marks if getattr(mark, "valid", True)]
         if not result.success or len(executable) == 0:
+            failure_code = (
+                "ambiguous"
+                if getattr(result, "failure_code", None)
+                == "grounding_ambiguous"
+                else "no_candidate"
+            )
             raise LocateAmbiguousError(
                 f"no confident match for {description!r}",
                 candidates=list(result.candidates),
+                failure_code=failure_code,
             )
         if len(executable) > 1:
             raise LocateAmbiguousError(
                 f"ambiguous match for {description!r}: {len(executable)} candidates",
                 candidates=executable,
+                failure_code="ambiguous",
             )
         raw = executable[0]
+        if scope_crop is not None:
+            full_bbox = scope_crop.map_box_to_full(raw.bbox)
+            full_center = scope_crop.map_point_to_full(raw.center)
+            raw = replace(
+                raw,
+                bbox=[int(round(value)) for value in full_bbox],
+                center=[int(round(value)) for value in full_center],
+            )
         minted = replace(
             raw, mark_id=mint_badge(raw.mark_id, self.epoch), epoch=self.epoch
         )
@@ -536,6 +632,11 @@ class PhoneSession:
         self._last_locate_shot = shot
         self._last_locate_app = self._foreground_label()
         return minted
+
+    def last_locate_metadata(self) -> dict[str, Any]:
+        """Return trace-safe metadata for the most recent locate query."""
+
+        return dict(self._last_locate_metadata)
 
     def last_locate_frame(self) -> dict | None:
         """Return the stashed locate screenshot as a same-frame render payload.
@@ -564,6 +665,8 @@ class PhoneSession:
         lines: list[str] = []
         for mark in marks[:max_items]:
             role = (mark.role or "?")[:24]
+            if is_container_like(mark):
+                role = f"[容器]{role}"
             text = (mark.text_summary or "").replace("\n", " ").strip()
             if len(text) > 32:
                 text = text[:32]
@@ -644,6 +747,9 @@ class PhoneSession:
             cfg = {
                 "grounding_provider_name": self.config.grounding_provider,
                 "locateanything_max_size": self.config.locateanything_max_size,
+                "locateanything_context_max_chars": (
+                    self.config.locateanything_context_max_chars
+                ),
             }
             if self.config.locateanything_model:
                 cfg["grounding_model_path"] = self.config.locateanything_model

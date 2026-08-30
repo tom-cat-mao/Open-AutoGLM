@@ -195,6 +195,7 @@ class AccessibilityTreeProvider:
         screen_binding: ScreenBinding,
         hints: list[MarkProviderHint] | None = None,
         timeout: float | None = None,
+        max_size: int | None = None,
     ) -> MarkProviderResult:
         started = time.perf_counter()
         try:
