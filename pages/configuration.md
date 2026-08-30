@@ -1,79 +1,109 @@
 # 配置参考
 
-配置优先级：**CLI 参数 > shell 环境变量 > 项目 `.env` > 代码默认值**。复制仓库根目录 `.env.example` 为 `.env` 后按需修改；`.env` 仅加载 `PHONE_AGENT_` 前缀变量。布尔值接受 `on/off`、`true/false`、`1/0`。
+所有配置为 `PHONE_AGENT_*` 环境变量。优先级：**CLI 参数 > shell 环境变量 > `.env` > 默认值**。`.env.example` 为模板。
 
-## 必填：模型
+## 模型
 
-| 变量 | 说明 |
-|---|---|
-| `PHONE_AGENT_BASE_URL` | OpenAI-compatible API 地址 |
-| `PHONE_AGENT_MODEL` | 主模型 ID（需要视觉多模态能力） |
-| `PHONE_AGENT_API_KEY` | API Key |
+| 变量 | 类型 | 默认值 | 说明 |
+|---|---|---|---|
+| `PHONE_AGENT_BASE_URL` | url | `http://localhost:8000/v1` | OpenAI-compatible 网关地址。**必填** |
+| `PHONE_AGENT_MODEL` | str | `autoglm-phone-9b` | 主模型 id，需视觉多模态能力。**必填** |
+| `PHONE_AGENT_API_KEY` | str | `EMPTY` | API key。**必填** |
+| `PHONE_AGENT_MODEL_TIMEOUT` | int | `180` | 单次模型请求超时（秒） |
+| `PHONE_AGENT_MODEL_MAX_RETRIES` | int | `2` | 模型请求重试次数 |
+| `PHONE_AGENT_TEMPERATURE` | float | 不发送 | 采样参数；网关限制固定值时在此覆盖 |
+| `PHONE_AGENT_TOP_P` | float | 不发送 | 同上 |
+| `PHONE_AGENT_FREQUENCY_PENALTY` | float | 不发送 | 同上 |
+| `PHONE_AGENT_HTTP_HEADERS` | str | 无 | 附加请求头，格式 `K1=V1;K2=V2` |
+| `PHONE_AGENT_USER_AGENT` | str | 内置 UA | 覆盖默认 User-Agent |
 
-## 常用
+## 运行控制
 
-| 变量 | 默认值 | 说明 |
-|---|---:|---|
-| `PHONE_AGENT_DEVICE_ID` | 自动识别 | ADB 设备序列号 |
-| `PHONE_AGENT_LANG` | `cn` | Prompt 语言：`cn` / `en` |
-| `PHONE_AGENT_MAX_STEPS` | `100` | 单轮最大模型调用数（防跑飞保险丝，非成本手段） |
-| `PHONE_AGENT_TOKEN_BUDGET` | `1000000` | 单轮 token 总预算（成本上限），耗尽即终止 |
-| `PHONE_AGENT_SAFETY_MODE` | `wary` | 安全门控：`off` / `wary` / `hard` / `reviewer`，见[安全模式](safety.md) |
-| `PHONE_AGENT_GROUNDING_PROVIDER` | `hybrid` | 落地方式：`hybrid` / `accessibility` / `locateanything` |
+| 变量 | 类型 | 默认值 | 说明 |
+|---|---|---|---|
+| `PHONE_AGENT_DEVICE_ID` | str | 自动识别 | ADB 设备序列号；多设备时必填 |
+| `PHONE_AGENT_LANG` | `cn`/`en` | `cn` | 提示词语言 |
+| `PHONE_AGENT_MAX_STEPS` | int | `100` | 单轮最大模型调用数；仅作失控保险丝，非成本手段 |
+| `PHONE_AGENT_MAX_HITL_RESUMES` | int | `20` | 人工中断恢复次数上限 |
 
-## 长任务（预算与压缩）
+## 预算与上下文压缩
 
-| 变量 | 默认值 | 说明 |
-|---|---:|---|
-| `PHONE_AGENT_TOKEN_WARN_REMAINING` | `100000` | 剩余预算降至该值时提醒模型收尾 |
-| `PHONE_AGENT_COMPACT` | `true` | 两级 auto-compact 开关 |
-| `PHONE_AGENT_COMPACT_WARN_RATIO` | `0.75` | 上下文窗口用量预警线 |
-| `PHONE_AGENT_COMPACT_TRIGGER_RATIO` | `0.92` | 自动生成 handoff 摘要并折叠历史的触发线 |
-| `PHONE_AGENT_CONTEXT_WINDOW` | 按模型推断（兜底 256k） | 手动覆盖上下文窗口 |
-| `PHONE_AGENT_MEMORY_MODEL` | 主模型 | compact 摘要用的纯文本模型 |
-| `PHONE_AGENT_IMAGE_KEEP` | `2` | 历史中保留的截图消息数 |
+| 变量 | 类型 | 默认值 | 说明 |
+|---|---|---|---|
+| `PHONE_AGENT_TOKEN_BUDGET` | int | `1000000` | 单轮 input+output token 总预算，耗尽终止运行 |
+| `PHONE_AGENT_TOKEN_WARN_REMAINING` | int | `100000` | 剩余低于该值时向模型注入一次余量提醒 |
+| `PHONE_AGENT_COMPACT` | bool | `true` | auto-compact 总开关 |
+| `PHONE_AGENT_COMPACT_WARN_RATIO` | float | `0.75` | 上下文占窗口比例达到此值时提醒模型收敛 |
+| `PHONE_AGENT_COMPACT_TRIGGER_RATIO` | float | `0.92` | 达到此值时生成 handoff 摘要并折叠历史 |
+| `PHONE_AGENT_CONTEXT_WINDOW` | int | 按模型推断，兜底 `256000` | 手动覆盖上下文窗口大小 |
+| `PHONE_AGENT_MEMORY_MODEL` | str | 主模型 | compact 摘要使用的模型 |
+| `PHONE_AGENT_IMAGE_KEEP` | int | `2` | 历史中保留的含图消息数 |
+| `PHONE_AGENT_OBS_MARKS_KEEP` | int | `2` | 历史中保留完整 marks 摘要的观测数 |
+
+## 界面落地（Grounding）
+
+| 变量 | 类型 | 默认值 | 说明 |
+|---|---|---|---|
+| `PHONE_AGENT_GROUNDING_PROVIDER` | `hybrid`/`accessibility`/`locateanything` | `hybrid` | mark 来源；hybrid = 控件树优先，视觉兜底 |
+| `PHONE_AGENT_ACCESSIBILITY_TIMEOUT` | float | `3.0` | 控件树抓取超时（秒） |
+| `PHONE_AGENT_ACCESSIBILITY_MAX_MARKS` | int | `80` | 单次观测最多输出的 mark 数 |
+| `PHONE_AGENT_LOCATEANYTHING_MODEL` | path | 无 | 本地视觉定位模型路径；不配置则视觉定位不可用 |
+| `PHONE_AGENT_LOCATE_MAX_SIZE` | int | `0` | locate 输入图最长边；`0` = 原图 |
+| `PHONE_AGENT_SCOPE_PADDING_RATIO` | float | `0.05` | scope 区域裁剪的边缘扩展比例 |
+| `PHONE_AGENT_LOCATEANYTHING_CONTEXT_MAX_CHARS` | int | `200` | locate 指令中单字段提示长度上限 |
+| `PHONE_AGENT_PARALLEL_TOOL_CALLS` | bool | `false` | 并行工具调用；网关拒绝该参数时设 `true` |
+
+## 观测
+
+| 变量 | 类型 | 默认值 | 说明 |
+|---|---|---|---|
+| `PHONE_AGENT_OBSERVE_SETTLE_MS` | int | `300` | 每次观测采样前的静置毫秒数；`0` 关闭。应对加载延迟的页面 |
+| `PHONE_AGENT_BLACK_SCREEN_DETECT` | bool | `true` | 全黑截图判定为 FLAG_SECURE 保护屏，不下发黑图 |
+
+## 安全与验收
+
+| 变量 | 类型 | 默认值 | 说明 |
+|---|---|---|---|
+| `PHONE_AGENT_SAFETY_MODE` | `off`/`wary`/`hard`/`reviewer` | `wary` | 执行类动作门控，详见[安全模式](safety.md) |
+| `PHONE_AGENT_SAFETY_REVIEWER_MODEL` | str | verifier 或主模型 | `reviewer` 档的风险精排模型 |
+| `PHONE_AGENT_FINISH_VERIFY` | `off`/`auto`/`always` | `auto` | finish 独立验收器触发策略 |
+| `PHONE_AGENT_FINISH_VERIFY_K` | int | `1` | 验收器查看的尾部截图数 |
+| `PHONE_AGENT_VERIFIER_MODEL` | str | 主模型 | 验收器模型 |
 
 ## 记忆
 
-### App-KB（本机应用事实库）
+### App-KB
 
-| 变量 | 默认值 | 说明 |
-|---|---:|---|
-| `PHONE_AGENT_APP_KB` | `true` | App-KB 总开关 |
-| `PHONE_AGENT_MEMORY_DIR` | `memory` | 本地记忆根目录 |
-| `PHONE_AGENT_APP_LIST_MAX` | `40` | 注入 prompt 的本机应用名上限 |
-| `PHONE_AGENT_DREAM` | `manual` | 整理时机：`off` / `auto` / `manual`（仅 `--dream`） |
-| `PHONE_AGENT_IMPLICIT_ALIAS` | `true` | 隐式纠正：叫法失手→包名成功时自动记别名 |
+| 变量 | 类型 | 默认值 | 说明 |
+|---|---|---|---|
+| `PHONE_AGENT_APP_KB` | bool | `true` | App-KB 总开关（同步/读取/写回/注入） |
+| `PHONE_AGENT_MEMORY_DIR` | path | `memory` | 记忆根目录 |
+| `PHONE_AGENT_APP_LIST_MAX` | int | `40` | 注入提示词的应用名数量上限 |
+| `PHONE_AGENT_DREAM` | `off`/`auto`/`manual` | `manual` | 记忆整理时机；`manual` 仅 `--dream` |
+| `PHONE_AGENT_IMPLICIT_ALIAS` | bool | `true` | 隐式纠正：叫法失败→候选包名成功时自动记别名 |
 
-### 经验与回想（建设中）
+### 经验与回想
 
-| 变量 | 默认值 | 说明 |
-|---|---:|---|
-| `PHONE_AGENT_EXPERIENCE` | `on` | episode 任务档案记录开关（observe-only） |
-| `PHONE_AGENT_EXPERIENCE_DIR` | `memory/experience` | 档案目录 |
-| `PHONE_AGENT_EPISODE_KEEP` | `500` | 保留完整档案数，更老的归档为聚合统计 |
-| `PHONE_AGENT_MEMORY_RAG` | `shadow` | 语义回想：`off` / `shadow`（只观测不注入）/ `on`（预留） |
-| `PHONE_AGENT_EMBED_MODEL` | `mlx-community/Qwen3-Embedding-0.6B-4bit-DWQ` | 本地嵌入模型（MLX，可换） |
-| `PHONE_AGENT_RECALL_TOP_K` | `5` | 回想候选数上限 |
-| `PHONE_AGENT_RECALL_MIN_SCORE` | `0.35` | 相似度阈值，低于则静默（宁可不召回） |
+| 变量 | 类型 | 默认值 | 说明 |
+|---|---|---|---|
+| `PHONE_AGENT_EXPERIENCE` | bool | `true` | episode 档案记录开关（observe-only） |
+| `PHONE_AGENT_EXPERIENCE_DIR` | path | `memory/experience` | 档案目录 |
+| `PHONE_AGENT_EPISODE_KEEP` | int | `500` | 保留的完整档案数；更老的归档为聚合统计 |
+| `PHONE_AGENT_EPISODE_ARCHIVE_DAYS` | int | `90` | 超过该天数的档案在 dream 时归档 |
+| `PHONE_AGENT_MEMORY_RAG` | `off`/`shadow`/`on` | `shadow` | 语义回想档位；`shadow` 只观测不注入 |
+| `PHONE_AGENT_EMBED_MODEL` | str | `mlx-community/Qwen3-Embedding-0.6B-4bit-DWQ` | 本地嵌入模型（MLX） |
+| `PHONE_AGENT_EMBED_DIM` | int | `1024` | 嵌入向量维度 |
+| `PHONE_AGENT_VEC_DB` | path | `memory/vec.db` | 向量索引文件 |
+| `PHONE_AGENT_RECALL_TOP_K` | int | `5` | 回想候选数上限 |
+| `PHONE_AGENT_RECALL_MIN_SCORE` | float | `0.35` | 召回分数阈值；低于则放弃召回 |
+| `PHONE_AGENT_RECALL_DECAY_LAMBDA` | float | `0.02` | 时间衰减速率（按天） |
 
-## Grounding 与视觉定位
+## 任务板与记录
 
-| 变量 | 默认值 | 说明 |
-|---|---:|---|
-| `PHONE_AGENT_LOCATEANYTHING_MODEL` | 未设置 | 本地视觉定位模型路径 |
-| `PHONE_AGENT_LOCATE_MAX_SIZE` | `0` | locate 输入档位：`0`=原图（默认）；>0=最长边上限 |
-| `PHONE_AGENT_SCOPE_PADDING_RATIO` | `0.05` | scope 圈定区域时的边缘扩展比例 |
-| `PHONE_AGENT_ACCESSIBILITY_MAX_MARKS` | `80` | 单次观测最多输出的界面元素数 |
-
-## 完成验收与诊断
-
-| 变量 | 默认值 | 说明 |
-|---|---:|---|
-| `PHONE_AGENT_FINISH_VERIFY` | `auto` | finish 验收器：`off` / `auto` / `always` |
-| `PHONE_AGENT_VERIFIER_MODEL` | 主模型 | 独立验收模型 |
-| `PHONE_AGENT_TRACE` | `true` | 运行 trace（JSONL，脱敏）开关 |
-| `PHONE_AGENT_TRACE_DIR` | `.traces` | trace 目录 |
-
-!!! tip "原则"
-    所有模型、阈值、窗口、档位都是配置项——如果你的部署有特殊限制（采样值固定、请求头等），用对应的环境变量覆盖，不需要改代码。完整可选项见仓库 `.env.example` 注释。
+| 变量 | 类型 | 默认值 | 说明 |
+|---|---|---|---|
+| `PHONE_AGENT_TASKDOC` | bool | `true` | TaskDoc 任务板开关 |
+| `PHONE_AGENT_TRACE` | bool | `true` | JSONL trace 开关（脱敏，不含截图） |
+| `PHONE_AGENT_TRACE_DIR` | path | `.traces` | trace 目录 |
+| `PHONE_AGENT_DIAG_EVIDENCE` | bool | `false` | 诊断证据流（live-diagnosis 用） |
+| `PHONE_AGENT_DIAG_UNREDACTED` | bool | `false` | 本机诊断全保真模式 |
