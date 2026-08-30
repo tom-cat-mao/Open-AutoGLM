@@ -1,5 +1,5 @@
 name: "\U0001F680 Feature request"
-description: Submit a request for a new Open-AutoGLM / 提交一个新的 Open-AutoGLM 的功能建议
+description: Submit a request for a new TaskWizard / 提交一个新的 TaskWizard 的功能建议
 labels: [ "feature" ]
 body:
   - type: textarea

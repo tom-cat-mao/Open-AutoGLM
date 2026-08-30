@@ -1,10 +1,10 @@
-# Open-AutoGLM Agent Guide
+# TaskWizard Agent Guide
 
 > LLM 驱动的安卓手机操作 Agent：看一眼屏幕、想一步、动一下；编码前先读本文件，P0 约束不可违反。
 
 ## What This Is
 
-Open-AutoGLM is a **thin-loop (v2)** Android phone agent: an LLM drives a real device through
+TaskWizard is a **thin-loop (v2)** Android phone agent: an LLM drives a real device through
 tools — one model call per step, on LangChain `create_agent`. The harness only supplies tools,
 enforces safety boundaries, keeps context hygienic, and records traces. It does **not** route a
 workflow. The v1 LangGraph node architecture was deleted; `adb/`, `grounding/`, and

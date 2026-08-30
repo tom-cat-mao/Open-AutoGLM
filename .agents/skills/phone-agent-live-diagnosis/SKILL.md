@@ -1,7 +1,7 @@
 ---
 name: phone-agent-live-diagnosis
 description: >-
-  Use when the user wants to run or monitor the Open-AutoGLM thin-loop (v2) PhoneAgent
+  Use when the user wants to run or monitor the TaskWizard thin-loop (v2) PhoneAgent
   on a real Android device, inspect what the model actually did, correlate the run's
   evidence stream with v2 source code, generate code-level modification recommendations,
   or produce an interactive HTML diagnosis report. Trigger on 实机测试, 监看, 实际效果,
@@ -16,7 +16,7 @@ when_to_use: |
 
 # Phone Agent Live Diagnosis (thin-loop v2)
 
-Run an Open-AutoGLM thin-loop task, collect a diagnostic **evidence stream**, map what
+Run an TaskWizard thin-loop task, collect a diagnostic **evidence stream**, map what
 happened back to v2 source, and render an interactive HTML report.
 
 > This is the **v2 rewrite**. The v1 LangGraph node model (`goal`/`plan`/`execute`/

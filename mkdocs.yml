@@ -1,0 +1,51 @@
+site_name: TaskWizard
+site_description: LLM 驱动的安卓手机操作 Agent — thin-loop v2
+site_url: https://tom-cat-mao.github.io/TaskWizard/
+repo_url: https://github.com/tom-cat-mao/TaskWizard
+repo_name: tom-cat-mao/TaskWizard
+docs_dir: pages
+edit_uri: edit/main/pages/
+
+theme:
+  name: material
+  language: zh
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: deep purple
+      toggle:
+        icon: material/weather-night
+        name: 切换到深色
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: deep purple
+      toggle:
+        icon: material/weather-sunny
+        name: 切换到浅色
+  features:
+    - navigation.sections
+    - navigation.top
+    - content.code.copy
+    - search.highlight
+
+plugins:
+  - search
+
+markdown_extensions:
+  - admonition
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.superfences
+
+nav:
+  - 首页: index.md
+  - 快速开始: quickstart.md
+  - 配置参考: configuration.md
+  - 架构: architecture.md
+  - Web 控制台: console.md
+  - 安全模式: safety.md
+  - 记忆与自进化: memory.md
+  - 路线图: roadmap.md

@@ -17,7 +17,7 @@ from typing import Any
 
 
 def resolve_repo_root() -> Path:
-    """Resolve the Open-AutoGLM repo root.
+    """Resolve the TaskWizard repo root.
 
     The skill ships under
     ``<repo>/.agents/skills/phone-agent-live-diagnosis/scripts`` so ``parents[4]``

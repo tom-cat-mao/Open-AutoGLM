@@ -1,17 +1,16 @@
-# Open-AutoGLM
+# TaskWizard
 
 LLM 驱动的安卓手机操作 Agent：看一眼屏幕、想一步、动一下，带安全预警与自积累记忆。
 
 [![License](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/Python-%E2%89%A53.10-3776AB?logo=python&logoColor=white)](setup.py)
-[![CI](https://img.shields.io/badge/CI-GitHub_Actions-lightgrey?logo=githubactions)](https://github.com/tom-cat-mao/Open-AutoGLM/actions)
+[![CI](https://img.shields.io/badge/CI-GitHub_Actions-lightgrey?logo=githubactions)](https://github.com/tom-cat-mao/TaskWizard/actions)
 
-Open-AutoGLM 采用 thin-loop v2：模型每轮观察真实设备、决定一个工具调用并执行一步；harness 只负责工具、安全边界、上下文卫生和可观测性，不替模型编排工作流。
+TaskWizard 采用 thin-loop v2：模型每轮观察真实设备、决定一个工具调用并执行一步；harness 只负责工具、安全边界、上下文卫生和可观测性，不替模型编排工作流。
 
 ## Demo
 
-<!-- TODO(owner): 将下方截图替换为真实任务的 GIF 录屏。 -->
-![Open-AutoGLM Android demo](resources/screenshot-20251209-181423.png)
+![TaskWizard Web 控制台](pages/assets/console.png)
 
 ## Features
 
@@ -47,11 +46,13 @@ Web 控制台默认只监听 `127.0.0.1:8080`：输入任务后可实时查看�
 
 ## 文档
 
+📖 **完整文档站：<https://tom-cat-mao.github.io/TaskWizard/>**
+
 | 主题 | 入口 |
 |---|---|
-| 配置 | [完整配置说明](docs/configuration.md) · [`.env` 模板](.env.example) |
-| App-KB 设计 | [docs/app-kb-memory-design.md](docs/app-kb-memory-design.md) |
-| 架构状态与路线图 | [docs/future-roadmap.md](docs/future-roadmap.md) |
+| 快速开始 | [文档站](https://tom-cat-mao.github.io/TaskWizard/quickstart/) · [`.env` 模板](.env.example) |
+| 配置参考（全量） | [文档站配置页](https://tom-cat-mao.github.io/TaskWizard/configuration/) |
+| 架构 / 安全 / 记忆 / 路线图 | [文档站](https://tom-cat-mao.github.io/TaskWizard/) |
 | Agent 开发约定 | [AGENTS.md](AGENTS.md) |
 
 ## Contributing

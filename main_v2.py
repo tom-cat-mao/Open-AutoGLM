@@ -26,7 +26,7 @@ from phone_agent.v2.config import V2Config, load_project_env
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="main_v2.py",
-        description="Open-AutoGLM thin-loop v2 PhoneAgent CLI",
+        description="TaskWizard thin-loop v2 PhoneAgent CLI",
     )
     parser.add_argument("task", nargs="?", default=None, help="natural-language task description")
     parser.add_argument("--device-id", default=None, help="ADB device serial")

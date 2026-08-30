@@ -53,7 +53,7 @@ def env_float(key: str) -> float | None:
 DEFAULT_MODEL_USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/125.0.0.0 Safari/537.36 Open-AutoGLM/0.1"
+    "Chrome/125.0.0.0 Safari/537.36 TaskWizard/0.1"
 )
 
 

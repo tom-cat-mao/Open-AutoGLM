@@ -8,7 +8,7 @@ import argparse
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="python -m phone_agent.web",
-        description="Open-AutoGLM thin-loop 本地实时控制台",
+        description="TaskWizard thin-loop 本地实时控制台",
     )
     parser.add_argument("--device-id", default=None, help="ADB 设备序列号")
     parser.add_argument("--model", default=None, help="模型 ID（PHONE_AGENT_MODEL）")

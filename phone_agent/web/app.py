@@ -208,7 +208,7 @@ def create_ui(
     with ui.header().classes(
         "items-center gap-3 px-5 py-3 bg-white text-slate-900 border-b"
     ):
-        ui.label("Open-AutoGLM 实时控制台").classes(
+        ui.label("TaskWizard 实时控制台").classes(
             "text-xl font-semibold whitespace-nowrap"
         )
         task_input = (
@@ -536,7 +536,7 @@ def run(
     ui.run(
         host=host,
         port=port,
-        title="Open-AutoGLM 实时控制台",
+        title="TaskWizard 实时控制台",
         show=False,
         reload=False,
     )

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Live-diagnosis CLI orchestration for the Open-AutoGLM thin-loop (v2) agent.
+"""Live-diagnosis CLI orchestration for the TaskWizard thin-loop (v2) agent.
 
 Per ``outputs/design-council/ROUND2-D1.md`` §5. This is the driver that ties the
 diagnostic evidence stream to the analysis + report package:
@@ -987,7 +987,7 @@ def _add_run_arguments(parser: argparse.ArgumentParser) -> None:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="run_diagnosis.py",
-        description="Open-AutoGLM thin-loop (v2) live diagnosis: run + analyze + report",
+        description="TaskWizard thin-loop (v2) live diagnosis: run + analyze + report",
     )
     sub = parser.add_subparsers(dest="command")
 

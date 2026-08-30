@@ -1,6 +1,6 @@
 # Source Map (thin-loop v2)
 
-This file maps live-diagnosis symptoms to Open-AutoGLM **v2** source files. It is the
+This file maps live-diagnosis symptoms to TaskWizard **v2** source files. It is the
 reference behind `scripts/sourcemap.py::V2_SOURCE_RULES` (which the report renders as
 clickable `path:line` anchors) and the taxonomy in `scripts/taxonomy.py`.
 
