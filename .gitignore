@@ -54,6 +54,9 @@ Thumbs.db
 *.log
 /tmp/
 screenshots/
+.traces/
+bench_output/
+outputs/
 
 # Keep old files during transition
 call_model.py
@@ -61,3 +64,36 @@ app_package_name.py
 
 .claude/
 .venv
+.omc/
+.qoder/
+.env
+models/
+.omx/
+.codex/*
+!.codex/agents/
+!.codex/agents/**
+!.codex/skills/
+!.codex/skills/**
+.codex/skills/.system/**
+!.codex/prompts/
+!.codex/prompts/**
+
+# Agent tooling
+.pi/
+.codebuddy/
+Untitled
+openautoglm-vs-deepagents.html
+.wt/
+
+# Agent long-term memory (runtime state, never commit)
+memory/
+
+# Local working documents — never tracked
+docs/
+
+# Local-only working dirs — never tracked
+.codex/
+examples/
+resources/
+tests/
+bench/

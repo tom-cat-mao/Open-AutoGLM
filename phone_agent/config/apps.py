@@ -1,5 +1,14 @@
 """App name to package name mapping for supported applications."""
 
+from typing import Any
+
+from phone_agent.config.app_registry import (
+    AppRegistry,
+    InstalledAppInventory,
+    LaunchPolicy,
+    LaunchTargetResolver,
+)
+
 APP_PACKAGES: dict[str, str] = {
     # Social & Messaging
     "微信": "com.tencent.mm",
@@ -25,6 +34,8 @@ APP_PACKAGES: dict[str, str] = {
     "肯德基": "com.yek.android.kfc.activitys",
     # Travel
     "携程": "ctrip.android.view",
+    "同程": "com.tongcheng.android",
+    "同程旅行": "com.tongcheng.android",
     "铁路12306": "com.MobileTicket",
     "12306": "com.MobileTicket",
     "去哪儿": "com.Qunar",
@@ -73,6 +84,8 @@ APP_PACKAGES: dict[str, str] = {
     "Android  System Settings": "com.android.settings",
     "Android-System-Settings": "com.android.settings",
     "Settings": "com.android.settings",
+    "设置": "com.android.settings",
+    "系统设置": "com.android.settings",
     "AudioRecorder": "com.android.soundrecorder",
     "audiorecorder": "com.android.soundrecorder",
     "Bluecoins": "com.rammigsoftware.bluecoins",
@@ -198,7 +211,8 @@ def get_package_name(app_name: str) -> str | None:
     Returns:
         The Android package name, or None if not found.
     """
-    return APP_PACKAGES.get(app_name)
+    resolution = DEFAULT_LAUNCH_TARGET_RESOLVER.resolve(app_name)
+    return resolution.package_name if resolution.status == "resolved" else None
 
 
 def get_app_name(package_name: str) -> str | None:
@@ -211,10 +225,10 @@ def get_app_name(package_name: str) -> str | None:
     Returns:
         The display name of the app, or None if not found.
     """
-    for name, package in APP_PACKAGES.items():
-        if package == package_name:
-            return name
-    return None
+    resolution = DEFAULT_APP_REGISTRY.resolve_package(package_name)
+    if resolution.status != "resolved" or resolution.identity is None:
+        return None
+    return _legacy_launch_name(resolution.identity.canonical_id)
 
 
 def list_supported_apps() -> list[str]:
@@ -225,3 +239,187 @@ def list_supported_apps() -> list[str]:
         List of app names.
     """
     return list(APP_PACKAGES.keys())
+
+
+APP_ALIASES: dict[str, str] = {
+    "设置": "Settings",
+    "系统设置": "Settings",
+    "AndroidSystemSettings": "Settings",
+    "Android System Settings": "Settings",
+    "Android  System Settings": "Settings",
+    "Android-System-Settings": "Settings",
+    "chrome": "Chrome",
+    "Google Chrome": "Chrome",
+    "gmail": "Gmail",
+    "GoogleMail": "Gmail",
+    "Google Mail": "Gmail",
+    "wechat": "WeChat",
+    "微信": "WeChat",
+    "WeChat(微信)": "WeChat",
+    "b站": "bilibili",
+    "哔哩": "bilibili",
+    "douyin": "抖音",
+    "xiaohongshu": "小红书",
+    "rednote": "小红书",
+    "Whatsapp": "WhatsApp",
+    "twitter": "Twitter",
+    "X": "Twitter",
+    "Twitter(X)": "Twitter",
+    "tiktok": "Tiktok",
+    "temu": "Temu",
+    "reddit": "Reddit",
+    "quora": "Quora",
+    "duolingo": "Duolingo",
+    "expedia": "Expedia",
+    "joplin": "Joplin",
+    "osmand": "Osmand",
+    "clock": "Clock",
+    "contacts": "Contacts",
+    "files": "Files",
+    "File Manager": "Files",
+    "file manager": "Files",
+    "audiorecorder": "AudioRecorder",
+    "bluecoins": "Bluecoins",
+    "broccoli": "Broccoli",
+    "booking": "Booking.com",
+    "booking.com": "Booking.com",
+    "BOOKING.COM": "Booking.com",
+    "mcdonald": "McDonald",
+    "pimusicplayer": "PiMusicPlayer",
+    "retromusic": "RetroMusic",
+}
+
+CANONICAL_APP_DISPLAY: dict[str, str] = {
+    "Settings": "Settings",
+    "WeChat": "WeChat(微信)",
+    "QQ": "QQ",
+    "Chrome": "Chrome",
+    "Gmail": "Gmail",
+    "WhatsApp": "WhatsApp",
+    "Twitter": "Twitter(X)",
+    "Tiktok": "Tiktok",
+    "Telegram": "Telegram",
+    "淘宝": "淘宝",
+    "京东": "京东",
+    "拼多多": "拼多多",
+    "小红书": "小红书",
+    "微博": "微博",
+    "抖音": "抖音",
+    "美团": "美团",
+    "大众点评": "大众点评",
+    "饿了么": "饿了么",
+    "高德地图": "高德地图",
+    "百度地图": "百度地图",
+    "携程": "携程",
+    "同程": "同程",
+    "同程旅行": "同程旅行",
+    "滴滴出行": "滴滴出行",
+    "知乎": "知乎",
+    "豆瓣": "豆瓣",
+    "bilibili": "bilibili",
+    "飞书": "飞书",
+    "腾讯视频": "腾讯视频",
+    "爱奇艺": "爱奇艺",
+    "网易云音乐": "网易云音乐",
+    "QQ音乐": "QQ音乐",
+    "今日头条": "今日头条",
+    "快手": "快手",
+    "豆包": "豆包",
+    "Google Maps": "Google Maps",
+    "Google Calendar": "Google Calendar",
+    "Google Drive": "Google Drive",
+    "Google Play Store": "Google Play Store",
+    "Booking.com": "Booking.com",
+    "Temu": "Temu",
+    "Contacts": "Contacts",
+    "Clock": "Clock",
+    "Files": "Files",
+    "AudioRecorder": "AudioRecorder",
+}
+
+
+def normalize_app_name(name: str) -> str | None:
+    """Normalize an app term to the legacy launch name compatibility key."""
+
+    resolution = DEFAULT_APP_REGISTRY.resolve_term(name)
+    if resolution.status != "resolved" or resolution.identity is None:
+        return None
+    return _legacy_launch_name(resolution.identity.canonical_id)
+
+
+def _legacy_launch_name(canonical_id: str) -> str | None:
+    resolution = DEFAULT_APP_REGISTRY.resolve_term(canonical_id)
+    if resolution.status != "resolved" or resolution.identity is None:
+        return None
+    packages = resolution.identity.packages
+    for name in CANONICAL_APP_DISPLAY:
+        if APP_PACKAGES.get(name) in packages:
+            return name
+    for name, package in APP_PACKAGES.items():
+        if package in packages:
+            return name
+    return None
+
+
+def get_app_registry_summary(
+    lang: str = "cn",
+    max_chars: int = 2400,
+    *,
+    learning: Any | None = None,
+    inventory: InstalledAppInventory | None = None,
+    installed_top_n: int = 30,
+) -> str:
+    """Build a compact app list for prompt injection.
+
+    The static registry is an alias seed: the summary always lists the static
+    seed, unions in the per-run learned mappings (``learning``), and appends
+    the device-installed package Top-N when ``inventory`` is available. The
+    goal contract should only reference apps that actually exist.
+    """
+    app_list = ", ".join(
+        identity.display_name
+        for identity in DEFAULT_APP_REGISTRY.identities
+        if DEFAULT_LAUNCH_POLICY.is_allowed(identity)
+    )
+
+    if lang == "en":
+        header = "# Available Apps (Launch action must use one of these names)"
+        learned_header = "# Learned app mappings this run (term => package)"
+        installed_header = f"# Installed device apps (first {installed_top_n} alphabetically; Launch accepts these package names)"
+    else:
+        header = "# 可用应用（Launch 动作必须使用以下名称之一）"
+        learned_header = "# 本跑已学习应用映射（术语 => 包名）"
+        installed_header = f"# 设备实装应用（按字母序前 {installed_top_n} 条；Launch 可直接使用这些包名）"
+
+    sections = [f"{header}\n{app_list}"]
+    if learning is not None:
+        snapshot = learning.snapshot()
+        if snapshot:
+            sections.append(
+                learned_header
+                + "\n"
+                + ", ".join(f"{term}=>{package}" for term, package in snapshot.items())
+            )
+    if inventory is not None and inventory.packages:
+        installed = sorted(inventory.packages)[: max(0, installed_top_n)]
+        sections.append(installed_header + "\n" + ", ".join(installed))
+
+    result = "\n\n".join(sections)
+    if len(result) > max_chars:
+        truncated = result[: max_chars - 3]
+        result = f"{truncated}..."
+    return result
+
+
+# APP_PACKAGES remains the legacy launch-name compatibility source. Typed
+# consumers use these separate identity, inventory, and policy boundaries.
+DEFAULT_APP_REGISTRY = AppRegistry.from_legacy_maps(
+    APP_PACKAGES,
+    APP_ALIASES,
+    CANONICAL_APP_DISPLAY,
+)
+DEFAULT_LAUNCH_POLICY = LaunchPolicy(frozenset(APP_PACKAGES.values()))
+DEFAULT_LAUNCH_TARGET_RESOLVER = LaunchTargetResolver(
+    DEFAULT_APP_REGISTRY,
+    DEFAULT_LAUNCH_POLICY,
+)

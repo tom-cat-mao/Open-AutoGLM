@@ -1,5 +1,10 @@
 Pillow>=12.0.0
 openai>=2.9.0
+nicegui>=3.0.0
+
+# For LangGraph Agent Architecture
+langgraph>=0.2.0
+langchain-core>=0.3.0
 
 # For iOS Support
 requests>=2.31.0
@@ -13,8 +18,14 @@ requests>=2.31.0
 # vllm>=0.12.0
 # transformers>=5.0.0rc0
 
-# Optional: for development
-# pytest>=7.0.0
-# pre-commit>=4.5.0
-# black>=23.0.0
-# mypy>=1.0.0
+# Optional Visual Grounding (LocateAnything on Apple Silicon MLX)
+# mlx-vlm is intentionally kept out of default requirements so CI and non-MLX
+# hosts do not need Apple Silicon/Metal-only dependencies. Install a compatible
+# mlx-vlm build manually in the local MLX environment before running the real
+# LocateAnything provider or benchmark.
+
+# Development & Testing
+pytest>=7.0.0
+black>=23.0.0
+mypy>=1.0.0
+ruff>=0.1.0

@@ -32,8 +32,17 @@ setup(
     install_requires=[
         "Pillow>=12.0.0",
         "openai>=2.9.0",
+        "langgraph>=0.2.0",
+        "langchain-core>=0.3.0",
+        "requests>=2.31.0",
     ],
     extras_require={
+        "locateanything": [
+            # Visual grounding (LocateAnything on Apple Silicon MLX).
+            # mlx-vlm is installed from a PR branch until LocateAnything support is merged upstream.
+            "mlx-vlm @ git+https://github.com/beshkenadze/mlx-vlm@feat/locateanything-3b",
+            "modelscope>=1.37.0",
+        ],
         "dev": [
             "pytest>=7.0.0",
             "black>=23.0.0",

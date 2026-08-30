@@ -2,7 +2,6 @@
 
 import base64
 import subprocess
-from typing import Optional
 
 
 def type_text(text: str, device_id: str | None = None) -> None:
