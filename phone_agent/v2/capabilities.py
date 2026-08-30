@@ -111,4 +111,53 @@ class CapabilityRegistry:
         return rows
 
 
-__all__ = ["CapabilityRegistry", "CapabilitySpec"]
+def build_capability_registry(config: Any) -> CapabilityRegistry:
+    """Build the passive capability composition shared by agent and runner."""
+
+    registry = CapabilityRegistry()
+    for spec in (
+        CapabilitySpec(
+            "taskdoc",
+            "TaskDoc",
+            "on" if getattr(config, "taskdoc_enabled", True) else "off",
+        ),
+        CapabilitySpec("safety", "Safety", getattr(config, "safety_mode", "wary")),
+        CapabilitySpec("budget", "Token budget", "on"),
+        CapabilitySpec(
+            "compact",
+            "Auto compact",
+            "on" if getattr(config, "compact_enabled", True) else "off",
+        ),
+        CapabilitySpec(
+            "finish_verify",
+            "Finish verifier",
+            getattr(config, "finish_verify", "auto"),
+        ),
+        CapabilitySpec(
+            "app_kb",
+            "App knowledge",
+            "on" if getattr(config, "app_kb_enabled", True) else "off",
+        ),
+        CapabilitySpec(
+            "dream",
+            "Memory maintenance",
+            getattr(config, "dream_mode", "manual"),
+            deps=("app_kb",),
+        ),
+        CapabilitySpec(
+            "experience",
+            "Experience plane",
+            "on" if getattr(config, "experience_enabled", True) else "off",
+        ),
+        CapabilitySpec(
+            "recall",
+            "Memory recall",
+            getattr(config, "memory_rag", "shadow"),
+            deps=("experience",),
+        ),
+    ):
+        registry.register(spec)
+    return registry
+
+
+__all__ = ["CapabilityRegistry", "CapabilitySpec", "build_capability_registry"]

@@ -165,6 +165,8 @@ class V2Config:
     # local App-KB (device labels + persistent aliases). PhoneSession opens the
     # store lazily so disabling it performs no filesystem writes.
     memory_dir: str = "memory"
+    # Detached Web runner IPC root; the headless CLI does not use it.
+    runs_dir: str = "memory/runs"
     app_kb_enabled: bool = True
     # Evidence-backed correction: unknown name -> receipt-listed package ->
     # verified package launch writes the failed name as a learned alias.
@@ -326,6 +328,7 @@ class V2Config:
             ),
             observe_settle_ms=_env_int("PHONE_AGENT_OBSERVE_SETTLE_MS", 300),
             memory_dir=_env_str("PHONE_AGENT_MEMORY_DIR", "memory"),
+            runs_dir=_env_str("PHONE_AGENT_RUNS_DIR", "memory/runs"),
             app_kb_enabled=_env_bool_default_true("PHONE_AGENT_APP_KB", True),
             implicit_alias_enabled=_env_bool_default_true(
                 "PHONE_AGENT_IMPLICIT_ALIAS", True

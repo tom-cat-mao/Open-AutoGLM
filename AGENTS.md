@@ -10,9 +10,11 @@ enforces safety boundaries, keeps context hygienic, and records traces plus priv
 experience episodes. It does **not** route a
 workflow. The v1 LangGraph node architecture was deleted; `adb/`, `grounding/`, and
 `config/{policy,app_registry,redact}` are retained as libraries used by `phone_agent/v2/`.
-The optional `phone_agent/web/` NiceGUI frontend observes runs through
-`ThinPhoneAgent(extra_middleware=...)`; it must not own device access, tool execution, or workflow
-routing, and the headless `ThinPhoneAgent.run(...)` path must remain usable without the web layer.
+The optional `phone_agent/web/` NiceGUI frontend launches `python -m phone_agent.runner` and
+observes it through append-only files under `PHONE_AGENT_RUNS_DIR`; the runner attaches the shared
+`WebEventMiddleware` through `ThinPhoneAgent(extra_middleware=...)`. The web process must not own
+device access, tool execution, or workflow routing, and the headless `ThinPhoneAgent.run(...)` path
+must remain usable without the web layer.
 
 ## Development Commands
 
@@ -59,6 +61,7 @@ skill before running or monitoring a device task.
 |---|---|
 | `main_v2.py` | CLI entry; resolves CLI overrides and starts one thin-loop run or an explicit offline maintenance/review command. |
 | `phone_agent/v2/agent.py` | Assembles LangChain `create_agent`, middleware, tools, checkpointer, and terminal result. |
+| `phone_agent/v2/{runner,run_ipc,run_events}.py` | Web-only runner process, flushed file IPC, and the shared Web event schema/middleware. |
 | `phone_agent/v2/session.py` | Owns device/session state, run-local implicit-alias evidence, and the atomic observation lifecycle. |
 | `phone_agent/v2/tools/` | Perception, mark-bound actuation, TaskDoc updates, finish, user query, and takeover. |
 | `phone_agent/v2/middleware/` | Safety, TaskDoc pinning, image hygiene, compaction, token budget, trace, and diagnostics. |
@@ -95,7 +98,7 @@ The v1 routed LangGraph workflow and its `graph/`, `actions/`, `checkpoint/`, ol
 | Config keys (all `PHONE_AGENT_*`) | `docs/configuration.md`; sources: `.env.example` + `phone_agent/v2/config.py` docstrings |
 | Budget / auto-compact internals | `phone_agent/v2/middleware/{budget,compact,_tokens}.py` docstrings |
 | Architecture status & deferred items | `docs/future-roadmap.md` |
-| Module contracts | docstrings in `phone_agent/v2/` (agent, session, tools, middleware) |
+| Module contracts | docstrings in `phone_agent/v2/` (agent, session, tools, middleware, runner IPC) |
 | Real-device diagnosis | `.agents/skills/phone-agent-live-diagnosis/SKILL.md` (v2; local-first full-fidelity report, screenshots on disk, `--share` redacts) |
 | Local Web watch/steer UI | `README.md`, `phone_agent/web/{bridge,app}.py` docstrings |
 | Historical batch logs (v1 era) | `docs/archive/` |
