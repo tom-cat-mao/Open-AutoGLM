@@ -91,7 +91,7 @@
 | `PHONE_AGENT_EPISODE_KEEP` | int | `500` | 保留的完整档案数；更老的归档为聚合统计 |
 | `PHONE_AGENT_EPISODE_ARCHIVE_DAYS` | int | `90` | 超过该天数的档案在 dream 时归档 |
 | `PHONE_AGENT_MEMORY_RAG` | `off`/`shadow`/`on` | `shadow` | 语义回想档位；`shadow` 只观测不注入 |
-| `PHONE_AGENT_EMBED_MODEL` | str | `mlx-community/Qwen3-Embedding-0.6B-4bit-DWQ` | 本地嵌入模型（MLX） |
+| `PHONE_AGENT_EMBED_MODEL` | str | `Qwen/Qwen3-Embedding-0.6B` | 本地嵌入模型（MLX） |
 | `PHONE_AGENT_EMBED_DIM` | int | `1024` | 嵌入向量维度 |
 | `PHONE_AGENT_VEC_DB` | path | `memory/vec.db` | 向量索引文件 |
 | `PHONE_AGENT_RECALL_TOP_K` | int | `5` | 回想候选数上限 |

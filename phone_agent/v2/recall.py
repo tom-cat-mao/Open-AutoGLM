@@ -23,7 +23,7 @@ import threading
 from typing import Any, Protocol
 
 
-DEFAULT_EMBED_MODEL = "mlx-community/Qwen3-Embedding-0.6B-4bit-DWQ"
+DEFAULT_EMBED_MODEL = "Qwen/Qwen3-Embedding-0.6B"
 _NAMESPACES = frozenset({"episode", "app_alias"})
 _TOKEN_RE = re.compile(r"[A-Za-z0-9_.-]+|[\u3400-\u9fff]+")
 _LAUNCH_RE = re.compile(

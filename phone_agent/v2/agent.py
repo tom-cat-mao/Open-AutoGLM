@@ -359,7 +359,7 @@ class ThinPhoneAgent:
                 model_id = getattr(
                     self.config,
                     "embed_model",
-                    "mlx-community/Qwen3-Embedding-0.6B-4bit-DWQ",
+                    "Qwen/Qwen3-Embedding-0.6B",
                 )
                 embed_dim = getattr(self.config, "embed_dim", 1024)
                 embedder = getattr(self, "_recall_embedder", None)
