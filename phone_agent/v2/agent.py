@@ -320,6 +320,105 @@ class ThinPhoneAgent:
         except Exception:  # noqa: BLE001 - prompt enrichment never blocks a run
             self._system_prompt = base_prompt
 
+    def _shadow_recall_start(self, task: str) -> None:
+        """Retrieve trace-only candidates without touching actor context."""
+
+        self._shadow_candidates: list[dict[str, Any]] = []
+        self._shadow_recall_ready = False
+        reset = getattr(self._trace, "reset_run_observations", None)
+        if callable(reset):
+            reset()
+        if getattr(self.config, "memory_rag", "off") != "shadow":
+            return
+
+        trace_payload: dict[str, Any] = {"mode": "shadow", "candidates": []}
+        try:
+            from phone_agent.v2.recall import MlxEmbedder, VecIndex
+
+            serial = getattr(self.config, "device_id", None)
+            if not serial:
+                serial_getter = getattr(self.session, "_kb_device_id", None)
+                serial = serial_getter() if callable(serial_getter) else None
+            if not serial:
+                trace_payload["status"] = "skipped"
+                trace_payload["reason"] = "device_scope_unavailable"
+            else:
+                model_id = getattr(
+                    self.config,
+                    "embed_model",
+                    "mlx-community/Qwen3-Embedding-0.6B-4bit-DWQ",
+                )
+                embed_dim = getattr(self.config, "embed_dim", 1024)
+                embedder = getattr(self, "_recall_embedder", None)
+                if (
+                    embedder is None
+                    or embedder.model_id != model_id
+                    or embedder.dimension != embed_dim
+                ):
+                    embedder = MlxEmbedder(model_id, embed_dim)
+                    self._recall_embedder = embedder
+                with VecIndex(
+                    getattr(self.config, "vec_db", "memory/vec.db"),
+                    embedder=embedder,
+                ) as index:
+                    self._shadow_candidates = index.recall(
+                        task,
+                        device_scope=f"device:{serial}",
+                        top_k=getattr(self.config, "recall_top_k", 5),
+                        min_score=getattr(self.config, "recall_min_score", 0.35),
+                        decay_lambda=getattr(
+                            self.config, "recall_decay_lambda", 0.02
+                        ),
+                    )
+                self._shadow_recall_ready = True
+                trace_payload["status"] = "ok"
+                trace_payload["candidates"] = [
+                    {
+                        "ref_id": candidate["ref_id"],
+                        "score": candidate["score"],
+                        "match_reasons": candidate["match_reasons"],
+                    }
+                    for candidate in self._shadow_candidates
+                ]
+        except Exception as exc:  # noqa: BLE001 - optional shadow path is fail-open
+            trace_payload["status"] = "error"
+            trace_payload["error"] = type(exc).__name__
+
+        record = getattr(self._trace, "record_event", None)
+        if callable(record):
+            record("run_start", memory_rag=trace_payload)
+
+    def _shadow_recall_finish(self) -> None:
+        """Evaluate trace-only recall against confirmed launch receipts."""
+
+        if not getattr(self, "_shadow_recall_ready", False):
+            return
+        try:
+            from pathlib import Path
+
+            from phone_agent.v2.recall import evaluate_recall, update_recall_stats
+
+            actual_apps = getattr(self._trace, "launched_apps", set())
+            evaluation = evaluate_recall(self._shadow_candidates, actual_apps)
+            stats_path = (
+                Path(getattr(self.config, "memory_dir", "memory"))
+                / "experience/recall_stats.json"
+            )
+            stats = update_recall_stats(stats_path, evaluation, run_id=self.run_id)
+            record = getattr(self._trace, "record_event", None)
+            if callable(record):
+                record(
+                    "recall_evaluation",
+                    evaluation=evaluation,
+                    cumulative={
+                        "evaluations": stats["evaluations"],
+                        "hit_rate": stats["hit_rate"],
+                        "false_hit_rate": stats["false_hit_rate"],
+                    },
+                )
+        except Exception:  # noqa: BLE001 - shadow evaluation never changes run outcome
+            pass
+
     @staticmethod
     def _extract_interrupts(result: Any) -> tuple[Any, ...]:
         if isinstance(result, dict) and "__interrupt__" in result:
@@ -386,6 +485,7 @@ class ThinPhoneAgent:
         ts_start = time.time()
         self._seed_task_doc(task)
         self._prepare_app_knowledge()
+        self._shadow_recall_start(task)
         # Reset per-run one-shot flags so a reused agent behaves like a fresh run
         # (S1 R7): the HITL-exhaustion terminal flag, the token-budget state, and
         # the compaction middleware's per-run counters.
@@ -458,6 +558,7 @@ class ThinPhoneAgent:
             raise
 
         run_result = self._build_result(result)
+        self._shadow_recall_finish()
         self._append_experience_outcome(
             task,
             run_result,

@@ -35,6 +35,8 @@ setup(
         "langgraph>=0.2.0",
         "langchain-core>=0.3.0",
         "requests>=2.31.0",
+        "sqlite-vec>=0.1.9",
+        "mlx-embeddings==0.1.0",
     ],
     extras_require={
         "locateanything": [

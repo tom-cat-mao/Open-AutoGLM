@@ -10,8 +10,9 @@ Redaction rules (applied to every logged text value):
     via :func:`phone_agent.config.redact.redact_context_text`;
   * screenshot ``base64`` is never logged — only ``screen_seq`` and byte length.
 
-Events: ``model_call`` / ``tool_call`` / ``tool_result`` / ``run_end`` with a
-timestamp, step index, tool name, redacted args, latency (ms), and error text.
+Events: ``run_start`` / ``model_call`` / ``tool_call`` / ``tool_result`` /
+``run_end`` / ``recall_evaluation`` with a timestamp, step index, tool name,
+redacted args, latency (ms), and error text as applicable.
 """
 
 from __future__ import annotations
@@ -80,6 +81,7 @@ class TraceMiddleware(AgentMiddleware):
         self.trace_dir = trace_dir
         self.enabled = enabled
         self._step = 0
+        self._launched_apps: set[str] = set()
         self._path: str | None = None
         # The experience sink is independent of production trace enablement.
         # It receives only a fixed allowlist after the tool has returned and is
@@ -134,6 +136,29 @@ class TraceMiddleware(AgentMiddleware):
             )
         except Exception:  # noqa: BLE001 - observability must never alter actor behavior
             return
+    @property
+    def launched_apps(self) -> set[str]:
+        """Packages confirmed by successful launch-tool receipts this run."""
+
+        return set(self._launched_apps)
+
+    def reset_run_observations(self) -> None:
+        """Reset per-run observations when a ThinPhoneAgent is reused."""
+
+        self._launched_apps.clear()
+
+    def record_event(self, event: str, **payload: Any) -> None:
+        """Write a custom event through the same P0 redaction boundary."""
+
+        redacted = _redact_value(payload)
+        self._write({"event": str(event), **redacted})
+
+    def _record_successful_launch(self, name: str, content: Any) -> None:
+        if name != "launch_app":
+            return
+        from phone_agent.v2.recall import extract_launched_apps
+
+        self._launched_apps.update(extract_launched_apps(content))
 
     # --- model call ---------------------------------------------------------
     def wrap_model_call(self, request, handler):  # noqa: ANN001
@@ -211,6 +236,7 @@ class TraceMiddleware(AgentMiddleware):
             self._write_experience(name, error=exc, launched_before=launched_before)
             raise
         content = getattr(result, "content", None)
+        self._record_successful_launch(name, content)
         artifact = _tool_artifact(result)
         self._write(
             {
@@ -256,6 +282,7 @@ class TraceMiddleware(AgentMiddleware):
             self._write_experience(name, error=exc, launched_before=launched_before)
             raise
         content = getattr(result, "content", None)
+        self._record_successful_launch(name, content)
         artifact = _tool_artifact(result)
         self._write(
             {

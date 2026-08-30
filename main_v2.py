@@ -41,6 +41,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="consolidate the local App-KB instead of running a phone task",
     )
+    parser.add_argument(
+        "--rebuild-vec",
+        action="store_true",
+        help="rebuild the semantic recall index from episode/App-KB JSONL",
+    )
     return parser
 
 
@@ -119,12 +124,20 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
 
-    if not args.task and not args.dream:
+    if not args.task and not args.dream and not args.rebuild_vec:
         parser.error("a task description is required")
 
     config = V2Config.from_env(_overrides_from_args(args))
     if args.dream:
         _print_dream_summary(_run_dream(config, light=False))
+        return 0
+    if args.rebuild_vec:
+        from phone_agent.v2.recall import rebuild_index
+
+        print(
+            "vec: "
+            + json.dumps(rebuild_index(config), ensure_ascii=False, sort_keys=True)
+        )
         return 0
 
     # ThinPhoneAgent is delivered by the integration/middleware workstream

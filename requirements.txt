@@ -8,6 +8,8 @@ langchain-core>=0.3.0
 
 # For iOS Support
 requests>=2.31.0
+sqlite-vec>=0.1.9
+mlx-embeddings==0.1.0
 
 # For Model Deployment
 

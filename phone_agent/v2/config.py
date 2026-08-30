@@ -170,6 +170,16 @@ class V2Config:
     experience_dir: str = "memory/experience"
     episode_keep: int = 500
     episode_archive_days: int = 90
+    # Rebuildable semantic recall. ``shadow`` retrieves and evaluates candidates
+    # without changing actor messages; ``on`` is reserved and currently has no
+    # injection behavior. The MLX model itself remains lazy until first embed.
+    memory_rag: str = "shadow"
+    embed_model: str = "mlx-community/Qwen3-Embedding-0.6B-4bit-DWQ"
+    embed_dim: int = 1024
+    vec_db: str = "memory/vec.db"
+    recall_top_k: int = 5
+    recall_min_score: float = 0.35
+    recall_decay_lambda: float = 0.02
     # loop
     max_model_calls: int = 100
     # HITL resume budget (S1 §3.3): outer-loop cap on human-in-the-loop resumes,
@@ -306,6 +316,20 @@ class V2Config:
             experience_dir=_env_str("PHONE_AGENT_EXPERIENCE_DIR", "memory/experience"),
             episode_keep=_env_int("PHONE_AGENT_EPISODE_KEEP", 500),
             episode_archive_days=_env_int("PHONE_AGENT_EPISODE_ARCHIVE_DAYS", 90),
+            memory_rag=_env_choice(
+                "PHONE_AGENT_MEMORY_RAG", "shadow", ("off", "shadow", "on")
+            ),
+            embed_model=_env_str(
+                "PHONE_AGENT_EMBED_MODEL",
+                "mlx-community/Qwen3-Embedding-0.6B-4bit-DWQ",
+            ),
+            embed_dim=_env_int("PHONE_AGENT_EMBED_DIM", 1024),
+            vec_db=_env_str("PHONE_AGENT_VEC_DB", "memory/vec.db"),
+            recall_top_k=_env_int("PHONE_AGENT_RECALL_TOP_K", 5),
+            recall_min_score=_env_float("PHONE_AGENT_RECALL_MIN_SCORE", 0.35),
+            recall_decay_lambda=_env_float(
+                "PHONE_AGENT_RECALL_DECAY_LAMBDA", 0.02
+            ),
             max_model_calls=_env_int("PHONE_AGENT_MAX_STEPS", 100),
             max_hitl_resumes=_env_int("PHONE_AGENT_MAX_HITL_RESUMES", 20),
             budget_warn_ratio=_env_float("PHONE_AGENT_BUDGET_WARN_RATIO", 0.8),
@@ -382,5 +406,13 @@ class V2Config:
             raise ValueError("PHONE_AGENT_EPISODE_KEEP must be non-negative")
         if config.episode_archive_days < 0:
             raise ValueError("PHONE_AGENT_EPISODE_ARCHIVE_DAYS must be non-negative")
+        if config.embed_dim <= 0:
+            raise ValueError("PHONE_AGENT_EMBED_DIM must be positive")
+        if config.recall_top_k <= 0:
+            raise ValueError("PHONE_AGENT_RECALL_TOP_K must be positive")
+        if not 0.0 <= config.recall_min_score <= 1.0:
+            raise ValueError("PHONE_AGENT_RECALL_MIN_SCORE must be between 0 and 1")
+        if config.recall_decay_lambda < 0.0:
+            raise ValueError("PHONE_AGENT_RECALL_DECAY_LAMBDA must be non-negative")
 
         return config
