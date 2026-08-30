@@ -489,6 +489,12 @@ def build_actuation_tools(session, config) -> list[StructuredTool]:
                     f"error: 未能启动 {app_name!r}（{resolution.package_name}）——设备返回启动失败，"
                     "可 read_screen 重新观测后重试。",
                 )
+            record_launch = getattr(session, "record_launched_app", None)
+            if callable(record_launch):
+                try:
+                    record_launch(resolution.package_name)
+                except Exception:  # noqa: BLE001 - experience mirror is observe-only
+                    pass
             _record_verified_launch(
                 session,
                 config,

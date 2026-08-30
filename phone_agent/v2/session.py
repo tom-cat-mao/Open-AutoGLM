@@ -145,6 +145,10 @@ class PhoneSession:
         self.finished: bool = False
         self.finish_summary: str | None = None
         self.takeover_reason: str | None = None
+        # Observe-only experience mirrors. Tools append only after device-confirmed
+        # launches; finish records whether its independent verifier actually ran.
+        self.launched_apps: list[str] = []
+        self.finish_verifier: str = "skipped"
         # finish two-step review (S2 §1.2): the first finish() call emits a world
         # mirror (review packet) and sets finish_reviewed=True at finish_review_seq;
         # confirm=True only lands finished when the review is still valid
@@ -176,6 +180,13 @@ class PhoneSession:
         self._last_height: int = 0
 
     # -- app knowledge ---------------------------------------------------
+
+    def record_launched_app(self, package: str) -> None:
+        """Remember one device-confirmed launch for the run outcome sidecar."""
+
+        value = str(package or "").strip()
+        if value:
+            self.launched_apps.append(value)
 
     def _kb_device_id(self) -> str | None:
         """Device namespace for App-KB: configured serial, else the live one.

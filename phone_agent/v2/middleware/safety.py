@@ -588,6 +588,7 @@ class SafetyWarningMiddleware(AgentMiddleware):
         self.config = config
         self._reviewer = reviewer
         self._notify = notify if notify is not None else _default_notify
+        self.warning_count = 0
 
     def _warn_message(self, request: Any) -> ToolMessage | None:
         """Return a warning ToolMessage if the call must be blocked, else ``None``."""
@@ -602,6 +603,7 @@ class SafetyWarningMiddleware(AgentMiddleware):
         )
         if not verdict.should_gate:
             return None
+        self.warning_count += 1
         text = format_warning(name, args, verdict)
         try:
             self._notify(f"[safety] {name}: {verdict.reason} — 已拦截，等待模型确认")

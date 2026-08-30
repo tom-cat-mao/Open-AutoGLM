@@ -66,13 +66,26 @@ def _tool_artifact(result: Any) -> Any:
 class TraceMiddleware(AgentMiddleware):
     """Append redacted model/tool events to a per-run JSONL trace file."""
 
-    def __init__(self, run_id: str, trace_dir: str = ".traces", enabled: bool = True) -> None:
+    def __init__(
+        self,
+        run_id: str,
+        trace_dir: str = ".traces",
+        enabled: bool = True,
+        *,
+        experience_writer: Any | None = None,
+        session: Any | None = None,
+    ) -> None:
         super().__init__()
         self.run_id = run_id
         self.trace_dir = trace_dir
         self.enabled = enabled
         self._step = 0
         self._path: str | None = None
+        # The experience sink is independent of production trace enablement.
+        # It receives only a fixed allowlist after the tool has returned and is
+        # fail-open, so it cannot alter the actor or the device action result.
+        self._experience_writer = experience_writer
+        self._session = session
         if self.enabled:
             os.makedirs(self.trace_dir, exist_ok=True)
             self._path = os.path.join(self.trace_dir, f"{run_id}.jsonl")
@@ -87,6 +100,40 @@ class TraceMiddleware(AgentMiddleware):
         event.setdefault("ts", time.time())
         with open(self._path, "a", encoding="utf-8") as handle:
             handle.write(json.dumps(event, ensure_ascii=False) + "\n")
+
+    def _write_experience(
+        self,
+        tool: str,
+        result: Any = None,
+        *,
+        error: BaseException | None = None,
+        launched_before: int = 0,
+    ) -> None:
+        """Persist a privacy-minimal tool receipt without touching its return."""
+
+        writer = self._experience_writer
+        if writer is None:
+            return
+        try:
+            from phone_agent.v2.experience import classify_tool_result
+
+            launched = list(getattr(self._session, "launched_apps", []) or [])
+            app_package = (
+                launched[-1]
+                if tool == "launch_app" and len(launched) > launched_before
+                else None
+            )
+            writer.append_event(
+                run_id=self.run_id,
+                step=self._step,
+                ts=time.time(),
+                tool=tool,
+                result_class=classify_tool_result(result, error),
+                app_package=app_package,
+                device_scope=getattr(self, "experience_device_scope", "device:unknown"),
+            )
+        except Exception:  # noqa: BLE001 - observability must never alter actor behavior
+            return
 
     # --- model call ---------------------------------------------------------
     def wrap_model_call(self, request, handler):  # noqa: ANN001
@@ -146,6 +193,7 @@ class TraceMiddleware(AgentMiddleware):
             }
         )
         started = time.perf_counter()
+        launched_before = len(getattr(self._session, "launched_apps", []) or [])
         error: str | None = None
         try:
             result = handler(request)
@@ -160,6 +208,7 @@ class TraceMiddleware(AgentMiddleware):
                     "error": _redact_text(error),
                 }
             )
+            self._write_experience(name, error=exc, launched_before=launched_before)
             raise
         content = getattr(result, "content", None)
         artifact = _tool_artifact(result)
@@ -174,6 +223,7 @@ class TraceMiddleware(AgentMiddleware):
                 "error": None,
             }
         )
+        self._write_experience(name, result, launched_before=launched_before)
         return result
 
     async def awrap_tool_call(self, request, handler):  # noqa: ANN001
@@ -189,7 +239,22 @@ class TraceMiddleware(AgentMiddleware):
             }
         )
         started = time.perf_counter()
-        result = await handler(request)
+        launched_before = len(getattr(self._session, "launched_apps", []) or [])
+        try:
+            result = await handler(request)
+        except Exception as exc:  # noqa: BLE001 - trace then re-raise
+            error = f"{type(exc).__name__}: {exc}"
+            self._write(
+                {
+                    "event": "tool_result",
+                    "step": self._step,
+                    "tool": name,
+                    "latency_ms": int((time.perf_counter() - started) * 1000),
+                    "error": _redact_text(error),
+                }
+            )
+            self._write_experience(name, error=exc, launched_before=launched_before)
+            raise
         content = getattr(result, "content", None)
         artifact = _tool_artifact(result)
         self._write(
@@ -203,6 +268,7 @@ class TraceMiddleware(AgentMiddleware):
                 "error": None,
             }
         )
+        self._write_experience(name, result, launched_before=launched_before)
         return result
 
     # --- run end ------------------------------------------------------------
@@ -215,9 +281,20 @@ class TraceMiddleware(AgentMiddleware):
 
 
 def build_trace_middleware(
-    run_id: str, trace_dir: str = ".traces", enabled: bool = True
+    run_id: str,
+    trace_dir: str = ".traces",
+    enabled: bool = True,
+    *,
+    experience_writer: Any | None = None,
+    session: Any | None = None,
 ) -> TraceMiddleware:
-    return TraceMiddleware(run_id, trace_dir=trace_dir, enabled=enabled)
+    return TraceMiddleware(
+        run_id,
+        trace_dir=trace_dir,
+        enabled=enabled,
+        experience_writer=experience_writer,
+        session=session,
+    )
 
 
 __all__ = ["TraceMiddleware", "build_trace_middleware", "redact_args"]

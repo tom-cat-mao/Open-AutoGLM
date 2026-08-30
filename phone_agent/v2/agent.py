@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
+from datetime import datetime
+import time
 from typing import Any, Callable
 
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -134,10 +136,25 @@ class ThinPhoneAgent:
         self.model = build_chat_model(config)
         self.tools = build_tools(self.session, config)
 
+        # Observe-only experience sink. Construction and every write are
+        # fail-open: local memory must never change actor behavior or run outcome.
+        self._experience_writer = None
+        if getattr(config, "experience_enabled", False):
+            try:
+                from phone_agent.v2.experience import ExperienceWriter
+
+                self._experience_writer = ExperienceWriter(
+                    getattr(config, "experience_dir", "memory/experience")
+                )
+            except Exception:  # noqa: BLE001 - optional local persistence
+                self._experience_writer = None
+
         self._trace = build_trace_middleware(
             self.run_id,
             trace_dir=getattr(config, "trace_dir", ".traces"),
             enabled=getattr(config, "trace_enabled", True),
+            experience_writer=self._experience_writer,
+            session=self.session,
         )
         self.trace_path = self._trace.trace_path
 
@@ -366,6 +383,7 @@ class ThinPhoneAgent:
     def run(self, task: str, hitl_handler: Callable[[str], str] = input) -> RunResult:
         from langgraph.types import Command
 
+        ts_start = time.time()
         self._seed_task_doc(task)
         self._prepare_app_knowledge()
         # Reset per-run one-shot flags so a reused agent behaves like a fresh run
@@ -382,6 +400,22 @@ class ThinPhoneAgent:
                 self._compact.reset()
             except Exception:  # noqa: BLE001 - best-effort reset; never block a run
                 pass
+        try:
+            self.session.launched_apps = []
+            self.session.finish_verifier = "skipped"
+        except Exception:  # noqa: BLE001 - duck-typed sessions may be immutable
+            pass
+        if getattr(self, "_safety_warning", None) is not None:
+            self._safety_warning.warning_count = 0
+
+        device_scope = "device:unknown"
+        if getattr(self, "_experience_writer", None) is not None:
+            device_scope = self._experience_device_scope()
+        if (
+            getattr(self, "_experience_writer", None) is not None
+            and getattr(self, "_trace", None) is not None
+        ):
+            self._trace.experience_device_scope = device_scope
 
         config = {"configurable": {"thread_id": self.run_id}}
         payload: Any = {"messages": self._initial_messages(task)}
@@ -391,21 +425,124 @@ class ThinPhoneAgent:
         # is raised (S1 F7); bound it by the HITL-resume budget, orthogonal to the
         # per-invoke model-call budget. ``+1`` accounts for the initial invoke.
         max_resumes = getattr(self.config, "max_hitl_resumes", 20)
-        for attempt in range(max_resumes + 1):
-            result = self.agent.invoke(payload, config)
-            interrupts = self._extract_interrupts(result)
-            if not interrupts:
-                break
-            if attempt == max_resumes:
-                # Still interrupting but the resume budget is spent: terminate.
-                self._hitl_exhausted = True
-                break
-            decisions: list[dict[str, Any]] = []
-            for interrupt in interrupts:
-                decisions.extend(self._decisions_for(interrupt, hitl_handler))
-            payload = Command(resume={"decisions": decisions})
+        try:
+            for attempt in range(max_resumes + 1):
+                result = self.agent.invoke(payload, config)
+                interrupts = self._extract_interrupts(result)
+                if not interrupts:
+                    break
+                if attempt == max_resumes:
+                    # Still interrupting but the resume budget is spent: terminate.
+                    self._hitl_exhausted = True
+                    break
+                decisions: list[dict[str, Any]] = []
+                for interrupt in interrupts:
+                    decisions.extend(self._decisions_for(interrupt, hitl_handler))
+                payload = Command(resume={"decisions": decisions})
+        except Exception as exc:
+            # Preserve the existing exception behavior while still closing the
+            # observe-only episode. The exception text itself is never stored.
+            failed = RunResult(
+                False,
+                f"error:{type(exc).__name__}",
+                getattr(self._trace, "_step", 0),
+                self.trace_path,
+            )
+            self._append_experience_outcome(
+                task,
+                failed,
+                ts_start=ts_start,
+                ts_end=time.time(),
+                device_scope=device_scope,
+            )
+            raise
 
-        return self._build_result(result)
+        run_result = self._build_result(result)
+        self._append_experience_outcome(
+            task,
+            run_result,
+            ts_start=ts_start,
+            ts_end=time.time(),
+            device_scope=device_scope,
+        )
+        return run_result
+
+    def _experience_device_scope(self) -> str:
+        """Resolve the allowed device namespace without exposing other state."""
+
+        serial = getattr(self.config, "device_id", None)
+        if not serial:
+            getter = getattr(self.session, "_kb_device_id", None)
+            if callable(getter):
+                try:
+                    serial = getter()
+                except Exception:  # noqa: BLE001 - experience is fail-open
+                    serial = None
+        return f"device:{serial or 'unknown'}"
+
+    def _append_experience_outcome(
+        self,
+        task: str,
+        result: RunResult,
+        *,
+        ts_start: float,
+        ts_end: float,
+        device_scope: str,
+    ) -> None:
+        """Persist the fixed WP-I1/WP-I2 EpisodeOutcome after result building."""
+
+        writer = getattr(self, "_experience_writer", None)
+        if writer is None:
+            return
+        try:
+            local_start = datetime.fromtimestamp(ts_start).astimezone()
+            hour = local_start.hour
+            if hour < 6:
+                time_of_day = "night"
+            elif hour < 12:
+                time_of_day = "morning"
+            elif hour < 18:
+                time_of_day = "afternoon"
+            else:
+                time_of_day = "evening"
+
+            ledger = getattr(self, "usage_ledger", None)
+            tokens_total = ledger.total if ledger is not None else 0
+            tokens_by_role = ledger.by_role() if ledger is not None else {}
+            launched = list(getattr(self.session, "launched_apps", []) or [])
+            apps = list(dict.fromkeys(str(package) for package in launched if package))
+            takeover = getattr(self.session, "takeover_reason", None)
+            warnings = int(
+                getattr(getattr(self, "_safety_warning", None), "warning_count", 0)
+            )
+            writer.append_outcome(
+                type="episode_outcome",
+                schema_v=1,
+                run_id=self.run_id,
+                ts_start=ts_start,
+                ts_end=ts_end,
+                time_of_day=time_of_day,
+                day_of_week=local_start.weekday(),
+                device_scope=device_scope,
+                goal_text=task,
+                apps=apps,
+                success=result.success,
+                reason=(
+                    "finished"
+                    if result.success
+                    else "takeover"
+                    if takeover
+                    else result.reason
+                ),
+                steps=result.steps,
+                tokens_total=tokens_total,
+                tokens_by_role=tokens_by_role,
+                warnings=warnings,
+                takeover=takeover,
+                verifier=getattr(self.session, "finish_verifier", "skipped"),
+            )
+        except Exception:  # noqa: BLE001 - persistence cannot alter run semantics
+            return
 
     def _build_result(self, result: Any) -> RunResult:
         session = self.session

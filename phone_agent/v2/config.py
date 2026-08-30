@@ -163,6 +163,13 @@ class V2Config:
     app_kb_enabled: bool = True
     app_list_max: int = 40
     dream_mode: str = "manual"
+    # Observe-only run experience store. The explicit directory is independent
+    # of App-KB's memory root so callers may place this privacy-minimal plane on
+    # a separate volume without changing application knowledge.
+    experience_enabled: bool = True
+    experience_dir: str = "memory/experience"
+    episode_keep: int = 500
+    episode_archive_days: int = 90
     # loop
     max_model_calls: int = 100
     # HITL resume budget (S1 §3.3): outer-loop cap on human-in-the-loop resumes,
@@ -293,6 +300,12 @@ class V2Config:
             dream_mode=_env_choice(
                 "PHONE_AGENT_DREAM", "manual", ("off", "auto", "manual")
             ),
+            experience_enabled=(
+                _env_choice("PHONE_AGENT_EXPERIENCE", "on", ("on", "off")) == "on"
+            ),
+            experience_dir=_env_str("PHONE_AGENT_EXPERIENCE_DIR", "memory/experience"),
+            episode_keep=_env_int("PHONE_AGENT_EPISODE_KEEP", 500),
+            episode_archive_days=_env_int("PHONE_AGENT_EPISODE_ARCHIVE_DAYS", 90),
             max_model_calls=_env_int("PHONE_AGENT_MAX_STEPS", 100),
             max_hitl_resumes=_env_int("PHONE_AGENT_MAX_HITL_RESUMES", 20),
             budget_warn_ratio=_env_float("PHONE_AGENT_BUDGET_WARN_RATIO", 0.8),
@@ -365,5 +378,9 @@ class V2Config:
             )
         if config.scope_padding_ratio < 0:
             raise ValueError("PHONE_AGENT_SCOPE_PADDING_RATIO must be non-negative")
+        if config.episode_keep < 0:
+            raise ValueError("PHONE_AGENT_EPISODE_KEEP must be non-negative")
+        if config.episode_archive_days < 0:
+            raise ValueError("PHONE_AGENT_EPISODE_ARCHIVE_DAYS must be non-negative")
 
         return config

@@ -19,6 +19,7 @@ TaskWizard 采用 thin-loop v2：模型每轮观察真实设备、决定一个�
 - **安全预警制**：风险动作先返回警告与选项，模型明确确认后才执行（confirm-to-execute）。
 - **可信完成**：TaskDoc 任务板与流程线持续记录进度；finish 两段式确认，并可交给独立上下文验收器复核。
 - **App-KB 自积累记忆**：同步本机应用名称；验证启动成功后沉淀非敏感别名，并累计既有别名的成功反馈。
+- **经验数据面**：每次 run 结束以严格隐私白名单落盘 episode outcome 与工具结果分类，持久化分角色 token 账本；全程 observe-only，不向 actor 回注。
 - **长任务可控**：token 预算限制成本，两级 auto-compact 在接近上下文窗口时保留关键状态。
 
 ## 快速开始
@@ -37,12 +38,16 @@ cp .env.example .env  # 填写模型网关、模型名与 API Key
 .venv/bin/python main_v2.py "打开设置进入 WLAN" --device-id <serial>
 .venv/bin/python main_v2.py "在飞猪查询 10 月 2 日上海飞桃仙的最低价机票" --max-steps 40
 .venv/bin/python -m phone_agent.web --device-id <serial> --port 8080   # Web 控制台
-.venv/bin/python main_v2.py --dream    # 手动整理本地 App-KB
+.venv/bin/python main_v2.py --dream    # 手动整理本地 App-KB 与经验库
 .venv/bin/pytest tests -q
 ```
 
 Web 控制台默认只监听 `127.0.0.1:8080`：输入任务后可实时查看手机画面、步骤时间线、任务板与终局状态，
 并处理 `ask_user` / `take_over` / hard 档安全确认。Web 是可选观察层，无界面用法不变。
+
+经验数据默认写入 `memory/experience/{events.jsonl,episodes.json}`；前者是追加式事实日志，后者是按
+`run_id` 索引、可重建的物化视图。`PHONE_AGENT_EXPERIENCE=off` 可完全关闭写入；`--dream` 按
+`PHONE_AGENT_EPISODE_KEEP` / `PHONE_AGENT_EPISODE_ARCHIVE_DAYS` 将旧全文折叠为无原文的类别成功率统计。
 
 ## 文档
 

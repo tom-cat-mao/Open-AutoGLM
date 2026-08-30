@@ -77,8 +77,9 @@ def _run_dream(
     light: bool,
     store: Any | None = None,
 ) -> dict[str, Any]:
-    """Consolidate App-KB and always return a printable summary."""
+    """Maintain App-KB and the rule-based experience library."""
 
+    summary: dict[str, Any] = {}
     try:
         from phone_agent.v2.appkb import AppKnowledgeStore
         from phone_agent.v2.dream import consolidate
@@ -86,11 +87,27 @@ def _run_dream(
         active_store = (
             store if store is not None else AppKnowledgeStore(config.memory_dir)
         )
-        return consolidate(
-            active_store, inventory=_device_inventory(config), light=light
+        summary.update(
+            consolidate(active_store, inventory=_device_inventory(config), light=light)
         )
     except Exception as exc:  # noqa: BLE001 - maintenance never masks run outcome
-        return {"status": "skipped", "reason": type(exc).__name__}
+        summary = {"status": "skipped", "reason": type(exc).__name__}
+
+    if getattr(config, "experience_enabled", False):
+        try:
+            from phone_agent.v2.dream import maintain_experience
+
+            summary["experience"] = maintain_experience(
+                getattr(config, "experience_dir", "memory/experience"),
+                keep=getattr(config, "episode_keep", 500),
+                archive_days=getattr(config, "episode_archive_days", 90),
+            )
+        except Exception as exc:  # noqa: BLE001 - maintenance never masks run outcome
+            summary["experience"] = {
+                "status": "skipped",
+                "reason": type(exc).__name__,
+            }
+    return summary
 
 
 def _print_dream_summary(summary: dict[str, Any]) -> None:

@@ -159,6 +159,11 @@ def build_control_tools(session, config) -> list[StructuredTool]:
             # A fresh confirm. Optionally run the independent-context verifier
             # (S2 §4): high-risk goal / hard-contradiction confirm / always-mode.
             verdict = _maybe_verify_finish(session, config)
+            if verdict is not None:
+                try:
+                    session.finish_verifier = "pass" if verdict.approve else "fail"
+                except Exception:  # noqa: BLE001 - outcome mirror cannot affect finish
+                    pass
             if verdict is not None and not verdict.approve:
                 return _handle_reject(session, verdict)
             session.finished = True

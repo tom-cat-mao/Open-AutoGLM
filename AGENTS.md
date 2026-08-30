@@ -6,7 +6,8 @@
 
 TaskWizard is a **thin-loop (v2)** Android phone agent: an LLM drives a real device through
 tools — one model call per step, on LangChain `create_agent`. The harness only supplies tools,
-enforces safety boundaries, keeps context hygienic, and records traces. It does **not** route a
+enforces safety boundaries, keeps context hygienic, and records traces plus privacy-minimal
+experience episodes. It does **not** route a
 workflow. The v1 LangGraph node architecture was deleted; `adb/`, `grounding/`, and
 `config/{policy,app_registry,redact}` are retained as libraries used by `phone_agent/v2/`.
 The optional `phone_agent/web/` NiceGUI frontend observes runs through
@@ -47,6 +48,7 @@ skill before running or monitoring a device task.
 | 13 | **Token Budget (cost ceiling)** | Cost is measured in **tokens** (`middleware/budget.py`): cumulative `AIMessage.usage_metadata` input+output (fallback `len//4`+1500/image), accumulated in `after_model` so it survives compaction. `PHONE_AGENT_TOKEN_BUDGET` (default 1M) hard-stops the run at exhaustion (`_build_result` → `token_budget_exhausted`); `PHONE_AGENT_TOKEN_WARN_REMAINING` (default 100k) injects a one-time L0 remaining-token mirror. `ModelCallLimit` (`PHONE_AGENT_MAX_STEPS`, default **100**) is now only a runaway-loop fuse (`loop_fuse`). |
 | 14 | **Two-Threshold Auto-Compact** | `middleware/compact.py` runs **before** context-pruning. T1 (`PHONE_AGENT_COMPACT_WARN_RATIO`, 0.75 of the window) injects a one-time "write facts into TaskDoc / wind down exploration" hint. T2 (`PHONE_AGENT_COMPACT_TRIGGER_RATIO`, 0.92) calls a text-only LLM (`config.memory_model`→main) for a structured phone hand-off summary and rebuilds the transcript via `REMOVE_ALL_MESSAGES` (system prompt + `[COMPACT_SUMMARY]` + recent tail + fresh-observation hint + pinned TaskDoc). The cut never splits a `tool_use`/`tool_result` pair, never folds pinned blocks; iterative (prior summary fed back), PTL retry ≤3 by dropping the oldest turn-group, **fail-open** (skip the fold if the summariser fails). Window inferred from model name (256k default, `PHONE_AGENT_CONTEXT_WINDOW` override). Master switch `PHONE_AGENT_COMPACT` (default on). |
 | 15 | **Atomic Observation Lifecycle (U1)** | `session.observe()` is the **single observation producer**: one sampling window takes foreground-before → screenshot → accessibility dump (`refresh_marks(shot)` reuses that one screenshot, no 2nd capture) → foreground-after; a mid-capture foreground change retries the window **once**, a second instability raises `ScreenshotError`. Each success bumps `session.epoch` (+1) and mints every external mark id as a **batch badge** `ax_1@e<epoch>` (`MarkCandidate.epoch`/`Observation.epoch`/`ScreenBinding.observation_epoch` set); the provider-internal id is the pre-`@e` prefix (provenance only). `resolve_mark` is the **freshness gate**: a badged id from a superseded batch fails closed (`StaleMarkError`) *before* the marks lookup. An observation failure **invalidates the whole batch** (`marks` cleared, epoch frozen) — no stale addressing authority survives. `locate` mints its hit into the **current** batch (no epoch bump) and its tool returns the **same frame** the visual model ran on (via `last_locate_frame()`, no extra observe). **Parallel tool calls are disabled** (`build_chat_model` sets `model_kwargs={"parallel_tool_calls": False}` so it survives `create_agent`'s per-turn `bind_tools`; `PHONE_AGENT_PARALLEL_TOOL_CALLS` default false, opt-out true). |
+| 16 | **Experience Plane (WP-I1)** | Every completed `run()` appends exactly one fixed-schema `episode_outcome`; tool receipts append fixed-schema `experience_event` records. This plane is **observe-only**: it never changes actor input, routing, tool execution, or result semantics, and all setup/write failures fail open. Only the explicit privacy allowlist may persist; `goal_text` passes `config/redact.py`, while tool args/results, typed text, mark text, screenshots/base64, and model reasoning never enter the schema. `events.jsonl` remains append-only truth; `episodes.json` is a rebuildable run-id view. The WP-I1/WP-I2 episode schema is a hard cross-workstream contract and must not be changed. |
 
 ## Architecture Map
 
@@ -58,8 +60,9 @@ skill before running or monitoring a device task.
 | `phone_agent/v2/tools/` | Perception, mark-bound actuation, TaskDoc updates, finish, user query, and takeover. |
 | `phone_agent/v2/middleware/` | Safety, TaskDoc pinning, image hygiene, compaction, token budget, trace, and diagnostics. |
 | `phone_agent/v2/{taskdoc,resolver,review,verify}.py` | Task state, unique mark resolution, finish review packet, and independent verification. |
+| `phone_agent/v2/experience.py` | Append-only, privacy-allowlisted run/tool experience records and rebuildable episode view. |
 | `phone_agent/v2/{model,config,prompts}.py` | Model transport, `V2Config`, and the thin-loop system contract. |
-| `phone_agent/v2/{appkb,dream}.py` | Persistent local application knowledge, append-only mutation history, verified-launch feedback, and maintenance/consolidation. |
+| `phone_agent/v2/{appkb,dream}.py` | Persistent local application knowledge, verified-launch feedback, and rule-based App-KB/experience maintenance. |
 | `phone_agent/{adb,grounding,config}/` + `device_factory.py` | Retained device, grounding, policy/registry/redaction libraries; v2 consumes them through their contracts. |
 
 The v1 routed LangGraph workflow and its `graph/`, `actions/`, `checkpoint/`, old `agent.py`, old
