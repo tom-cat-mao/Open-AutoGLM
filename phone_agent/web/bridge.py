@@ -8,11 +8,13 @@ event queue and answers HITL prompts through a ``threading.Event``.
 
 from __future__ import annotations
 
+import json
 import queue
 import re
 import threading
 import time
 from dataclasses import asdict
+from pathlib import Path
 from typing import Any, Callable
 
 from langchain.agents.middleware import AgentMiddleware
@@ -25,6 +27,24 @@ from phone_agent.v2.middleware._tokens import estimate_message_tokens, usage_tok
 from phone_agent.v2.middleware.trace import redact_args
 
 _OBS_RE = re.compile(r"\[OBS\]\s+app=(?P<app>.*?)\s+screen#(?P<seq>\d+)")
+
+
+def _read_json_mtime(cache: dict[str, Any], key: str, path: Path) -> Any:
+    """Read a JSON file with mtime caching; None when missing/undecodable."""
+
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        return None
+    cached = cache.get(key)
+    if cached is not None and cached[0] == mtime:
+        return cached[1]
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001 - memory readout is best-effort
+        return None
+    cache[key] = (mtime, data)
+    return data
 _FAIL_PREFIXES = (
     "error:",
     "错误",
@@ -392,6 +412,7 @@ class WebRunBridge:
         self._hitl_answer: str | None = None
         self._agent: Any | None = None
         self._middleware: WebEventMiddleware | None = None
+        self._memory_cache: dict[str, Any] = {}
         self._reset_state()
 
     def _reset_state(self) -> None:
@@ -537,6 +558,37 @@ class WebRunBridge:
         except Exception as exc:  # noqa: BLE001 - maintenance never breaks the UI
             return {"status": "skipped", "reason": type(exc).__name__}
 
+    def memory_snapshot(self) -> dict[str, Any]:
+        """Experience-plane readout for the 记忆 tab (mtime-cached, best-effort).
+
+        Reads the episode materialized view and the shadow-recall stats written
+        by WP-I1/WP-I2. Returns empty sections when the files do not exist yet.
+        """
+
+        config = self._config
+        if config is None:
+            try:
+                config = self._config_factory(self.overrides)
+            except Exception:  # noqa: BLE001 - fall back to defaults below
+                config = None
+        base = getattr(config, "experience_dir", None) or "memory/experience"
+        raw_episodes = _read_json_mtime(
+            self._memory_cache, "episodes", Path(base) / "episodes.json"
+        )
+        episodes: list[dict[str, Any]] = []
+        if isinstance(raw_episodes, dict):
+            episodes = sorted(
+                (dict(item) for item in raw_episodes.values() if isinstance(item, dict)),
+                key=lambda item: float(item.get("ts_start", 0) or 0),
+                reverse=True,
+            )[:30]
+        return {
+            "episodes": episodes,
+            "recall_stats": _read_json_mtime(
+                self._memory_cache, "recall", Path(base) / "recall_stats.json"
+            ),
+        }
+
     def request_stop(self) -> bool:
         """Ask the running task to stop after the current step (soft stop)."""
 
@@ -576,6 +628,7 @@ class WebRunBridge:
             "args": {},
             "model_latency_ms": 0,
             "tool_latency_ms": 0,
+            "screen_seq": None,
         }
         self.steps.append(step)
         self.steps.sort(key=lambda item: item["step"])
@@ -621,6 +674,11 @@ class WebRunBridge:
                 status="success" if ok else "error",
                 tool_latency_ms=int(event.get("latency_ms", 0)),
             )
+            # Link the step to the frame its observation produced (if any), so
+            # the UI can pin that exact screenshot when the step is clicked.
+            match = _OBS_RE.search(str(result_text))
+            if match:
+                step["screen_seq"] = int(match.group("seq"))
         elif kind == "safety_warning":
             step = self._step(int(event.get("step", 0)))
             step.update(result=str(event.get("text", "")), ok=False, status="warning")

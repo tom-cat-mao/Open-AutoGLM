@@ -7,6 +7,7 @@ token breakdown, soft stop, and an App-KB tab with dream.
 
 from __future__ import annotations
 
+import time
 from typing import Any
 
 from nicegui import ui
@@ -61,6 +62,17 @@ _USAGE_ROLE_TEXT = {
     "reviewer": "安全复核",
     "distill": "蒸馏",
 }
+
+_VERIFIER_TEXT = {"pass": "通过", "fail": "未通过", "skipped": "跳过"}
+
+
+def _stat_card(label: str, value: str) -> ui.label:
+    """Small metric card; returns the value label for later updates."""
+
+    with ui.element("div").classes("stat-card"):
+        ui.label(label).classes("text-xs text-slate-500")
+        value_label = ui.label(value).classes("text-lg font-semibold")
+    return value_label
 
 _KIND_TEXT = {
     "device": "设备",
@@ -192,22 +204,30 @@ def create_ui(
 ) -> None:
     """Build the single-page UI and attach it to ``bridge``."""
 
-    ui.colors(primary="#2563eb", positive="#16a34a", negative="#dc2626")
+    ui.colors(primary="#8b5cf6", positive="#22c55e", negative="#ef4444")
+    ui.dark_mode().enable()
     ui.add_css("""
-        body { background: #f4f6f8; color: #172033; }
-        .panel { border: 1px solid #e5e7eb; box-shadow: none; }
-        .phone-frame { background: #111827; border-radius: 1.3rem; padding: .65rem; }
+        body { background: #0b1220; color: #e2e8f0; }
+        .panel { background: #111c30; border: 1px solid #1e2b45; box-shadow: none; }
+        .panel .text-slate-500 { color: #94a3b8; }
+        .panel .text-slate-400 { color: #7d8aa5; }
+        .phone-frame { background: #020617; border-radius: 1.3rem; padding: .65rem; }
         .thumb { cursor: pointer; border: 2px solid transparent; border-radius: .4rem; }
-        .thumb:hover { border-color: #93c5fd; }
+        .thumb:hover { border-color: #8b5cf6; }
         .task-board { max-height: 46vh; overflow-y: auto; white-space: pre-wrap; }
         .step-detail { white-space: pre-wrap; word-break: break-all; }
+        .step-card { border-left: 4px solid grey; border-radius: .4rem;
+                     background: #0d1830; cursor: pointer; }
+        .stat-card { background: #0d1830; border: 1px solid #1e2b45;
+                     border-radius: .6rem; padding: .6rem .9rem; }
+        .q-tab-panels { background: transparent; }
         """)
 
     panel = _ConfigPanel(config)
 
     with ui.header().classes(
-        "items-center gap-3 px-5 py-3 bg-white text-slate-900 border-b"
-    ):
+        "items-center gap-3 px-5 py-3 border-b"
+    ).style("background: #0d1830; border-color: #1e2b45"):
         ui.label("TaskWizard 实时控制台").classes(
             "text-xl font-semibold whitespace-nowrap"
         )
@@ -252,6 +272,7 @@ def create_ui(
                         tab_steps = ui.tab("steps", label="步骤")
                         tab_board = ui.tab("board", label="任务板")
                         tab_kb = ui.tab("appkb", label="应用库")
+                        tab_memory = ui.tab("memory", label="记忆")
                     with ui.tab_panels(tabs, value=tab_steps).classes("w-full"):
                         with ui.tab_panel(tab_steps).classes("p-0 pt-2"):
                             with ui.row().classes(
@@ -261,6 +282,9 @@ def create_ui(
                                 usage_line = ui.label("").classes(
                                     "text-xs text-slate-500"
                                 )
+                            usage_bars = ui.row().classes(
+                                "w-full gap-2 items-center flex-wrap mt-1"
+                            )
                             timeline = ui.column().classes(
                                 "w-full gap-2 max-h-[46vh] overflow-y-auto"
                             )
@@ -291,6 +315,28 @@ def create_ui(
                                 rows=[],
                                 row_key="package",
                             ).classes("w-full max-h-[40vh]")
+                        with ui.tab_panel(tab_memory).classes("p-0 pt-2"):
+                            with ui.row().classes("w-full gap-3 flex-wrap"):
+                                stat_evals = _stat_card("回想评估", "—")
+                                stat_hit = _stat_card("命中率", "—")
+                                stat_false = _stat_card("误命中率", "—")
+                                stat_eps = _stat_card("任务档案", "—")
+                            ui.separator().classes("my-2")
+                            memory_table = ui.table(
+                                columns=[
+                                    {"name": "time", "label": "时间", "field": "time"},
+                                    {"name": "goal", "label": "任务", "field": "goal"},
+                                    {"name": "outcome", "label": "结果", "field": "outcome"},
+                                    {"name": "steps", "label": "步数", "field": "steps"},
+                                    {"name": "tokens", "label": "Token", "field": "tokens"},
+                                    {"name": "verifier", "label": "验收", "field": "verifier"},
+                                ],
+                                rows=[],
+                                row_key="time",
+                            ).classes("w-full max-h-[34vh]")
+                            ui.label(
+                                "回想处于 shadow 模式：只观测不注入；命中率由每次运行的实际行为自动对答案。"
+                            ).classes("text-xs text-slate-500 mt-1")
 
         with ui.card().classes("panel w-full p-4 border-orange-300") as hitl_panel:
             ui.label("需要人工决定").classes("text-lg font-semibold text-orange-700")
@@ -370,9 +416,8 @@ def create_ui(
                         f"{_display(step['tool'])}"
                         + (f"<{step['target']}>" if step.get("target") else "")
                     )
-                with ui.expansion(head).classes("w-full").style(
-                    f"border-left: 4px solid "
-                    f"{color}; border-radius: .4rem; background: #fff"
+                with ui.expansion(head).classes("w-full step-card").style(
+                    f"border-left-color: {color}"
                 ).props("dense") as expansion:
                     with ui.column().classes("gap-1 p-1"):
                         badge_text = (
@@ -397,6 +442,48 @@ def create_ui(
                         ).classes("text-xs text-slate-400")
                 if step["status"] == "running" and not is_closing:
                     expansion.set_value(True)
+                # 点步骤卡片 → 左侧手机画面钉到该步产出的那一帧截图
+                if step.get("screen_seq") is not None:
+                    expansion.on(
+                        "click",
+                        lambda _e, s=step["screen_seq"]: _pin_toggle(selected, s),
+                    )
+
+    def _render_memory() -> None:
+        """记忆 tab：任务档案表 + shadow 回想统计（文件驱动，2s 刷新）。"""
+
+        snapshot = bridge.memory_snapshot()
+        stats = snapshot.get("recall_stats") or {}
+        evaluations = int(stats.get("evaluations", 0) or 0)
+        hits = int(stats.get("hits", 0) or 0)
+        false_hits = int(stats.get("false_hits", 0) or 0)
+        stat_evals.set_text(str(evaluations))
+        stat_hit.set_text(f"{hits / evaluations:.0%}" if evaluations else "—")
+        stat_false.set_text(f"{false_hits / evaluations:.0%}" if evaluations else "—")
+        episodes = snapshot.get("episodes") or []
+        stat_eps.set_text(str(len(episodes)))
+        rows = []
+        for episode in episodes:
+            ts = episode.get("ts_start")
+            time_text = (
+                time.strftime("%m-%d %H:%M", time.localtime(float(ts))) if ts else "—"
+            )
+            goal = str(episode.get("goal_text", ""))
+            rows.append(
+                {
+                    "time": time_text,
+                    "goal": goal[:28] + ("…" if len(goal) > 28 else ""),
+                    "outcome": ("✅ " if episode.get("success") else "❌ ")
+                    + str(episode.get("reason", "")),
+                    "steps": episode.get("steps", 0),
+                    "tokens": episode.get("tokens_total", 0),
+                    "verifier": _VERIFIER_TEXT.get(
+                        str(episode.get("verifier", "")), "—"
+                    ),
+                }
+            )
+        memory_table.rows = rows
+        memory_table.update()
 
     def _render_kb() -> None:
         entries = bridge.kb_entries()
@@ -432,6 +519,7 @@ def create_ui(
                     step["result"],
                     step["latency_ms"],
                     step.get("tool_latency_ms"),
+                    step.get("screen_seq"),
                 )
                 for step in state["steps"]
             ),
@@ -457,14 +545,21 @@ def create_ui(
         step_count.set_text(f"{len(state['steps'])} 步")
 
         usage = state["usage"] or {}
+        total_usage = sum(usage.values())
+        usage_line.set_text(f"共 {total_usage:,}" if usage else "")
+        usage_bars.clear()
         if usage:
-            parts = " · ".join(
-                f"{_USAGE_ROLE_TEXT.get(role, role)} {tokens:,}"
-                for role, tokens in sorted(usage.items())
-            )
-            usage_line.set_text(parts)
-        else:
-            usage_line.set_text("")
+            with usage_bars:
+                for role, tokens in sorted(
+                    usage.items(), key=lambda pair: -pair[1]
+                ):
+                    ui.badge(
+                        _USAGE_ROLE_TEXT.get(role, role), color="primary"
+                    ).props("outline")
+                    ui.linear_progress(
+                        value=tokens / total_usage, show_value=False
+                    ).classes("w-20")
+                    ui.label(f"{tokens:,}").classes("text-xs text-slate-400")
 
         # --- phone screen + history -------------------------------------
         screens = state["screens"]
@@ -511,6 +606,7 @@ def create_ui(
 
     ui.timer(refresh_seconds, render)
     ui.timer(2.0, _render_kb)
+    ui.timer(2.0, _render_memory)
 
 
 def run(
