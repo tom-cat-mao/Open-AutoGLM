@@ -213,7 +213,9 @@ def _record_verified_launch(
         return
 
 
-def _ok_with_obs(head: str, session) -> list[dict]:
+def _ok_with_obs(
+    head: str, session, *, settle_ms: int | None = None
+) -> list[dict]:
     """Merge an ``OK. <head>`` text block with the multimodal observation blocks.
 
     Success paths return a content ``list`` (text + image when the screen
@@ -225,7 +227,10 @@ def _ok_with_obs(head: str, session) -> list[dict]:
     """
 
     mark_tool_ok(session)
-    return [{"type": "text", "text": f"OK. {head}"}, *auto_observation(session)]
+    return [
+        {"type": "text", "text": f"OK. {head}"},
+        *auto_observation(session, settle_ms=settle_ms),
+    ]
 
 
 def _fail(session, message: str) -> str:
@@ -333,6 +338,7 @@ def build_actuation_tools(session, config) -> list[StructuredTool]:
         action: str,
         target_mark_id: str | None,
         target_description: str | None,
+        settle_ms: int | None,
     ) -> str | list[dict]:
         mark, err = _resolve_target(session, target_mark_id, target_description)
         if err is not None:
@@ -344,13 +350,16 @@ def build_actuation_tools(session, config) -> list[StructuredTool]:
         else:
             device.tap(x, y, device_id=device_id)
             verb = "已点击"
-        return _ok_with_obs(f"{verb}{_mark_label(mark)}", session)
+        return _ok_with_obs(
+            f"{verb}{_mark_label(mark)}", session, settle_ms=settle_ms
+        )
 
     def tap(
         target_mark_id: str | None = None,
         target_description: str | None = None,
         intent: str = "",
         note: str | None = None,
+        settle_ms: int | None = None,
         confirm_irreversible: bool = False,
         sensitive: bool = False,
     ) -> str | list[dict]:
@@ -362,6 +371,8 @@ def build_actuation_tools(session, config) -> list[StructuredTool]:
 
         Always pass ``intent`` (this step's goal, e.g. 把出发地改成上海).
         ``note`` optionally records what you discovered this step.
+        ``settle_ms`` replaces the global observation delay.
+        搜索/提交/打开页面后建议 1500-2500ms；普通点击留空。
 
         Safety (wary mode): if the target looks risky (irreversible commit /
         credential field), the call is NOT executed and a warning is returned
@@ -369,13 +380,14 @@ def build_actuation_tools(session, config) -> list[StructuredTool]:
         ``sensitive=true`` to self-declare a call you want double-checked.
         """
 
-        return _tap_like("tap", target_mark_id, target_description)
+        return _tap_like("tap", target_mark_id, target_description, settle_ms)
 
     def long_press(
         target_mark_id: str | None = None,
         target_description: str | None = None,
         intent: str = "",
         note: str | None = None,
+        settle_ms: int | None = None,
         confirm_irreversible: bool = False,
         sensitive: bool = False,
     ) -> str | list[dict]:
@@ -384,9 +396,13 @@ def build_actuation_tools(session, config) -> list[StructuredTool]:
         Always pass ``intent`` (this step's goal). ``note`` optionally records
         what you discovered this step. Resend with ``confirm_irreversible=true``
         after a safety warning; set ``sensitive=true`` to self-declare.
+        ``settle_ms`` replaces the global observation delay.
+        搜索/提交/打开页面后建议 1500-2500ms；普通点击留空。
         """
 
-        return _tap_like("long_press", target_mark_id, target_description)
+        return _tap_like(
+            "long_press", target_mark_id, target_description, settle_ms
+        )
 
     def type_text(
         text: str,
@@ -394,6 +410,7 @@ def build_actuation_tools(session, config) -> list[StructuredTool]:
         target_description: str | None = None,
         intent: str = "",
         note: str | None = None,
+        settle_ms: int | None = None,
         confirm_irreversible: bool = False,
         sensitive: bool = False,
     ) -> str | list[dict]:
@@ -406,6 +423,8 @@ def build_actuation_tools(session, config) -> list[StructuredTool]:
         Always pass ``intent`` (this step's goal). ``note`` optionally records
         what you discovered this step. Resend with ``confirm_irreversible=true``
         after a safety warning; set ``sensitive=true`` to self-declare.
+        ``settle_ms`` replaces the global observation delay.
+        搜索/提交/打开页面后建议 1500-2500ms；普通点击留空。
         """
 
         if target_mark_id or target_description:
@@ -427,12 +446,15 @@ def build_actuation_tools(session, config) -> list[StructuredTool]:
                 restore(ime, device_id=device_id)
 
         preview = text if len(text) <= 32 else text[:31] + "…"
-        return _ok_with_obs(f"已输入 {preview!r}", session)
+        return _ok_with_obs(
+            f"已输入 {preview!r}", session, settle_ms=settle_ms
+        )
 
     def scroll(
         direction: Literal["up", "down", "left", "right"],
         intent: str = "",
         note: str | None = None,
+        settle_ms: int | None = None,
     ) -> str | list[dict]:
         """Scroll the screen by a mid-screen swipe in ``direction``.
 
@@ -441,6 +463,8 @@ def build_actuation_tools(session, config) -> list[StructuredTool]:
 
         Always pass ``intent`` (this step's goal). ``note`` optionally records
         what you discovered this step.
+        ``settle_ms`` replaces the global observation delay.
+        搜索/提交/打开页面后建议 1500-2500ms；普通点击留空。
         """
 
         obs_w, obs_h = _screen_dims(session)
@@ -461,13 +485,14 @@ def build_actuation_tools(session, config) -> list[StructuredTool]:
             )
         sx, sy, ex, ey = moves[direction]
         device.swipe(sx, sy, ex, ey, device_id=device_id)
-        return _ok_with_obs(f"scroll {direction}", session)
+        return _ok_with_obs(f"scroll {direction}", session, settle_ms=settle_ms)
 
     def swipe(
         start: list[int],
         end: list[int],
         intent: str = "",
         note: str | None = None,
+        settle_ms: int | None = None,
     ) -> str | list[dict]:
         """Swipe between two 0-1000 relative points (coordinate fallback).
 
@@ -476,6 +501,8 @@ def build_actuation_tools(session, config) -> list[StructuredTool]:
 
         Always pass ``intent`` (this step's goal). ``note`` optionally records
         what you discovered this step.
+        ``settle_ms`` replaces the global observation delay.
+        搜索/提交/打开页面后建议 1500-2500ms；普通点击留空。
         """
 
         if not (isinstance(start, (list, tuple)) and len(start) == 2):
@@ -486,28 +513,42 @@ def build_actuation_tools(session, config) -> list[StructuredTool]:
         ex, ey = _relative_to_abs(session, int(end[0]), int(end[1]))
         device.swipe(sx, sy, ex, ey, device_id=device_id)
         return _ok_with_obs(
-            f"swipe ({start[0]},{start[1]})->({end[0]},{end[1]})", session
+            f"swipe ({start[0]},{start[1]})->({end[0]},{end[1]})",
+            session,
+            settle_ms=settle_ms,
         )
 
-    def back(intent: str = "", note: str | None = None) -> str | list[dict]:
+    def back(
+        intent: str = "",
+        note: str | None = None,
+        settle_ms: int | None = None,
+    ) -> str | list[dict]:
         """Press the system Back button.
 
         Always pass ``intent`` (this step's goal). ``note`` optionally records
         what you discovered this step.
+        ``settle_ms`` replaces the global observation delay.
+        搜索/提交/打开页面后建议 1500-2500ms；普通点击留空。
         """
 
         device.back(device_id=device_id)
-        return _ok_with_obs("back", session)
+        return _ok_with_obs("back", session, settle_ms=settle_ms)
 
-    def home(intent: str = "", note: str | None = None) -> str | list[dict]:
+    def home(
+        intent: str = "",
+        note: str | None = None,
+        settle_ms: int | None = None,
+    ) -> str | list[dict]:
         """Press the system Home button.
 
         Always pass ``intent`` (this step's goal). ``note`` optionally records
         what you discovered this step.
+        ``settle_ms`` replaces the global observation delay.
+        搜索/提交/打开页面后建议 1500-2500ms；普通点击留空。
         """
 
         device.home(device_id=device_id)
-        return _ok_with_obs("home", session)
+        return _ok_with_obs("home", session, settle_ms=settle_ms)
 
     def wait(
         seconds: float = 2.0,
@@ -529,6 +570,7 @@ def build_actuation_tools(session, config) -> list[StructuredTool]:
         app_name: str,
         intent: str = "",
         note: str | None = None,
+        settle_ms: int | None = None,
         confirm_irreversible: bool = False,
         sensitive: bool = False,
     ) -> str | list[dict]:
@@ -540,6 +582,8 @@ def build_actuation_tools(session, config) -> list[StructuredTool]:
         Always pass ``intent`` (this step's goal). ``note`` optionally records
         what you discovered this step. Resend with ``confirm_irreversible=true``
         after a safety warning; set ``sensitive=true`` to self-declare.
+        ``settle_ms`` replaces the global observation delay.
+        搜索/提交/打开页面后建议 1500-2500ms；普通点击留空。
         """
 
         # Resolve against the device's real installed inventory (fail-closed):
@@ -596,7 +640,9 @@ def build_actuation_tools(session, config) -> list[StructuredTool]:
                 package=resolution.package_name,
             )
             return _ok_with_obs(
-                f"launched {app_name} ({resolution.package_name})", session
+                f"launched {app_name} ({resolution.package_name})",
+                session,
+                settle_ms=settle_ms,
             )
         if status == "ambiguous":
             names = []

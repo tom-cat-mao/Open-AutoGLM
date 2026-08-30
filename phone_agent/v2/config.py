@@ -157,6 +157,11 @@ class V2Config:
     model_max_retries: int = 2
     # device
     device_id: str | None = None
+    # Observation hardening: protected-screen detection plus a short global
+    # settle before each atomic sampling attempt. Per-tool settle_ms overrides
+    # (rather than adds to) observe_settle_ms.
+    black_screen_detect: bool = True
+    observe_settle_ms: int = 300
     # local App-KB (device labels + persistent aliases). PhoneSession opens the
     # store lazily so disabling it performs no filesystem writes.
     memory_dir: str = "memory"
@@ -307,6 +312,13 @@ class V2Config:
             model_timeout=_env_float("PHONE_AGENT_MODEL_TIMEOUT", 180.0),
             model_max_retries=_env_int("PHONE_AGENT_MODEL_MAX_RETRIES", 2),
             device_id=_env_opt_str("PHONE_AGENT_DEVICE_ID"),
+            black_screen_detect=(
+                _env_choice(
+                    "PHONE_AGENT_BLACK_SCREEN_DETECT", "on", ("on", "off")
+                )
+                == "on"
+            ),
+            observe_settle_ms=_env_int("PHONE_AGENT_OBSERVE_SETTLE_MS", 300),
             memory_dir=_env_str("PHONE_AGENT_MEMORY_DIR", "memory"),
             app_kb_enabled=_env_bool_default_true("PHONE_AGENT_APP_KB", True),
             implicit_alias_enabled=_env_bool_default_true(
@@ -402,6 +414,8 @@ class V2Config:
 
         if config.locate_max_size < 0:
             raise ValueError("PHONE_AGENT_LOCATE_MAX_SIZE must be 0 or a positive integer")
+        if config.observe_settle_ms < 0:
+            raise ValueError("PHONE_AGENT_OBSERVE_SETTLE_MS must be non-negative")
         if config.locateanything_context_max_chars < 0:
             raise ValueError(
                 "PHONE_AGENT_LOCATEANYTHING_CONTEXT_MAX_CHARS must be non-negative"
