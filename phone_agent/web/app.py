@@ -1,8 +1,7 @@
 """NiceGUI application for live thin-loop watch and HITL steering (v2).
 
-Design contract: ``docs/web-ui-design.md`` §10. Adds over v1: config drawer
-(per-run overrides), expandable step details, screenshot history, per-role
-token breakdown, soft stop, and an App-KB tab with dream.
+Console v3: designed dark UI — timeline steps with status nodes, click-to-pin
+frames, per-role token bars, memory/capability tab, command-bar header.
 """
 
 from __future__ import annotations
@@ -15,44 +14,157 @@ from nicegui import ui
 from phone_agent.v2.config import V2Config, load_project_env
 from phone_agent.web.bridge import WebRunBridge
 
-_STATUS_TEXT = {
-    "idle": "待命",
-    "starting": "启动中",
-    "running": "运行中",
-    "waiting_hitl": "等待人工",
-    "succeeded": "已完成",
-    "failed": "未完成",
-    "takeover": "已接管/已停止",
-    "budget_exhausted": "Token 预算耗尽",
-    "loop_fuse": "步骤保险丝触发",
-    "error": "运行错误",
+# ---------------------------------------------------------------- design tokens
+
+_ACCENT = "#8b5cf6"
+_BG = "#070b14"
+_PANEL = "#0d1526"
+_PANEL_SOFT = "#111c33"
+_BORDER = "rgba(148,163,184,.10)"
+_TEXT = "#e2e8f0"
+_MUTED = "#64748b"
+
+_CSS = f"""
+:root {{ color-scheme: dark; }}
+body {{ background: {_BG}; color: {_TEXT};
+       font-family: -apple-system, "SF Pro Text", "PingFang SC", "Segoe UI", sans-serif;
+       -webkit-font-smoothing: antialiased; }}
+.mono {{ font-family: ui-monospace, "SF Mono", Menlo, monospace; }}
+
+/* header */
+.tw-header {{ background: rgba(13,21,38,.82); backdrop-filter: blur(12px);
+  border-bottom: 1px solid {_BORDER}; }}
+.tw-mark {{ width: 26px; height: 26px; border-radius: 8px;
+  background: linear-gradient(135deg, #8b5cf6, #6366f1);
+  box-shadow: 0 0 14px rgba(139,92,246,.45); }}
+.tw-cmd {{ border-radius: 10px; }}
+.tw-cmd .q-field__control {{ border-radius: 10px; background: rgba(148,163,184,.06); }}
+.tw-cmd.q-field--focused .q-field__control {{ box-shadow: 0 0 0 2px rgba(139,92,246,.5); }}
+
+/* status pill */
+.tw-pill {{ display:inline-flex; align-items:center; gap:7px; padding:4px 12px;
+  border-radius:999px; font-size:12.5px; font-weight:600;
+  border:1px solid {_BORDER}; background:{_PANEL_SOFT}; }}
+.tw-dot {{ width:8px; height:8px; border-radius:50%; }}
+.tw-dot.live {{ animation: tw-pulse 1.6s ease-in-out infinite; }}
+@keyframes tw-pulse {{ 0%,100% {{ opacity:1; box-shadow:0 0 0 0 currentColor; }}
+  50% {{ opacity:.55; }} }}
+
+/* panels */
+.panel {{ background:{_PANEL}; border:1px solid {_BORDER}; border-radius:14px;
+  box-shadow: 0 1px 2px rgba(2,6,23,.4); }}
+.section-title {{ font-size:12px; font-weight:700; letter-spacing:.08em;
+  text-transform:uppercase; color:{_MUTED}; }}
+
+/* device bezel */
+.phone-frame {{ background: linear-gradient(160deg,#0b1224,#020617);
+  border:1px solid rgba(148,163,184,.16); border-radius:26px; padding:12px;
+  box-shadow: 0 18px 40px -18px rgba(2,6,23,.9), inset 0 1px 0 rgba(255,255,255,.04); }}
+.phone-frame img {{ border-radius:16px; display:block; }}
+.filmstrip {{ scroll-snap-type:x mandatory; scrollbar-width:thin; }}
+.thumb {{ scroll-snap-align:start; cursor:pointer; border-radius:8px;
+  border:2px solid transparent; opacity:.55; transition:all .15s ease; }}
+.thumb:hover {{ opacity:.9; }}
+.thumb.sel {{ border-color:{_ACCENT}; opacity:1; }}
+
+/* timeline */
+.tl {{ position:relative; }}
+.tl-item {{ position:relative; padding-left:46px; padding-bottom:10px; }}
+.tl-item::before {{ content:''; position:absolute; left:16px; top:38px; bottom:-2px;
+  width:2px; background:{_BORDER}; }}
+.tl-item:last-child::before {{ display:none; }}
+.tl-node {{ position:absolute; left:0; top:6px; width:34px; height:34px;
+  border-radius:11px; display:flex; align-items:center; justify-content:center;
+  background:{_PANEL_SOFT}; border:1px solid {_BORDER}; }}
+.tl-node .q-icon {{ font-size:17px; }}
+.tl-item[data-st="running"] .tl-node {{ border-color:{_ACCENT};
+  box-shadow:0 0 12px rgba(139,92,246,.35); animation:tw-pulse 1.6s infinite; }}
+.tl-item[data-st="success"] .tl-node {{ border-color:rgba(52,211,153,.45); color:#34d399; }}
+.tl-item[data-st="error"] .tl-node {{ border-color:rgba(248,113,113,.5); color:#f87171; }}
+.tl-item[data-st="warning"] .tl-node {{ border-color:rgba(251,191,36,.5); color:#fbbf24; }}
+.tl-card {{ background:{_PANEL_SOFT}; border:1px solid {_BORDER}; border-radius:11px;
+  transition:border-color .15s ease; }}
+.tl-card:hover {{ border-color:rgba(139,92,246,.4); }}
+.tl-card .q-item {{ padding:9px 14px; min-height:0; }}
+.tl-card .q-expansion-item__content {{ padding:0; }}
+.chip {{ display:inline-flex; align-items:center; gap:4px; padding:2px 9px;
+  border-radius:6px; font-size:11.5px; font-weight:600;
+  background:rgba(139,92,246,.13); color:#c4b5fd; border:1px solid rgba(139,92,246,.25); }}
+.chip.grey {{ background:rgba(148,163,184,.09); color:#94a3b8;
+  border-color:rgba(148,163,184,.18); }}
+.latbar {{ height:4px; border-radius:2px; background:rgba(148,163,184,.12);
+  overflow:hidden; }}
+.latbar > div {{ height:100%; border-radius:2px; }}
+
+/* tabs */
+.tw-tabs .q-tab {{ text-transform:none; font-weight:600; color:{_MUTED}; }}
+.tw-tabs .q-tab--active {{ color:{_TEXT}; }}
+.q-tab-panels {{ background:transparent; }}
+
+/* tables */
+.q-table {{ background:transparent; box-shadow:none; }}
+.q-table th {{ font-size:11px; letter-spacing:.07em; text-transform:uppercase;
+  color:{_MUTED}; border-bottom:1px solid {_BORDER}; }}
+.q-table td {{ border-bottom:1px solid rgba(148,163,184,.06); font-size:13px; }}
+.q-table tbody tr:hover {{ background:rgba(148,163,184,.05); }}
+
+/* stat cards */
+.stat-card {{ background:{_PANEL_SOFT}; border:1px solid {_BORDER};
+  border-radius:12px; padding:12px 16px; min-width:120px; }}
+.stat-num {{ font-size:22px; font-weight:700; font-family:ui-monospace,Menlo,monospace; }}
+
+/* empty states */
+.empty {{ display:flex; flex-direction:column; align-items:center; gap:8px;
+  padding:36px 0; color:{_MUTED}; }}
+
+/* hitl banner */
+.hitl {{ border:1px solid rgba(251,191,36,.4); background:rgba(251,191,36,.07);
+  border-radius:14px; }}
+
+/* drawer */
+.q-drawer {{ background:{_PANEL}; border-left:1px solid {_BORDER}; }}
+.q-drawer .q-field .q-field__control {{ background:rgba(148,163,184,.06);
+  border-radius:9px; }}
+.step-detail {{ white-space:pre-wrap; word-break:break-all; }}
+"""
+
+_STATUS_META = {
+    "idle": ("待命", "#64748b", False),
+    "starting": ("启动中", "#38bdf8", True),
+    "running": ("运行中", _ACCENT, True),
+    "waiting_hitl": ("等待人工", "#fbbf24", True),
+    "succeeded": ("已完成", "#34d399", False),
+    "failed": ("未完成", "#f87171", False),
+    "takeover": ("已接管/停止", "#fbbf24", False),
+    "budget_exhausted": ("预算耗尽", "#f87171", False),
+    "loop_fuse": ("保险丝触发", "#f87171", False),
+    "error": ("运行错误", "#f87171", False),
 }
 
-_STATUS_COLOR = {
-    "idle": "grey",
-    "starting": "blue-grey",
-    "running": "primary",
-    "waiting_hitl": "orange",
-    "succeeded": "positive",
-    "failed": "negative",
-    "takeover": "orange",
-    "budget_exhausted": "negative",
-    "loop_fuse": "negative",
-    "error": "negative",
+_STEP_META = {
+    "running": ("执行中", _ACCENT),
+    "success": ("成功", "#34d399"),
+    "warning": ("预警", "#fbbf24"),
+    "error": ("失败", "#f87171"),
 }
 
-_STEP_COLOR = {
-    "running": "blue",
-    "success": "green",
-    "warning": "orange",
-    "error": "red",
-}
-
-_STEP_TEXT = {
-    "running": "执行中",
-    "success": "成功",
-    "warning": "预警",
-    "error": "失败",
+_TOOL_ICON = {
+    "tap": "touch_app",
+    "long_press": "touch_app",
+    "type_text": "keyboard",
+    "launch_app": "rocket_launch",
+    "locate": "my_location",
+    "swipe": "swipe",
+    "scroll": "unfold_more",
+    "wait": "hourglass_empty",
+    "finish": "flag",
+    "update_task_doc": "edit_note",
+    "ask_user": "help_outline",
+    "take_over": "pan_tool",
+    "read_screen": "visibility",
+    "press_key": "smart_button",
+    "home": "home",
+    "back": "arrow_back",
 }
 
 _USAGE_ROLE_TEXT = {
@@ -65,20 +177,13 @@ _USAGE_ROLE_TEXT = {
 
 _VERIFIER_TEXT = {"pass": "通过", "fail": "未通过", "skipped": "跳过"}
 
+_KIND_TEXT = {"device": "设备", "alias": "别名", "learned": "学习", "user": "用户"}
 
-def _stat_card(label: str, value: str) -> ui.label:
-    """Small metric card; returns the value label for later updates."""
-
-    with ui.element("div").classes("stat-card"):
-        ui.label(label).classes("text-xs text-slate-500")
-        value_label = ui.label(value).classes("text-lg font-semibold")
-    return value_label
-
-_KIND_TEXT = {
-    "device": "设备",
-    "alias": "别名",
-    "learned": "学习",
-    "user": "用户",
+_CAP_STATE_STYLE = {
+    "active": ("#34d399", "生效"),
+    "shadow": (_ACCENT, "影子"),
+    "off": ("#64748b", "关闭"),
+    "pending": ("#fbbf24", "待岗"),
 }
 
 
@@ -88,11 +193,7 @@ def _display(value: Any, fallback: str = "—") -> str:
 
 
 def _choose_frame(screens: list[dict], selected: dict) -> dict | None:
-    """Main-frame choice: follow the newest frame unless the user pinned one.
-
-    ``selected`` is ``{"seq": int|None, "pinned": bool}`` mutated in place.
-    A pinned frame that rolled out of the history cap releases the pin.
-    """
+    """Main-frame choice: follow the newest frame unless the user pinned one."""
 
     latest = screens[-1] if screens else None
     if not selected["pinned"]:
@@ -105,7 +206,7 @@ def _choose_frame(screens: list[dict], selected: dict) -> dict | None:
 
 
 def _pin_toggle(selected: dict, seq: Any) -> None:
-    """Click a thumbnail: pin it; click the pinned one again: follow latest."""
+    """Click a thumbnail/step: pin it; click the pinned one again: follow latest."""
 
     if selected["pinned"] and selected["seq"] == seq:
         selected.update(seq=None, pinned=False)
@@ -120,54 +221,70 @@ def _mask_url(url: str) -> str:
     return text[:18] + "…" + text[-8:]
 
 
+def _tokens_fmt(n: int | float) -> str:
+    n = int(n)
+    return f"{n / 1000:.1f}k" if n >= 10000 else f"{n:,}"
+
+
+def _stat_card(label: str, accent: str = _ACCENT) -> ui.label:
+    with ui.element("div").classes("stat-card"):
+        ui.label(label).classes("section-title")
+        value = ui.label("—").classes("stat-num").style(f"color:{accent}")
+    return value
+
+
 class _ConfigPanel:
     """Right-drawer config: per-run overrides (never written back to .env)."""
 
     def __init__(self, config: V2Config) -> None:
         self._config = config
-        with ui.drawer("right", bordered=True).classes("p-4 gap-3 w-80") as drawer:
-            ui.label("运行配置（本次生效，不写回 .env）").classes("text-base font-semibold")
+        with ui.drawer("right", bordered=True, value=False).classes(
+            "p-5 gap-3 w-80"
+        ) as drawer:
+            ui.label("运行配置").classes("text-lg font-bold")
+            ui.label("本次生效，不写回 .env").classes("text-xs").style(
+                f"color:{_MUTED}; margin-top:-8px"
+            )
             self.device_id = ui.input(
                 "设备 serial（留空=自动）", value=config.device_id or ""
-            ).props("outlined dense").classes("w-full")
+            ).props("outlined dense dark").classes("w-full")
             self.model_name = ui.input("模型", value=config.model_name).props(
-                "outlined dense"
+                "outlined dense dark"
             ).classes("w-full")
             self.safety_mode = ui.select(
                 ["wary", "off", "hard", "reviewer"],
                 value=getattr(config, "safety_mode", "wary"),
                 label="安全模式",
-            ).props("outlined dense").classes("w-full")
+            ).props("outlined dense dark").classes("w-full")
             self.lang = ui.select(
                 ["cn", "en"], value=getattr(config, "lang", "cn"), label="语言"
-            ).props("outlined dense").classes("w-full")
+            ).props("outlined dense dark").classes("w-full")
             self.max_steps = ui.number(
                 "最大步数（保险丝）", value=getattr(config, "max_model_calls", 100), min=1
-            ).props("outlined dense").classes("w-full")
+            ).props("outlined dense dark").classes("w-full")
             self.token_budget = ui.number(
                 "Token 预算", value=getattr(config, "token_budget", 1_000_000), min=1000
-            ).props("outlined dense").classes("w-full")
+            ).props("outlined dense dark").classes("w-full")
             self.grounding_provider = ui.select(
                 ["hybrid", "accessibility", "locateanything"],
                 value=getattr(config, "grounding_provider", "hybrid"),
                 label="Grounding",
-            ).props("outlined dense").classes("w-full")
+            ).props("outlined dense dark").classes("w-full")
             self.app_kb = ui.switch(
                 "App-KB 记忆", value=bool(getattr(config, "app_kb_enabled", True))
-            )
+            ).props("dark")
             ui.separator()
-            ui.label("当前生效（只读）").classes("text-sm font-medium text-slate-500")
-            ui.label(f"网关：{_mask_url(getattr(config, 'base_url', ''))}").classes(
-                "text-xs text-slate-500 break-all"
-            )
+            ui.label("当前生效（只读）").classes("section-title")
+            ui.label(f"网关 {_mask_url(getattr(config, 'base_url', ''))}").classes(
+                "text-xs mono"
+            ).style(f"color:{_MUTED}")
             ui.label(
                 f"图片保留 {getattr(config, 'image_keep', 2)} 张 · "
                 f"compact {getattr(config, 'compact_warn_ratio', 0.75)}/"
-                f"{getattr(config, 'compact_trigger_ratio', 0.92)} · "
-                f"记忆目录 {getattr(config, 'memory_dir', 'memory')}"
-            ).classes("text-xs text-slate-500")
+                f"{getattr(config, 'compact_trigger_ratio', 0.92)}"
+            ).classes("text-xs").style(f"color:{_MUTED}")
             ui.button("恢复默认", icon="restart_alt", on_click=self.reset).props(
-                "flat dense"
+                "flat dense no-caps"
             )
         self.drawer = drawer
 
@@ -185,8 +302,8 @@ class _ConfigPanel:
 
     def overrides(self) -> dict[str, Any]:
         return {
-            "device_id": str(self.device_id.value or "").strip() or None,
-            "model_name": str(self.model_name.value or "").strip() or None,
+            "device_id": str(self.device_id.value or "") or None,
+            "model_name": str(self.model_name.value or "") or None,
             "safety_mode": self.safety_mode.value,
             "lang": self.lang.value,
             "max_model_calls": int(self.max_steps.value or 100),
@@ -194,6 +311,9 @@ class _ConfigPanel:
             "grounding_provider": self.grounding_provider.value,
             "app_kb_enabled": bool(self.app_kb.value),
         }
+
+
+# ------------------------------------------------------------------ main UI
 
 
 def create_ui(
@@ -204,161 +324,188 @@ def create_ui(
 ) -> None:
     """Build the single-page UI and attach it to ``bridge``."""
 
-    ui.colors(primary="#8b5cf6", positive="#22c55e", negative="#ef4444")
+    ui.colors(primary=_ACCENT, positive="#34d399", negative="#f87171")
     ui.dark_mode().enable()
-    ui.add_css("""
-        body { background: #0b1220; color: #e2e8f0; }
-        .panel { background: #111c30; border: 1px solid #1e2b45; box-shadow: none; }
-        .panel .text-slate-500 { color: #94a3b8; }
-        .panel .text-slate-400 { color: #7d8aa5; }
-        .phone-frame { background: #020617; border-radius: 1.3rem; padding: .65rem; }
-        .thumb { cursor: pointer; border: 2px solid transparent; border-radius: .4rem; }
-        .thumb:hover { border-color: #8b5cf6; }
-        .task-board { max-height: 46vh; overflow-y: auto; white-space: pre-wrap; }
-        .step-detail { white-space: pre-wrap; word-break: break-all; }
-        .step-card { border-left: 4px solid grey; border-radius: .4rem;
-                     background: #0d1830; cursor: pointer; }
-        .stat-card { background: #0d1830; border: 1px solid #1e2b45;
-                     border-radius: .6rem; padding: .6rem .9rem; }
-        .q-tab-panels { background: transparent; }
-        """)
+    ui.add_css(_CSS)
 
     panel = _ConfigPanel(config)
 
-    with ui.header().classes(
-        "items-center gap-3 px-5 py-3 border-b"
-    ).style("background: #0d1830; border-color: #1e2b45"):
-        ui.label("TaskWizard 实时控制台").classes(
-            "text-xl font-semibold whitespace-nowrap"
-        )
+    # --- header ---------------------------------------------------------
+    with ui.header().classes("tw-header items-center gap-3 px-5 py-2.5"):
+        ui.element("div").classes("tw-mark")
+        with ui.column().classes("gap-0"):
+            ui.label("TaskWizard").classes("text-base font-bold leading-5")
+            ui.label("thin-loop 实时控制台").classes("text-[11px] leading-4").style(
+                f"color:{_MUTED}"
+            )
         task_input = (
-            ui.input(placeholder="输入手机任务，例如：打开设置并进入 WLAN")
-            .props("outlined dense clearable")
-            .classes("grow min-w-64")
+            ui.input(placeholder="输入手机任务，回车运行 — 例如：打开设置并进入 WLAN")
+            .props("outlined dense clearable dark")
+            .classes("grow min-w-64 tw-cmd")
         )
-        start_button = ui.button("开始运行", icon="play_arrow").props("unelevated")
-        stop_button = ui.button("停止", icon="stop", color="negative").props("outline")
-        status_badge = ui.badge("待命", color="grey").classes("text-sm")
-        ui.button(icon="settings", on_click=panel.drawer.toggle).props(
+        start_button = ui.button("运行", icon="play_arrow").props(
+            "unelevated no-caps"
+        ).style(
+            f"background:{_ACCENT}; box-shadow:0 4px 16px -4px rgba(139,92,246,.5);"
+            " border-radius:10px; font-weight:600"
+        )
+        stop_button = ui.button("停止", icon="stop").props("flat no-caps text-negative")
+        with ui.element("div").classes("tw-pill") as status_pill:
+            status_dot = ui.element("span").classes("tw-dot").style(
+                f"background:#64748b; color:#64748b"
+            )
+            status_text = ui.label("待命").classes("text-[12.5px]")
+        tokens_chip = ui.label("").classes("mono text-xs").style(f"color:{_MUTED}")
+        ui.button(icon="tune", on_click=panel.drawer.toggle).props(
             "flat round dense"
-        )
+        ).style(f"color:{_MUTED}")
 
-    with ui.column().classes("w-full max-w-[1500px] mx-auto p-4 gap-4"):
-        with ui.row().classes("w-full items-stretch gap-4 flex-wrap lg:flex-nowrap"):
-            with ui.card().classes("panel w-full lg:w-[38%] p-4"):
-                ui.label("手机画面").classes("text-lg font-semibold")
-                screen_meta = ui.label("等待画面").classes("text-sm text-slate-500")
+    # --- main stage ------------------------------------------------------
+    with ui.column().classes("w-full max-w-[1460px] mx-auto p-5 gap-5"):
+        with ui.row().classes("w-full items-stretch gap-5 flex-wrap lg:flex-nowrap"):
+
+            # device rail
+            with ui.element("div").classes("panel w-full lg:w-[370px] p-4"):
+                with ui.row().classes("w-full items-center justify-between"):
+                    ui.label("设备").classes("section-title")
+                    screen_meta = ui.label("—").classes("mono text-[11px]").style(
+                        f"color:{_MUTED}"
+                    )
                 with ui.element("div").classes(
-                    "phone-frame w-full flex justify-center items-start mt-2"
-                ):
-                    # Plain <img> (not Quasar q-img): the box hugs the bitmap
-                    # (height-anchored), so no cropping and no empty black slab.
+                    "phone-frame w-full flex justify-center items-start mt-3"
+                ) as phone_frame:
                     screen_image = ui.element("img").style(
                         "max-height: 62vh; max-width: 100%; width: auto;"
-                        " height: auto; display: block; margin: 0 auto;"
-                        " border-radius: .8rem;"
+                        " height: auto; margin: 0 auto;"
                     )
-                    screen_image.set_visibility(False)
-                no_screen = ui.label("运行后将在这里显示最新截图").classes(
-                    "text-sm text-slate-400 self-center mt-3"
-                )
+                phone_frame.set_visibility(False)
+                with ui.element("div").classes("empty") as no_screen:
+                    ui.icon("smartphone").style("font-size:34px")
+                    ui.label("运行后这里显示实时画面").classes("text-xs")
                 thumbs = ui.row().classes(
-                    "w-full gap-2 mt-2 overflow-x-auto flex-nowrap"
+                    "filmstrip w-full gap-2 mt-3 overflow-x-auto flex-nowrap pb-1"
                 )
 
-            with ui.column().classes("w-full lg:w-[62%] gap-4"):
-                with ui.card().classes("panel w-full p-4"):
-                    with ui.tabs().classes("w-full") as tabs:
-                        tab_steps = ui.tab("steps", label="步骤")
-                        tab_board = ui.tab("board", label="任务板")
-                        tab_kb = ui.tab("appkb", label="应用库")
-                        tab_memory = ui.tab("memory", label="记忆")
-                    with ui.tab_panels(tabs, value=tab_steps).classes("w-full"):
-                        with ui.tab_panel(tab_steps).classes("p-0 pt-2"):
-                            with ui.row().classes(
-                                "w-full items-center justify-between"
-                            ):
-                                step_count = ui.badge("0 步", color="grey")
-                                usage_line = ui.label("").classes(
-                                    "text-xs text-slate-500"
-                                )
-                            usage_bars = ui.row().classes(
-                                "w-full gap-2 items-center flex-wrap mt-1"
-                            )
-                            timeline = ui.column().classes(
-                                "w-full gap-2 max-h-[46vh] overflow-y-auto"
-                            )
-                            with timeline:
-                                ui.label("尚无执行步骤").classes(
-                                    "text-sm text-slate-400"
-                                )
-                        with ui.tab_panel(tab_board).classes("p-0 pt-2"):
-                            task_board = ui.markdown("_等待 TaskDoc…_").classes(
-                                "task-board w-full text-sm"
-                            )
-                        with ui.tab_panel(tab_kb).classes("p-0 pt-2"):
-                            with ui.row().classes(
-                                "w-full items-center justify-between"
-                            ):
-                                kb_count = ui.badge("0 条", color="grey")
-                                dream_button = ui.button(
-                                    "立即整理 (dream)", icon="cleaning_services"
-                                ).props("outline dense")
-                            kb_table = ui.table(
-                                columns=[
-                                    {"name": "label", "label": "名称", "field": "label"},
-                                    {"name": "package", "label": "包名", "field": "package"},
-                                    {"name": "kind", "label": "类型", "field": "kind"},
-                                    {"name": "success_count", "label": "成功次数", "field": "success_count"},
-                                    {"name": "stale", "label": "状态", "field": "stale"},
-                                ],
-                                rows=[],
-                                row_key="package",
-                            ).classes("w-full max-h-[40vh]")
-                        with ui.tab_panel(tab_memory).classes("p-0 pt-2"):
-                            ui.label("能力状态").classes("text-sm font-medium")
-                            caps_row = ui.row().classes("w-full gap-2 flex-wrap mt-1")
-                            ui.separator().classes("my-2")
-                            with ui.row().classes("w-full gap-3 flex-wrap"):
-                                stat_evals = _stat_card("回想评估", "—")
-                                stat_hit = _stat_card("命中率", "—")
-                                stat_false = _stat_card("误命中率", "—")
-                                stat_eps = _stat_card("任务档案", "—")
-                            ui.separator().classes("my-2")
-                            memory_table = ui.table(
-                                columns=[
-                                    {"name": "time", "label": "时间", "field": "time"},
-                                    {"name": "goal", "label": "任务", "field": "goal"},
-                                    {"name": "outcome", "label": "结果", "field": "outcome"},
-                                    {"name": "steps", "label": "步数", "field": "steps"},
-                                    {"name": "tokens", "label": "Token", "field": "tokens"},
-                                    {"name": "verifier", "label": "验收", "field": "verifier"},
-                                ],
-                                rows=[],
-                                row_key="time",
-                            ).classes("w-full max-h-[34vh]")
-                            ui.label(
-                                "回想处于 shadow 模式：只观测不注入；命中率由每次运行的实际行为自动对答案。"
-                            ).classes("text-xs text-slate-500 mt-1")
+            # stage
+            with ui.element("div").classes("panel grow p-4").style(
+                "min-height: 72vh"
+            ):
+                with ui.tabs().classes("w-full tw-tabs") as tabs:
+                    tab_steps = ui.tab("steps", label="步骤")
+                    tab_board = ui.tab("board", label="任务板")
+                    tab_kb = ui.tab("appkb", label="应用库")
+                    tab_memory = ui.tab("memory", label="记忆")
+                ui.separator().style(f"background:{_BORDER}")
+                with ui.tab_panels(tabs, value=tab_steps).classes("w-full"):
 
-        with ui.card().classes("panel w-full p-4 border-orange-300") as hitl_panel:
-            ui.label("需要人工决定").classes("text-lg font-semibold text-orange-700")
+                    with ui.tab_panel(tab_steps).classes("p-0 pt-3"):
+                        with ui.row().classes(
+                            "w-full items-center justify-between mb-2"
+                        ):
+                            step_count = ui.label("0 步").classes(
+                                "mono text-xs font-bold"
+                            ).style(f"color:{_MUTED}")
+                            usage_total = ui.label("").classes("mono text-xs").style(
+                                f"color:{_MUTED}"
+                            )
+                        usage_bars = ui.row().classes(
+                            "w-full gap-2 items-center flex-wrap mb-2"
+                        )
+                        timeline = ui.column().classes(
+                            "tl w-full gap-0 max-h-[52vh] overflow-y-auto pr-1"
+                        )
+
+                    with ui.tab_panel(tab_board).classes("p-0 pt-3"):
+                        task_board = ui.markdown("_等待 TaskDoc…_").classes(
+                            "task-board w-full text-sm"
+                        )
+
+                    with ui.tab_panel(tab_kb).classes("p-0 pt-3"):
+                        with ui.row().classes(
+                            "w-full items-center justify-between mb-2"
+                        ):
+                            kb_count = ui.label("0 条").classes(
+                                "mono text-xs font-bold"
+                            ).style(f"color:{_MUTED}")
+                            dream_button = ui.button(
+                                "立即整理", icon="auto_fix_high"
+                            ).props("outline dense no-caps")
+                        kb_table = ui.table(
+                            columns=[
+                                {"name": "label", "label": "名称", "field": "label"},
+                                {"name": "package", "label": "包名", "field": "package"},
+                                {"name": "kind", "label": "类型", "field": "kind"},
+                                {
+                                    "name": "success_count",
+                                    "label": "成功",
+                                    "field": "success_count",
+                                },
+                                {"name": "stale", "label": "状态", "field": "stale"},
+                            ],
+                            rows=[],
+                            row_key="package",
+                        ).classes("w-full max-h-[42vh]")
+
+                    with ui.tab_panel(tab_memory).classes("p-0 pt-3"):
+                        ui.label("能力状态").classes("section-title")
+                        caps_row = ui.row().classes("w-full gap-2 flex-wrap mt-1 mb-3")
+                        with ui.row().classes("w-full gap-3 flex-wrap"):
+                            stat_eps = _stat_card("任务档案", _ACCENT)
+                            stat_evals = _stat_card("回想评估", "#38bdf8")
+                            stat_hit = _stat_card("命中率", "#34d399")
+                            stat_false = _stat_card("误命中率", "#fbbf24")
+                        memory_table = ui.table(
+                            columns=[
+                                {"name": "time", "label": "时间", "field": "time"},
+                                {"name": "goal", "label": "任务", "field": "goal"},
+                                {
+                                    "name": "outcome",
+                                    "label": "结果",
+                                    "field": "outcome",
+                                },
+                                {"name": "steps", "label": "步数", "field": "steps"},
+                                {"name": "tokens", "label": "Token", "field": "tokens"},
+                                {
+                                    "name": "verifier",
+                                    "label": "验收",
+                                    "field": "verifier",
+                                },
+                            ],
+                            rows=[],
+                            row_key="time",
+                        ).classes("w-full max-h-[36vh] mt-3")
+                        ui.label(
+                            "回想处于 shadow 模式：只观测不注入；命中率由每次运行的实际行为自动对答案。"
+                        ).classes("text-xs mt-2").style(f"color:{_MUTED}")
+
+        # HITL banner
+        with ui.element("div").classes("hitl w-full p-4") as hitl_panel:
+            with ui.row().classes("items-center gap-2 mb-2"):
+                ui.icon("front_hand", color="warning").style("font-size:20px")
+                ui.label("需要人工决定").classes("text-base font-bold")
             hitl_prompt = ui.label().classes("text-sm whitespace-pre-wrap")
-            hitl_answer = (
-                ui.input(placeholder="也可以输入文本回答")
-                .props("outlined dense clearable")
-                .classes("w-full")
-            )
-            with ui.row().classes("gap-2"):
-                approve_button = ui.button("同意", icon="check", color="positive")
-                reject_button = ui.button("拒绝", icon="close", color="negative")
-                answer_button = ui.button("提交回答", icon="send").props("outline")
+            with ui.row().classes("w-full gap-2 mt-3 items-center"):
+                hitl_answer = (
+                    ui.input(placeholder="也可以输入文本回答")
+                    .props("outlined dense clearable dark")
+                    .classes("grow tw-cmd")
+                )
+                approve_button = ui.button("同意", icon="check").props(
+                    "unelevated no-caps color=positive"
+                )
+                reject_button = ui.button("拒绝", icon="close").props(
+                    "flat no-caps text-negative"
+                )
+                answer_button = ui.button("提交", icon="send").props(
+                    "outline no-caps"
+                )
         hitl_panel.set_visibility(False)
 
     last_signature: tuple[Any, ...] | None = None
     selected: dict[str, Any] = {"seq": None, "pinned": False}
     last_run_id: dict[str, Any] = {"id": None}
 
+    # --- actions ---------------------------------------------------------
     def submit_hitl(answer: str) -> None:
         try:
             bridge.submit_hitl(answer)
@@ -373,10 +520,7 @@ def create_ui(
 
     def start_run() -> None:
         try:
-            bridge.start(
-                str(task_input.value or ""),
-                overrides=panel.overrides(),
-            )
+            bridge.start(str(task_input.value or ""), overrides=panel.overrides())
             ui.notify("任务已启动", type="positive")
         except (ValueError, RuntimeError) as exc:
             ui.notify(str(exc), type="warning")
@@ -398,87 +542,137 @@ def create_ui(
 
     dream_button.on("click", run_dream)
 
+    # --- renderers -------------------------------------------------------
     def _render_steps(steps: list[dict[str, Any]]) -> None:
         timeline.clear()
         with timeline:
             if not steps:
-                ui.label("尚无执行步骤").classes("text-sm text-slate-400")
+                with ui.element("div").classes("empty"):
+                    ui.icon("route").style("font-size:30px")
+                    ui.label("尚无执行步骤").classes("text-xs")
                 return
             for step in steps:
-                color = _STEP_COLOR.get(step["status"], "grey")
+                status_key = step["status"]
+                _, color = _STEP_META.get(status_key, ("", _MUTED))
                 is_closing = not step.get("tool") and not step.get("result")
+                icon = _TOOL_ICON.get(step.get("tool", ""), "bolt")
                 if is_closing:
-                    # A final model turn with no tool call is the wrap-up, not a
-                    # work step — label it as such instead of "（未声明意图）".
-                    head = f"#{step['step']} 模型收尾（无工具调用）"
-                    color = _STEP_COLOR["success"]
+                    head_text = f"#{step['step']} 模型收尾"
+                    icon = "check_circle"
+                    status_key = "success"
                 else:
-                    head = (
-                        f"#{step['step']} "
-                        f"{_display(step['intent'], '（未声明意图）')} → "
-                        f"{_display(step['tool'])}"
-                        + (f"<{step['target']}>" if step.get("target") else "")
-                    )
-                with ui.expansion(head).classes("w-full step-card").style(
-                    f"border-left-color: {color}"
-                ).props("dense") as expansion:
-                    with ui.column().classes("gap-1 p-1"):
-                        badge_text = (
-                            "收尾"
-                            if is_closing
-                            else _STEP_TEXT.get(step["status"], step["status"])
+                    head_text = _display(step["intent"], "（未声明意图）")
+                with ui.element("div").classes("tl-item w-full").props(
+                    f'data-st="{status_key}"'
+                ):
+                    with ui.element("div").classes("tl-node"):
+                        ui.icon(icon).style(f"font-size:17px; color:{color}")
+                    with ui.expansion().classes("tl-card w-full").props("dense") as ex:
+                        with ex.add_slot("header"):
+                            with ui.row().classes(
+                                "w-full items-center gap-2 no-wrap"
+                            ):
+                                ui.label(f"#{step['step']}").classes(
+                                    "mono text-[11px]"
+                                ).style(f"color:{_MUTED}")
+                                ui.label(head_text).classes(
+                                    "text-[13.5px] font-semibold ellipsis"
+                                ).style("max-width:46%")
+                                if step.get("tool"):
+                                    ui.label(step["tool"]).classes("chip mono")
+                                if step.get("target"):
+                                    ui.label(
+                                        str(step["target"])[:26]
+                                    ).classes("chip grey mono ellipsis")
+                                ui.space()
+                                lat_total = step.get("model_latency_ms", 0) + step.get(
+                                    "tool_latency_ms", 0
+                                )
+                                if lat_total:
+                                    ui.label(f"{lat_total / 1000:.1f}s").classes(
+                                        "mono text-[11px]"
+                                    ).style(f"color:{_MUTED}")
+                        with ui.column().classes("gap-2 px-4 py-3"):
+                            badge_text = (
+                                "收尾"
+                                if is_closing
+                                else _STEP_META.get(step["status"], ("",))[0]
+                            )
+                            if badge_text:
+                                ui.label(badge_text).classes("chip").style(
+                                    f"color:{color}; border-color:{color}55;"
+                                    f" background:{color}18"
+                                )
+                            if step.get("args"):
+                                ui.label("参数").classes("section-title")
+                                ui.label(str(step["args"])).classes(
+                                    "mono text-[11.5px] step-detail"
+                                ).style(f"color:{_MUTED}")
+                            if step.get("result"):
+                                ui.label("结果").classes("section-title")
+                                ui.label(str(step["result"])).classes(
+                                    "text-[13px] step-detail"
+                                )
+                            model_lat = step.get("model_latency_ms", 0)
+                            tool_lat = step.get("tool_latency_ms", 0)
+                            total = model_lat + tool_lat
+                            if total:
+                                with ui.element("div").classes("latbar w-full"):
+                                    ui.element("div").style(
+                                        f"width:{model_lat / total * 100:.0f}%;"
+                                        f" background:{_ACCENT}"
+                                    )
+                                ui.label(
+                                    f"模型 {model_lat}ms · 工具 {tool_lat}ms"
+                                ).classes("mono text-[10.5px]").style(
+                                    f"color:{_MUTED}"
+                                )
+                    if step["status"] == "running" and not is_closing:
+                        ex.set_value(True)
+                    if step.get("screen_seq") is not None:
+                        ex.on(
+                            "click",
+                            lambda _e, s=step["screen_seq"]: _pin_toggle(selected, s),
                         )
-                        ui.badge(badge_text, color=color)
-                        if step.get("args"):
-                            ui.label("参数").classes("text-xs font-medium text-slate-500")
-                            ui.label(str(step["args"])).classes(
-                                "text-xs step-detail text-slate-600"
-                            )
-                        if step.get("result"):
-                            ui.label("结果").classes("text-xs font-medium text-slate-500")
-                            ui.label(str(step["result"])).classes(
-                                "text-sm step-detail"
-                            )
-                        ui.label(
-                            f"模型 {step.get('model_latency_ms', 0)}ms · "
-                            f"工具 {step.get('tool_latency_ms', 0)}ms"
-                        ).classes("text-xs text-slate-400")
-                if step["status"] == "running" and not is_closing:
-                    expansion.set_value(True)
-                # 点步骤卡片 → 左侧手机画面钉到该步产出的那一帧截图
-                if step.get("screen_seq") is not None:
-                    expansion.on(
-                        "click",
-                        lambda _e, s=step["screen_seq"]: _pin_toggle(selected, s),
-                    )
 
-    _CAP_STATE_STYLE = {
-        "active": ("positive", "生效"),
-        "shadow": ("primary", "影子"),
-        "off": ("grey", "关闭"),
-        "pending": ("warning", "待岗"),
-    }
+    def _render_kb() -> None:
+        entries = bridge.kb_entries()
+        rows = [
+            {
+                "label": entry.get("label", ""),
+                "package": entry.get("package", ""),
+                "kind": _KIND_TEXT.get(entry.get("kind", ""), entry.get("kind", "")),
+                "success_count": entry.get("success_count", 0),
+                "stale": "已失效" if entry.get("stale") else "有效",
+            }
+            for entry in entries
+        ]
+        kb_table.rows = rows
+        kb_table.update()
+        kb_count.set_text(f"{len(rows)} 条")
 
     def _render_caps(caps: list[dict[str, Any]]) -> None:
-        """能力注册表状态（WP-J）：每个能力一个 chip，pending 显示缺什么。"""
-
         caps_row.clear()
         with caps_row:
             if not caps:
-                ui.label("等待首次运行…").classes("text-xs text-slate-500")
+                ui.label("首次运行后显示能力状态").classes("text-xs").style(
+                    f"color:{_MUTED}"
+                )
                 return
             for cap in caps:
                 state_key = str(cap.get("state", ""))
-                color, text = _CAP_STATE_STYLE.get(state_key, ("grey", state_key))
+                color, text = _CAP_STATE_STYLE.get(state_key, ("#64748b", state_key))
                 missing = cap.get("missing_deps") or []
                 label = f"{cap.get('title', cap.get('cap_id'))} · {text}"
                 if missing:
                     label += f"（缺 {', '.join(missing)}）"
-                ui.badge(label, color=color).props("outline")
+                with ui.element("span").classes("chip grey"):
+                    ui.element("span").classes("tw-dot").style(
+                        f"background:{color}; color:{color}"
+                    ).classes("tw-dot" + (" live" if state_key == "shadow" else ""))
+                    ui.label(label)
 
     def _render_memory() -> None:
-        """记忆 tab：任务档案表 + shadow 回想统计（文件驱动，2s 刷新）。"""
-
         snapshot = bridge.memory_snapshot()
         stats = snapshot.get("recall_stats") or {}
         evaluations = int(stats.get("evaluations", 0) or 0)
@@ -500,10 +694,10 @@ def create_ui(
                 {
                     "time": time_text,
                     "goal": goal[:28] + ("…" if len(goal) > 28 else ""),
-                    "outcome": ("✅ " if episode.get("success") else "❌ ")
+                    "outcome": ("✓ " if episode.get("success") else "✗ ")
                     + str(episode.get("reason", "")),
                     "steps": episode.get("steps", 0),
-                    "tokens": episode.get("tokens_total", 0),
+                    "tokens": _tokens_fmt(episode.get("tokens_total", 0)),
                     "verifier": _VERIFIER_TEXT.get(
                         str(episode.get("verifier", "")), "—"
                     ),
@@ -511,22 +705,6 @@ def create_ui(
             )
         memory_table.rows = rows
         memory_table.update()
-
-    def _render_kb() -> None:
-        entries = bridge.kb_entries()
-        rows = [
-            {
-                "label": entry.get("label", ""),
-                "package": entry.get("package", ""),
-                "kind": _KIND_TEXT.get(entry.get("kind", ""), entry.get("kind", "")),
-                "success_count": entry.get("success_count", 0),
-                "stale": "已失效" if entry.get("stale") else "有效",
-            }
-            for entry in entries
-        ]
-        kb_table.rows = rows
-        kb_table.update()
-        kb_count.set_text(f"{len(rows)} 条")
 
     def render() -> None:
         nonlocal last_signature
@@ -567,9 +745,11 @@ def create_ui(
         last_signature = signature
 
         status = state["status"]
-        status_text = _STATUS_TEXT.get(status, status)
-        status_badge.set_text(status_text)
-        status_badge.props(f"color={_STATUS_COLOR.get(status, 'grey')}")
+        text, color, live = _STATUS_META.get(status, (status, "#64748b", False))
+        status_text.set_text(text)
+        status_dot.style(f"background:{color}; color:{color}")
+        status_dot.classes("tw-dot" + (" live" if live else ""), remove="tw-dot")
+        status_pill.style(f"border-color:{color}44")
         running = status in {"starting", "running", "waiting_hitl"}
         start_button.set_enabled(not running)
         stop_button.set_enabled(bool(running))
@@ -577,54 +757,54 @@ def create_ui(
 
         usage = state["usage"] or {}
         total_usage = sum(usage.values())
-        usage_line.set_text(f"共 {total_usage:,}" if usage else "")
+        usage_total.set_text(f"共 {_tokens_fmt(total_usage)}" if usage else "")
+        tokens_chip.set_text(f"⏱ {_tokens_fmt(state['tokens'])} tokens")
         usage_bars.clear()
         if usage:
             with usage_bars:
                 for role, tokens in sorted(
                     usage.items(), key=lambda pair: -pair[1]
                 ):
-                    ui.badge(
-                        _USAGE_ROLE_TEXT.get(role, role), color="primary"
-                    ).props("outline")
-                    ui.linear_progress(
-                        value=tokens / total_usage, show_value=False
-                    ).classes("w-20")
-                    ui.label(f"{tokens:,}").classes("text-xs text-slate-400")
+                    ui.label(_USAGE_ROLE_TEXT.get(role, role)).classes(
+                        "chip grey"
+                    ).style("font-size:10.5px; padding:1px 7px")
+                    with ui.element("div").classes("latbar").style("width:64px"):
+                        ui.element("div").style(
+                            f"width:{tokens / total_usage * 100:.0f}%;"
+                            f" background:{_ACCENT}"
+                        )
+                    ui.label(_tokens_fmt(tokens)).classes("mono text-[10.5px]").style(
+                        f"color:{_MUTED}"
+                    )
 
-        # --- phone screen + history -------------------------------------
+        # --- device frame + filmstrip ------------------------------------
         screens = state["screens"]
         latest = screens[-1] if screens else None
         if state["run_id"] != last_run_id["id"]:
-            # New run: drop any pinned historical frame.
             last_run_id["id"] = state["run_id"]
             selected["seq"] = None
             selected["pinned"] = False
         shown = _choose_frame(screens, selected)
         if shown and shown.get("image"):
             screen_image.props(f'src="{shown["image"]}"')
-            screen_image.set_visibility(True)
+            phone_frame.set_visibility(True)
             no_screen.set_visibility(False)
         else:
-            screen_image.set_visibility(False)
+            phone_frame.set_visibility(False)
             no_screen.set_visibility(True)
         screen_meta.set_text(
-            f"应用：{_display(state['current_app'])} · screen#{_display(state['screen_seq'])}"
-            + (
-                f"（历史帧 #{selected['seq']}，再点一次该缩略图回到最新）"
-                if selected["pinned"] and shown is not latest
-                else ""
-            )
+            f"{_display(state['current_app'])} · #{_display(state['screen_seq'])}"
+            + (" · 已钉住历史帧" if selected["pinned"] and shown is not latest else "")
         )
 
         thumbs.clear()
         with thumbs:
             for item in screens[-12:]:
                 seq = item.get("seq")
-                thumb_cls = "thumb w-14"
+                cls = "thumb w-14"
                 if selected["pinned"] and seq == selected["seq"]:
-                    thumb_cls += " border-blue-500"
-                ui.image(item["image"]).classes(thumb_cls).props("fit=contain").on(
+                    cls += " sel"
+                ui.image(item["image"]).classes(cls).props("fit=contain").on(
                     "click", lambda _e, s=seq: _pin_toggle(selected, s)
                 )
 
