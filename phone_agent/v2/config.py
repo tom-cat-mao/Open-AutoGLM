@@ -189,7 +189,7 @@ class V2Config:
     # without changing actor messages; ``on`` is reserved and currently has no
     # injection behavior. The MLX model itself remains lazy until first embed.
     memory_rag: str = "shadow"
-    embed_model: str = "mlx-community/Qwen3-Embedding-0.6B-4bit-DWQ"
+    embed_model: str = "Qwen/Qwen3-Embedding-0.6B"
     embed_dim: int = 1024
     vec_db: str = "memory/vec.db"
     recall_top_k: int = 5
@@ -352,7 +352,7 @@ class V2Config:
             ),
             embed_model=_env_str(
                 "PHONE_AGENT_EMBED_MODEL",
-                "mlx-community/Qwen3-Embedding-0.6B-4bit-DWQ",
+                "Qwen/Qwen3-Embedding-0.6B",
             ),
             embed_dim=_env_int("PHONE_AGENT_EMBED_DIM", 1024),
             vec_db=_env_str("PHONE_AGENT_VEC_DB", "memory/vec.db"),

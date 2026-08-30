@@ -55,7 +55,7 @@ cp .env.example .env  # 填写模型网关、模型名与 API Key
 ```
 
 RAG 默认 `PHONE_AGENT_MEMORY_RAG=shadow`。向量模型
-`mlx-community/Qwen3-Embedding-0.6B-4bit-DWQ` 仅在索引或非空召回第一次真正 embed 时懒加载；
+`Qwen/Qwen3-Embedding-0.6B` 仅在索引或非空召回第一次真正 embed 时懒加载；
 `PHONE_AGENT_MEMORY_RAG=on` 当前只是保留配置档位，不启用上下文注入。
 
 Web 控制台默认只监听 `127.0.0.1:8080`：输入任务后可实时查看手机画面、步骤时间线、任务板与终局状态，
