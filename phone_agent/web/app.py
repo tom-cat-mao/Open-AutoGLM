@@ -316,6 +316,9 @@ def create_ui(
                                 row_key="package",
                             ).classes("w-full max-h-[40vh]")
                         with ui.tab_panel(tab_memory).classes("p-0 pt-2"):
+                            ui.label("能力状态").classes("text-sm font-medium")
+                            caps_row = ui.row().classes("w-full gap-2 flex-wrap mt-1")
+                            ui.separator().classes("my-2")
                             with ui.row().classes("w-full gap-3 flex-wrap"):
                                 stat_evals = _stat_card("回想评估", "—")
                                 stat_hit = _stat_card("命中率", "—")
@@ -449,6 +452,30 @@ def create_ui(
                         lambda _e, s=step["screen_seq"]: _pin_toggle(selected, s),
                     )
 
+    _CAP_STATE_STYLE = {
+        "active": ("positive", "生效"),
+        "shadow": ("primary", "影子"),
+        "off": ("grey", "关闭"),
+        "pending": ("warning", "待岗"),
+    }
+
+    def _render_caps(caps: list[dict[str, Any]]) -> None:
+        """能力注册表状态（WP-J）：每个能力一个 chip，pending 显示缺什么。"""
+
+        caps_row.clear()
+        with caps_row:
+            if not caps:
+                ui.label("等待首次运行…").classes("text-xs text-slate-500")
+                return
+            for cap in caps:
+                state_key = str(cap.get("state", ""))
+                color, text = _CAP_STATE_STYLE.get(state_key, ("grey", state_key))
+                missing = cap.get("missing_deps") or []
+                label = f"{cap.get('title', cap.get('cap_id'))} · {text}"
+                if missing:
+                    label += f"（缺 {', '.join(missing)}）"
+                ui.badge(label, color=color).props("outline")
+
     def _render_memory() -> None:
         """记忆 tab：任务档案表 + shadow 回想统计（文件驱动，2s 刷新）。"""
 
@@ -530,6 +557,10 @@ def create_ui(
             state["tokens"],
             tuple(sorted((state["usage"] or {}).items())),
             result.get("reason"),
+            tuple(
+                (cap.get("cap_id"), cap.get("state"))
+                for cap in (state.get("capabilities") or [])
+            ),
         )
         if signature == last_signature:
             return
@@ -603,6 +634,8 @@ def create_ui(
         prompt = state["pending_hitl_prompt"]
         hitl_prompt.set_text(prompt or "")
         hitl_panel.set_visibility(bool(prompt))
+
+        _render_caps(state.get("capabilities") or [])
 
     ui.timer(refresh_seconds, render)
     ui.timer(2.0, _render_kb)

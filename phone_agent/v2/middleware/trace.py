@@ -10,9 +10,9 @@ Redaction rules (applied to every logged text value):
     via :func:`phone_agent.config.redact.redact_context_text`;
   * screenshot ``base64`` is never logged — only ``screen_seq`` and byte length.
 
-Events: ``run_start`` / ``model_call`` / ``tool_call`` / ``tool_result`` /
-``run_end`` / ``recall_evaluation`` with a timestamp, step index, tool name,
-redacted args, latency (ms), and error text as applicable.
+Events: ``run_start`` / ``capability_snapshot`` / ``model_call`` / ``tool_call``
+/ ``tool_result`` / ``run_end`` / ``recall_evaluation`` with a timestamp, step
+index, tool name, redacted args, latency (ms), and error text as applicable.
 """
 
 from __future__ import annotations

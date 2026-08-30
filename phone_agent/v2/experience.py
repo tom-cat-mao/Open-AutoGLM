@@ -37,6 +37,7 @@ EPISODE_OUTCOME_FIELDS = (
     "warnings",
     "takeover",
     "verifier",
+    "capabilities",
 )
 EXPERIENCE_EVENT_FIELDS = (
     "type",
@@ -74,6 +75,8 @@ _TOOLS = frozenset(
     }
 )
 _PACKAGE_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0-9_]*)+$")
+_CAPABILITY_ID_PATTERN = re.compile(r"^[a-z][a-z0-9_]*$")
+_CAPABILITY_STATES = frozenset({"active", "off", "shadow", "pending"})
 
 
 def _clean_text(value: Any) -> str:
@@ -95,6 +98,8 @@ def _classify_and_clean(record: Mapping[str, Any]) -> dict[str, Any]:
     * ``apps``/``app_package`` contain package ids, never screen or mark text.
     * success/reason/steps/tokens/warnings/takeover/verifier are bounded outcome
       and accounting signals; any string among them is still regex-redacted.
+    * ``capabilities`` contains only stable ids and one of four bounded states;
+      titles, hook data, configuration values, and dependency details are absent.
     * ``tool`` and ``result_class`` describe execution shape without arguments or
       receipts.  In particular, ``type_text`` text, mark text, screenshots, tool
       result text, and model reasoning have no schema field and are discarded.
@@ -133,6 +138,17 @@ def _classify_and_clean(record: Mapping[str, Any]) -> dict[str, Any]:
                 tokens_by_role[clean_role] = max(0, int(tokens))
         takeover = record.get("takeover")
         clean_takeover = None if takeover is None else _clean_text(takeover)
+        capabilities: dict[str, str] = {}
+        raw_capabilities = record.get("capabilities", {})
+        if isinstance(raw_capabilities, Mapping):
+            for raw_cap_id, raw_state in raw_capabilities.items():
+                cap_id = _clean_text(raw_cap_id).strip()
+                state = _clean_text(raw_state).strip().lower()
+                if (
+                    _CAPABILITY_ID_PATTERN.fullmatch(cap_id)
+                    and state in _CAPABILITY_STATES
+                ):
+                    capabilities[cap_id] = state
 
         # Construct in the exact shared WP-I1/WP-I2 field order.
         return {
@@ -154,6 +170,7 @@ def _classify_and_clean(record: Mapping[str, Any]) -> dict[str, Any]:
             "warnings": max(0, int(record.get("warnings", 0))),
             "takeover": clean_takeover,
             "verifier": verifier,
+            "capabilities": capabilities,
         }
 
     if kind == "experience_event":

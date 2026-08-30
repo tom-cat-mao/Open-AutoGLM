@@ -16,10 +16,14 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass
 from datetime import datetime
+import json
+from pathlib import Path
 import time
 from typing import Any, Callable
 
 from langchain_core.messages import HumanMessage, SystemMessage
+
+from phone_agent.v2.capabilities import CapabilityRegistry, CapabilitySpec
 
 
 @dataclass
@@ -106,6 +110,54 @@ class ThinPhoneAgent:
     ) -> None:
         self.config = config
         self.run_id = uuid.uuid4().hex
+        self.capability_registry = CapabilityRegistry()
+        for spec in (
+            CapabilitySpec(
+                "taskdoc",
+                "TaskDoc",
+                "on" if getattr(config, "taskdoc_enabled", True) else "off",
+            ),
+            CapabilitySpec(
+                "safety", "Safety", getattr(config, "safety_mode", "wary")
+            ),
+            CapabilitySpec("budget", "Token budget", "on"),
+            CapabilitySpec(
+                "compact",
+                "Auto compact",
+                "on" if getattr(config, "compact_enabled", True) else "off",
+            ),
+            CapabilitySpec(
+                "finish_verify",
+                "Finish verifier",
+                getattr(config, "finish_verify", "auto"),
+            ),
+            CapabilitySpec(
+                "app_kb",
+                "App knowledge",
+                "on" if getattr(config, "app_kb_enabled", True) else "off",
+            ),
+            CapabilitySpec(
+                "dream",
+                "Memory maintenance",
+                getattr(config, "dream_mode", "manual"),
+                deps=("app_kb",),
+            ),
+            CapabilitySpec(
+                "experience",
+                "Experience plane",
+                "on"
+                if getattr(config, "experience_enabled", True)
+                else "off",
+            ),
+            CapabilitySpec(
+                "recall",
+                "Memory recall",
+                getattr(config, "memory_rag", "shadow"),
+                deps=("experience",),
+            ),
+        ):
+            self.capability_registry.register(spec)
+        self._run_capabilities: dict[str, str] = {}
 
         # Lazy imports: these modules are produced by the concurrent core/tools
         # worktrees and may not exist when this module is first imported.
@@ -419,6 +471,55 @@ class ThinPhoneAgent:
         except Exception:  # noqa: BLE001 - shadow evaluation never changes run outcome
             pass
 
+    def _app_kb_generation(self) -> dict[str, Any] | None:
+        """Return the App-KB generation marker without mutating the store.
+
+        A future materialized format may expose ``generation`` or ``version``.
+        The current ``kb.json`` is a list, so its nanosecond mtime is the
+        explicitly documented fallback generation identifier.
+        """
+
+        store = getattr(self.session, "app_store", None)
+        path = getattr(store, "kb_path", None)
+        if path is None:
+            path = Path(getattr(self.config, "memory_dir", "memory")) / "app_kb/kb.json"
+        try:
+            path = Path(path)
+            mtime_ns = path.stat().st_mtime_ns
+        except (OSError, TypeError, ValueError):
+            return None
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, TypeError, ValueError, json.JSONDecodeError):
+            payload = None
+        if isinstance(payload, dict):
+            for key in ("generation", "version"):
+                if key in payload:
+                    return {"source": f"kb.json.{key}", "value": payload[key]}
+        return {"source": "kb.json.mtime_ns", "value": mtime_ns}
+
+    def _record_capability_snapshot(self) -> None:
+        """Freeze one run-start composition for trace and episode reuse."""
+
+        try:
+            statuses = self.capability_registry.status()
+            self._run_capabilities = {
+                str(row["cap_id"]): str(row["state"]) for row in statuses
+            }
+        except Exception:  # noqa: BLE001 - architecture telemetry is fail-open
+            self._run_capabilities = {}
+            return
+        try:
+            record = getattr(self._trace, "record_event", None)
+            if callable(record):
+                record(
+                    "capability_snapshot",
+                    capabilities=statuses,
+                    memory_generation=self._app_kb_generation(),
+                )
+        except Exception:  # noqa: BLE001 - trace failure must not erase episode data
+            pass
+
     @staticmethod
     def _extract_interrupts(result: Any) -> tuple[Any, ...]:
         if isinstance(result, dict) and "__interrupt__" in result:
@@ -490,6 +591,7 @@ class ThinPhoneAgent:
             reset_implicit_alias(self.run_id)
         self._seed_task_doc(task)
         self._prepare_app_knowledge()
+        self._record_capability_snapshot()
         self._shadow_recall_start(task)
         # Reset per-run one-shot flags so a reused agent behaves like a fresh run
         # (S1 R7): the HITL-exhaustion terminal flag, the token-budget state, and
@@ -646,6 +748,7 @@ class ThinPhoneAgent:
                 warnings=warnings,
                 takeover=takeover,
                 verifier=getattr(self.session, "finish_verifier", "skipped"),
+                capabilities=dict(getattr(self, "_run_capabilities", {})),
             )
         except Exception:  # noqa: BLE001 - persistence cannot alter run semantics
             return

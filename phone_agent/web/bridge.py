@@ -735,6 +735,14 @@ class WebRunBridge:
                     usage = ledger.by_role()
                 except Exception:  # noqa: BLE001 - usage display is best-effort
                     usage = {}
+            capabilities: list[dict[str, Any]] = []
+            registry = getattr(agent, "capability_registry", None)
+            status = getattr(registry, "status", None)
+            if callable(status):
+                try:
+                    capabilities = status()
+                except Exception:  # noqa: BLE001 - status display is best-effort
+                    capabilities = []
             return {
                 "run_id": self.run_id,
                 "task": self.task,
@@ -751,6 +759,7 @@ class WebRunBridge:
                 ),
                 "tokens": self.tokens,
                 "usage": usage,
+                "capabilities": capabilities,
                 "error": self.error,
             }
 
