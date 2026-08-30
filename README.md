@@ -59,7 +59,8 @@ RAG 默认 `PHONE_AGENT_MEMORY_RAG=shadow`。向量模型
 `PHONE_AGENT_MEMORY_RAG=on` 当前只是保留配置档位，不启用上下文注入。
 
 Web 控制台默认只监听 `127.0.0.1:8080`：输入任务后可实时查看手机画面、步骤时间线、任务板与终局状态，
-并处理 `ask_user` / `take_over` / hard 档安全确认。Web 是可选观察层，无界面用法不变。
+并处理 `ask_user` / `take_over` / hard 档安全确认。任务由独立 runner 子进程执行，控制台重启后会从
+`PHONE_AGENT_RUNS_DIR`（默认 `memory/runs`）回放事件并重连仍存活的任务；无界面用法仍保持进程内直跑。
 
 经验数据默认写入 `memory/experience/{events.jsonl,episodes.json}`；前者是追加式事实日志，后者是按
 `run_id` 索引、可重建的物化视图。`PHONE_AGENT_EXPERIENCE=off` 可完全关闭写入；`--dream` 按

@@ -23,7 +23,7 @@ from typing import Any, Callable
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
-from phone_agent.v2.capabilities import CapabilityRegistry, CapabilitySpec
+from phone_agent.v2.capabilities import build_capability_registry
 
 
 @dataclass
@@ -107,56 +107,11 @@ class ThinPhoneAgent:
         config: Any,
         checkpointer: Any | None = None,
         extra_middleware: list[Any] | None = None,
+        run_id: str | None = None,
     ) -> None:
         self.config = config
-        self.run_id = uuid.uuid4().hex
-        self.capability_registry = CapabilityRegistry()
-        for spec in (
-            CapabilitySpec(
-                "taskdoc",
-                "TaskDoc",
-                "on" if getattr(config, "taskdoc_enabled", True) else "off",
-            ),
-            CapabilitySpec(
-                "safety", "Safety", getattr(config, "safety_mode", "wary")
-            ),
-            CapabilitySpec("budget", "Token budget", "on"),
-            CapabilitySpec(
-                "compact",
-                "Auto compact",
-                "on" if getattr(config, "compact_enabled", True) else "off",
-            ),
-            CapabilitySpec(
-                "finish_verify",
-                "Finish verifier",
-                getattr(config, "finish_verify", "auto"),
-            ),
-            CapabilitySpec(
-                "app_kb",
-                "App knowledge",
-                "on" if getattr(config, "app_kb_enabled", True) else "off",
-            ),
-            CapabilitySpec(
-                "dream",
-                "Memory maintenance",
-                getattr(config, "dream_mode", "manual"),
-                deps=("app_kb",),
-            ),
-            CapabilitySpec(
-                "experience",
-                "Experience plane",
-                "on"
-                if getattr(config, "experience_enabled", True)
-                else "off",
-            ),
-            CapabilitySpec(
-                "recall",
-                "Memory recall",
-                getattr(config, "memory_rag", "shadow"),
-                deps=("experience",),
-            ),
-        ):
-            self.capability_registry.register(spec)
+        self.run_id = str(run_id or uuid.uuid4().hex)
+        self.capability_registry = build_capability_registry(config)
         self._run_capabilities: dict[str, str] = {}
         self._run_memory_generation: dict[str, Any] | None = None
         self._run_capability_snapshot_ready = False
