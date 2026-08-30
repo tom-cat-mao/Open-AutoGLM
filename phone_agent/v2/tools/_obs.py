@@ -19,6 +19,8 @@ hiccuped, and no fake image is ever emitted).
 
 from __future__ import annotations
 
+from phone_agent.v2.session import ScreenshotError, clamp_action_settle_ms
+
 
 def mark_tool_ok(session) -> None:
     """Record that the most recent actuation/perception tool call succeeded.
@@ -70,10 +72,13 @@ def format_marks_digest_fallback(marks: dict, max_items: int = 40) -> str:
     return body + extra
 
 
-def _obs_text(session) -> tuple[str, object]:
+def _obs_text(session, settle_ms: int | None = None) -> tuple[str, object]:
     """Observe once and build the ``[OBS]`` text; return ``(text, observation)``."""
 
-    obs = session.observe()
+    if settle_ms is None:
+        obs = session.observe()
+    else:
+        obs = session.observe(settle_ms=settle_ms)
     current_app = getattr(obs, "current_app", None) or "?"
     seq = getattr(obs, "screen_seq", getattr(session, "screen_seq", 0))
     marks = getattr(obs, "marks", None)
@@ -91,7 +96,7 @@ def _obs_text(session) -> tuple[str, object]:
     return text, obs
 
 
-def auto_observation(session) -> list[dict]:
+def auto_observation(session, settle_ms: int | None = None) -> list[dict]:
     """Return the §7.4 ``[OBS]`` block as a multimodal content list.
 
     Success: ``[{text}, {image_url, screen_seq}]`` — the fresh screenshot is
@@ -104,10 +109,52 @@ def auto_observation(session) -> list[dict]:
     fake image — fail-closed.
     """
 
+    effective_settle_ms = settle_ms
+    clamp_note = ""
+    if settle_ms is not None:
+        effective_settle_ms, was_clamped = clamp_action_settle_ms(settle_ms)
+        if was_clamped:
+            clamp_note = (
+                f"settle_ms 已从 {settle_ms} clamp 为 {effective_settle_ms}ms。"
+            )
+
     try:
-        text, obs = _obs_text(session)
+        text, obs = _obs_text(session, effective_settle_ms)
+    except ScreenshotError as exc:
+        if getattr(exc, "failure_code", None) == "secure_screenshot_blocked":
+            marks = getattr(session, "marks", {})
+            count = len(marks) if hasattr(marks, "__len__") else 0
+            marks_text = (
+                f"accessibility marks 剩 {count} 个"
+                if count
+                else "accessibility marks 为空"
+            )
+            receipt = (
+                "[OBS] 此屏被系统级保护（登录/支付页）。\n"
+                "截图不可用。\n"
+                f"{marks_text}；涉及登录/支付时考虑 take_over 交人处理。"
+            )
+            if clamp_note:
+                receipt += f" {clamp_note}"
+            return [{"type": "text", "text": receipt}]
+        suffix = f" {clamp_note}" if clamp_note else ""
+        return [
+            {
+                "type": "text",
+                "text": f"[OBS] (re-observation failed: {exc}){suffix}",
+            }
+        ]
     except Exception as exc:  # noqa: BLE001 - observation is best-effort here
-        return [{"type": "text", "text": f"[OBS] (re-observation failed: {exc})"}]
+        suffix = f" {clamp_note}" if clamp_note else ""
+        return [
+            {
+                "type": "text",
+                "text": f"[OBS] (re-observation failed: {exc}){suffix}",
+            }
+        ]
+
+    if clamp_note:
+        text += f"\n{clamp_note}"
 
     b64 = getattr(obs, "screenshot_b64", None)
     if not b64:

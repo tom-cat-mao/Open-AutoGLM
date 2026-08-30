@@ -21,7 +21,11 @@ from phone_agent.v2.tools._obs import (
 def build_perception_tools(session, config) -> list[StructuredTool]:
     """Return the perception tool list bound to ``session``."""
 
-    def read_screen(intent: str = "", note: str | None = None) -> list[dict]:
+    def read_screen(
+        intent: str = "",
+        note: str | None = None,
+        settle_ms: int | None = None,
+    ) -> list[dict]:
         """Re-observe the current screen (no side effects on the device).
 
         Returns the current app and a marks digest so you can pick a
@@ -30,10 +34,12 @@ def build_perception_tools(session, config) -> list[StructuredTool]:
 
         Always pass ``intent`` (this step's goal). ``note`` optionally records
         what you discovered this step.
+        ``settle_ms`` replaces the global observation delay.
+        搜索/提交/打开页面后建议 1500-2500ms；普通点击留空。
         """
 
         mark_tool_ok(session)
-        return auto_observation(session)
+        return auto_observation(session, settle_ms=settle_ms)
 
     def locate(
         description: str,

@@ -44,6 +44,17 @@ if TYPE_CHECKING:
 class ScreenshotError(RuntimeError):
     """Raised when the device screenshot is unavailable / invalid."""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        failure_code: str | None = None,
+        failure_message: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.failure_code = failure_code
+        self.failure_message = failure_message
+
 
 class StaleMarkError(RuntimeError):
     """Raised when a requested mark_id is not in the current-screen marks."""
@@ -69,6 +80,15 @@ class LocateAmbiguousError(RuntimeError):
 # provenance; every id the model ever sees carries the batch suffix so a stale
 # reference is structurally detectable in ``resolve_mark``.
 _BADGE_SEP = "@e"
+MAX_ACTION_SETTLE_MS = 5000
+
+
+def clamp_action_settle_ms(settle_ms: int) -> tuple[int, bool]:
+    """Clamp a per-tool observation settle override to [0, 5000] ms."""
+
+    requested = int(settle_ms)
+    effective = max(0, min(MAX_ACTION_SETTLE_MS, requested))
+    return effective, effective != requested
 
 
 def mint_badge(provider_id: str, epoch: int) -> str:
@@ -395,10 +415,27 @@ class PhoneSession:
     def screenshot(self) -> "Screenshot":
         """Capture a device screenshot; raise ScreenshotError if invalid."""
 
-        shot = self.device_factory.get_screenshot(self.config.device_id)
+        try:
+            shot = self.device_factory.get_screenshot(
+                self.config.device_id,
+                black_screen_detect=getattr(
+                    self.config, "black_screen_detect", True
+                ),
+            )
+        except TypeError as exc:
+            # Compatibility for external/test DeviceFactory doubles that still
+            # expose the pre-WP-O two-argument screenshot surface. Production's
+            # DeviceFactory forwards the explicit V2Config switch.
+            if "black_screen_detect" not in str(exc):
+                raise
+            shot = self.device_factory.get_screenshot(self.config.device_id)
         if not getattr(shot, "is_valid", False):
             code = getattr(shot, "failure_code", None) or "screenshot_unavailable"
-            raise ScreenshotError(f"screenshot invalid: {code}")
+            raise ScreenshotError(
+                f"screenshot invalid: {code}",
+                failure_code=code,
+                failure_message=getattr(shot, "failure_message", None),
+            )
         self._last_width = int(shot.width)
         self._last_height = int(shot.height)
         return shot
@@ -436,10 +473,13 @@ class PhoneSession:
             return []
         return list(result.marks)
 
-    def observe(self) -> Observation:
+    def observe(self, settle_ms: int | None = None) -> Observation:
         """Atomic single-producer observation (U1).
 
-        One consistent frame is assembled in a single sampling window:
+        Before every sampling attempt, observation settles for
+        ``config.observe_settle_ms`` by default. An explicit ``settle_ms``
+        replaces that default and is clamped to [0, 5000] ms. The locate-only
+        sampling path intentionally remains immediate. The atomic window stays:
         foreground-before → screenshot → accessibility dump (marks, reusing that
         one screenshot) → foreground-after. If the foreground component changed
         between the before/after brackets the frame is inconsistent (the screen
@@ -453,8 +493,17 @@ class PhoneSession:
         stays as the pre-badge prefix (provenance only).
         """
 
+        if settle_ms is None:
+            effective_settle_ms = int(
+                getattr(self.config, "observe_settle_ms", 300) or 0
+            )
+        else:
+            effective_settle_ms, _was_clamped = clamp_action_settle_ms(settle_ms)
+
         last_error: Exception | None = None
         for _attempt in range(2):
+            if effective_settle_ms > 0:
+                time.sleep(effective_settle_ms / 1000.0)
             try:
                 before = self._foreground_observation()
                 shot = self.screenshot()

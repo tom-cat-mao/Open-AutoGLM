@@ -26,13 +26,21 @@ class Screenshot:
     failure_message: str | None = None
 
 
-def get_screenshot(device_id: str | None = None, timeout: int = 10) -> Screenshot:
+def get_screenshot(
+    device_id: str | None = None,
+    timeout: int = 10,
+    *,
+    black_screen_detect: bool | None = None,
+) -> Screenshot:
     """
     Capture a screenshot from the connected Android device.
 
     Args:
         device_id: Optional ADB device ID for multi-device setups.
         timeout: Timeout in seconds for screenshot operations.
+        black_screen_detect: Whether a decoded uniformly black image should be
+            treated as a system-protected screen. ``None`` reads
+            ``PHONE_AGENT_BLACK_SCREEN_DETECT`` (default on).
 
     Returns:
         Screenshot object containing base64 data and dimensions.
@@ -60,7 +68,7 @@ def get_screenshot(device_id: str | None = None, timeout: int = 10) -> Screensho
             return _create_fallback_screenshot(
                 is_sensitive=True,
                 failure_code="secure_screenshot_blocked",
-                failure_message="Android blocked screenshot capture for a secure screen",
+                failure_message="系统级保护页（登录/支付等），截图不可用",
             )
         if result.returncode != 0:
             return _create_fallback_screenshot(
@@ -87,6 +95,14 @@ def get_screenshot(device_id: str | None = None, timeout: int = 10) -> Screensho
         # Read and encode image
         img = Image.open(temp_path)
         width, height = img.size
+        if _black_screen_detect_enabled(black_screen_detect) and _is_uniform_black(
+            img
+        ):
+            return _create_fallback_screenshot(
+                is_sensitive=True,
+                failure_code="secure_screenshot_blocked",
+                failure_message="系统级保护页（登录/支付等），截图不可用",
+            )
 
         buffered = BytesIO()
         mime_type = _save_model_image(img, buffered)
@@ -129,6 +145,29 @@ def _get_adb_prefix(device_id: str | None) -> list:
     if device_id:
         return ["adb", "-s", device_id]
     return ["adb"]
+
+
+def _black_screen_detect_enabled(override: bool | None) -> bool:
+    """Resolve the opt-out black-screen detector switch."""
+
+    if override is not None:
+        return bool(override)
+    raw = os.getenv("PHONE_AGENT_BLACK_SCREEN_DETECT")
+    if raw is None or not raw.strip():
+        return True
+    return raw.strip().lower() != "off"
+
+
+def _is_uniform_black(img: Image.Image) -> bool:
+    """Return True when every visible colour channel has a maximum <= 4.
+
+    Android screencap PNGs may include an opaque alpha channel, so the test is
+    intentionally performed after conversion to RGB. Any real highlight, text,
+    or icon above the near-black threshold keeps a dark-mode screen valid.
+    """
+
+    extrema = img.convert("RGB").getextrema()
+    return all(channel_max <= 4 for _channel_min, channel_max in extrema)
 
 
 def _save_model_image(img: Image.Image, buffered: BytesIO) -> str:

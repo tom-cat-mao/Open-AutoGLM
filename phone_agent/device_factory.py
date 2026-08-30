@@ -65,9 +65,22 @@ class DeviceFactory:
                 raise ValueError(f"Unknown device type: {self.device_type}")
         return self._module
 
-    def get_screenshot(self, device_id: str | None = None, timeout: int = 10):
+    def get_screenshot(
+        self,
+        device_id: str | None = None,
+        timeout: int = 10,
+        *,
+        black_screen_detect: bool | None = None,
+    ):
         """Get screenshot from device."""
-        return self.module.get_screenshot(device_id, timeout)
+        try:
+            return self.module.get_screenshot(
+                device_id, timeout, black_screen_detect=black_screen_detect
+            )
+        except TypeError as exc:
+            if "black_screen_detect" not in str(exc):
+                raise
+            return self.module.get_screenshot(device_id, timeout)
 
     def get_screen_marks(
         self,
