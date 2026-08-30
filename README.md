@@ -10,7 +10,7 @@ TaskWizard 采用 thin-loop v2：模型每轮观察真实设备、决定一个�
 
 ## Demo
 
-![TaskWizard Web 控制台](pages/assets/console.png)
+![TaskWizard 控制台：真实运行中的步骤时间线与接管终态](pages/assets/console-run.png)
 
 ## Features
 
@@ -18,10 +18,10 @@ TaskWizard 采用 thin-loop v2：模型每轮观察真实设备、决定一个�
 - **高精度视觉定位**：`locate` 默认把原分辨率截图交给视觉定位器，优先利用“外观 + 可见文字 + 相对位置”提示；歧义时可用当前批次的容器或上下锚点 mark 做原图 scope 裁剪，结果仿射回映射为全屏 mark。
 - **安全预警制**：风险动作先返回警告与选项，模型明确确认后才执行（confirm-to-execute）。
 - **可信完成**：TaskDoc 任务板与流程线持续记录进度；finish 两段式确认，并可交给独立上下文验收器复核。
-- **App-KB 自积累记忆**：同步本机应用名称；验证启动成功后沉淀非敏感别名，并累计既有别名的成功反馈。
+- **App-KB 自积累记忆**：同步本机应用名称；验证启动成功后沉淀非敏感别名，并累计成功反馈。同一 run 中未知中文名失败、回执列出的包名随后启动成功时，自动把该中文名写为 `learned` 别名（隐式纠正，证据闭环）。
 - **经验数据面**：每次 run 结束以严格隐私白名单落盘 episode outcome 与工具结果分类，持久化分角色 token 账本；全程 observe-only，不向 actor 回注。
 - **RAG shadow 召回**：sqlite-vec + FTS5 混合检索历史 episode 与 App 别名；默认只写 trace 并按实际启动应用统计命中率，绝不注入 actor 上下文。
-- **App-KB 自积累记忆**：同步本机应用名称；验证启动成功后沉淀非敏感别名，并累计既有别名的成功反馈。同一 run 中未知中文名失败后，只有回执列出的包名随后启动成功，才会把该中文名写为 `learned` 别名。
+- **能力注册表**：每个能力（App-KB/dream/经验/回想/安全/压缩/验收…）有稳定 id、档位与依赖声明；依赖缺失可见待岗；每次 run 的能力快照写入 trace 与 episode，可审计可复盘。
 - **长任务可控**：token 预算限制成本，两级 auto-compact 在接近上下文窗口时保留关键状态。
 
 ## 快速开始

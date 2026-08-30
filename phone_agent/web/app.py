@@ -6,6 +6,7 @@ frames, per-role token bars, memory/capability tab, command-bar header.
 
 from __future__ import annotations
 
+import re
 import time
 from typing import Any
 
@@ -102,11 +103,24 @@ body {{ background: {_BG}; color: {_TEXT};
 .q-tab-panels {{ background:transparent; }}
 
 /* tables */
-.q-table {{ background:transparent; box-shadow:none; }}
+.q-table__container, .q-table {{ background: transparent; box-shadow: none;
+  border: none; }}
+.q-table__card {{ background: transparent; box-shadow: none; }}
 .q-table th {{ font-size:11px; letter-spacing:.07em; text-transform:uppercase;
-  color:{_MUTED}; border-bottom:1px solid {_BORDER}; }}
-.q-table td {{ border-bottom:1px solid rgba(148,163,184,.06); font-size:13px; }}
+  color:{_MUTED}; border-bottom:1px solid {_BORDER}; background:transparent; }}
+.q-table td {{ border-bottom:1px solid rgba(148,163,184,.06); font-size:13px;
+  background:transparent; }}
 .q-table tbody tr:hover {{ background:rgba(148,163,184,.05); }}
+.q-table__bottom {{ border-top:1px solid {_BORDER}; color:{_MUTED}; }}
+
+/* task board */
+.board-goal {{ background:{_PANEL_SOFT}; border:1px solid {_BORDER};
+  border-radius:11px; padding:12px 16px; }}
+.board-item {{ display:flex; gap:10px; padding:7px 4px; align-items:flex-start;
+  border-bottom:1px solid rgba(148,163,184,.06); }}
+.board-flow {{ font-family:ui-monospace,Menlo,monospace; font-size:11.5px;
+  color:{_MUTED}; padding:3px 0; border-bottom:1px dashed rgba(148,163,184,.08);
+  white-space:pre-wrap; word-break:break-all; }}
 
 /* stat cards */
 .stat-card {{ background:{_PANEL_SOFT}; border:1px solid {_BORDER};
@@ -176,6 +190,84 @@ _USAGE_ROLE_TEXT = {
 }
 
 _VERIFIER_TEXT = {"pass": "通过", "fail": "未通过", "skipped": "跳过"}
+
+_BOARD_ITEM_RE = re.compile(r"^- \[(?P<status>\w+)\] (?P<ident>\S+): (?P<rest>.*)$")
+_BOARD_NOTE_RE = re.compile(r"（(?:证据|原因)：(?P<note>.*)）$|\((?:evidence|reason): (?P<note_en>.*)\)$")
+_BOARD_SECTIONS = {
+    "goal": ("目标", "Goal"),
+    "items": ("路线", "Plan"),
+    "flow": ("流程线", "Flow"),
+}
+
+
+def _parse_board(text: str) -> dict[str, Any]:
+    """Parse the pinned TaskDoc block into structured sections for the 任务板 tab.
+
+    Input format (see ``taskdoc.render`` + ``TaskDocMiddleware._flow_block``):
+    ``## 目标/Goal`` → ``base: …`` + ``- amendment``; ``## 路线/Plan`` →
+    ``- [status] id: content（证据/原因：…）``; ``## 流程线/Flow…`` → ``#N …`` lines.
+    Unknown shapes land in ``raw`` so nothing is ever lost.
+    """
+
+    out: dict[str, Any] = {"goal": "", "amendments": [], "items": [], "flow": [], "raw": ""}
+    if not text or not text.strip():
+        return out
+    lines = [ln.rstrip() for ln in str(text).splitlines()]
+    section: str | None = None
+    in_amendments = False
+    for ln in lines:
+        stripped = ln.strip()
+        if not stripped or stripped == "[TASK_DOC]":
+            continue
+        header = re.match(r"^##\s*(.+)$", stripped)
+        if header:
+            title = header.group(1)
+            section = None
+            for key, names in _BOARD_SECTIONS.items():
+                if any(title.startswith(name) for name in names):
+                    section = key
+                    break
+            in_amendments = False
+            if section is None:
+                out["raw"] += ln + "\n"
+            continue
+        if section == "goal":
+            if stripped.startswith(("base:", "Base:")):
+                out["goal"] = stripped.split(":", 1)[1].strip()
+            elif stripped.startswith(("补充", "Amendments")):
+                in_amendments = True
+            elif in_amendments and stripped.startswith("- "):
+                out["amendments"].append(stripped[2:])
+            else:
+                out["raw"] += ln + "\n"
+        elif section == "items":
+            match = _BOARD_ITEM_RE.match(stripped)
+            if match:
+                rest = match.group("rest")
+                note = ""
+                note_match = _BOARD_NOTE_RE.search(rest)
+                if note_match:
+                    note = note_match.group("note") or note_match.group("note_en") or ""
+                    rest = rest[: note_match.start()].rstrip()
+                out["items"].append(
+                    {
+                        "status": match.group("status"),
+                        "id": match.group("ident"),
+                        "content": rest,
+                        "note": note,
+                    }
+                )
+            else:
+                out["raw"] += ln + "\n"
+        elif section == "flow":
+            if stripped.startswith("#"):
+                out["flow"].append(stripped)
+            else:
+                out["raw"] += ln + "\n"
+        else:
+            out["raw"] += ln + "\n"
+    out["raw"] = out["raw"].strip()
+    return out
 
 _KIND_TEXT = {"device": "设备", "alias": "别名", "learned": "学习", "user": "用户"}
 
@@ -416,8 +508,8 @@ def create_ui(
                         )
 
                     with ui.tab_panel(tab_board).classes("p-0 pt-3"):
-                        task_board = ui.markdown("_等待 TaskDoc…_").classes(
-                            "task-board w-full text-sm"
+                        board_box = ui.column().classes(
+                            "w-full gap-3 max-h-[52vh] overflow-y-auto pr-1"
                         )
 
                     with ui.tab_panel(tab_kb).classes("p-0 pt-3"):
@@ -635,6 +727,63 @@ def create_ui(
                             lambda _e, s=step["screen_seq"]: _pin_toggle(selected, s),
                         )
 
+    _BOARD_STATUS_ICON = {
+        "completed": ("check_circle", "#34d399"),
+        "in_progress": ("radio_button_checked", _ACCENT),
+        "pending": ("radio_button_unchecked", "#64748b"),
+        "blocked": ("block", "#f87171"),
+    }
+
+    def _render_board(text: str) -> None:
+        """任务板：结构化渲染 TaskDoc——目标卡 + 路线检查单 + 紧凑流程线。"""
+
+        board_box.clear()
+        parsed = _parse_board(text)
+        with board_box:
+            if not any(
+                [parsed["goal"], parsed["amendments"], parsed["items"], parsed["flow"]]
+            ):
+                with ui.element("div").classes("empty"):
+                    ui.icon("assignment").style("font-size:30px")
+                    ui.label("等待任务板…").classes("text-xs")
+                return
+            if parsed["goal"] or parsed["amendments"]:
+                ui.label("目标").classes("section-title")
+                with ui.element("div").classes("board-goal w-full"):
+                    if parsed["goal"]:
+                        ui.label(parsed["goal"]).classes("text-[14px] font-semibold")
+                    for amendment in parsed["amendments"]:
+                        ui.label(f"· {amendment}").classes("text-xs mt-1").style(
+                            f"color:{_MUTED}"
+                        )
+            if parsed["items"]:
+                ui.label("路线").classes("section-title")
+                with ui.column().classes("w-full gap-0"):
+                    for item in parsed["items"]:
+                        icon, color = _BOARD_STATUS_ICON.get(
+                            item["status"], ("radio_button_unchecked", "#64748b")
+                        )
+                        with ui.row().classes("board-item w-full no-wrap"):
+                            ui.icon(icon).style(f"font-size:17px; color:{color}")
+                            ui.label(item["id"]).classes("mono text-[11px]").style(
+                                f"color:{_MUTED}; min-width:18px"
+                            )
+                            with ui.column().classes("gap-0 grow"):
+                                ui.label(item["content"]).classes("text-[13px]")
+                                if item["note"]:
+                                    ui.label(item["note"]).classes(
+                                        "text-[11.5px]"
+                                    ).style(f"color:{_MUTED}")
+            if parsed["flow"]:
+                ui.label("流程线").classes("section-title mt-1")
+                with ui.column().classes("w-full gap-0"):
+                    for line in parsed["flow"]:
+                        ui.label(line).classes("board-flow")
+            if parsed["raw"]:
+                ui.label(parsed["raw"]).classes(
+                    "text-xs whitespace-pre-wrap"
+                ).style(f"color:{_MUTED}")
+
     def _render_kb() -> None:
         entries = bridge.kb_entries()
         rows = [
@@ -809,7 +958,7 @@ def create_ui(
                 )
 
         _render_steps(state["steps"])
-        task_board.set_content(state["task_board"] or "_等待 TaskDoc…_")
+        _render_board(state["task_board"] or "")
 
         prompt = state["pending_hitl_prompt"]
         hitl_prompt.set_text(prompt or "")
