@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass, replace
+import time
 from typing import TYPE_CHECKING, Any
 
 from phone_agent.device_factory import DeviceFactory, get_device_factory
@@ -131,6 +132,14 @@ class PhoneSession:
         # imports and filesystem creation until sync or prompt lookup needs it.
         self.app_store: "AppKnowledgeStore | None" = None
         self.app_knowledge: "AppKnowledge | None" = None
+        # WP-I3 run-local launch correction evidence. Unknown launch attempts
+        # record only package names that were actually rendered in that failure
+        # receipt; a later verified package launch may consume exact matches.
+        # This state is reset at every ThinPhoneAgent.run() boundary and is never
+        # itself persisted.
+        self.implicit_alias_run_id: str = ""
+        self._failed_launches: list[dict[str, Any]] = []
+        self._implicit_alias_written_terms: set[str] = set()
         # Cached device serial resolved via adb when config.device_id is unset
         # (the single-device default); None means "not resolved yet" (retried).
         self._kb_serial: str | None = None
@@ -187,6 +196,75 @@ class PhoneSession:
         value = str(package or "").strip()
         if value:
             self.launched_apps.append(value)
+    @staticmethod
+    def _normalize_launch_term(value: str) -> str:
+        """Strip all whitespace from a launch term without guessing aliases."""
+
+        return "".join(str(value or "").split())
+
+    def reset_implicit_alias_state(self, run_id: str | None = None) -> None:
+        """Start an empty implicit-alias evidence ledger for one run."""
+
+        self.implicit_alias_run_id = str(run_id or "").strip()
+        self._failed_launches.clear()
+        self._implicit_alias_written_terms.clear()
+
+    def record_failed_launch(
+        self, failed_term: str, candidates: list[str]
+    ) -> None:
+        """Remember one unknown launch and its receipt-visible packages."""
+
+        term = self._normalize_launch_term(failed_term)
+        normalized_candidates: list[str] = []
+        seen: set[str] = set()
+        for candidate in candidates:
+            package = self._normalize_launch_term(candidate)
+            if not package or package in seen:
+                continue
+            seen.add(package)
+            normalized_candidates.append(package)
+        self._failed_launches.append(
+            {
+                "failed_term": term,
+                "candidates": normalized_candidates,
+                "ts": time.time(),
+            }
+        )
+
+    def implicit_alias_terms_for(self, package: str) -> list[str]:
+        """Return unique failed terms backed by this exact listed package."""
+
+        normalized_package = self._normalize_launch_term(package)
+        if not normalized_package:
+            return []
+
+        matches: list[str] = []
+        seen: set[str] = set()
+        for failure in self._failed_launches:
+            term = self._normalize_launch_term(failure.get("failed_term", ""))
+            if (
+                not term
+                or term == normalized_package
+                or term in seen
+                or term in self._implicit_alias_written_terms
+            ):
+                continue
+            candidates = failure.get("candidates") or []
+            if not any(
+                self._normalize_launch_term(candidate) == normalized_package
+                for candidate in candidates
+            ):
+                continue
+            seen.add(term)
+            matches.append(term)
+        return matches
+
+    def mark_implicit_alias_written(self, term: str) -> None:
+        """Deduplicate a successfully persisted failed term within this run."""
+
+        normalized = self._normalize_launch_term(term)
+        if normalized:
+            self._implicit_alias_written_terms.add(normalized)
 
     def _kb_device_id(self) -> str | None:
         """Device namespace for App-KB: configured serial, else the live one.

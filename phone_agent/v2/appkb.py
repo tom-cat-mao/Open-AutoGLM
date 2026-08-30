@@ -167,8 +167,15 @@ class AppKnowledgeStore:
         self._entries = self._replay_events()
         self._write_materialized()
 
-    def upsert(self, entry: Mapping[str, Any]) -> None:
-        """Insert or replace one entry and append its mutation event."""
+    def upsert(
+        self, entry: Mapping[str, Any], *, evidence_note: str | None = None
+    ) -> None:
+        """Insert or replace one entry and append its mutation event.
+
+        ``evidence_note`` is optional event-only provenance. It deliberately does
+        not enter the materialized entry schema, so resolver semantics stay
+        unchanged while evidence-backed writers can leave an auditable reason.
+        """
 
         candidate = _coerce_entry(entry)
         key = _entry_key(candidate)
@@ -180,7 +187,9 @@ class AppKnowledgeStore:
                     key=_parse_iso,
                 )
             self._entries[key] = candidate
-            self._append_event("upsert", candidate)
+            self._append_event(
+                "upsert", candidate, evidence_note=evidence_note
+            )
             self._write_materialized()
 
     def record_success(self, term: str, package: str) -> bool:
@@ -320,10 +329,19 @@ class AppKnowledgeStore:
                     current.pop(key, None)
         return current
 
-    def _append_event(self, op: str, entry: Mapping[str, Any]) -> None:
+    def _append_event(
+        self,
+        op: str,
+        entry: Mapping[str, Any],
+        *,
+        evidence_note: str | None = None,
+    ) -> None:
         """Append and flush one mutation event."""
 
         event = {"op": op, "entry": dict(entry), "ts": _iso_now()}
+        note = str(evidence_note or "").strip()
+        if note:
+            event["evidence_note"] = note
         needs_newline = False
         if self.events_path.stat().st_size:
             with self.events_path.open("rb") as stream:

@@ -483,6 +483,11 @@ class ThinPhoneAgent:
         from langgraph.types import Command
 
         ts_start = time.time()
+        reset_implicit_alias = getattr(
+            self.session, "reset_implicit_alias_state", None
+        )
+        if callable(reset_implicit_alias):
+            reset_implicit_alias(self.run_id)
         self._seed_task_doc(task)
         self._prepare_app_knowledge()
         self._shadow_recall_start(task)

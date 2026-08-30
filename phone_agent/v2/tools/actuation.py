@@ -19,6 +19,7 @@ Tools are built as closures over ``session`` and ``config`` by
 
 from __future__ import annotations
 
+import re
 from typing import Literal
 
 from langchain_core.tools import StructuredTool
@@ -35,6 +36,9 @@ from phone_agent.v2.resolver import (
     resolve_description,
 )
 from phone_agent.v2.tools._obs import auto_observation, mark_tool_fail, mark_tool_ok
+
+
+_PACKAGE_NAME_RE = re.compile(r"[A-Za-z0-9_]+(?:\.[A-Za-z0-9_]+)+")
 
 
 def _available_app_names(session, *, max_n: int) -> str:
@@ -57,6 +61,89 @@ def _available_app_names(session, *, max_n: int) -> str:
         except Exception:  # noqa: BLE001 - preserve the original launch failure
             pass
     return ""
+
+
+def _receipt_package_candidates(available: str) -> list[str]:
+    """Extract only package-shaped entries from the rendered failure list."""
+
+    packages: list[str] = []
+    seen: set[str] = set()
+    for candidate in re.split(r"[,，]", str(available or "")):
+        package = "".join(candidate.split())
+        if not _PACKAGE_NAME_RE.fullmatch(package) or package in seen:
+            continue
+        seen.add(package)
+        packages.append(package)
+    return packages
+
+
+def _remember_unknown_launch(session, config, app_name: str, available: str) -> None:
+    """Keep receipt-backed unknown-launch evidence in this session only."""
+
+    if not getattr(config, "implicit_alias_enabled", True):
+        return
+    remember = getattr(session, "record_failed_launch", None)
+    if callable(remember):
+        try:
+            remember(app_name, _receipt_package_candidates(available))
+        except Exception:  # noqa: BLE001 - preserve the original failure receipt
+            return
+
+
+def _record_implicit_aliases(
+    session, config, *, app_name: str, package: str
+) -> None:
+    """Persist aliases only for exact run-local failure-candidate matches."""
+
+    if (
+        not getattr(config, "app_kb_enabled", True)
+        or not getattr(config, "implicit_alias_enabled", True)
+    ):
+        return
+    used_term = "".join(str(app_name or "").split())
+    resolved_package = "".join(str(package or "").split())
+    if (
+        not _PACKAGE_NAME_RE.fullmatch(used_term)
+        or used_term != resolved_package
+    ):
+        return
+
+    matching_terms = getattr(session, "implicit_alias_terms_for", None)
+    mark_written = getattr(session, "mark_implicit_alias_written", None)
+    store = getattr(session, "app_store", None)
+    if not callable(matching_terms) or store is None:
+        return
+
+    run_id = str(getattr(session, "implicit_alias_run_id", "") or "unknown")
+    try:
+        failed_terms = matching_terms(resolved_package)
+    except Exception:  # noqa: BLE001 - memory feedback must never break launch
+        return
+    for failed_term in failed_terms:
+        sensitive = SENSITIVE_PATTERN.search(failed_term) is not None
+        if not should_save("learned", durable=True, sensitive=sensitive):
+            continue
+        try:
+            store.upsert(
+                {
+                    "term": failed_term,
+                    "label": resolved_package,
+                    "package": resolved_package,
+                    "kind": "learned",
+                    "scope": "global",
+                    "confidence": 0.9,
+                    "success_count": 1,
+                    "stale": False,
+                },
+                evidence_note=f"implicit: run<{run_id}> 失败叫法自愈",
+            )
+        except Exception:  # noqa: BLE001 - memory feedback must never break launch
+            continue
+        if callable(mark_written):
+            try:
+                mark_written(failed_term)
+            except Exception:  # noqa: BLE001 - write already landed; launch still wins
+                pass
 
 
 def _record_verified_launch(
@@ -502,6 +589,12 @@ def build_actuation_tools(session, config) -> list[StructuredTool]:
                 resolution=resolution,
                 kb_match=kb_match,
             )
+            _record_implicit_aliases(
+                session,
+                config,
+                app_name=app_name,
+                package=resolution.package_name,
+            )
             return _ok_with_obs(
                 f"launched {app_name} ({resolution.package_name})", session
             )
@@ -525,6 +618,7 @@ def build_actuation_tools(session, config) -> list[StructuredTool]:
             )
         available = _available_app_names(session, max_n=10)
         suffix = f"；本机可用应用：{available}" if available else ""
+        _remember_unknown_launch(session, config, app_name, available)
         return _fail(
             session,
             f"unknown app {app_name!r}: not in registry/inventory — cannot launch"

@@ -161,6 +161,9 @@ class V2Config:
     # store lazily so disabling it performs no filesystem writes.
     memory_dir: str = "memory"
     app_kb_enabled: bool = True
+    # Evidence-backed correction: unknown name -> receipt-listed package ->
+    # verified package launch writes the failed name as a learned alias.
+    implicit_alias_enabled: bool = True
     app_list_max: int = 40
     dream_mode: str = "manual"
     # Observe-only run experience store. The explicit directory is independent
@@ -306,6 +309,9 @@ class V2Config:
             device_id=_env_opt_str("PHONE_AGENT_DEVICE_ID"),
             memory_dir=_env_str("PHONE_AGENT_MEMORY_DIR", "memory"),
             app_kb_enabled=_env_bool_default_true("PHONE_AGENT_APP_KB", True),
+            implicit_alias_enabled=_env_bool_default_true(
+                "PHONE_AGENT_IMPLICIT_ALIAS", True
+            ),
             app_list_max=_env_int("PHONE_AGENT_APP_LIST_MAX", 40),
             dream_mode=_env_choice(
                 "PHONE_AGENT_DREAM", "manual", ("off", "auto", "manual")
