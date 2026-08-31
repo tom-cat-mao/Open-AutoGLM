@@ -1,6 +1,6 @@
 """JSONL trace middleware: redacted, per-run observability.
 
-Per refactor-thin-loop-v2 §9.3 (P0 #6, egress redaction): every model call and
+Per AGENTS.md (P0 #6, egress redaction): every model call and
 tool call is appended as a JSONL event to ``<trace_dir>/<run_id>.jsonl``.
 
 Redaction rules (applied to every logged text value):

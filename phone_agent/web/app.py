@@ -444,7 +444,7 @@ def create_ui(
         stop_button = ui.button("停止", icon="stop").props("flat no-caps text-negative")
         with ui.element("div").classes("tw-pill") as status_pill:
             status_dot = ui.element("span").classes("tw-dot").style(
-                f"background:#64748b; color:#64748b"
+                "background:#64748b; color:#64748b"
             )
             status_text = ui.label("待命").classes("text-[12.5px]")
         tokens_chip = ui.label("").classes("mono text-xs").style(f"color:{_MUTED}")

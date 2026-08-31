@@ -5,7 +5,7 @@ dataclass defaults. ``load_project_env()`` loads ``PHONE_AGENT_*`` keys from the
 project ``.env`` without overriding values already present in the shell
 environment (ported from the live-diagnosis ``run_diagnosis.py`` helper).
 
-See ``docs/refactor-thin-loop-v2.md`` §4 for the binding contract.
+See ``AGENTS.md`` §4 for the binding contract.
 """
 
 from __future__ import annotations

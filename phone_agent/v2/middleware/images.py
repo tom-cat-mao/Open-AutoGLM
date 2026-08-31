@@ -1,6 +1,6 @@
 """Context-pruning middleware: bound image + OBS-text growth before each model call.
 
-Per refactor-thin-loop-v2 §9.2 (P0 #3) and S1 §1.4/§2: before every model call
+Per AGENTS.md (P0 #3): before every model call
 this middleware runs two independent, idempotent passes over the transcript:
 
 1. **Image pruning** — keep the image blocks of only the newest ``keep_images``

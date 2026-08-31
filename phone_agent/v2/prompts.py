@@ -8,7 +8,7 @@ handling, the warning-system safety flow (risky actions are intercepted with a
 warning and re-sent with ``confirm_irreversible=true``), and that ``finish``
 requires evidence.
 
-See ``docs/refactor-thin-loop-v2.md`` §10 for the binding contract.
+See ``AGENTS.md`` §10 for the binding contract.
 """
 
 from __future__ import annotations

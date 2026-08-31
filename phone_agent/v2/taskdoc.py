@@ -7,7 +7,7 @@ writer). The harness seeds ``goal_base`` at run start; the model never rewrites
 it. A ``before_model`` middleware renders the doc as a pinned block so it is
 immune to context compaction.
 
-See ``docs/refactor-thin-loop-v2-taskdoc.md`` §1-§2.1 for the binding contract.
+See ``AGENTS.md`` §1-§2.1 for the binding contract.
 """
 
 from __future__ import annotations

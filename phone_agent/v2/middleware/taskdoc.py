@@ -1,6 +1,6 @@
 """TaskDoc middleware: pin the task board + a derived flow line into context.
 
-Per ``docs/refactor-thin-loop-v2-taskdoc.md`` §2.3 (U3 update). This middleware
+Per ``AGENTS.md`` §2.3 (U3 update). This middleware
 is the render hook of the TaskDoc increment: before every model call it
 re-injects, as a single ``[TASK_DOC]`` system message kept at the tail of the
 transcript, the pinned block:

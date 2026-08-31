@@ -1,6 +1,6 @@
 """ThinPhoneAgent: v2 thin-loop assembly and run driver.
 
-Per refactor-thin-loop-v2 §10. The agent wires a LangChain ``create_agent``
+Per AGENTS.md. The agent wires a LangChain ``create_agent``
 graph with the v2 middleware stack (safety HITL + image pruning + JSONL trace +
 model-call limit) and drives a synchronous ``run`` loop that surfaces HITL
 interrupts to a ``hitl_handler``.

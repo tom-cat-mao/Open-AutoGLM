@@ -1,6 +1,6 @@
 """v2 middleware package: safety HITL, image pruning, and JSONL trace.
 
-See ``docs/refactor-thin-loop-v2.md`` §9 for the binding contract.
+See ``AGENTS.md`` §9 for the binding contract.
 """
 
 from __future__ import annotations
