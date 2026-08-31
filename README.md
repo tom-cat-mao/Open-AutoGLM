@@ -20,8 +20,8 @@ TaskWizard 采用 thin-loop v2：模型每轮观察真实设备、决定一个�
 - **安全预警制**：风险动作先返回警告与选项，模型明确确认后才执行（confirm-to-execute）。
 - **可信完成**：TaskDoc 任务板与流程线持续记录进度；finish 两段式确认，并可交给独立上下文验收器复核。
 - **App-KB 自积累记忆**：同步本机应用名称；验证启动成功后沉淀非敏感别名，并累计成功反馈。同一 run 中未知中文名失败、回执列出的包名随后启动成功时，自动把该中文名写为 `learned` 别名（隐式纠正，证据闭环）。
-- **经验数据面**：每次 run 结束以严格隐私白名单落盘 episode outcome 与工具结果分类，持久化分角色 token 账本；全程 observe-only，不向 actor 回注。
-- **经验提炼与晋升**：离线 `--distill` 从证据充足的 episode 组生成 proposed lesson；Rule-of-3 通过后仍须人工 approve。lesson 永不进入 actor 上下文。
+- **经验数据面**：每次 run 结束以严格隐私白名单落盘 episode outcome 与工具结果分类，持久化分角色 token 账本；数据采集全程 observe-only，并审计本轮实际注入的 lesson id。
+- **经验提炼与晋升**：离线 `--distill` 从证据充足的 episode 组生成 proposed lesson；Rule-of-3 通过后仍须人工 approve。仅 `PHONE_AGENT_MEMORY_RAG=on` 时，approved lesson 才在 run 开局以“参考、非规则”的 L0 Mirror 受控注入。
 - **RAG shadow 召回**：sqlite-vec + FTS5 混合检索历史 episode 与 App 别名；默认只写 trace 并按实际启动应用统计命中率，绝不注入 actor 上下文。
 - **能力注册表**：每个能力（App-KB/dream/经验/回想/安全/压缩/验收…）有稳定 id、档位与依赖声明；依赖缺失可见待岗；每次 run 的能力快照写入 trace 与 episode，可审计可复盘。
 - **长任务可控**：token 预算限制成本，两级 auto-compact 在接近上下文窗口时保留关键状态。
@@ -56,7 +56,10 @@ cp .env.example .env  # 填写模型网关、模型名与 API Key
 
 RAG 默认 `PHONE_AGENT_MEMORY_RAG=shadow`。向量模型
 `Qwen/Qwen3-Embedding-0.6B` 仅在索引或非空召回第一次真正 embed 时懒加载；
-`PHONE_AGENT_MEMORY_RAG=on` 当前只是保留配置档位，不启用上下文注入。
+`PHONE_AGENT_MEMORY_RAG=on` 会在 run 开局一次性注入人审 approved lesson，默认上限为
+`PHONE_AGENT_LESSON_INJECT_MAX=3` 条、`PHONE_AGENT_LESSON_INJECT_TOKENS=800` 估算 token；
+设备 scope 必须匹配，开局未知 app 时不会选择 app 级 lesson。提示明确标为历史参考而非规则，
+lesson 视图缺失或损坏时 fail-open。`shadow` 仍只做 trace 召回与命中统计，`off` 不召回也不注入。
 
 Web 控制台默认只监听 `127.0.0.1:8080`：输入任务后可实时查看手机画面、步骤时间线、任务板与终局状态，
 并处理 `ask_user` / `take_over` / hard 档安全确认。任务由独立 runner 子进程执行，控制台重启后会从
@@ -69,7 +72,8 @@ Web 控制台默认只监听 `127.0.0.1:8080`：输入任务后可实时查看�
 `PHONE_AGENT_EVOLUTION=manual` 仅开放显式离线命令；候选写入
 `memory/lessons/{events.jsonl,lessons.json}`。蒸馏只看到隐私最小化的 episode 摘要，输出先经严格
 schema、证据、scope 与原文泄漏检查，再以 proposed 状态落盘；Rule-of-3 也只产生“可供人工晋升”结论。
-该管线和 approved lesson 都不参与 actor prompt，`PHONE_AGENT_MEMORY_RAG` 继续保持 shadow 语义。
+离线管线不参与 actor prompt；proposed/revoked 永不注入。默认 `shadow` 继续只观测，只有显式
+`PHONE_AGENT_MEMORY_RAG=on` 才按上述边界把 approved lesson 注入一次，并在 trace 与 episode 记录 id。
 
 ## 文档
 

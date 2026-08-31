@@ -1,9 +1,11 @@
 """Offline lesson distillation and human-governed promotion.
 
-This module is deliberately outside the actor hot path. It reads the
-privacy-minimal episode outcomes, emits proposal events, and never builds or
-mutates actor messages. events.jsonl is authoritative; lessons.json is a
-rebuildable current-version view.
+The mutation path is deliberately outside the actor hot path: it reads
+privacy-minimal episode outcomes and emits proposal/review events.  The sole
+runtime bridge is a bounded, read-only selector for approved lessons; actor
+message construction remains owned by :mod:`phone_agent.v2.agent`.
+events.jsonl is authoritative; lessons.json is a rebuildable current-version
+view.
 """
 
 from __future__ import annotations
@@ -24,6 +26,7 @@ from typing import Any
 from phone_agent.v2.middleware._tokens import (
     estimate_context_tokens,
     estimate_message_tokens,
+    estimate_text_tokens,
 )
 from phone_agent.v2.usage import UsageLedger
 
@@ -490,6 +493,63 @@ def load_lessons(
     """Rebuild and return the current lesson view from authoritative events."""
 
     return LessonStore(lessons_dir).lessons()
+
+
+def select_lessons_for_injection(
+    lessons_dir: str | os.PathLike[str],
+    *,
+    device_scope: str | None,
+    max_items: int,
+    max_tokens: int,
+) -> list[LessonCandidate]:
+    """Read a bounded approved-only run-start snapshot from ``lessons.json``.
+
+    This path intentionally does not construct :class:`LessonStore`: opening a
+    runtime run must never create or rebuild lesson state.  A missing or damaged
+    materialized view fails open to no injection.  App-scoped lessons are
+    excluded because the foreground app is not yet known at run start; a future
+    event-triggered injector may resolve that narrower scope.
+    """
+
+    try:
+        item_limit = int(max_items)
+        token_limit = int(max_tokens)
+    except (TypeError, ValueError):
+        return []
+    if item_limit <= 0 or token_limit <= 0:
+        return []
+
+    path = Path(lessons_dir) / "lessons.json"
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(payload, list):
+            return []
+        lessons = [LessonCandidate.from_dict(item) for item in payload]
+        if len({lesson.lesson_id for lesson in lessons}) != len(lessons):
+            return []
+    except (OSError, TypeError, ValueError, json.JSONDecodeError):
+        return []
+
+    local_device = _single_line(device_scope).removeprefix("device:")
+    if local_device == "unknown":
+        local_device = ""
+    eligible = [
+        lesson
+        for lesson in lessons
+        if lesson.status == "approved"
+        and lesson.scope["device"] in {None, local_device or None}
+        # App and app-version scope cannot be established at run start.
+        and lesson.scope["app"] is None
+        and lesson.scope["app_version"] is None
+    ]
+    selected = sorted(
+        eligible,
+        key=lambda lesson: (-lesson.version, -lesson.created_ts, lesson.lesson_id),
+    )[:item_limit]
+
+    while selected and sum(estimate_text_tokens(item.text) for item in selected) > token_limit:
+        selected.pop()
+    return selected
 
 
 @dataclass(frozen=True)
@@ -963,4 +1023,5 @@ __all__ = [
     "load_lessons",
     "make_lesson_id",
     "read_episode_outcomes",
+    "select_lessons_for_injection",
 ]

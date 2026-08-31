@@ -180,15 +180,17 @@ class V2Config:
     experience_dir: str = "memory/experience"
     episode_keep: int = 500
     episode_archive_days: int = 90
-    # Offline lesson evolution. This is CLI-only and never participates in the
-    # actor run path. Manual enables explicit maintenance commands; off refuses
-    # distillation. Lessons remain proposals until a human approves.
+    # Offline lesson evolution. Manual enables explicit maintenance commands;
+    # off refuses distillation. Lessons remain proposals until a human approves.
     evolution_mode: str = "manual"
     lessons_dir: str = "memory/lessons"
     # Rebuildable semantic recall. ``shadow`` retrieves and evaluates candidates
-    # without changing actor messages; ``on`` is reserved and currently has no
-    # injection behavior. The MLX model itself remains lazy until first embed.
+    # without changing actor messages; ``on`` injects a bounded run-start L0
+    # mirror containing approved lessons only. The MLX model itself remains lazy
+    # until first embed.
     memory_rag: str = "shadow"
+    lesson_inject_max: int = 3
+    lesson_inject_tokens: int = 800
     embed_model: str = "Qwen/Qwen3-Embedding-0.6B"
     embed_dim: int = 1024
     vec_db: str = "memory/vec.db"
@@ -350,6 +352,10 @@ class V2Config:
             memory_rag=_env_choice(
                 "PHONE_AGENT_MEMORY_RAG", "shadow", ("off", "shadow", "on")
             ),
+            lesson_inject_max=_env_int("PHONE_AGENT_LESSON_INJECT_MAX", 3),
+            lesson_inject_tokens=_env_int(
+                "PHONE_AGENT_LESSON_INJECT_TOKENS", 800
+            ),
             embed_model=_env_str(
                 "PHONE_AGENT_EMBED_MODEL",
                 "Qwen/Qwen3-Embedding-0.6B",
@@ -439,6 +445,10 @@ class V2Config:
             raise ValueError("PHONE_AGENT_EPISODE_KEEP must be non-negative")
         if config.episode_archive_days < 0:
             raise ValueError("PHONE_AGENT_EPISODE_ARCHIVE_DAYS must be non-negative")
+        if config.lesson_inject_max < 0:
+            raise ValueError("PHONE_AGENT_LESSON_INJECT_MAX must be non-negative")
+        if config.lesson_inject_tokens < 0:
+            raise ValueError("PHONE_AGENT_LESSON_INJECT_TOKENS must be non-negative")
         if config.embed_dim <= 0:
             raise ValueError("PHONE_AGENT_EMBED_DIM must be positive")
         if config.recall_top_k <= 0:
