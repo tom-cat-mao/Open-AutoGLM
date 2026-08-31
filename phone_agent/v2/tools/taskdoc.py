@@ -1,6 +1,6 @@
 """``update_task_doc`` tool: the model's sole writer into the TaskDoc board.
 
-Per ``docs/refactor-thin-loop-v2-taskdoc.md`` §2.2. The tool full-replaces the
+Per ``AGENTS.md`` §2.2. The tool full-replaces the
 路线 items and 关键事实, appends amendments, validates the resulting document,
 and only commits when valid (fail-closed: a validation failure returns an error
 string and writes nothing). ``goal_base`` is never accepted here — only the

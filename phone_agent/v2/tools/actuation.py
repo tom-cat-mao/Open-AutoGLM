@@ -1,6 +1,6 @@
 """Actuation tools: tap/long_press/type_text/scroll/swipe/back/home/wait/launch_app.
 
-Per refactor-thin-loop-v2.md §7.1. Every execution tool is marks-first and
+Per AGENTS.md. Every execution tool is marks-first and
 fail-closed:
 
 - ``tap`` / ``long_press`` accept dual addressing (``target_mark_id`` direct or

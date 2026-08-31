@@ -1,6 +1,6 @@
 """Perception tools: read_screen / locate.
 
-Per refactor-thin-loop-v2.md §7.2. ``read_screen`` is a side-effect-free
+Per AGENTS.md. ``read_screen`` is a side-effect-free
 re-observation; ``locate`` runs deep visual localization (LocateAnything) when
 accessibility marks miss the target, registering the resolved mark on success.
 """

@@ -5,7 +5,7 @@ Tools reach the device and the current-screen marks exclusively through it. All
 device I/O goes through :class:`~phone_agent.device_factory.DeviceFactory`
 (P0: no direct ADB), and marks come from the grounding provider stack.
 
-See ``docs/refactor-thin-loop-v2.md`` §6 for the binding contract.
+See ``AGENTS.md`` §6 for the binding contract.
 """
 
 from __future__ import annotations

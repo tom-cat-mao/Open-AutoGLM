@@ -1,7 +1,7 @@
 """Thin-loop v2 core: config, model factory, device session, coords, prompts.
 
 This package implements the v2 "thin loop + tooling" architecture described in
-``docs/refactor-thin-loop-v2.md``. The v1 LangGraph node graph (goal -> plan ->
+``AGENTS.md``. The v1 LangGraph node graph (goal -> plan ->
 execute -> reflect -> acceptance) has been removed; v2 drives the device through
 a single LLM call per step via tools, with the harness responsible only for tool
 supply, safety boundaries, context hygiene, and observability.

@@ -1,6 +1,6 @@
 """Target resolution: description -> unique mark, fail-closed.
 
-Per refactor-thin-loop-v2.md §8. The resolver never taps raw coordinates; it
+Per AGENTS.md. The resolver never taps raw coordinates; it
 maps a natural-language description to exactly one ``MarkCandidate`` from the
 session's current marks, falling back to deep visual localization
 (``session.locate``) only when the current marks yield zero text matches.

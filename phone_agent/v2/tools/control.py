@@ -1,13 +1,13 @@
 """Control tools: finish / ask_user / take_over.
 
-Per refactor-thin-loop-v2.md §7.3. These tools shape the run outcome rather than
+Per AGENTS.md. These tools shape the run outcome rather than
 touching the device. HITL interrupts for ``ask_user``/``take_over`` are enforced
 by the safety middleware; the tool bodies only record intent / format text.
 
 ``finish`` enforces two fail-closed gates and a two-step review (S2 §1):
 
 1. Non-empty ``evidence`` (list what was done + the on-screen proof).
-2. TaskDoc guard (``docs/refactor-thin-loop-v2-taskdoc.md`` §2.4): open route
+2. TaskDoc guard (``AGENTS.md`` §2.4): open route
    items block the declaration.
 
 Then, unless ``PHONE_AGENT_FINISH_VERIFY=off`` degrades it to the pre-two-step

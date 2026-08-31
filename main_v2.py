@@ -10,7 +10,7 @@ default to ``None`` so unset flags never clobber env-derived values.
 
 Exit codes: success 0 / error 1 / takeover 2 / budget-or-fuse exhausted 3.
 
-See ``docs/refactor-thin-loop-v2.md`` §11 for the binding contract.
+See ``AGENTS.md`` §11 for the binding contract.
 """
 
 from __future__ import annotations

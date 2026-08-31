@@ -5,7 +5,7 @@ OpenAI-compatible gateway reached through ``langchain_openai.ChatOpenAI`` with
 browser-style UA + optional CF Access headers and sampling params forwarded from
 :class:`~phone_agent.v2.config.V2Config`.
 
-See ``docs/refactor-thin-loop-v2.md`` §5 for the binding contract.
+See ``AGENTS.md`` §5 for the binding contract.
 """
 
 from __future__ import annotations

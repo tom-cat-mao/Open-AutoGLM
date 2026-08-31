@@ -1,6 +1,6 @@
 # 配置参考
 
-所有配置为 `PHONE_AGENT_*` 环境变量。优先级：**CLI 参数 > shell 环境变量 > `.env` > 默认值**。`.env.example` 为模板。
+所有运行时配置为 `PHONE_AGENT_*` 环境变量。优先级：**CLI 参数 > shell 环境变量 > `.env` > 默认值**。`.env.example` 为模板（含完整注释）。
 
 ## 模型
 
@@ -65,7 +65,7 @@
 | 变量 | 类型 | 默认值 | 说明 |
 |---|---|---|---|
 | `PHONE_AGENT_SAFETY_MODE` | `off`/`wary`/`hard`/`reviewer` | `wary` | 执行类动作门控，详见[安全模式](safety.md) |
-| `PHONE_AGENT_SAFETY_REVIEWER_MODEL` | str | verifier 或主模型 | `reviewer` 档的风险精排模型 |
+| `PHONE_AGENT_SAFETY_REVIEWER_MODEL` | str | verifier 模型 | `reviewer` 档的风险精排模型；未设置时该档不可用 |
 | `PHONE_AGENT_FINISH_VERIFY` | `off`/`auto`/`always` | `auto` | finish 独立验收器触发策略 |
 | `PHONE_AGENT_FINISH_VERIFY_K` | int | `1` | 验收器查看的尾部截图数 |
 | `PHONE_AGENT_VERIFIER_MODEL` | str | 主模型 | 验收器模型 |
@@ -90,13 +90,17 @@
 | `PHONE_AGENT_EXPERIENCE_DIR` | path | `memory/experience` | 档案目录 |
 | `PHONE_AGENT_EPISODE_KEEP` | int | `500` | 保留的完整档案数；更老的归档为聚合统计 |
 | `PHONE_AGENT_EPISODE_ARCHIVE_DAYS` | int | `90` | 超过该天数的档案在 dream 时归档 |
-| `PHONE_AGENT_MEMORY_RAG` | `off`/`shadow`/`on` | `shadow` | 语义回想档位；`shadow` 只观测不注入 |
+| `PHONE_AGENT_MEMORY_RAG` | `off`/`shadow`/`on` | `shadow` | 语义回想档位；`shadow` 只观测不注入；`on` 注入人审通过的经验 |
 | `PHONE_AGENT_EMBED_MODEL` | str | `Qwen/Qwen3-Embedding-0.6B` | 本地嵌入模型（MLX） |
 | `PHONE_AGENT_EMBED_DIM` | int | `1024` | 嵌入向量维度 |
 | `PHONE_AGENT_VEC_DB` | path | `memory/vec.db` | 向量索引文件 |
 | `PHONE_AGENT_RECALL_TOP_K` | int | `5` | 回想候选数上限 |
 | `PHONE_AGENT_RECALL_MIN_SCORE` | float | `0.35` | 召回分数阈值；低于则放弃召回 |
 | `PHONE_AGENT_RECALL_DECAY_LAMBDA` | float | `0.02` | 时间衰减速率（按天） |
+| `PHONE_AGENT_EVOLUTION` | `off`/`manual` | `manual` | 经验提炼开关；`manual` 由 `--distill` 触发 |
+| `PHONE_AGENT_LESSONS_DIR` | path | `memory/lessons` | 经验库存储目录 |
+| `PHONE_AGENT_LESSON_INJECT_MAX` | int | `3` | 单次注入的经验条数上限 |
+| `PHONE_AGENT_LESSON_INJECT_TOKENS` | int | `800` | 注入内容的 token 上限 |
 
 ## 任务板与记录
 
@@ -107,3 +111,4 @@
 | `PHONE_AGENT_TRACE_DIR` | path | `.traces` | trace 目录 |
 | `PHONE_AGENT_DIAG_EVIDENCE` | bool | `false` | 诊断证据流（live-diagnosis 用） |
 | `PHONE_AGENT_DIAG_UNREDACTED` | bool | `false` | 本机诊断全保真模式 |
+| `PHONE_AGENT_RUNS_DIR` | path | `memory/runs` | runner 子进程运行目录（事件/控制通道） |
