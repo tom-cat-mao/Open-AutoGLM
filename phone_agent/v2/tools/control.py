@@ -213,3 +213,12 @@ def build_control_tools(session, config) -> list[StructuredTool]:
         StructuredTool.from_function(ask_user, parse_docstring=True),
         StructuredTool.from_function(take_over, parse_docstring=True),
     ]
+
+
+def make_finish_tool(session, config) -> StructuredTool:
+    """Build only the configured finish tool for capability replacement."""
+
+    return build_control_tools(session, config)[0]
+
+
+__all__ = ["build_control_tools", "make_finish_tool"]

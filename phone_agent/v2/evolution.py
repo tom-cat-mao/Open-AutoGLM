@@ -552,6 +552,24 @@ def select_lessons_for_injection(
     return selected
 
 
+def emergency_revoke_lesson(
+    lessons_dir: str | os.PathLike[str], lesson_id: str
+) -> bool:
+    """Persist a runner-originated revocation; unknown/corrupt state is a no-op."""
+
+    try:
+        store = LessonStore(lessons_dir)
+        current = store.get(lesson_id)
+        if current is None:
+            return False
+        if current.status == "revoked":
+            return True
+        store.revoke(lesson_id, "runner emergency revoke")
+    except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+        return False
+    return True
+
+
 @dataclass(frozen=True)
 class PromotionEvaluation:
     eligible: bool

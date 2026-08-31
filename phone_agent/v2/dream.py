@@ -221,6 +221,40 @@ def maintain_experience(
     }
 
 
+def run_maintenance(
+    config: Any,
+    *,
+    light: bool,
+    store: AppKnowledgeStore | None = None,
+    inventory_provider=None,
+) -> dict[str, Any]:
+    """Run the shared manual/auto dream lifecycle without masking outcomes."""
+
+    summary: dict[str, Any] = {}
+    try:
+        active_store = store or AppKnowledgeStore(
+            getattr(config, "memory_dir", "memory")
+        )
+        inventory = inventory_provider() if callable(inventory_provider) else None
+        summary.update(consolidate(active_store, inventory=inventory, light=light))
+    except Exception as exc:  # noqa: BLE001 - maintenance is deliberately fail-open
+        summary = {"status": "skipped", "reason": type(exc).__name__}
+
+    if getattr(config, "experience_enabled", False):
+        try:
+            summary["experience"] = maintain_experience(
+                getattr(config, "experience_dir", "memory/experience"),
+                keep=getattr(config, "episode_keep", 500),
+                archive_days=getattr(config, "episode_archive_days", 90),
+            )
+        except Exception as exc:  # noqa: BLE001 - experience maintenance is optional
+            summary["experience"] = {
+                "status": "skipped",
+                "reason": type(exc).__name__,
+            }
+    return summary
+
+
 def _merge_duplicates(
     entries: list[dict[str, Any]],
 ) -> tuple[list[dict[str, Any]], int]:

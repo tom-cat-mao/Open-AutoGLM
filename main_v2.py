@@ -20,6 +20,11 @@ import json
 import sys
 from typing import Any
 
+from phone_agent.v2.capabilities import (
+    CapabilityAssemblyContext,
+    assemble_capabilities,
+    build_capability_registry,
+)
 from phone_agent.v2.config import V2Config, load_project_env
 
 
@@ -110,37 +115,16 @@ def _run_dream(
     light: bool,
     store: Any | None = None,
 ) -> dict[str, Any]:
-    """Maintain App-KB and the rule-based experience library."""
+    """Maintain App-KB and experience through the shared dream implementation."""
 
-    summary: dict[str, Any] = {}
-    try:
-        from phone_agent.v2.appkb import AppKnowledgeStore
-        from phone_agent.v2.dream import consolidate
+    from phone_agent.v2.dream import run_maintenance
 
-        active_store = (
-            store if store is not None else AppKnowledgeStore(config.memory_dir)
-        )
-        summary.update(
-            consolidate(active_store, inventory=_device_inventory(config), light=light)
-        )
-    except Exception as exc:  # noqa: BLE001 - maintenance never masks run outcome
-        summary = {"status": "skipped", "reason": type(exc).__name__}
-
-    if getattr(config, "experience_enabled", False):
-        try:
-            from phone_agent.v2.dream import maintain_experience
-
-            summary["experience"] = maintain_experience(
-                getattr(config, "experience_dir", "memory/experience"),
-                keep=getattr(config, "episode_keep", 500),
-                archive_days=getattr(config, "episode_archive_days", 90),
-            )
-        except Exception as exc:  # noqa: BLE001 - maintenance never masks run outcome
-            summary["experience"] = {
-                "status": "skipped",
-                "reason": type(exc).__name__,
-            }
-    return summary
+    return run_maintenance(
+        config,
+        light=light,
+        store=store,
+        inventory_provider=lambda: _device_inventory(config),
+    )
 
 
 def _print_dream_summary(summary: dict[str, Any]) -> None:
@@ -210,21 +194,29 @@ def _maintenance_requested(args: argparse.Namespace) -> bool:
     )
 
 
-def main(argv: list[str] | None = None) -> int:
-    load_project_env()
-    parser = build_parser()
-    args = parser.parse_args(argv)
+def _maintenance_command(args: argparse.Namespace) -> str | None:
+    for name in (
+        "dream",
+        "rebuild_vec",
+        "distill",
+        "review_lessons",
+        "approve_lesson",
+        "revoke_lesson",
+        "supersede_lesson",
+    ):
+        if getattr(args, name, None):
+            return name
+    return None
 
-    if not args.task and not _maintenance_requested(args):
-        parser.error("a task description is required")
-    if args.task and _maintenance_requested(args):
-        parser.error("task description cannot be combined with a maintenance command")
 
-    config = V2Config.from_env(_overrides_from_args(args))
-    if args.dream:
+def _build_cli_capability_context(config: V2Config) -> CapabilityAssemblyContext:
+    """Mount maintenance commands through the same capability registry."""
+
+    def dream(_args: argparse.Namespace) -> int:
         _print_dream_summary(_run_dream(config, light=False))
         return 0
-    if args.rebuild_vec:
+
+    def rebuild_vec(_args: argparse.Namespace) -> int:
         from phone_agent.v2.recall import rebuild_index
 
         print(
@@ -232,7 +224,8 @@ def main(argv: list[str] | None = None) -> int:
             + json.dumps(rebuild_index(config), ensure_ascii=False, sort_keys=True)
         )
         return 0
-    if args.distill:
+
+    def distill(_args: argparse.Namespace) -> int:
         if config.evolution_mode == "off":
             print("error: PHONE_AGENT_EVOLUTION=off disables --distill", file=sys.stderr)
             return 1
@@ -249,13 +242,15 @@ def main(argv: list[str] | None = None) -> int:
             + json.dumps(result.to_dict(), ensure_ascii=False, sort_keys=True)
         )
         return 0
-    if args.review_lessons:
+
+    def review_lessons(_args: argparse.Namespace) -> int:
         print(
             "review: "
             + json.dumps(_review_lessons(config), ensure_ascii=False, sort_keys=True)
         )
         return 0
-    if args.approve_lesson:
+
+    def approve_lesson(args: argparse.Namespace) -> int:
         try:
             lesson = _approve_lesson(config, args.approve_lesson)
         except (KeyError, ValueError) as exc:
@@ -263,7 +258,8 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         print("lesson: " + json.dumps(lesson, ensure_ascii=False, sort_keys=True))
         return 0
-    if args.revoke_lesson:
+
+    def revoke_lesson(args: argparse.Namespace) -> int:
         lesson_id, reason = args.revoke_lesson
         try:
             lesson = _lesson_store(config).revoke(lesson_id, reason)
@@ -275,7 +271,8 @@ def main(argv: list[str] | None = None) -> int:
             + json.dumps(lesson.to_dict(), ensure_ascii=False, sort_keys=True)
         )
         return 0
-    if args.supersede_lesson:
+
+    def supersede_lesson(args: argparse.Namespace) -> int:
         lesson_id, text = args.supersede_lesson
         try:
             lesson = _lesson_store(config).supersede(lesson_id, text)
@@ -287,6 +284,44 @@ def main(argv: list[str] | None = None) -> int:
             + json.dumps(lesson.to_dict(), ensure_ascii=False, sort_keys=True)
         )
         return 0
+
+    context = CapabilityAssemblyContext(
+        {
+            "cli_handlers": {
+                "dream": dream,
+                "rebuild_vec": rebuild_vec,
+                "distill": distill,
+                "review_lessons": review_lessons,
+                "approve_lesson": approve_lesson,
+                "revoke_lesson": revoke_lesson,
+                "supersede_lesson": supersede_lesson,
+            }
+        }
+    )
+    return assemble_capabilities(build_capability_registry(config), context)
+
+
+def main(argv: list[str] | None = None) -> int:
+    load_project_env()
+    parser = build_parser()
+    args = parser.parse_args(argv)
+
+    if not args.task and not _maintenance_requested(args):
+        parser.error("a task description is required")
+    if args.task and _maintenance_requested(args):
+        parser.error("task description cannot be combined with a maintenance command")
+
+    config = V2Config.from_env(_overrides_from_args(args))
+    command_name = _maintenance_command(args)
+    if command_name is not None:
+        handler = _build_cli_capability_context(config).cli_commands.get(command_name)
+        if handler is None:
+            print(
+                f"error: capability for --{command_name.replace('_', '-')} is unavailable",
+                file=sys.stderr,
+            )
+            return 1
+        return int(handler(args))
 
     # ThinPhoneAgent is delivered by the integration/middleware workstream
     # (phone_agent/v2/agent.py). Guard the import so the CLI skeleton lands and
@@ -303,7 +338,12 @@ def main(argv: list[str] | None = None) -> int:
 
     agent = ThinPhoneAgent(config)
     result = agent.run(args.task)
-    if config.app_kb_enabled and config.dream_mode == "auto":
+    if getattr(agent, "_last_dream_summary", None) is not None:
+        _print_dream_summary(agent._last_dream_summary)
+    elif config.app_kb_enabled and config.dream_mode == "auto":
+        # Compatibility for injected/legacy agent factories without lifecycle
+        # hooks.  ThinPhoneAgent itself executes this through the dream run_end
+        # hook and therefore never enters this branch.
         _print_dream_summary(
             _run_dream(
                 config, light=True, store=getattr(agent.session, "app_store", None)

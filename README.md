@@ -23,7 +23,7 @@ TaskWizard 采用 thin-loop v2：模型每轮观察真实设备、决定一个�
 - **经验数据面**：每次 run 结束以严格隐私白名单落盘 episode outcome 与工具结果分类，持久化分角色 token 账本；数据采集全程 observe-only，并审计本轮实际注入的 lesson id。
 - **经验提炼与晋升**：离线 `--distill` 从证据充足的 episode 组生成 proposed lesson；Rule-of-3 通过后仍须人工 approve。仅 `PHONE_AGENT_MEMORY_RAG=on` 时，approved lesson 才在 run 开局以“参考、非规则”的 L0 Mirror 受控注入。
 - **RAG shadow 召回**：sqlite-vec + FTS5 混合检索历史 episode 与 App 别名；默认只写 trace 并按实际启动应用统计命中率，绝不注入 actor 上下文。
-- **能力注册表**：每个能力（App-KB/dream/经验/回想/安全/压缩/验收…）有稳定 id、档位与依赖声明；依赖缺失可见待岗；每次 run 的能力快照写入 trace 与 episode，可审计可复盘。
+- **能力装配层**：九个内建能力通过稳定 `cap_id` 和 `apply/release` 生命周期挂入中间件、工具、提示块、run hooks 或 CLI 命令；注册表按 id/档位 diff 做 reconcile，依赖缺失保持 pending，卸载后不残留能力产物。每次 run 的能力快照仍写入 trace 与 episode。
 - **长任务可控**：token 预算限制成本，两级 auto-compact 在接近上下文窗口时保留关键状态。
 
 ## 快速开始
@@ -60,6 +60,8 @@ RAG 默认 `PHONE_AGENT_MEMORY_RAG=shadow`。向量模型
 `PHONE_AGENT_LESSON_INJECT_MAX=3` 条、`PHONE_AGENT_LESSON_INJECT_TOKENS=800` 估算 token；
 设备 scope 必须匹配，开局未知 app 时不会选择 app 级 lesson。提示明确标为历史参考而非规则，
 lesson 视图缺失或损坏时 fail-open。`shadow` 仍只做 trace 召回与命中统计，`off` 不召回也不注入。
+runner 的 `control.jsonl` 接受 `revoke_lesson` 紧急撤销消息：它会立即把 lesson store 标为 revoked，
+并让本 run 的后续注入点排除该 id。已经发送给模型的历史消息不可撤回，不会伪装成已从上下文删除。
 
 Web 控制台默认只监听 `127.0.0.1:8080`：输入任务后可实时查看手机画面、步骤时间线、任务板与终局状态，
 并处理 `ask_user` / `take_over` / hard 档安全确认。任务由独立 runner 子进程执行，控制台重启后会从
