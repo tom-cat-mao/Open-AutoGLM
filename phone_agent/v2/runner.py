@@ -33,14 +33,17 @@ class ControlChannel:
         path: str | Path,
         *,
         stop_callback: Callable[[], None],
+        revoke_lesson_callback: Callable[[str], Any] | None = None,
         poll_seconds: float = 0.5,
     ) -> None:
         self._reader = JsonlReader(path)
         self._stop_callback = stop_callback
+        self._revoke_lesson_callback = revoke_lesson_callback
         self._poll_seconds = poll_seconds
         self._closed = threading.Event()
         self._condition = threading.Condition()
         self._answers: list[str] = []
+        self._pending_revocations: list[str] = []
         self._thread = threading.Thread(
             target=self._poll, name="phone-agent-runner-control", daemon=True
         )
@@ -53,6 +56,23 @@ class ControlChannel:
         with self._condition:
             self._condition.notify_all()
         self._thread.join(timeout=max(1.0, self._poll_seconds * 3))
+
+    def set_revoke_lesson_callback(
+        self, callback: Callable[[str], Any] | None
+    ) -> None:
+        """Attach the agent callback and drain ids received during startup."""
+
+        with self._condition:
+            self._revoke_lesson_callback = callback
+            pending = list(self._pending_revocations)
+            self._pending_revocations.clear()
+        if not callable(callback):
+            return
+        for lesson_id in pending:
+            try:
+                callback(lesson_id)
+            except Exception:  # noqa: BLE001 - emergency control is fail-open
+                continue
 
     def _poll(self) -> None:
         while not self._closed.is_set():
@@ -71,6 +91,21 @@ class ControlChannel:
                         with self._condition:
                             self._answers.append(answer)
                             self._condition.notify_all()
+                elif kind == "revoke_lesson":
+                    # The store and all future provider evaluations can be
+                    # changed; messages already sent to the model are immutable
+                    # history and are deliberately not presented as retractable.
+                    lesson_id = str(message.get("lesson_id", "")).strip()
+                    if lesson_id:
+                        with self._condition:
+                            callback = self._revoke_lesson_callback
+                            if not callable(callback):
+                                self._pending_revocations.append(lesson_id)
+                                continue
+                        try:
+                            callback(lesson_id)
+                        except Exception:  # noqa: BLE001 - control channel is fail-open
+                            pass
             self._closed.wait(self._poll_seconds)
 
     def wait_for_hitl(self) -> str:
@@ -157,6 +192,9 @@ def run_spec(
                     config, extra_middleware=[middleware], run_id=spec.run_id
                 )
                 middleware.attach_session(getattr(agent, "session", None))
+                controls.set_revoke_lesson_callback(
+                    getattr(agent, "revoke_lesson", None)
+                )
 
                 def hitl_handler(prompt: str) -> str:
                     middleware.emit(

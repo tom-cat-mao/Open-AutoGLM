@@ -695,12 +695,42 @@ def build_hitl_middleware(session: Any | None = None, config: Any | None = None)
     return HumanInTheLoopMiddleware(interrupt_on=interrupt_on)
 
 
+def build_control_hitl_middleware():
+    """Build the mode-independent ask_user/take_over interrupt layer."""
+
+    from langchain.agents.middleware import HumanInTheLoopMiddleware
+
+    return HumanInTheLoopMiddleware(
+        interrupt_on={
+            "ask_user": {"allowed_decisions": ["respond"]},
+            "take_over": {"allowed_decisions": ["approve", "reject"]},
+        }
+    )
+
+
+def build_capability_safety_middleware(
+    session: Any | None = None, config: Any | None = None
+):
+    """Build the mode-specific safety product mounted by the safety cap.
+
+    Hard mode returns the legacy combined HITL layer so it can replace the core
+    control-only slot without changing the observable middleware sequence.
+    """
+
+    mode = _safety_mode(config)
+    if mode == "hard":
+        return build_hitl_middleware(session, config)
+    return build_safety_warning_middleware(session, config)
+
+
 __all__ = [
     "ToolCallVerdict",
     "classify_tool_call",
     "is_sensitive_tool_call",
     "build_safety_reviewer",
     "build_hitl_middleware",
+    "build_control_hitl_middleware",
+    "build_capability_safety_middleware",
     "SafetyWarningMiddleware",
     "build_safety_warning_middleware",
     "format_warning",

@@ -147,6 +147,11 @@ class TraceMiddleware(AgentMiddleware):
 
         self._launched_apps.clear()
 
+    def set_experience_writer(self, writer: Any | None) -> None:
+        """Attach or clear the current run's optional experience sink."""
+
+        self._experience_writer = writer
+
     def record_event(self, event: str, **payload: Any) -> None:
         """Write a custom event through the same P0 redaction boundary."""
 

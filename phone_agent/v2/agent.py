@@ -18,12 +18,19 @@ from dataclasses import dataclass
 from datetime import datetime
 import json
 from pathlib import Path
+import sys
 import time
 from typing import Any, Callable
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
-from phone_agent.v2.capabilities import build_capability_registry
+from phone_agent.v2.capabilities import (
+    CapabilityAssemblyContext,
+    MiddlewareReplacement,
+    PromptBlock,
+    assemble_capabilities,
+    build_capability_registry,
+)
 
 
 @dataclass
@@ -123,13 +130,15 @@ class ThinPhoneAgent:
 
         from phone_agent.v2.model import build_chat_model
         from phone_agent.v2.session import PhoneSession
-        from phone_agent.v2.tools import build_tools
+        tools_module = sys.modules.get("phone_agent.v2.tools")
+        if tools_module is None:
+            from phone_agent.v2 import tools as tools_module
         from phone_agent.v2.usage import UsageLedger
         from phone_agent.v2.middleware.budget import build_budget_middleware
         from phone_agent.v2.middleware.images import build_context_pruning_middleware
         from phone_agent.v2.middleware.safety import (
-            build_hitl_middleware,
-            build_safety_warning_middleware,
+            build_capability_safety_middleware,
+            build_control_hitl_middleware,
         )
         from phone_agent.v2.middleware.trace import build_trace_middleware
 
@@ -143,21 +152,12 @@ class ThinPhoneAgent:
         self.usage_ledger = UsageLedger()
         self.session.usage_ledger = self.usage_ledger
         self.model = build_chat_model(config)
-        self.tools = build_tools(self.session, config)
+        build_base_tools = getattr(tools_module, "build_base_tools", None)
+        native_tool_assembly = callable(build_base_tools)
 
-        # Observe-only experience sink. Construction and every write are
-        # fail-open: local memory must never change actor behavior or run outcome.
+        # Observe-only experience sink.  The experience capability opens it at
+        # run start and attaches it to trace before any model/tool call.
         self._experience_writer = None
-        if getattr(config, "experience_enabled", False):
-            try:
-                from phone_agent.v2.experience import ExperienceWriter
-
-                self._experience_writer = ExperienceWriter(
-                    getattr(config, "experience_dir", "memory/experience")
-                )
-            except Exception:  # noqa: BLE001 - optional local persistence
-                self._experience_writer = None
-
         self._trace = build_trace_middleware(
             self.run_id,
             trace_dir=getattr(config, "trace_dir", ".traces"),
@@ -167,76 +167,111 @@ class ThinPhoneAgent:
         )
         self.trace_path = self._trace.trace_path
 
-        # L0 token-budget mirror + hard cost ceiling (A4 §2). Warns once as the
-        # remaining token budget crosses the line, and hard-stops the run when the
-        # budget is fully spent. Held as an attribute so run() can reset its
-        # per-run state on reuse (S1 R7) and _build_result can read ``exhausted``.
-        self._budget = build_budget_middleware(
-            token_budget=getattr(config, "token_budget", 1_000_000),
-            warn_remaining=getattr(config, "token_warn_remaining", 100_000),
-            lang=getattr(config, "lang", "cn"),
-            ledger=self.usage_ledger,
-            trace_recorder=getattr(self._trace, "record_event", None),
+        def taskdoc_middleware_factory():
+            from phone_agent.v2.middleware.taskdoc import build_taskdoc_middleware
+
+            return build_taskdoc_middleware(
+                self.session,
+                lang=getattr(config, "lang", "cn"),
+                nudge_steps=getattr(config, "taskdoc_nudge_steps", 5),
+            )
+
+        def compact_middleware_factory():
+            from phone_agent.v2.middleware.compact import build_compact_middleware
+
+            return build_compact_middleware(
+                self.session,
+                config,
+                model=self.model,
+                memory_state_provider=self._compact_memory_state,
+            )
+
+        def budget_middleware_factory():
+            return build_budget_middleware(
+                token_budget=getattr(config, "token_budget", 1_000_000),
+                warn_remaining=getattr(config, "token_warn_remaining", 100_000),
+                lang=getattr(config, "lang", "cn"),
+                ledger=self.usage_ledger,
+                trace_recorder=getattr(self._trace, "record_event", None),
+            )
+
+        def taskdoc_tool_factory():
+            if not native_tool_assembly:
+                return None
+            from phone_agent.v2.tools.taskdoc import make_update_task_doc_tool
+
+            return make_update_task_doc_tool(
+                self.session, getattr(config, "lang", "cn")
+            )
+
+        def finish_verify_tool_factory():
+            if not native_tool_assembly:
+                return None
+            from phone_agent.v2.tools.control import make_finish_tool
+
+            return make_finish_tool(self.session, config)
+
+        self._capability_ctx = CapabilityAssemblyContext(
+            {
+                "taskdoc_middleware_factory": taskdoc_middleware_factory,
+                "taskdoc_tool_factory": taskdoc_tool_factory,
+                "taskdoc_run_start": self._taskdoc_run_start,
+                "safety_middleware_factory": lambda: (
+                    MiddlewareReplacement(
+                        build_capability_safety_middleware(self.session, config),
+                        "control_hitl",
+                    )
+                    if getattr(config, "safety_mode", "wary") == "hard"
+                    else build_capability_safety_middleware(self.session, config)
+                ),
+                "budget_middleware_factory": budget_middleware_factory,
+                "compact_middleware_factory": compact_middleware_factory,
+                "finish_verify_tool_factory": finish_verify_tool_factory,
+                "app_kb_run_start": self._app_kb_run_start,
+                "app_kb_prompt_provider": self._app_kb_prompt_block,
+                "dream_run_end": self._dream_run_end,
+                "experience_run_start": self._experience_run_start,
+                "experience_run_end": self._experience_run_end,
+                "recall_run_start": self._recall_run_start,
+                "recall_run_end": self._recall_run_end,
+                "recall_prompt_provider": self._recall_prompt_block,
+            }
         )
 
-        # Two-threshold auto-compact (A4 §3): T1 warn + T2 forced handoff summary.
-        # Guarded/optional so a missing module or disabled switch degrades to a
-        # plain thin loop. Placed before context-pruning (coarse fold before the
-        # fine-grained image/marks prune).
-        self._compact = None
-        if getattr(config, "compact_enabled", True):
-            try:
-                from phone_agent.v2.middleware.compact import build_compact_middleware
+        # Core harness products keep their pre-WP-C2 order in the gaps between
+        # capability slots.  The legacy public builder is deliberately retained
+        # as the baseline for integrations that replace the module wholesale;
+        # same-named capability tools replace entries in place.
+        base_tools = (
+            build_base_tools(self.session, config)
+            if native_tool_assembly
+            else tools_module.build_tools(self.session, config)
+        )
+        for index, tool in enumerate(base_tools):
+            self._capability_ctx.register_core_tool(tool, order=index)
 
-                self._compact = build_compact_middleware(
-                    self.session,
-                    config,
-                    model=self.model,
-                    memory_state_provider=self._compact_memory_state,
-                )
-            except Exception:  # noqa: BLE001 - optional increment; never block bring-up
-                self._compact = None
-
-        middleware = [
-            build_hitl_middleware(self.session, config),
-        ]
-        # TaskDoc render + flow-line middleware (task-board increment). Guarded so
-        # a missing taskdoc module (e.g. this file imported before the concurrent
-        # W1 worktree lands) degrades gracefully to a plain thin loop. Kept before
-        # compact so the pinned [TASK_DOC] block exists when compact chooses its
-        # cut point (compact never folds the pinned block). ``nudge_steps`` is a
-        # deprecated no-op kwarg (U3 removed the stagnation nudge) kept for
-        # backward-compatible construction.
-        if getattr(config, "taskdoc_enabled", True):
-            try:
-                from phone_agent.v2.middleware.taskdoc import build_taskdoc_middleware
-
-                middleware.append(
-                    build_taskdoc_middleware(
-                        self.session,
-                        lang=getattr(config, "lang", "cn"),
-                        nudge_steps=getattr(config, "taskdoc_nudge_steps", 5),
-                    )
-                )
-            except Exception:  # noqa: BLE001 - optional increment; never block bring-up
-                pass
-
-        if self._compact is not None:
-            middleware.append(self._compact)
-
-        middleware.extend(
-            [
-                build_context_pruning_middleware(
-                    keep_images=getattr(config, "image_keep", 2),
-                    keep_marks=getattr(config, "obs_marks_keep", 2),
-                ),
-                self._budget,
-                self._trace,
-                ModelCallLimitMiddleware(
-                    thread_limit=getattr(config, "max_model_calls", 100),
-                    exit_behavior="end",
-                ),
-            ]
+        self._capability_ctx.register_core_middleware(
+            build_control_hitl_middleware(),
+            order=0,
+            replace_key="control_hitl",
+        )
+        self._capability_ctx.register_core_middleware(
+            build_context_pruning_middleware(
+                keep_images=getattr(config, "image_keep", 2),
+                keep_marks=getattr(config, "obs_marks_keep", 2),
+            ),
+            order=30,
+        )
+        self._capability_ctx.register_core_middleware(self._trace, order=50)
+        self._capability_ctx.register_core_middleware(
+            ModelCallLimitMiddleware(
+                thread_limit=getattr(config, "max_model_calls", 100),
+                exit_behavior="end",
+            ),
+            order=60,
+        )
+        self._capability_ctx.add_core_run_hook(
+            "start", self._capability_snapshot_run_start, order=30
         )
 
         # Diagnostic evidence stream (live-diagnosis skill). Appended LAST so its
@@ -261,7 +296,9 @@ class ThinPhoneAgent:
                     enabled=True,
                     unredacted=bool(getattr(config, "diagnostic_unredacted", False)),
                 )
-                middleware.append(self._diagnostic)
+                self._capability_ctx.register_core_middleware(
+                    self._diagnostic, order=70
+                )
             except Exception:  # noqa: BLE001 - optional increment; never block bring-up
                 self._diagnostic = None
         self.evidence_path = getattr(self._diagnostic, "evidence_path", None)
@@ -269,17 +306,23 @@ class ThinPhoneAgent:
         # Optional add-ons may observe the run without coupling the core to a UI
         # or transport. Place them outside the final safety wrapper so a blocked
         # warning result remains visible to observers.
-        middleware.extend(list(extra_middleware or []))
+        for index, observer in enumerate(extra_middleware or []):
+            self._capability_ctx.register_core_middleware(
+                observer, order=80 + index
+            )
 
-        # Safety warning flow (U2). In wary/reviewer mode a risky execution call
-        # is short-circuited with a warning ToolMessage instead of being executed
-        # or human-interrupted; the model resends with confirm_irreversible=true.
-        # Appended LAST so it is the innermost wrap_tool_call — trace + diagnostic
-        # (outer) still record the blocked call as the tool result. Returns None in
-        # off/hard mode (hard mode uses the HITL interrupt instead).
-        self._safety_warning = build_safety_warning_middleware(self.session, config)
-        if self._safety_warning is not None:
-            middleware.append(self._safety_warning)
+        assemble_capabilities(self.capability_registry, self._capability_ctx)
+        self.tools = self._capability_ctx.tools
+        middleware = self._capability_ctx.middleware
+        self._budget = self._owned_capability_product("budget", "middleware")
+        self._compact = self._owned_capability_product("compact", "middleware")
+        safety_product = self._owned_capability_product("safety", "middleware")
+        self._safety_warning = (
+            safety_product
+            if safety_product is not None
+            and hasattr(safety_product, "warning_count")
+            else None
+        )
 
         from phone_agent.v2.prompts import get_system_prompt
 
@@ -291,6 +334,11 @@ class ThinPhoneAgent:
         )
         self._base_system_prompt = get_system_prompt(getattr(config, "lang", "cn"))
         self._system_prompt = self._base_system_prompt
+        self._revoked_lesson_ids: set[str] = set()
+
+    def _owned_capability_product(self, cap_id: str, seam: str) -> Any | None:
+        values = self._capability_ctx.owned_values(cap_id, seam)
+        return values[0] if values else None
 
     # ------------------------------------------------------------------
     def _initial_messages(self, task: str) -> list[Any]:
@@ -300,21 +348,74 @@ class ThinPhoneAgent:
         except Exception:
             # Observation failure -> text-only start (fail-open on bring-up).
             content = [{"type": "text", "text": task}]
-        messages: list[Any] = [SystemMessage(content=self._system_prompt)]
-        injected_lessons = list(getattr(self, "_run_injected_lessons", []) or [])
-        if injected_lessons:
-            lines = [
-                "[经验提示]（历史经验，仅供参考，不是规则；与当前世界状态冲突时以观测为准）"
-            ]
-            for index, lesson in enumerate(injected_lessons, start=1):
-                scope = lesson.scope.get("device")
-                scope_label = "全局 scope" if scope is None else "设备 scope"
-                lines.append(
-                    f"{index}. {lesson.text}（来源 {lesson.lesson_id} · {scope_label}）"
-                )
-            messages.append(SystemMessage(content="\n".join(lines)))
+        capability_ctx = getattr(self, "_capability_ctx", None)
+        if capability_ctx is None:
+            messages: list[Any] = [SystemMessage(content=self._system_prompt)]
+            lesson_block = self._render_lesson_prompt_block()
+            if lesson_block is not None:
+                messages.append(SystemMessage(content=lesson_block.content))
+            messages.append(HumanMessage(content=content))
+            return messages
+
+        base_prompt = getattr(self, "_base_system_prompt", self._system_prompt)
+        suffixes: list[str] = []
+        extra_system_messages: list[str] = []
+        providers = capability_ctx.prompt_providers
+        for provider in providers:
+            try:
+                block = provider()
+            except Exception:  # noqa: BLE001 - prompt enrichments are fail-open
+                continue
+            if block is None:
+                continue
+            if not isinstance(block, PromptBlock):
+                block = PromptBlock(str(block))
+            if not block.content:
+                continue
+            if block.placement == "system_suffix":
+                suffixes.append(block.content)
+            else:
+                extra_system_messages.append(block.content)
+        system_prompt = base_prompt + "".join(suffixes)
+        self._system_prompt = system_prompt
+        messages: list[Any] = [SystemMessage(content=system_prompt)]
+        messages.extend(SystemMessage(content=text) for text in extra_system_messages)
         messages.append(HumanMessage(content=content))
         return messages
+
+    def _render_lesson_prompt_block(self) -> PromptBlock | None:
+        revoked = set(getattr(self, "_revoked_lesson_ids", set()))
+        injected_lessons = [
+            lesson
+            for lesson in list(getattr(self, "_run_injected_lessons", []) or [])
+            if lesson.lesson_id not in revoked
+        ]
+        if not injected_lessons:
+            return None
+        lines = [
+            "[经验提示]（历史经验，仅供参考，不是规则；与当前世界状态冲突时以观测为准）"
+        ]
+        for index, lesson in enumerate(injected_lessons, start=1):
+            scope = lesson.scope.get("device")
+            scope_label = "全局 scope" if scope is None else "设备 scope"
+            lines.append(
+                f"{index}. {lesson.text}（来源 {lesson.lesson_id} · {scope_label}）"
+            )
+        actually_injected = getattr(self, "_actually_injected_lesson_ids", None)
+        if actually_injected is None:
+            actually_injected = []
+            self._actually_injected_lesson_ids = actually_injected
+        for lesson in injected_lessons:
+            if lesson.lesson_id not in actually_injected:
+                actually_injected.append(lesson.lesson_id)
+        return PromptBlock("\n".join(lines), placement="system_message")
+
+    def _recall_prompt_block(self) -> PromptBlock | None:
+        return self._render_lesson_prompt_block()
+
+    def _app_kb_prompt_block(self) -> PromptBlock | None:
+        suffix = str(getattr(self, "_app_kb_prompt_suffix", ""))
+        return PromptBlock(suffix, placement="system_suffix") if suffix else None
 
     def _prepare_lesson_injection(self, device_scope: str) -> None:
         """Freeze one approved-only L0 lesson snapshot for this run."""
@@ -331,6 +432,12 @@ class ThinPhoneAgent:
                 max_items=getattr(self.config, "lesson_inject_max", 3),
                 max_tokens=getattr(self.config, "lesson_inject_tokens", 800),
             )
+            revoked = set(getattr(self, "_revoked_lesson_ids", set()))
+            self._run_injected_lessons = [
+                item
+                for item in self._run_injected_lessons
+                if item.lesson_id not in revoked
+            ]
         except Exception:  # noqa: BLE001 - optional memory injection is fail-open
             self._run_injected_lessons = []
 
@@ -348,6 +455,38 @@ class ThinPhoneAgent:
         except Exception:  # noqa: BLE001 - trace failure cannot block injection/run
             pass
 
+    def revoke_lesson(self, lesson_id: str) -> bool:
+        """Emergency-revoke one lesson and exclude it from future injection.
+
+        Already-sent model messages are immutable and remain truthful history.
+        This method updates the authoritative store immediately and makes every
+        later provider evaluation (including future event-triggered injection)
+        ignore the id.  Damaged stores and unknown ids fail open to the run.
+        """
+
+        clean_id = str(lesson_id).strip()
+        if not clean_id:
+            return False
+        try:
+            from phone_agent.v2.evolution import emergency_revoke_lesson
+
+            revoked = emergency_revoke_lesson(
+                getattr(self.config, "lessons_dir", "memory/lessons"),
+                clean_id,
+            )
+            if not revoked:
+                return False
+        except Exception:  # noqa: BLE001 - emergency control must not stop the run
+            return False
+        self._revoked_lesson_ids.add(clean_id)
+        try:
+            record = getattr(self._trace, "record_event", None)
+            if callable(record):
+                record("lesson_revoked", lesson_id=clean_id, source="runner_control")
+        except Exception:  # noqa: BLE001 - trace is never authoritative
+            pass
+        return True
+
     def _prepare_app_knowledge(self) -> None:
         """Sync App-KB once and rebuild this run's bounded prompt suffix."""
 
@@ -356,6 +495,7 @@ class ThinPhoneAgent:
         )
         self._base_system_prompt = base_prompt
         self._system_prompt = base_prompt
+        self._app_kb_prompt_suffix = ""
         if not getattr(self.config, "app_kb_enabled", True):
             return
         try:
@@ -369,12 +509,113 @@ class ThinPhoneAgent:
                 else ""
             )
             if app_list:
-                self._system_prompt += (
+                self._app_kb_prompt_suffix = (
                     "\n\n# 本机可启动应用（launch_app 请用这些名字）\n"
                     f"{app_list}"
                 )
+                self._system_prompt = base_prompt + self._app_kb_prompt_suffix
         except Exception:  # noqa: BLE001 - prompt enrichment never blocks a run
             self._system_prompt = base_prompt
+            self._app_kb_prompt_suffix = ""
+
+    def _taskdoc_run_start(self, state: dict[str, Any]) -> None:
+        self._seed_task_doc(str(state["task"]))
+
+    def _app_kb_run_start(self, _state: dict[str, Any]) -> None:
+        self._prepare_app_knowledge()
+
+    def _capability_snapshot_run_start(self, _state: dict[str, Any]) -> None:
+        self._record_capability_snapshot()
+
+    def _experience_run_start(self, state: dict[str, Any]) -> None:
+        self._experience_writer = None
+        if not getattr(self.config, "experience_enabled", False):
+            return
+        try:
+            from phone_agent.v2.experience import ExperienceWriter
+
+            self._experience_writer = ExperienceWriter(
+                getattr(self.config, "experience_dir", "memory/experience")
+            )
+        except Exception:  # noqa: BLE001 - optional persistence is fail-open
+            self._experience_writer = None
+        trace = getattr(self, "_trace", None)
+        if trace is not None:
+            attach = getattr(trace, "set_experience_writer", None)
+            if callable(attach):
+                attach(self._experience_writer)
+            else:
+                trace._experience_writer = self._experience_writer
+        state["device_scope"] = self._experience_device_scope()
+        if trace is not None:
+            trace.experience_device_scope = state["device_scope"]
+
+    def _recall_run_start(self, state: dict[str, Any]) -> None:
+        self._shadow_recall_start(str(state["task"]))
+        if (
+            state.get("device_scope") == "device:unknown"
+            and getattr(self.config, "memory_rag", "off") == "on"
+        ):
+            state["device_scope"] = self._experience_device_scope()
+        self._prepare_lesson_injection(str(state["device_scope"]))
+
+    def _recall_run_end(self, _state: dict[str, Any]) -> None:
+        if _state.get("exception"):
+            return
+        self._shadow_recall_finish()
+
+    def _experience_run_end(self, state: dict[str, Any]) -> None:
+        result = state.get("result")
+        if not isinstance(result, RunResult):
+            return
+        self._append_experience_outcome(
+            str(state["task"]),
+            result,
+            ts_start=float(state["ts_start"]),
+            ts_end=float(state.get("ts_end", time.time())),
+            device_scope=str(state.get("device_scope", "device:unknown")),
+        )
+
+    def _dream_run_end(self, _state: dict[str, Any]) -> None:
+        if (
+            _state.get("exception")
+            or getattr(self.config, "dream_mode", "manual") != "auto"
+        ):
+            return
+        try:
+            from phone_agent.v2.dream import run_maintenance
+
+            self._last_dream_summary = run_maintenance(
+                self.config,
+                light=True,
+                store=getattr(self.session, "app_store", None),
+                inventory_provider=self._installed_app_inventory,
+            )
+        except Exception as exc:  # noqa: BLE001 - maintenance never masks outcome
+            self._last_dream_summary = {
+                "status": "skipped",
+                "reason": type(exc).__name__,
+            }
+
+    def _installed_app_inventory(self) -> set[str] | None:
+        try:
+            inventory = self.session.device_factory.get_installed_app_inventory(
+                getattr(self.config, "device_id", None)
+            )
+            packages = set(getattr(inventory, "packages", ()) or ())
+            return packages or None
+        except Exception:  # noqa: BLE001 - dream is fail-open without a device
+            return None
+
+    def _execute_run_hooks(self, when: str, state: dict[str, Any]) -> None:
+        capability_ctx = getattr(self, "_capability_ctx", None)
+        if capability_ctx is None:
+            return
+        for hook in capability_ctx.run_hooks(when):
+            try:
+                hook(state)
+            except Exception:  # noqa: BLE001 - capability side planes are fail-open
+                continue
 
     def _shadow_recall_start(self, task: str) -> None:
         """Retrieve trace-only candidates without touching actor context."""
@@ -620,17 +861,50 @@ class ThinPhoneAgent:
         )
         if callable(reset_implicit_alias):
             reset_implicit_alias(self.run_id)
-        self._seed_task_doc(task)
-        self._prepare_app_knowledge()
-        self._record_capability_snapshot()
-        self._shadow_recall_start(task)
-        device_scope = "device:unknown"
-        if (
-            getattr(self, "_experience_writer", None) is not None
-            or getattr(self.config, "memory_rag", "off") == "on"
-        ):
-            device_scope = self._experience_device_scope()
-        self._prepare_lesson_injection(device_scope)
+        self._actually_injected_lesson_ids = []
+        run_state: dict[str, Any] = {
+            "task": task,
+            "ts_start": ts_start,
+            "device_scope": "device:unknown",
+        }
+        capability_ctx = getattr(self, "_capability_ctx", None)
+        if capability_ctx is not None:
+            # Clear run-scoped capability state before active hooks rebuild it.
+            # This is also what makes a prior apply -> release leave no semantic
+            # residue when the same process assembles another run.
+            try:
+                self.session.task_doc = None
+            except Exception:  # noqa: BLE001 - duck-typed sessions may be immutable
+                pass
+            self._shadow_candidates = []
+            self._shadow_recall_ready = False
+            self._run_injected_lessons = []
+            self._app_kb_prompt_suffix = ""
+            self._last_dream_summary = None
+            # A reused process may have reconciled experience off since the
+            # previous run. Clear the prior sink before active start hooks mount
+            # the current writer, so disabled means no residual persistence.
+            self._experience_writer = None
+            if getattr(self, "_trace", None) is not None:
+                attach = getattr(self._trace, "set_experience_writer", None)
+                if callable(attach):
+                    attach(None)
+                else:
+                    self._trace._experience_writer = None
+            self._execute_run_hooks("start", run_state)
+        else:
+            # Compatibility for unit-test doubles constructed via ``__new__``.
+            self._seed_task_doc(task)
+            self._prepare_app_knowledge()
+            self._record_capability_snapshot()
+            self._shadow_recall_start(task)
+            if (
+                getattr(self, "_experience_writer", None) is not None
+                or getattr(self.config, "memory_rag", "off") == "on"
+            ):
+                run_state["device_scope"] = self._experience_device_scope()
+            self._prepare_lesson_injection(str(run_state["device_scope"]))
+        device_scope = str(run_state["device_scope"])
         # Reset per-run one-shot flags so a reused agent behaves like a fresh run
         # (S1 R7): the HITL-exhaustion terminal flag, the token-budget state, and
         # the compaction middleware's per-run counters.
@@ -690,24 +964,32 @@ class ThinPhoneAgent:
                 getattr(self._trace, "_step", 0),
                 self.trace_path,
             )
-            self._append_experience_outcome(
-                task,
-                failed,
-                ts_start=ts_start,
-                ts_end=time.time(),
-                device_scope=device_scope,
-            )
+            run_state.update(result=failed, ts_end=time.time(), exception=True)
+            if capability_ctx is not None:
+                self._execute_run_hooks("end", run_state)
+            else:
+                self._append_experience_outcome(
+                    task,
+                    failed,
+                    ts_start=ts_start,
+                    ts_end=run_state["ts_end"],
+                    device_scope=device_scope,
+                )
             raise
 
         run_result = self._build_result(result)
-        self._shadow_recall_finish()
-        self._append_experience_outcome(
-            task,
-            run_result,
-            ts_start=ts_start,
-            ts_end=time.time(),
-            device_scope=device_scope,
-        )
+        run_state.update(result=run_result, ts_end=time.time())
+        if capability_ctx is not None:
+            self._execute_run_hooks("end", run_state)
+        else:
+            self._shadow_recall_finish()
+            self._append_experience_outcome(
+                task,
+                run_result,
+                ts_start=ts_start,
+                ts_end=run_state["ts_end"],
+                device_scope=device_scope,
+            )
         return run_result
 
     def _experience_device_scope(self) -> str:
@@ -785,8 +1067,10 @@ class ThinPhoneAgent:
                 verifier=getattr(self.session, "finish_verifier", "skipped"),
                 capabilities=dict(getattr(self, "_run_capabilities", {})),
                 injected_lessons=[
-                    item.lesson_id
-                    for item in getattr(self, "_run_injected_lessons", []) or []
+                    lesson_id
+                    for lesson_id in getattr(
+                        self, "_actually_injected_lesson_ids", []
+                    )
                 ],
             )
         except Exception:  # noqa: BLE001 - persistence cannot alter run semantics
