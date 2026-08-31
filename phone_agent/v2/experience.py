@@ -38,6 +38,7 @@ EPISODE_OUTCOME_FIELDS = (
     "takeover",
     "verifier",
     "capabilities",
+    "injected_lessons",
 )
 EXPERIENCE_EVENT_FIELDS = (
     "type",
@@ -77,6 +78,7 @@ _TOOLS = frozenset(
 _PACKAGE_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0-9_]*)+$")
 _CAPABILITY_ID_PATTERN = re.compile(r"^[a-z][a-z0-9_]*$")
 _CAPABILITY_STATES = frozenset({"active", "off", "shadow", "pending"})
+_LESSON_ID_PATTERN = re.compile(r"^les_[0-9a-f]{12,64}$")
 
 
 def _clean_text(value: Any) -> str:
@@ -100,6 +102,7 @@ def _classify_and_clean(record: Mapping[str, Any]) -> dict[str, Any]:
       and accounting signals; any string among them is still regex-redacted.
     * ``capabilities`` contains only stable ids and one of four bounded states;
       titles, hook data, configuration values, and dependency details are absent.
+    * ``injected_lessons`` contains only validated lesson ids, never lesson text.
     * ``tool`` and ``result_class`` describe execution shape without arguments or
       receipts.  In particular, ``type_text`` text, mark text, screenshots, tool
       result text, and model reasoning have no schema field and are discarded.
@@ -149,6 +152,16 @@ def _classify_and_clean(record: Mapping[str, Any]) -> dict[str, Any]:
                     and state in _CAPABILITY_STATES
                 ):
                     capabilities[cap_id] = state
+        injected_lessons: list[str] = []
+        raw_injected_lessons = record.get("injected_lessons", [])
+        if isinstance(raw_injected_lessons, (list, tuple)):
+            for raw_lesson_id in raw_injected_lessons:
+                lesson_id = _clean_text(raw_lesson_id).strip()
+                if (
+                    _LESSON_ID_PATTERN.fullmatch(lesson_id)
+                    and lesson_id not in injected_lessons
+                ):
+                    injected_lessons.append(lesson_id)
 
         # Construct in the exact shared WP-I1/WP-I2 field order.
         return {
@@ -171,6 +184,7 @@ def _classify_and_clean(record: Mapping[str, Any]) -> dict[str, Any]:
             "takeover": clean_takeover,
             "verifier": verifier,
             "capabilities": capabilities,
+            "injected_lessons": injected_lessons,
         }
 
     if kind == "experience_event":

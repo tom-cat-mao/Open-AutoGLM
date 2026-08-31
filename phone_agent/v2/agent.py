@@ -300,10 +300,53 @@ class ThinPhoneAgent:
         except Exception:
             # Observation failure -> text-only start (fail-open on bring-up).
             content = [{"type": "text", "text": task}]
-        return [
-            SystemMessage(content=self._system_prompt),
-            HumanMessage(content=content),
-        ]
+        messages: list[Any] = [SystemMessage(content=self._system_prompt)]
+        injected_lessons = list(getattr(self, "_run_injected_lessons", []) or [])
+        if injected_lessons:
+            lines = [
+                "[经验提示]（历史经验，仅供参考，不是规则；与当前世界状态冲突时以观测为准）"
+            ]
+            for index, lesson in enumerate(injected_lessons, start=1):
+                scope = lesson.scope.get("device")
+                scope_label = "全局 scope" if scope is None else "设备 scope"
+                lines.append(
+                    f"{index}. {lesson.text}（来源 {lesson.lesson_id} · {scope_label}）"
+                )
+            messages.append(SystemMessage(content="\n".join(lines)))
+        messages.append(HumanMessage(content=content))
+        return messages
+
+    def _prepare_lesson_injection(self, device_scope: str) -> None:
+        """Freeze one approved-only L0 lesson snapshot for this run."""
+
+        self._run_injected_lessons: list[Any] = []
+        if getattr(self.config, "memory_rag", "off") != "on":
+            return
+        try:
+            from phone_agent.v2.evolution import select_lessons_for_injection
+
+            self._run_injected_lessons = select_lessons_for_injection(
+                getattr(self.config, "lessons_dir", "memory/lessons"),
+                device_scope=device_scope,
+                max_items=getattr(self.config, "lesson_inject_max", 3),
+                max_tokens=getattr(self.config, "lesson_inject_tokens", 800),
+            )
+        except Exception:  # noqa: BLE001 - optional memory injection is fail-open
+            self._run_injected_lessons = []
+
+        if not self._run_injected_lessons:
+            return
+        try:
+            record = getattr(self._trace, "record_event", None)
+            if callable(record):
+                lesson_ids = [item.lesson_id for item in self._run_injected_lessons]
+                record(
+                    "lesson_injection",
+                    lesson_ids=lesson_ids,
+                    count=len(lesson_ids),
+                )
+        except Exception:  # noqa: BLE001 - trace failure cannot block injection/run
+            pass
 
     def _prepare_app_knowledge(self) -> None:
         """Sync App-KB once and rebuild this run's bounded prompt suffix."""
@@ -581,6 +624,13 @@ class ThinPhoneAgent:
         self._prepare_app_knowledge()
         self._record_capability_snapshot()
         self._shadow_recall_start(task)
+        device_scope = "device:unknown"
+        if (
+            getattr(self, "_experience_writer", None) is not None
+            or getattr(self.config, "memory_rag", "off") == "on"
+        ):
+            device_scope = self._experience_device_scope()
+        self._prepare_lesson_injection(device_scope)
         # Reset per-run one-shot flags so a reused agent behaves like a fresh run
         # (S1 R7): the HITL-exhaustion terminal flag, the token-budget state, and
         # the compaction middleware's per-run counters.
@@ -603,9 +653,6 @@ class ThinPhoneAgent:
         if getattr(self, "_safety_warning", None) is not None:
             self._safety_warning.warning_count = 0
 
-        device_scope = "device:unknown"
-        if getattr(self, "_experience_writer", None) is not None:
-            device_scope = self._experience_device_scope()
         if (
             getattr(self, "_experience_writer", None) is not None
             and getattr(self, "_trace", None) is not None
@@ -737,6 +784,10 @@ class ThinPhoneAgent:
                 takeover=takeover,
                 verifier=getattr(self.session, "finish_verifier", "skipped"),
                 capabilities=dict(getattr(self, "_run_capabilities", {})),
+                injected_lessons=[
+                    item.lesson_id
+                    for item in getattr(self, "_run_injected_lessons", []) or []
+                ],
             )
         except Exception:  # noqa: BLE001 - persistence cannot alter run semantics
             return
