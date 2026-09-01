@@ -165,6 +165,8 @@ class ThinPhoneAgent:
             enabled=getattr(config, "trace_enabled", True),
             experience_writer=self._experience_writer,
             session=self.session,
+            alias_overwrite_enabled=getattr(config, "alias_overwrite_enabled", True),
+            alias_overwrite_notes=tuple(getattr(config, "alias_overwrite_notes", ())),
         )
         self.session.resolution_trace_recorder = getattr(
             self._trace, "record_event", None

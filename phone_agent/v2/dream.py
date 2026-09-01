@@ -2,11 +2,222 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+import hashlib
+import json
+from pathlib import Path
 from typing import Any
 
-from phone_agent.v2.appkb import AppKnowledgeStore, _parse_iso, _sort_key
+from phone_agent.v2.appkb import (
+    AppKnowledgeStore,
+    _normalize_term,
+    _parse_iso,
+    _sort_key,
+)
 from phone_agent.v2.experience import ExperienceWriter, load_episodes
+
+
+@dataclass(frozen=True)
+class AliasOverwriteSignature:
+    """One evidence-complete wrong-app correction found in the event log."""
+
+    run_id: str
+    term: str
+    old_package: str
+    new_package: str
+    first_step: int
+    exit_step: int
+    corrected_step: int
+    note_marker: str
+    fingerprint: str
+
+
+def _read_app_events(path: Path) -> list[dict[str, Any]]:
+    """Read dictionary events from a possibly damaged append-only log."""
+
+    events: list[dict[str, Any]] = []
+    if not path.exists():
+        return events
+    with path.open("r", encoding="utf-8") as stream:
+        for line in stream:
+            try:
+                event = json.loads(line)
+            except (TypeError, json.JSONDecodeError):
+                continue
+            if isinstance(event, dict):
+                events.append(event)
+    return events
+
+
+def _signature_fingerprint(
+    run_id: str,
+    term: str,
+    old_package: str,
+    new_package: str,
+    first_step: int,
+    exit_step: int,
+    corrected_step: int,
+) -> str:
+    payload = json.dumps(
+        [
+            run_id,
+            _normalize_term(term),
+            old_package,
+            new_package,
+            first_step,
+            exit_step,
+            corrected_step,
+        ],
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def detect_alias_overwrite_signatures(
+    events_path: str | Path,
+    *,
+    note_terms: tuple[str, ...],
+) -> list[AliasOverwriteSignature]:
+    """Find launch-A -> explicit wrong-app exit -> launch-B signatures.
+
+    Evidence never crosses a run boundary.  The exit must occur one or two
+    model steps after a successful launch and must carry one configured note
+    marker.  A corrective launch may reuse the original name or use another
+    explicit name/package, but it must resolve successfully to a different
+    package.
+    """
+
+    configured = {
+        str(term).strip().casefold() for term in note_terms if str(term).strip()
+    }
+    events = _read_app_events(Path(events_path))
+    processed = {
+        str(event.get("signature_fingerprint", "")).strip()
+        for event in events
+        if event.get("op") == "alias_overwritten"
+    }
+    by_run: dict[str, list[tuple[int, dict[str, Any]]]] = {}
+    for order, event in enumerate(events):
+        if event.get("op") != "tool_observed":
+            continue
+        run_id = str(event.get("run_id", "")).strip()
+        if run_id:
+            by_run.setdefault(run_id, []).append((order, event))
+
+    found: list[AliasOverwriteSignature] = []
+    for run_id, run_events in by_run.items():
+        ordered = sorted(
+            run_events,
+            key=lambda item: (int(item[1].get("step", 0)), item[0]),
+        )
+        for index, (_order, first) in enumerate(ordered):
+            if first.get("tool") != "launch_app" or first.get("success") is not True:
+                continue
+            term = str(first.get("term", "")).strip()
+            old_package = str(first.get("package", "")).strip()
+            first_step = int(first.get("step", 0))
+            if not term or not old_package:
+                continue
+
+            exit_index = -1
+            exit_event: dict[str, Any] | None = None
+            for candidate_index in range(index + 1, len(ordered)):
+                candidate = ordered[candidate_index][1]
+                step_gap = int(candidate.get("step", 0)) - first_step
+                if step_gap > 2:
+                    break
+                marker = str(candidate.get("note_marker", "")).strip()
+                is_exit = candidate.get("success") is True and (
+                    candidate.get("tool") == "back"
+                    or (
+                        candidate.get("tool") == "launch_app"
+                        and str(candidate.get("package", "")).strip() != old_package
+                    )
+                )
+                if step_gap >= 1 and is_exit and marker.casefold() in configured:
+                    exit_index = candidate_index
+                    exit_event = candidate
+                    break
+            if exit_event is None:
+                continue
+
+            corrected: dict[str, Any] | None = None
+            if (
+                exit_event.get("tool") == "launch_app"
+                and exit_event.get("success") is True
+            ):
+                corrected = exit_event
+            else:
+                for _candidate_order, candidate in ordered[exit_index + 1 :]:
+                    if (
+                        candidate.get("tool") == "launch_app"
+                        and candidate.get("success") is True
+                        and str(candidate.get("package", "")).strip() != old_package
+                    ):
+                        corrected = candidate
+                        break
+            if corrected is None:
+                continue
+
+            new_package = str(corrected.get("package", "")).strip()
+            exit_step = int(exit_event.get("step", 0))
+            corrected_step = int(corrected.get("step", 0))
+            fingerprint = _signature_fingerprint(
+                run_id,
+                term,
+                old_package,
+                new_package,
+                first_step,
+                exit_step,
+                corrected_step,
+            )
+            if fingerprint in processed:
+                continue
+            found.append(
+                AliasOverwriteSignature(
+                    run_id=run_id,
+                    term=term,
+                    old_package=old_package,
+                    new_package=new_package,
+                    first_step=first_step,
+                    exit_step=exit_step,
+                    corrected_step=corrected_step,
+                    note_marker=str(exit_event["note_marker"]),
+                    fingerprint=fingerprint,
+                )
+            )
+            processed.add(fingerprint)
+    return found
+
+
+def apply_alias_overwrites(
+    store: AppKnowledgeStore, *, note_terms: tuple[str, ...]
+) -> dict[str, int]:
+    """Apply every unprocessed correction signature to learned aliases."""
+
+    signatures = detect_alias_overwrite_signatures(
+        store.events_path, note_terms=note_terms
+    )
+    overwritten = 0
+    for signature in signatures:
+        labels = [
+            str(entry.get("label", "")).strip()
+            for entry in store.entries(include_stale=False)
+            if entry.get("package") == signature.new_package
+            and str(entry.get("label", "")).strip()
+        ]
+        changed = store.overwrite_learned_alias(
+            signature.term,
+            signature.old_package,
+            signature.new_package,
+            label=labels[0] if labels else signature.new_package,
+            evidence_run_id=signature.run_id,
+            signature_fingerprint=signature.fingerprint,
+        )
+        overwritten += int(changed is not None)
+    return {"candidates": len(signatures), "overwritten": overwritten}
 
 
 def consolidate(
@@ -236,6 +447,17 @@ def run_maintenance(
         active_store = store or AppKnowledgeStore(
             getattr(config, "memory_dir", "memory")
         )
+        if getattr(config, "alias_overwrite_enabled", False):
+            summary["alias_overwrite"] = apply_alias_overwrites(
+                active_store,
+                note_terms=tuple(
+                    getattr(
+                        config,
+                        "alias_overwrite_notes",
+                        ("开错", "不对", "不是", "错了", "wrong app"),
+                    )
+                ),
+            )
         inventory = inventory_provider() if callable(inventory_provider) else None
         summary.update(consolidate(active_store, inventory=inventory, light=light))
     except Exception as exc:  # noqa: BLE001 - maintenance is deliberately fail-open
@@ -274,9 +496,16 @@ def _merge_duplicates(
 ) -> tuple[list[dict[str, Any]], int]:
     """Merge groups sharing an exact package and label."""
 
-    groups: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    groups: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
     for entry in entries:
-        groups.setdefault((entry["package"], entry["label"]), []).append(entry)
+        provenance = (
+            "mutable_alias"
+            if entry["kind"] in {"learned", "user"}
+            else str(entry["kind"])
+        )
+        groups.setdefault((entry["package"], entry["label"], provenance), []).append(
+            entry
+        )
 
     merged: list[dict[str, Any]] = []
     merged_count = 0
@@ -287,6 +516,7 @@ def _merge_duplicates(
         winner = max(
             group,
             key=lambda entry: (
+                int(entry["kind"] == "user"),
                 entry["confidence"],
                 entry["success_count"],
                 _parse_iso(entry["last_seen"]),

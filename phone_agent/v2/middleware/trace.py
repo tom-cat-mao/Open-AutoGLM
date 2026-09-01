@@ -89,6 +89,8 @@ class TraceMiddleware(AgentMiddleware):
         *,
         experience_writer: Any | None = None,
         session: Any | None = None,
+        alias_overwrite_enabled: bool = True,
+        alias_overwrite_notes: tuple[str, ...] = (),
     ) -> None:
         super().__init__()
         self.run_id = run_id
@@ -102,6 +104,10 @@ class TraceMiddleware(AgentMiddleware):
         # fail-open, so it cannot alter the actor or the device action result.
         self._experience_writer = experience_writer
         self._session = session
+        self._alias_overwrite_enabled = bool(alias_overwrite_enabled)
+        self._alias_overwrite_notes = tuple(
+            str(item).strip() for item in alias_overwrite_notes if str(item).strip()
+        )
         if self.enabled:
             os.makedirs(self.trace_dir, exist_ok=True)
             self._path = os.path.join(self.trace_dir, f"{run_id}.jsonl")
@@ -150,6 +156,65 @@ class TraceMiddleware(AgentMiddleware):
             )
         except Exception:  # noqa: BLE001 - observability must never alter actor behavior
             return
+
+    def _write_alias_evidence(
+        self,
+        tool: str,
+        args: Any,
+        result: Any = None,
+        *,
+        error: BaseException | None = None,
+        launched_before: int = 0,
+    ) -> None:
+        """Persist bounded dream evidence without storing a full model note."""
+
+        if not self._alias_overwrite_enabled or tool not in {"launch_app", "back"}:
+            return
+        store = getattr(self._session, "app_store", None)
+        record = getattr(store, "record_alias_tool_event", None)
+        if not callable(record):
+            return
+        try:
+            from phone_agent.config.redact import SENSITIVE_PATTERN
+            from phone_agent.v2.experience import classify_tool_result
+
+            call_args = args if isinstance(args, Mapping) else {}
+            note = str(call_args.get("note", "") or "")
+            folded_note = note.casefold()
+            marker = next(
+                (
+                    candidate
+                    for candidate in self._alias_overwrite_notes
+                    if candidate.casefold() in folded_note
+                ),
+                None,
+            )
+            launched = list(getattr(self._session, "launched_apps", []) or [])
+            package = (
+                launched[-1]
+                if tool == "launch_app" and len(launched) > launched_before
+                else None
+            )
+            success = classify_tool_result(result, error) == "ok"
+            term = (
+                str(call_args.get("app_name", "") or "").strip()
+                if tool == "launch_app"
+                else ""
+            )
+            if term and SENSITIVE_PATTERN.search(term):
+                term = ""
+            record(
+                run_id=self.run_id,
+                step=self._step,
+                tool=tool,
+                term=term or None,
+                package=package,
+                success=success,
+                note_marker=marker,
+            )
+        except Exception:  # noqa: BLE001 - memory evidence never changes execution
+            return
+
     @property
     def launched_apps(self) -> set[str]:
         """Packages confirmed by successful launch-tool receipts this run."""
@@ -253,6 +318,9 @@ class TraceMiddleware(AgentMiddleware):
                 }
             )
             self._write_experience(name, error=exc, launched_before=launched_before)
+            self._write_alias_evidence(
+                name, args, error=exc, launched_before=launched_before
+            )
             raise
         content = getattr(result, "content", None)
         self._record_successful_launch(name, content)
@@ -269,6 +337,7 @@ class TraceMiddleware(AgentMiddleware):
             }
         )
         self._write_experience(name, result, launched_before=launched_before)
+        self._write_alias_evidence(name, args, result, launched_before=launched_before)
         return result
 
     async def awrap_tool_call(self, request, handler):  # noqa: ANN001
@@ -299,6 +368,9 @@ class TraceMiddleware(AgentMiddleware):
                 }
             )
             self._write_experience(name, error=exc, launched_before=launched_before)
+            self._write_alias_evidence(
+                name, args, error=exc, launched_before=launched_before
+            )
             raise
         content = getattr(result, "content", None)
         self._record_successful_launch(name, content)
@@ -315,6 +387,7 @@ class TraceMiddleware(AgentMiddleware):
             }
         )
         self._write_experience(name, result, launched_before=launched_before)
+        self._write_alias_evidence(name, args, result, launched_before=launched_before)
         return result
 
     # --- run end ------------------------------------------------------------
@@ -333,6 +406,8 @@ def build_trace_middleware(
     *,
     experience_writer: Any | None = None,
     session: Any | None = None,
+    alias_overwrite_enabled: bool = True,
+    alias_overwrite_notes: tuple[str, ...] = (),
 ) -> TraceMiddleware:
     return TraceMiddleware(
         run_id,
@@ -340,6 +415,8 @@ def build_trace_middleware(
         enabled=enabled,
         experience_writer=experience_writer,
         session=session,
+        alias_overwrite_enabled=alias_overwrite_enabled,
+        alias_overwrite_notes=alias_overwrite_notes,
     )
 
 

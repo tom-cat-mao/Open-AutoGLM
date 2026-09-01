@@ -171,6 +171,17 @@ class V2Config:
     # Evidence-backed correction: unknown name -> receipt-listed package ->
     # verified package launch writes the failed name as a learned alias.
     implicit_alias_enabled: bool = True
+    # Offline learned-alias correction: retain a bounded launch/back evidence
+    # stream and let dream replace a wrong learned mapping after an explicit
+    # model self-correction. Notes are comma-separated literal markers.
+    alias_overwrite_enabled: bool = True
+    alias_overwrite_notes: tuple[str, ...] = (
+        "开错",
+        "不对",
+        "不是",
+        "错了",
+        "wrong app",
+    )
     app_list_max: int = 40
     dream_mode: str = "manual"
     # Four-route App-name resolver: high-recall generation followed by prior-
@@ -354,6 +365,17 @@ class V2Config:
             implicit_alias_enabled=_env_bool_default_true(
                 "PHONE_AGENT_IMPLICIT_ALIAS", True
             ),
+            alias_overwrite_enabled=_env_bool_default_true(
+                "PHONE_AGENT_ALIAS_OVERWRITE", True
+            ),
+            alias_overwrite_notes=tuple(
+                item.strip()
+                for item in _env_str(
+                    "PHONE_AGENT_ALIAS_OVERWRITE_NOTES",
+                    "开错,不对,不是,错了,wrong app",
+                ).split(",")
+                if item.strip()
+            ),
             app_list_max=_env_int("PHONE_AGENT_APP_LIST_MAX", 40),
             dream_mode=_env_choice(
                 "PHONE_AGENT_DREAM", "manual", ("off", "auto", "manual")
@@ -522,5 +544,7 @@ class V2Config:
             raise ValueError("PHONE_AGENT_RECALL_MIN_SCORE must be between 0 and 1")
         if config.recall_decay_lambda < 0.0:
             raise ValueError("PHONE_AGENT_RECALL_DECAY_LAMBDA must be non-negative")
+        if not config.alias_overwrite_notes:
+            raise ValueError("PHONE_AGENT_ALIAS_OVERWRITE_NOTES must not be empty")
 
         return config

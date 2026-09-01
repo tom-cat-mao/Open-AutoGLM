@@ -487,6 +487,7 @@ def _apply_deliverable(ctx: CapabilityAssemblyContext) -> None:
 def _apply_app_kb(ctx: CapabilityAssemblyContext) -> None:
     _register_service_hook(ctx, "start", "app_kb_run_start")
     _register_prompt(ctx, "app_kb_prompt_provider")
+    _register_cli(ctx, ("learn_alias", "forget_alias"))
 
 
 def _apply_dream(ctx: CapabilityAssemblyContext) -> None:
