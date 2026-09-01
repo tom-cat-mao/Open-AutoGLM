@@ -39,6 +39,7 @@ EPISODE_OUTCOME_FIELDS = (
     "verifier",
     "capabilities",
     "injected_lessons",
+    "deliverable_path",
 )
 EXPERIENCE_EVENT_FIELDS = (
     "type",
@@ -73,6 +74,8 @@ _TOOLS = frozenset(
         "ask_user",
         "take_over",
         "update_task_doc",
+        "write_document",
+        "update_document",
     }
 )
 _PACKAGE_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0-9_]*)+$")
@@ -103,9 +106,12 @@ def _classify_and_clean(record: Mapping[str, Any]) -> dict[str, Any]:
     * ``capabilities`` contains only stable ids and one of four bounded states;
       titles, hook data, configuration values, and dependency details are absent.
     * ``injected_lessons`` contains only validated lesson ids, never lesson text.
+    * optional ``deliverable_path`` identifies a successfully written local
+      artifact; the HTML body itself has no schema field and is discarded.
     * ``tool`` and ``result_class`` describe execution shape without arguments or
-      receipts.  In particular, ``type_text`` text, mark text, screenshots, tool
-      result text, and model reasoning have no schema field and are discarded.
+      receipts.  In particular, ``type_text`` text, document HTML, mark text,
+      screenshots, tool result text, and model reasoning have no schema field
+      and are discarded.
     """
 
     kind = record.get("type")
@@ -163,7 +169,15 @@ def _classify_and_clean(record: Mapping[str, Any]) -> dict[str, Any]:
                 ):
                     injected_lessons.append(lesson_id)
 
-        # Construct in the exact shared WP-I1/WP-I2 field order.
+        raw_deliverable_path = record.get("deliverable_path")
+        deliverable_path = (
+            None
+            if raw_deliverable_path is None
+            else _clean_text(raw_deliverable_path).strip() or None
+        )
+
+        # Construct in the exact shared WP-I1/WP-I2 field order. Legacy records
+        # may omit newer fields; canonical records materialize their defaults.
         return {
             "type": "episode_outcome",
             "schema_v": 1,
@@ -185,6 +199,7 @@ def _classify_and_clean(record: Mapping[str, Any]) -> dict[str, Any]:
             "verifier": verifier,
             "capabilities": capabilities,
             "injected_lessons": injected_lessons,
+            "deliverable_path": deliverable_path,
         }
 
     if kind == "experience_event":

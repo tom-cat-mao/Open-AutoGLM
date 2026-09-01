@@ -19,11 +19,12 @@ TaskWizard 采用 thin-loop v2：模型每轮观察真实设备、决定一个�
 - **观测加固**：默认在每次原子观测前静置 300ms 并识别 `FLAG_SECURE` 均匀黑屏；执行工具可用 `settle_ms` 替代全局静置（搜索/提交/开页建议 1500–2500ms）。
 - **安全预警制**：风险动作先返回警告与选项，模型明确确认后才执行（confirm-to-execute）。
 - **可信完成**：TaskDoc 任务板与流程线持续记录进度；finish 两段式确认，并可交给独立上下文验收器复核。
+- **HTML 产出物**：攻略、计划、比价报告等成果可由 `write_document` / `update_document` 写成本 run 的自包含单页 HTML；路径由 run id 派生，内容限 256 KiB，模型不能指定任意文件。
 - **App-KB 自积累记忆**：同步本机应用名称；验证启动成功后沉淀非敏感别名，并累计成功反馈。同一 run 中未知中文名失败、回执列出的包名随后启动成功时，自动把该中文名写为 `learned` 别名（隐式纠正，证据闭环）。
 - **经验数据面**：每次 run 结束以严格隐私白名单落盘 episode outcome 与工具结果分类，持久化分角色 token 账本；数据采集全程 observe-only，并审计本轮实际注入的 lesson id。
 - **经验提炼与晋升**：离线 `--distill` 从证据充足的 episode 组生成 proposed lesson；Rule-of-3 通过后仍须人工 approve。仅 `PHONE_AGENT_MEMORY_RAG=on` 时，approved lesson 才在 run 开局以“参考、非规则”的 L0 Mirror 受控注入。
 - **RAG shadow 召回**：sqlite-vec + FTS5 混合检索历史 episode 与 App 别名；默认只写 trace 并按实际启动应用统计命中率，绝不注入 actor 上下文。
-- **能力装配层**：九个内建能力通过稳定 `cap_id` 和 `apply/release` 生命周期挂入中间件、工具、提示块、run hooks 或 CLI 命令；注册表按 id/档位 diff 做 reconcile，依赖缺失保持 pending，卸载后不残留能力产物。每次 run 的能力快照仍写入 trace 与 episode。
+- **能力装配层**：十个内建能力通过稳定 `cap_id` 和 `apply/release` 生命周期挂入中间件、工具、提示块、run hooks 或 CLI 命令；注册表按 id/档位 diff 做 reconcile，依赖缺失保持 pending，卸载后不残留能力产物。每次 run 的能力快照仍写入 trace 与 episode。
 - **长任务可控**：token 预算限制成本，两级 auto-compact 在接近上下文窗口时保留关键状态。
 
 ## 快速开始
@@ -39,6 +40,7 @@ cp .env.example .env  # 填写模型网关、模型名与 API Key
 `PHONE_AGENT_LOCATE_MAX_SIZE=0` 保持 `locate` 原图输入；低配机器可设为正整数限制最长边。`PHONE_AGENT_LOCATEANYTHING_CONTEXT_MAX_CHARS` 限制 intent/可见文字提示长度，`PHONE_AGENT_SCOPE_PADDING_RATIO` 控制可选 scope 裁剪的边缘扩展比例。
 `PHONE_AGENT_OBSERVE_SETTLE_MS=300` 控制观测前静置（`0` 关闭），`PHONE_AGENT_BLACK_SCREEN_DETECT=on|off` 控制保护页黑屏检测；动作参数 `settle_ms` 会 clamp 到 0–5000ms，并替代而非叠加全局值。
 `PHONE_AGENT_IMPLICIT_ALIAS=on|off` 控制 App-KB 的证据闭环隐式纠正（默认 `on`）；无失败回执候选证据时不会猜测或写入。
+`PHONE_AGENT_DELIVERABLE=on|off` 控制 `deliverable` 能力（默认 `on`）；开启后模型可把文档成果写入 `PHONE_AGENT_DELIVERABLE_DIR/<run_id>.html`（默认 `outputs/deliverables`），只能创建或全量更新本 run 的 UTF-8 单页 HTML，大小上限 256 KiB。成功路径会进入 episode 的可选 `deliverable_path` 字段，生产 trace 只记录 HTML 字节数，不记录正文。
 
 ```bash
 .venv/bin/python main_v2.py "打开设置进入 WLAN" --device-id <serial>

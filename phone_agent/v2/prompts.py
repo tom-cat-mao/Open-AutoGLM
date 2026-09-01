@@ -88,6 +88,20 @@ Finishing:
 Tool failures are returned as error text; adjust accordingly and do not repeat the same ineffective action."""
 
 
+DELIVERABLE_PROMPT_ZH = (
+    "当任务要求交付攻略、计划、比价报告等文档时，调用 write_document 生成本 run 的"
+    "自包含单页 HTML；已有产出需修改时调用 update_document。使用内嵌 CSS、清晰的中文排版"
+    "和卡片式布局，不依赖外部资源。"
+)
+
+DELIVERABLE_PROMPT_EN = (
+    "When the task calls for a guide, plan, comparison report, or similar document, "
+    "use write_document to create this run's self-contained single-page HTML and "
+    "update_document for revisions. Use embedded CSS, Chinese-friendly typography, and a "
+    "card-based layout without external resources."
+)
+
+
 def get_system_prompt(lang: str) -> str:
     """Return the system prompt for ``lang`` (cn/zh -> Chinese, else English)."""
 
@@ -95,3 +109,12 @@ def get_system_prompt(lang: str) -> str:
     if normalized in {"cn", "zh", "zh-cn", "zh_cn", "chinese"}:
         return SYSTEM_PROMPT_ZH
     return SYSTEM_PROMPT_EN
+
+
+def get_deliverable_prompt(lang: str) -> str:
+    """Return the optional deliverable capability's compact prompt block."""
+
+    normalized = (lang or "").strip().lower()
+    if normalized in {"cn", "zh", "zh-cn", "zh_cn", "chinese"}:
+        return DELIVERABLE_PROMPT_ZH
+    return DELIVERABLE_PROMPT_EN

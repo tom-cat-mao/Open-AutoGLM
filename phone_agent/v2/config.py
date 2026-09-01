@@ -253,6 +253,10 @@ class V2Config:
     # taskdoc (task board increment)
     taskdoc_enabled: bool = True
     taskdoc_nudge_steps: int = 5
+    # Run-bound, local single-page HTML output. The model never supplies a path;
+    # write/update tools derive ``<deliverable_dir>/<run_id>.html``.
+    deliverable_enabled: bool = True
+    deliverable_dir: str = "outputs/deliverables"
     # finish verification (S2 §1.6/§4): off|auto|always. ``off`` degrades finish to
     # the pre-two-step single-call behavior; ``auto`` runs the independent-context
     # verifier only on trigger (high-risk goal / hard-contradiction confirm);
@@ -402,6 +406,13 @@ class V2Config:
             trace_enabled=_env_bool("PHONE_AGENT_TRACE", True),
             taskdoc_enabled=_env_bool_default_true("PHONE_AGENT_TASKDOC", True),
             taskdoc_nudge_steps=_env_int("PHONE_AGENT_TASKDOC_NUDGE_STEPS", 5),
+            deliverable_enabled=(
+                _env_choice("PHONE_AGENT_DELIVERABLE", "on", ("on", "off"))
+                == "on"
+            ),
+            deliverable_dir=_env_str(
+                "PHONE_AGENT_DELIVERABLE_DIR", "outputs/deliverables"
+            ),
             finish_verify=_env_choice(
                 "PHONE_AGENT_FINISH_VERIFY", "auto", ("off", "auto", "always")
             ),
