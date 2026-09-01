@@ -6,6 +6,7 @@ tool call is appended as a JSONL event to ``<trace_dir>/<run_id>.jsonl``.
 Redaction rules (applied to every logged text value):
   * text values longer than 64 chars are truncated (``…`` suffix, original
     length recorded);
+  * ``html`` tool arguments are omitted completely (only UTF-8 byte length);
   * sensitive substrings (phone/email/order/captcha/api-key/JWT/…) are replaced
     via :func:`phone_agent.config.redact.redact_context_text`;
   * screenshot ``base64`` is never logged — only ``screen_seq`` and byte length.
@@ -20,7 +21,7 @@ from __future__ import annotations
 import json
 import os
 import time
-from typing import Any
+from typing import Any, Mapping
 
 from langchain.agents.middleware import AgentMiddleware
 
@@ -51,8 +52,21 @@ def _redact_value(value: Any) -> Any:
 
 
 def redact_args(args: Any) -> Any:
-    """Public helper: redact a tool-call args mapping for trace logging."""
-    return _redact_value(args)
+    """Redact tool args while omitting HTML deliverable bodies entirely."""
+
+    if not isinstance(args, Mapping):
+        return _redact_value(args)
+    redacted: dict[Any, Any] = {}
+    for key, value in args.items():
+        if str(key).casefold() == "html" and isinstance(value, str):
+            redacted[key] = {
+                "type": "text",
+                "omitted": True,
+                "bytes": len(value.encode("utf-8", errors="replace")),
+            }
+        else:
+            redacted[key] = _redact_value(value)
+    return redacted
 
 
 def _tool_artifact(result: Any) -> Any:

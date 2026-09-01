@@ -473,6 +473,15 @@ def _apply_finish_verify(ctx: CapabilityAssemblyContext) -> None:
     _register_factory(ctx, "finish_verify_tool_factory", "register_tool")
 
 
+def _apply_deliverable(ctx: CapabilityAssemblyContext) -> None:
+    factory = ctx.service("deliverable_tools_factory")
+    if callable(factory):
+        tools = factory()
+        for tool in tools or ():
+            ctx.register_tool(tool)
+    _register_prompt(ctx, "deliverable_prompt_provider")
+
+
 def _apply_app_kb(ctx: CapabilityAssemblyContext) -> None:
     _register_service_hook(ctx, "start", "app_kb_run_start")
     _register_prompt(ctx, "app_kb_prompt_provider")
@@ -577,7 +586,7 @@ def assemble_capabilities(
 
 
 def build_capability_registry(config: Any) -> CapabilityRegistry:
-    """Build the nine-capability composition shared by agent and runner."""
+    """Build the ten-capability composition shared by agent and runner."""
 
     registry = CapabilityRegistry()
     for spec in (
@@ -615,6 +624,13 @@ def build_capability_registry(config: Any) -> CapabilityRegistry:
             getattr(config, "finish_verify", "auto"),
             apply=_owned_apply("finish_verify", _apply_finish_verify),
             release=_owned_release("finish_verify"),
+        ),
+        CapabilitySpec(
+            "deliverable",
+            "HTML deliverable",
+            "on" if getattr(config, "deliverable_enabled", True) else "off",
+            apply=_owned_apply("deliverable", _apply_deliverable),
+            release=_owned_release("deliverable"),
         ),
         CapabilitySpec(
             "app_kb",

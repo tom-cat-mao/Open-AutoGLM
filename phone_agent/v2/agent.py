@@ -122,6 +122,7 @@ class ThinPhoneAgent:
         self._run_capabilities: dict[str, str] = {}
         self._run_memory_generation: dict[str, Any] | None = None
         self._run_capability_snapshot_ready = False
+        self._deliverable_path: str | None = None
 
         # Lazy imports: these modules are produced by the concurrent core/tools
         # worktrees and may not exist when this module is first imported.
@@ -211,6 +212,25 @@ class ThinPhoneAgent:
 
             return make_finish_tool(self.session, config)
 
+        def deliverable_tools_factory():
+            if not native_tool_assembly:
+                return []
+            from phone_agent.v2.tools.deliverable import make_deliverable_tools
+
+            return make_deliverable_tools(
+                self.run_id,
+                getattr(config, "deliverable_dir", "outputs/deliverables"),
+                on_success=self._record_deliverable_path,
+            )
+
+        def deliverable_prompt_provider():
+            from phone_agent.v2.prompts import get_deliverable_prompt
+
+            return PromptBlock(
+                get_deliverable_prompt(getattr(config, "lang", "cn")),
+                placement="system_message",
+            )
+
         self._capability_ctx = CapabilityAssemblyContext(
             {
                 "taskdoc_middleware_factory": taskdoc_middleware_factory,
@@ -227,6 +247,8 @@ class ThinPhoneAgent:
                 "budget_middleware_factory": budget_middleware_factory,
                 "compact_middleware_factory": compact_middleware_factory,
                 "finish_verify_tool_factory": finish_verify_tool_factory,
+                "deliverable_tools_factory": deliverable_tools_factory,
+                "deliverable_prompt_provider": deliverable_prompt_provider,
                 "app_kb_run_start": self._app_kb_run_start,
                 "app_kb_prompt_provider": self._app_kb_prompt_block,
                 "dream_run_end": self._dream_run_end,
@@ -339,6 +361,11 @@ class ThinPhoneAgent:
     def _owned_capability_product(self, cap_id: str, seam: str) -> Any | None:
         values = self._capability_ctx.owned_values(cap_id, seam)
         return values[0] if values else None
+
+    def _record_deliverable_path(self, path: str) -> None:
+        """Remember a successfully written run artifact for episode linkage."""
+
+        self._deliverable_path = str(path)
 
     # ------------------------------------------------------------------
     def _initial_messages(self, task: str) -> list[Any]:
@@ -862,6 +889,7 @@ class ThinPhoneAgent:
         if callable(reset_implicit_alias):
             reset_implicit_alias(self.run_id)
         self._actually_injected_lesson_ids = []
+        self._deliverable_path = None
         run_state: dict[str, Any] = {
             "task": task,
             "ts_start": ts_start,
@@ -1072,6 +1100,7 @@ class ThinPhoneAgent:
                         self, "_actually_injected_lesson_ids", []
                     )
                 ],
+                deliverable_path=getattr(self, "_deliverable_path", None),
             )
         except Exception:  # noqa: BLE001 - persistence cannot alter run semantics
             return
