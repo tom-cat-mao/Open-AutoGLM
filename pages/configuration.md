@@ -93,10 +93,11 @@
 | `PHONE_AGENT_MEMORY_RAG` | `off`/`shadow`/`on` | `shadow` | 语义回想档位；`shadow` 只观测不注入；`on` 注入人审通过的经验 |
 | `PHONE_AGENT_EMBED_MODEL` | str | `Qwen/Qwen3-Embedding-0.6B` | 本地嵌入模型（MLX） |
 | `PHONE_AGENT_EMBED_DIM` | int | `1024` | 嵌入向量维度 |
-| `PHONE_AGENT_VEC_DB` | path | `memory/vec.db` | 向量索引文件 |
-| `PHONE_AGENT_RECALL_TOP_K` | int | `5` | 回想候选数上限 |
-| `PHONE_AGENT_RECALL_MIN_SCORE` | float | `0.35` | 召回分数阈值；低于则放弃召回 |
-| `PHONE_AGENT_RECALL_DECAY_LAMBDA` | float | `0.02` | 时间衰减速率（按天） |
+| `PHONE_AGENT_VEC_DB` | path | `memory/vec.db` | 向量索引文件；run 结束增量更新，dream 对账 |
+| `PHONE_AGENT_INDEX_MIN_STEPS` | int | `2` | episode 索引质量闸门；更短的 run 只留档，alias 不受影响 |
+| `PHONE_AGENT_RECALL_TOP_K` | int | `1` | episode 语义榜名额；app mention 独立返回、不占名额 |
+| `PHONE_AGENT_RECALL_MIN_SCORE` | float | `0.50` | 基于噪音分布的语义起始门槛，可调；无词法精确命中时门槛更高 |
+| `PHONE_AGENT_RECALL_DECAY_LAMBDA` | float | `0.02` | 时间衰减速率（按天），只用于语义同分决胜 |
 | `PHONE_AGENT_EVOLUTION` | `off`/`manual` | `manual` | 经验提炼开关；`manual` 由 `--distill` 触发 |
 | `PHONE_AGENT_LESSONS_DIR` | path | `memory/lessons` | 经验库存储目录 |
 | `PHONE_AGENT_LESSON_INJECT_MAX` | int | `3` | 单次注入的经验条数上限 |

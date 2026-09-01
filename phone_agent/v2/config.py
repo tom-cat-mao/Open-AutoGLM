@@ -194,8 +194,12 @@ class V2Config:
     embed_model: str = "Qwen/Qwen3-Embedding-0.6B"
     embed_dim: int = 1024
     vec_db: str = "memory/vec.db"
-    recall_top_k: int = 5
-    recall_min_score: float = 0.35
+    # Short episodes stay archived but do not enter the derived vector index.
+    index_min_steps: int = 2
+    # Episode semantic quota only; deterministic app mentions are separate.
+    recall_top_k: int = 1
+    # Starting point calibrated above the observed noise tail; deployment-tunable.
+    recall_min_score: float = 0.50
     recall_decay_lambda: float = 0.02
     # loop
     max_model_calls: int = 100
@@ -366,8 +370,9 @@ class V2Config:
             ),
             embed_dim=_env_int("PHONE_AGENT_EMBED_DIM", 1024),
             vec_db=_env_str("PHONE_AGENT_VEC_DB", "memory/vec.db"),
-            recall_top_k=_env_int("PHONE_AGENT_RECALL_TOP_K", 5),
-            recall_min_score=_env_float("PHONE_AGENT_RECALL_MIN_SCORE", 0.35),
+            index_min_steps=_env_int("PHONE_AGENT_INDEX_MIN_STEPS", 2),
+            recall_top_k=_env_int("PHONE_AGENT_RECALL_TOP_K", 1),
+            recall_min_score=_env_float("PHONE_AGENT_RECALL_MIN_SCORE", 0.50),
             recall_decay_lambda=_env_float(
                 "PHONE_AGENT_RECALL_DECAY_LAMBDA", 0.02
             ),
@@ -462,6 +467,8 @@ class V2Config:
             raise ValueError("PHONE_AGENT_LESSON_INJECT_TOKENS must be non-negative")
         if config.embed_dim <= 0:
             raise ValueError("PHONE_AGENT_EMBED_DIM must be positive")
+        if config.index_min_steps < 0:
+            raise ValueError("PHONE_AGENT_INDEX_MIN_STEPS must be non-negative")
         if config.recall_top_k <= 0:
             raise ValueError("PHONE_AGENT_RECALL_TOP_K must be positive")
         if not 0.0 <= config.recall_min_score <= 1.0:

@@ -42,8 +42,10 @@ _RUN_HOOK_ORDER = {
         "recall": 40,
     },
     "end": {
-        "recall": 40,
-        "experience": 50,
+        # The recall updater consumes the authoritative episode written by the
+        # experience hook for this run, so persistence must land first.
+        "experience": 40,
+        "recall": 50,
         "dream": 90,
     },
 }

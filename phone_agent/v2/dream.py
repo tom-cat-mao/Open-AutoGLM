@@ -231,6 +231,7 @@ def run_maintenance(
     """Run the shared manual/auto dream lifecycle without masking outcomes."""
 
     summary: dict[str, Any] = {}
+    active_store: AppKnowledgeStore | None = None
     try:
         active_store = store or AppKnowledgeStore(
             getattr(config, "memory_dir", "memory")
@@ -249,6 +250,19 @@ def run_maintenance(
             )
         except Exception as exc:  # noqa: BLE001 - experience maintenance is optional
             summary["experience"] = {
+                "status": "skipped",
+                "reason": type(exc).__name__,
+            }
+    if getattr(config, "vec_db", None):
+        try:
+            from phone_agent.v2.recall import reconcile_index
+
+            summary["vec"] = reconcile_index(
+                config,
+                app_store=active_store,
+            )
+        except Exception as exc:  # noqa: BLE001 - derived index is fail-open
+            summary["vec"] = {
                 "status": "skipped",
                 "reason": type(exc).__name__,
             }
@@ -288,6 +302,13 @@ def _merge_duplicates(
         combined["last_seen"] = max(
             (entry["last_seen"] for entry in group), key=_parse_iso
         )
+        last_successes = [
+            str(entry["last_success"])
+            for entry in group
+            if entry.get("last_success")
+        ]
+        if last_successes:
+            combined["last_success"] = max(last_successes, key=_parse_iso)
         merged.append(combined)
         merged_count += len(group) - 1
     return merged, merged_count
