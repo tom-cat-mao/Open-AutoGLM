@@ -8,9 +8,11 @@ from __future__ import annotations
 
 import re
 import time
+from pathlib import Path
 from typing import Any
 
-from nicegui import ui
+from fastapi.responses import FileResponse
+from nicegui import app, ui
 
 from phone_agent.v2.config import V2Config, load_project_env
 from phone_agent.web.bridge import WebRunBridge
@@ -24,6 +26,74 @@ _PANEL_SOFT = "#111c33"
 _BORDER = "rgba(148,163,184,.10)"
 _TEXT = "#e2e8f0"
 _MUTED = "#64748b"
+
+# ------------------------------------------------------- deliverables (WP-DOC)
+
+_RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
+_DELIVERABLE_ROOT = Path("outputs/deliverables")
+
+
+def set_deliverable_root(path: str) -> None:
+    global _DELIVERABLE_ROOT
+    _DELIVERABLE_ROOT = Path(path)
+
+
+def _deliverable_path(run_id: str) -> Path:
+    if not _RUN_ID_RE.match(run_id):
+        raise ValueError("invalid run_id")
+    root = _DELIVERABLE_ROOT.resolve()
+    target = (root / f"{run_id}.html").resolve()
+    if target.parent != root:
+        raise ValueError("path escapes deliverable root")
+    return target
+
+
+def _deliverable_title(path: Path) -> str:
+    try:
+        head = path.read_text(encoding="utf-8", errors="replace")[:4096]
+    except OSError:
+        return ""
+    match = re.search(r"<title[^>]*>(.*?)</title>", head, re.IGNORECASE | re.DOTALL)
+    return re.sub(r"\s+", " ", match.group(1)).strip()[:80] if match else ""
+
+
+@app.get("/api/deliverables")
+def _api_deliverables() -> list[dict[str, Any]]:
+    root = _DELIVERABLE_ROOT
+    if not root.is_dir():
+        return []
+    items = []
+    for path in sorted(root.glob("*.html"), key=lambda p: -p.stat().st_mtime):
+        run_id = path.stem
+        if not _RUN_ID_RE.match(run_id):
+            continue
+        stat = path.stat()
+        items.append(
+            {
+                "run_id": run_id,
+                "title": _deliverable_title(path),
+                "mtime": stat.st_mtime,
+                "size": stat.st_size,
+            }
+        )
+    return items
+
+
+@app.get("/deliverables/{run_id}")
+def _serve_deliverable(run_id: str) -> FileResponse:
+    target = _deliverable_path(run_id)
+    if not target.is_file():
+        raise FileNotFoundError(run_id)
+    return FileResponse(target, media_type="text/html")
+
+
+@app.post("/api/deliverables/{run_id}/delete")
+def _delete_deliverable(run_id: str) -> dict[str, bool]:
+    target = _deliverable_path(run_id)
+    existed = target.is_file()
+    if existed:
+        target.unlink()
+    return {"deleted": existed}
 
 _CSS = f"""
 :root {{ color-scheme: dark; }}
@@ -421,6 +491,7 @@ def create_ui(
     ui.add_css(_CSS)
 
     panel = _ConfigPanel(config)
+    set_deliverable_root(config.deliverable_dir)
 
     # --- header ---------------------------------------------------------
     with ui.header().classes("tw-header items-center gap-3 px-5 py-2.5"):
@@ -487,6 +558,7 @@ def create_ui(
                     tab_board = ui.tab("board", label="任务板")
                     tab_kb = ui.tab("appkb", label="应用库")
                     tab_memory = ui.tab("memory", label="记忆")
+                    tab_outputs = ui.tab("outputs", label="产出")
                 ui.separator().style(f"background:{_BORDER}")
                 with ui.tab_panels(tabs, value=tab_steps).classes("w-full"):
 
@@ -544,8 +616,8 @@ def create_ui(
                         with ui.row().classes("w-full gap-3 flex-wrap"):
                             stat_eps = _stat_card("任务档案", _ACCENT)
                             stat_evals = _stat_card("回想评估", "#38bdf8")
-                            stat_hit = _stat_card("命中率", "#34d399")
-                            stat_false = _stat_card("误命中率", "#fbbf24")
+                            stat_hit = _stat_card("Hit@1", "#34d399")
+                            stat_false = _stat_card("污染率", "#fbbf24")
                         memory_table = ui.table(
                             columns=[
                                 {"name": "time", "label": "时间", "field": "time"},
@@ -569,6 +641,48 @@ def create_ui(
                         ui.label(
                             "回想处于 shadow 模式：只观测不注入；命中率由每次运行的实际行为自动对答案。"
                         ).classes("text-xs mt-2").style(f"color:{_MUTED}")
+
+                    with ui.tab_panel(tab_outputs).classes("p-0 pt-3"):
+                        with ui.row().classes(
+                            "w-full items-center justify-between mb-2"
+                        ):
+                            outputs_count = ui.label("0 份").classes(
+                                "mono text-xs font-bold"
+                            ).style(f"color:{_MUTED}")
+                            ui.label("agent 产出可写可改；删除只有你能做").classes(
+                                "text-[11px]"
+                            ).style(f"color:{_MUTED}")
+                        outputs_list = ui.column().classes(
+                            "w-full gap-2 max-h-[52vh] overflow-y-auto pr-1"
+                        )
+                        with ui.dialog() as preview_dialog, ui.card().classes(
+                            "w-[86vw] max-w-5xl p-4"
+                        ).style("background:#10131a; border:1px solid #232838"):
+                            with ui.row().classes(
+                                "w-full items-center justify-between mb-2"
+                            ):
+                                preview_title = ui.label("").classes(
+                                    "text-sm font-bold"
+                                )
+                                ui.button(icon="close", on_click=preview_dialog.close).props(
+                                    "flat round dense"
+                                )
+                            preview_frame = ui.element("iframe").classes(
+                                "w-full rounded-lg"
+                            ).props("sandbox").style(
+                                "height:72vh; border:1px solid #232838; background:#fff"
+                            )
+                        with ui.dialog() as delete_dialog, ui.card().classes(
+                            "p-4"
+                        ).style("background:#10131a; border:1px solid #232838"):
+                            delete_hint = ui.label("").classes("text-sm mb-3")
+                            with ui.row().classes("gap-2 justify-end w-full"):
+                                ui.button("取消", on_click=delete_dialog.close).props(
+                                    "flat no-caps dense"
+                                )
+                                delete_confirm = ui.button("删除").props(
+                                    "unelevated no-caps dense color=negative"
+                                )
 
         # HITL banner
         with ui.element("div").classes("hitl w-full p-4") as hitl_panel:
@@ -826,10 +940,18 @@ def create_ui(
         stats = snapshot.get("recall_stats") or {}
         evaluations = int(stats.get("evaluations", 0) or 0)
         hits = int(stats.get("hits", 0) or 0)
-        false_hits = int(stats.get("false_hits", 0) or 0)
+        hit_at_1 = stats.get("hit_at_1")
+        contaminated = int(
+            stats.get("contaminated_runs", stats.get("false_hits", 0)) or 0
+        )
         stat_evals.set_text(str(evaluations))
-        stat_hit.set_text(f"{hits / evaluations:.0%}" if evaluations else "—")
-        stat_false.set_text(f"{false_hits / evaluations:.0%}" if evaluations else "—")
+        if hit_at_1 is not None:
+            stat_hit.set_text(f"{float(hit_at_1):.0%}")
+        else:
+            stat_hit.set_text(f"{hits / evaluations:.0%}" if evaluations else "—")
+        stat_false.set_text(
+            f"{contaminated / evaluations:.0%}" if evaluations else "—"
+        )
         episodes = snapshot.get("episodes") or []
         stat_eps.set_text(str(len(episodes)))
         rows = []
@@ -854,6 +976,74 @@ def create_ui(
             )
         memory_table.rows = rows
         memory_table.update()
+
+    outputs_sig: list[tuple] = [()]
+
+    def _render_outputs() -> None:
+        try:
+            items = _api_deliverables()
+        except OSError:
+            items = []
+        sig = tuple((i["run_id"], i["mtime"], i["size"]) for i in items)
+        if sig == outputs_sig[0]:
+            return
+        outputs_sig[0] = sig
+        outputs_count.set_text(f"{len(items)} 份")
+        outputs_list.clear()
+        if not items:
+            with outputs_list:
+                ui.label("还没有产出 — 任务要求攻略/计划/报告时 agent 会在这里生成").classes(
+                    "text-xs"
+                ).style(f"color:{_MUTED}")
+            return
+        for item in items:
+            rid = item["run_id"]
+            with outputs_list, ui.element("div").classes(
+                "w-full flex items-center gap-3 p-3 rounded-xl"
+            ).style("background:#10131a; border:1px solid #232838"):
+                ui.icon("description").style("color:#38bdf8; font-size:20px")
+                with ui.column().classes("gap-0 grow min-w-0"):
+                    ui.label(item["title"] or rid).classes(
+                        "text-sm font-bold truncate"
+                    )
+                    ui.label(
+                        f"{time.strftime('%m-%d %H:%M', time.localtime(item['mtime']))}"
+                        f" · {item['size'] / 1024:.1f} KB · {rid[:8]}"
+                    ).classes("mono text-[10.5px]").style(f"color:{_MUTED}")
+
+                def _preview(_e, rid=rid, title=item["title"]):
+                    preview_title.set_text(title or rid)
+                    preview_frame.props(f'sandbox src="/deliverables/{rid}"')
+                    preview_dialog.open()
+
+                def _delete(_e, rid=rid, title=item["title"]):
+                    delete_hint.set_text(f"确定删除「{title or rid}」？此操作不可恢复。")
+                    delete_confirm.on_click.clear()
+                    delete_confirm.on("click", lambda _e2, rid=rid: _do_delete(rid))
+                    delete_dialog.open()
+
+                def _do_delete(rid):
+                    try:
+                        _delete_deliverable(rid)
+                    except (OSError, ValueError):
+                        pass
+                    delete_dialog.close()
+                    outputs_sig[0] = ()
+                    _render_outputs()
+
+                ui.button("预览", icon="visibility", on_click=_preview).props(
+                    "flat dense no-caps"
+                )
+                ui.button(
+                    "打开",
+                    icon="open_in_new",
+                    on_click=lambda _e, rid=rid: ui.navigate.to(
+                        f"/deliverables/{rid}", new_tab=True
+                    ),
+                ).props("flat dense no-caps")
+                ui.button("删除", icon="delete", on_click=_delete).props(
+                    "flat dense no-caps"
+                ).style("color:#f87171")
 
     def render() -> None:
         nonlocal last_signature
@@ -969,6 +1159,7 @@ def create_ui(
     ui.timer(refresh_seconds, render)
     ui.timer(2.0, _render_kb)
     ui.timer(2.0, _render_memory)
+    ui.timer(2.0, _render_outputs)
 
 
 def run(
