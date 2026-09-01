@@ -17,7 +17,20 @@ Zero hits across all tiers delegate to ``session.locate`` (LocateAnything).
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+from typing import Any
+
+from phone_agent.config.apps import (
+    DEFAULT_APP_REGISTRY,
+    DEFAULT_LAUNCH_TARGET_RESOLVER,
+)
 from phone_agent.grounding.provider import MarkCandidate
+from phone_agent.v2.names import (
+    AppNameResolution,
+    ResolverSettings,
+    embedding_search_from_config,
+    resolve_name,
+)
 
 # Session-owned exceptions live in ``phone_agent.v2.session`` (core worktree).
 # Import defensively so the tools layer and unit tests work before session.py
@@ -110,3 +123,102 @@ def resolve_description(session, description: str) -> MarkCandidate:
     # Zero current-mark hits -> deep visual fallback (may raise
     # LocateAmbiguousError, which the tool layer catches).
     return session.locate(query)
+
+
+def _app_kb_entries(session: Any) -> list[Mapping[str, Any]]:
+    """Return applicable resolver rows, degrading old doubles to snapshots."""
+
+    knowledge = getattr(session, "app_knowledge", None)
+    entries = getattr(knowledge, "entries", None)
+    if callable(entries):
+        try:
+            return list(entries())
+        except Exception:  # noqa: BLE001 - optional KB view is fail-open
+            pass
+    snapshot = getattr(knowledge, "snapshot", None)
+    if callable(snapshot):
+        try:
+            return [
+                {
+                    "term": str(term),
+                    "label": str(term),
+                    "package": str(package),
+                    "kind": "learned",
+                    "success_count": 0,
+                }
+                for term, package in snapshot().items()
+            ]
+        except Exception:  # noqa: BLE001 - optional KB view is fail-open
+            return []
+    return []
+
+
+def resolve_app_name(
+    session: Any,
+    config: Any,
+    mention: str,
+    *,
+    inventory: Any | None = None,
+    registry: Any = DEFAULT_APP_REGISTRY,
+    embedding_search=None,  # noqa: ANN001 - protocol lives in names.py
+) -> AppNameResolution:
+    """Resolve an app mention through the shared four-route name core.
+
+    Installed packages are represented as device-prior sources. This function
+    still returns only a name decision; callers must separately apply launch
+    policy and installation checks to its winning package.
+    """
+
+    entries = list(_app_kb_entries(session))
+    for package in sorted(getattr(inventory, "packages", ()) or ()):
+        entries.append(
+            {
+                "term": str(package),
+                "label": str(package),
+                "package": str(package),
+                "kind": "device",
+                "success_count": 0,
+            }
+        )
+    if embedding_search is None:
+        cached = getattr(session, "_resolver_embedding_search", None)
+        if callable(cached):
+            embedding_search = cached
+        scope = getattr(inventory, "device_id", None)
+        if not scope:
+            kb_device_id = getattr(session, "_kb_device_id", None)
+            try:
+                scope = kb_device_id() if callable(kb_device_id) else None
+            except Exception:  # noqa: BLE001 - embedding route is optional
+                scope = None
+        if scope and embedding_search is None:
+            embedding_search = embedding_search_from_config(
+                config, device_scope=f"device:{scope}"
+            )
+            if embedding_search is not None:
+                try:
+                    session._resolver_embedding_search = embedding_search
+                except Exception:  # noqa: BLE001 - cache is only an optimization
+                    pass
+    return resolve_name(
+        mention,
+        registry=registry,
+        kb_entries=entries,
+        embedding_search=embedding_search,
+        settings=ResolverSettings.from_config(config),
+    )
+
+
+def authorize_app_candidate(
+    package: str,
+    *,
+    inventory: Any | None,
+    resolver: Any = DEFAULT_LAUNCH_TARGET_RESOLVER,
+):
+    """Apply the existing install + launch-policy boundary to one package."""
+
+    return resolver.resolve(
+        package,
+        inventory=inventory,
+        candidates=[package],
+    )

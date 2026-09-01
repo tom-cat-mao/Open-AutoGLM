@@ -173,6 +173,17 @@ class V2Config:
     implicit_alias_enabled: bool = True
     app_list_max: int = 40
     dream_mode: str = "manual"
+    # Four-route App-name resolver: high-recall generation followed by prior-
+    # weighted ranking and an explicit score/margin decision. These switches do
+    # not alter installation or launch-policy authorization.
+    resolver_min_score: float = 0.90
+    resolver_margin: float = 0.08
+    resolver_top_k: int = 10
+    resolver_pinyin: bool = True
+    resolver_embed: bool = True
+    resolver_lexical: bool = True
+    resolver_w_sim: float = 0.8
+    resolver_w_prior: float = 0.2
     # Observe-only run experience store. The explicit directory is independent
     # of App-KB's memory root so callers may place this privacy-minimal plane on
     # a separate volume without changing application knowledge.
@@ -347,6 +358,22 @@ class V2Config:
             dream_mode=_env_choice(
                 "PHONE_AGENT_DREAM", "manual", ("off", "auto", "manual")
             ),
+            resolver_min_score=_env_float(
+                "PHONE_AGENT_RESOLVER_MIN_SCORE", 0.90
+            ),
+            resolver_margin=_env_float("PHONE_AGENT_RESOLVER_MARGIN", 0.08),
+            resolver_top_k=_env_int("PHONE_AGENT_RESOLVER_TOP_K", 10),
+            resolver_pinyin=_env_bool_default_true(
+                "PHONE_AGENT_RESOLVER_PINYIN", True
+            ),
+            resolver_embed=_env_bool_default_true(
+                "PHONE_AGENT_RESOLVER_EMBED", True
+            ),
+            resolver_lexical=_env_bool_default_true(
+                "PHONE_AGENT_RESOLVER_LEXICAL", True
+            ),
+            resolver_w_sim=_env_float("PHONE_AGENT_RESOLVER_W_SIM", 0.8),
+            resolver_w_prior=_env_float("PHONE_AGENT_RESOLVER_W_PRIOR", 0.2),
             experience_enabled=(
                 _env_choice("PHONE_AGENT_EXPERIENCE", "on", ("on", "off")) == "on"
             ),
@@ -461,6 +488,26 @@ class V2Config:
             raise ValueError("PHONE_AGENT_EPISODE_KEEP must be non-negative")
         if config.episode_archive_days < 0:
             raise ValueError("PHONE_AGENT_EPISODE_ARCHIVE_DAYS must be non-negative")
+        if not 0.0 <= config.resolver_min_score <= 1.0:
+            raise ValueError(
+                "PHONE_AGENT_RESOLVER_MIN_SCORE must be between 0 and 1"
+            )
+        if not 0.0 <= config.resolver_margin <= 1.0:
+            raise ValueError(
+                "PHONE_AGENT_RESOLVER_MARGIN must be between 0 and 1"
+            )
+        if config.resolver_top_k <= 0:
+            raise ValueError("PHONE_AGENT_RESOLVER_TOP_K must be positive")
+        if config.resolver_w_sim < 0.0 or config.resolver_w_prior < 0.0:
+            raise ValueError(
+                "PHONE_AGENT_RESOLVER_W_SIM and PHONE_AGENT_RESOLVER_W_PRIOR "
+                "must be non-negative"
+            )
+        if config.resolver_w_sim + config.resolver_w_prior <= 0.0:
+            raise ValueError(
+                "PHONE_AGENT_RESOLVER_W_SIM and PHONE_AGENT_RESOLVER_W_PRIOR "
+                "must not both be zero"
+            )
         if config.lesson_inject_max < 0:
             raise ValueError("PHONE_AGENT_LESSON_INJECT_MAX must be non-negative")
         if config.lesson_inject_tokens < 0:

@@ -37,6 +37,7 @@ setup(
         "requests>=2.31.0",
         "sqlite-vec>=0.1.9",
         "mlx-embeddings==0.1.0",
+        "pypinyin>=0.55.0",
     ],
     extras_require={
         "locateanything": [
