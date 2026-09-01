@@ -129,7 +129,7 @@ def _coerce_entry(
     except (TypeError, ValueError) as exc:
         raise ValueError("entry timestamps must be valid ISO-8601 strings") from exc
 
-    return {
+    result = {
         "term": term,
         "label": label,
         "package": package,
@@ -141,6 +141,15 @@ def _coerce_entry(
         "last_seen": last_seen,
         "stale": stale,
     }
+    last_success_raw = entry.get("last_success")
+    if last_success_raw is not None:
+        last_success = str(last_success_raw).strip()
+        try:
+            _parse_iso(last_success)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("entry.last_success must be a valid ISO-8601 string") from exc
+        result["last_success"] = last_success
+    return result
 
 
 def should_save(kind: str, *, durable: bool, sensitive: bool) -> bool:
@@ -215,6 +224,7 @@ class AppKnowledgeStore:
                 updated = dict(entry)
                 updated["success_count"] += 1
                 updated["last_seen"] = timestamp
+                updated["last_success"] = timestamp
                 self._entries[key] = updated
                 self._append_event("upsert", updated)
             if matches:
@@ -295,20 +305,22 @@ class AppKnowledgeStore:
                 existing = self._entries.get(key)
                 first_seen = existing["first_seen"] if existing else timestamp
                 success_count = existing["success_count"] if existing else 0
-            self.upsert(
-                {
-                    "term": label,
-                    "label": label,
-                    "package": package,
-                    "kind": "device",
-                    "scope": scope,
-                    "confidence": 1.0,
-                    "success_count": success_count,
-                    "first_seen": first_seen,
-                    "last_seen": timestamp,
-                    "stale": False,
-                }
-            )
+                last_success = existing.get("last_success") if existing else None
+            candidate = {
+                "term": label,
+                "label": label,
+                "package": package,
+                "kind": "device",
+                "scope": scope,
+                "confidence": 1.0,
+                "success_count": success_count,
+                "first_seen": first_seen,
+                "last_seen": timestamp,
+                "stale": False,
+            }
+            if last_success:
+                candidate["last_success"] = last_success
+            self.upsert(candidate)
 
     def _replay_events(self) -> dict[tuple[str, str, str, str], dict[str, Any]]:
         """Replay valid events, skipping malformed or unknown lines."""

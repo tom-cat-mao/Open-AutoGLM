@@ -20,6 +20,7 @@ Tools are built as closures over ``session`` and ``config`` by
 from __future__ import annotations
 
 import re
+from datetime import datetime, timezone
 from typing import Literal
 
 from langchain_core.tools import StructuredTool
@@ -133,6 +134,7 @@ def _record_implicit_aliases(
                     "scope": "global",
                     "confidence": 0.9,
                     "success_count": 1,
+                    "last_success": datetime.now(timezone.utc).isoformat(),
                     "stale": False,
                 },
                 evidence_note=f"implicit: run<{run_id}> 失败叫法自愈",
@@ -187,6 +189,18 @@ def _record_verified_launch(
             )
         if not canonical_label and resolution.identity is not None:
             canonical_label = str(resolution.identity.display_name or "").strip()
+        matching_entry = next(
+            (
+                entry
+                for entry in store.entries(include_stale=False)
+                if entry.get("package") == package
+                and str(entry.get("term", "")).casefold() == used_term.casefold()
+            ),
+            None,
+        )
+        if matching_entry is not None:
+            store.record_success(str(matching_entry["term"]), package)
+            return
         if (
             not used_term
             or not canonical_label
@@ -206,6 +220,7 @@ def _record_verified_launch(
                 "scope": "global",
                 "confidence": 0.9,
                 "success_count": 1,
+                "last_success": datetime.now(timezone.utc).isoformat(),
                 "stale": False,
             }
         )

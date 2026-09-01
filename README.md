@@ -56,12 +56,18 @@ cp .env.example .env  # 填写模型网关、模型名与 API Key
 .venv/bin/pytest tests -q
 ```
 
-RAG 默认 `PHONE_AGENT_MEMORY_RAG=shadow`。向量模型
-`Qwen/Qwen3-Embedding-0.6B` 仅在索引或非空召回第一次真正 embed 时懒加载；
+RAG 默认 `PHONE_AGENT_MEMORY_RAG=shadow`。每次 run 结束会把通过
+`PHONE_AGENT_INDEX_MIN_STEPS=2` 质量闸门的 episode 与本 run 变更的 App-KB alias
+增量写入 sqlite-vec；dream 负责从 JSON 权威源补漏并清除失效项。App alias 通过静态 registry
+与 learned/user 名称做确定性 mention 匹配，episode 独立走默认 top-1 语义榜（门槛 0.50）。向量模型
+`Qwen/Qwen3-Embedding-0.6B` 仅在索引或非空 episode 召回第一次真正 embed 时懒加载；
 `PHONE_AGENT_MEMORY_RAG=on` 会在 run 开局一次性注入人审 approved lesson，默认上限为
 `PHONE_AGENT_LESSON_INJECT_MAX=3` 条、`PHONE_AGENT_LESSON_INJECT_TOKENS=800` 估算 token；
 设备 scope 必须匹配，开局未知 app 时不会选择 app 级 lesson。提示明确标为历史参考而非规则，
 lesson 视图缺失或损坏时 fail-open。`shadow` 仍只做 trace 召回与命中统计，`off` 不召回也不注入。
+召回统计以 evaluations 为 run 级统一分母，输出 `hit_at_1`、`contaminated_run_rate`、
+`conditional_hit_rate`、`precision_at_k` / `recall_at_k` 与 package 级 precision/recall；
+旧 `false_hits` / `false_hit_rate` 字段暂时保留给现有 Web 控制台读取。
 runner 的 `control.jsonl` 接受 `revoke_lesson` 紧急撤销消息：它会立即把 lesson store 标为 revoked，
 并让本 run 的后续注入点排除该 id。已经发送给模型的历史消息不可撤回，不会伪装成已从上下文删除。
 

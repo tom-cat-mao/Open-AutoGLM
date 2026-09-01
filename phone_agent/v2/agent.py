@@ -20,7 +20,7 @@ import json
 from pathlib import Path
 import sys
 import time
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
@@ -578,6 +578,17 @@ class ThinPhoneAgent:
             trace.experience_device_scope = state["device_scope"]
 
     def _recall_run_start(self, state: dict[str, Any]) -> None:
+        self._recall_alias_snapshot = {}
+        store = getattr(self.session, "app_store", None)
+        if store is not None:
+            try:
+                from phone_agent.v2.recall import alias_snapshot
+
+                self._recall_alias_snapshot = alias_snapshot(
+                    store.entries(include_stale=True)
+                )
+            except Exception:  # noqa: BLE001 - recall side plane is fail-open
+                self._recall_alias_snapshot = {}
         self._shadow_recall_start(str(state["task"]))
         if (
             state.get("device_scope") == "device:unknown"
@@ -586,16 +597,66 @@ class ThinPhoneAgent:
             state["device_scope"] = self._experience_device_scope()
         self._prepare_lesson_injection(str(state["device_scope"]))
 
-    def _recall_run_end(self, _state: dict[str, Any]) -> None:
-        if _state.get("exception"):
+    def _recall_run_end(self, state: dict[str, Any]) -> None:
+        if (
+            getattr(self.config, "memory_rag", "off") == "off"
+            or not getattr(self.config, "vec_db", None)
+        ):
             return
-        self._shadow_recall_finish()
+        if not state.get("exception"):
+            self._shadow_recall_finish()
+        report: dict[str, Any]
+        try:
+            from phone_agent.v2.recall import alias_snapshot, incremental_upsert
+
+            store = getattr(self.session, "app_store", None)
+            aliases = store.entries(include_stale=True) if store is not None else []
+            before = dict(getattr(self, "_recall_alias_snapshot", {}))
+            after = alias_snapshot(aliases)
+            directly_changed = [
+                entry
+                for entry in aliases
+                if after.get(self._alias_index_ref(entry))
+                != before.get(self._alias_index_ref(entry))
+            ]
+            changed_packages = {
+                str(entry.get("package", "")) for entry in directly_changed
+            }
+            # Alias documents are package-level composites. A new learned name
+            # therefore refreshes every row for that package, not just its own row.
+            changed = [
+                entry
+                for entry in aliases
+                if str(entry.get("package", "")) in changed_packages
+            ]
+            report = incremental_upsert(
+                self.config,
+                episode=state.get("episode_outcome"),
+                alias_entries=changed,
+                all_alias_entries=aliases,
+                embedder=getattr(self, "_recall_embedder", None),
+            )
+        except Exception as exc:  # noqa: BLE001 - derived index is fail-open
+            report = {"status": "error", "error": type(exc).__name__}
+        try:
+            record = getattr(self._trace, "record_event", None)
+            if callable(record):
+                record("recall_index_update", index_update=report)
+        except Exception:  # noqa: BLE001 - trace cannot change run semantics
+            pass
+
+    @staticmethod
+    def _alias_index_ref(entry: Mapping[str, Any]) -> str:
+        from phone_agent.v2.recall import alias_snapshot
+
+        snapshot = alias_snapshot([entry])
+        return next(iter(snapshot), "")
 
     def _experience_run_end(self, state: dict[str, Any]) -> None:
         result = state.get("result")
         if not isinstance(result, RunResult):
             return
-        self._append_experience_outcome(
+        state["episode_outcome"] = self._append_experience_outcome(
             str(state["task"]),
             result,
             ts_start=float(state["ts_start"]),
@@ -688,8 +749,8 @@ class ThinPhoneAgent:
                     self._shadow_candidates = index.recall(
                         task,
                         device_scope=f"device:{serial}",
-                        top_k=getattr(self.config, "recall_top_k", 5),
-                        min_score=getattr(self.config, "recall_min_score", 0.35),
+                        top_k=getattr(self.config, "recall_top_k", 1),
+                        min_score=getattr(self.config, "recall_min_score", 0.50),
                         decay_lambda=getattr(
                             self.config, "recall_decay_lambda", 0.02
                         ),
@@ -698,6 +759,7 @@ class ThinPhoneAgent:
                 trace_payload["status"] = "ok"
                 trace_payload["candidates"] = [
                     {
+                        "namespace": candidate.get("namespace", "episode"),
                         "ref_id": candidate["ref_id"],
                         "score": candidate["score"],
                         "match_reasons": candidate["match_reasons"],
@@ -737,6 +799,16 @@ class ThinPhoneAgent:
                     cumulative={
                         "evaluations": stats["evaluations"],
                         "hit_rate": stats["hit_rate"],
+                        "hit_at_1": stats["hit_at_1"],
+                        "conditional_hit_rate": stats["conditional_hit_rate"],
+                        "contaminated_run_rate": stats[
+                            "contaminated_run_rate"
+                        ],
+                        "package_precision": stats["package_precision"],
+                        "package_recall": stats["package_recall"],
+                        "precision_at_k": stats["precision_at_k"],
+                        "recall_at_k": stats["recall_at_k"],
+                        # Compatibility for the unchanged web/app.py reader.
                         "false_hit_rate": stats["false_hit_rate"],
                     },
                 )
@@ -1041,12 +1113,12 @@ class ThinPhoneAgent:
         ts_start: float,
         ts_end: float,
         device_scope: str,
-    ) -> None:
+    ) -> dict[str, Any] | None:
         """Persist the fixed WP-I1/WP-I2 EpisodeOutcome after result building."""
 
         writer = getattr(self, "_experience_writer", None)
         if writer is None:
-            return
+            return None
         try:
             local_start = datetime.fromtimestamp(ts_start).astimezone()
             hour = local_start.hour
@@ -1068,7 +1140,7 @@ class ThinPhoneAgent:
             warnings = int(
                 getattr(getattr(self, "_safety_warning", None), "warning_count", 0)
             )
-            writer.append_outcome(
+            return writer.append_outcome(
                 type="episode_outcome",
                 schema_v=1,
                 run_id=self.run_id,
@@ -1103,7 +1175,7 @@ class ThinPhoneAgent:
                 deliverable_path=getattr(self, "_deliverable_path", None),
             )
         except Exception:  # noqa: BLE001 - persistence cannot alter run semantics
-            return
+            return None
 
     def _build_result(self, result: Any) -> RunResult:
         session = self.session
