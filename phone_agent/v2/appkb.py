@@ -448,6 +448,11 @@ class AppKnowledge:
             if (package := self.lookup(term)) is not None
         }
 
+    def entries(self) -> list[dict[str, Any]]:
+        """Return copied applicable rows for the unified name resolver."""
+
+        return [dict(entry) for entry in self._applicable_entries()]
+
     def _applicable_entries(self) -> list[dict[str, Any]]:
         """Return global entries plus entries for this view's device."""
 

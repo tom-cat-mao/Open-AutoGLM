@@ -416,19 +416,9 @@ def _exact_lexical_match(query: str, text: str) -> bool:
 
 
 def _mention_occurs(term: str, query: str) -> bool:
-    normalized_term = " ".join(str(term or "").split()).casefold()
-    normalized_query = " ".join(str(query or "").split()).casefold()
-    if len(normalized_term) < 2:
-        return False
-    if _contains_cjk(normalized_term):
-        return normalized_term in normalized_query
-    return (
-        re.search(
-            rf"(?<![A-Za-z0-9_]){re.escape(normalized_term)}(?![A-Za-z0-9_])",
-            normalized_query,
-        )
-        is not None
-    )
+    from phone_agent.v2.names import mention_occurs
+
+    return mention_occurs(term, query)
 
 
 class VecIndex:
@@ -758,6 +748,8 @@ class VecIndex:
                     "term": term,
                     "label": label,
                     "kind": str(entry.get("kind", "")),
+                    "success_count": int(entry.get("success_count", 0)),
+                    "last_success": entry.get("last_success"),
                     "source_hash": source_hash,
                     **derived,
                 },
@@ -894,33 +886,76 @@ class VecIndex:
         )
         return [*app_candidates, *episode_candidates[:top_k]]
 
+    def app_name_vector_candidates(
+        self, query: str, *, device_scope: str, top_k: int = 20
+    ) -> list[dict[str, Any]]:
+        """Return App-KB vector neighbours for the names.py embedding route."""
+
+        clean_query = str(query or "").strip()
+        clean_scope = str(device_scope or "").strip()
+        if not clean_query or not clean_scope or top_k <= 0:
+            return []
+        count = self.connection.execute(
+            "SELECT count(*) FROM recall_items "
+            "WHERE namespace = 'app_alias' AND embed_model = ? "
+            "AND revoked = 0 AND (device_scope = ? OR device_scope = 'global')",
+            (self.embedder.model_id, clean_scope),
+        ).fetchone()
+        if not count or int(count[0]) == 0:
+            return []
+
+        from sqlite_vec import serialize_float32
+
+        query_vector = serialize_float32(self.embedder.embed([clean_query])[0])
+        rows = self.connection.execute(
+            """
+            SELECT i.ref_id, i.metadata_json,
+                   vec_distance_cosine(v.embedding, ?) AS vector_distance
+            FROM recall_items AS i
+            JOIN recall_vectors AS v ON v.rowid = i.id
+            WHERE i.namespace = 'app_alias' AND i.embed_model = ?
+              AND i.revoked = 0
+              AND (i.device_scope = ? OR i.device_scope = 'global')
+            ORDER BY vector_distance ASC, i.ref_id ASC
+            LIMIT ?
+            """,
+            (query_vector, self.embedder.model_id, clean_scope, int(top_k)),
+        ).fetchall()
+        candidates: list[dict[str, Any]] = []
+        for row in rows:
+            try:
+                metadata = json.loads(row["metadata_json"])
+            except (TypeError, json.JSONDecodeError):
+                continue
+            if metadata.get("semantic_eligible") is False:
+                continue
+            package = str(metadata.get("app_package", "")).strip()
+            if not package:
+                continue
+            candidates.append(
+                {
+                    "package": package,
+                    "term": str(metadata.get("term", metadata.get("label", package))),
+                    "label": str(metadata.get("label", "")),
+                    "kind": str(metadata.get("kind", "alias")),
+                    "success_count": int(metadata.get("success_count", 0) or 0),
+                    "last_success": metadata.get("last_success"),
+                    "ref_id": str(row["ref_id"]),
+                    "sim": max(
+                        0.0, min(1.0, 1.0 - float(row["vector_distance"]))
+                    ),
+                    "metadata": metadata,
+                }
+            )
+        return candidates
+
     def _mention_candidates(
         self, query: str, *, device_scope: str
     ) -> list[dict[str, Any]]:
         """Resolve static and learned app mentions without vector competition."""
 
-        matches: dict[str, tuple[int, str, dict[str, Any]]] = {}
         records: list[tuple[str, str, str, dict[str, Any]]] = []
-
-        def add(package: str, term: str, ref_id: str, metadata: Mapping[str, Any]) -> None:
-            clean_package = str(package or "").strip()
-            clean_term = str(term or "").strip()
-            if not clean_package or not _mention_occurs(clean_term, query):
-                return
-            candidate = {
-                "namespace": "app_alias",
-                "ref_id": ref_id,
-                "score": 1.0,
-                "vector_score": None,
-                "keyword_score": 1.0,
-                "time_score": None,
-                "match_reasons": [f"mention={clean_term}"],
-                "metadata": {**dict(metadata), "app_package": clean_package},
-            }
-            current = matches.get(clean_package)
-            rank = (len(clean_term), clean_term.casefold())
-            if current is None or rank > (current[0], current[1].casefold()):
-                matches[clean_package] = (len(clean_term), clean_term, candidate)
+        eligible: list[dict[str, Any]] = []
 
         from phone_agent.config.apps import DEFAULT_APP_REGISTRY
 
@@ -978,13 +1013,52 @@ class VecIndex:
             normalized = " ".join(term.split()).casefold()
             if len(owners_by_term.get(normalized, ())) != 1:
                 continue
-            add(package, term, ref_id, metadata)
-
-        return [
-            value[2]
-            for _package, value in sorted(
-                matches.items(), key=lambda item: (-item[1][0], item[0])
+            if not _mention_occurs(term, query):
+                continue
+            eligible.append(
+                {
+                    **dict(metadata),
+                    "term": term,
+                    "label": str(metadata.get("label", term)),
+                    "package": package,
+                    "kind": str(metadata.get("kind", "registry")),
+                    "ref_id": ref_id,
+                }
             )
+
+        from phone_agent.v2.names import ResolverSettings, generate_candidates
+
+        ranked = generate_candidates(
+            query,
+            registry=(),
+            kb_entries=eligible,
+            settings=ResolverSettings(
+                min_score=0.0,
+                margin=0.0,
+                top_k=max(1, len(eligible)),
+                lexical=True,
+                pinyin=False,
+                embed=False,
+            ),
+        )
+        return [
+            {
+                "namespace": "app_alias",
+                "ref_id": candidate.source_ref or f"package:{candidate.package}",
+                "score": round(candidate.score, 6),
+                "vector_score": None,
+                "keyword_score": round(candidate.sim, 6),
+                "time_score": None,
+                "match_reasons": [
+                    f"mention={candidate.matched_term}",
+                    f"route={candidate.source_route}",
+                ],
+                "metadata": {
+                    **dict(candidate.source_entry or {}),
+                    "app_package": candidate.package,
+                },
+            }
+            for candidate in ranked
         ]
 
 

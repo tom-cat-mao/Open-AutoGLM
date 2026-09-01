@@ -30,10 +30,13 @@ from phone_agent.config.redact import SENSITIVE_PATTERN
 from phone_agent.grounding.provider import MarkCandidate
 
 from phone_agent.v2.appkb import should_save
+from phone_agent.v2.names import ResolverSettings, decide_name
 from phone_agent.v2.resolver import (
     LocateAmbiguousError,
     ResolveAmbiguousError,
     StaleMarkError,
+    authorize_app_candidate,
+    resolve_app_name,
     resolve_description,
 )
 from phone_agent.v2.tools._obs import auto_observation, mark_tool_fail, mark_tool_ok
@@ -89,6 +92,32 @@ def _remember_unknown_launch(session, config, app_name: str, available: str) -> 
             remember(app_name, _receipt_package_candidates(available))
         except Exception:  # noqa: BLE001 - preserve the original failure receipt
             return
+
+
+def _ranked_app_packages(resolution, *, max_n: int) -> str:
+    """Render ranked package candidates without losing receipt evidence."""
+
+    packages = [candidate.package for candidate in resolution.candidates[:max_n]]
+    return "，".join(dict.fromkeys(packages))
+
+
+def _record_resolution_attempt(session, resolution) -> None:
+    """Best-effort custom trace event through the production redactor."""
+
+    recorder = getattr(session, "resolution_trace_recorder", None)
+    if not callable(recorder):
+        return
+    try:
+        payload = resolution.to_trace()
+        recorder(
+            "resolution_attempt",
+            mention=payload["mention"],
+            candidates=payload["candidates"],
+            decision=payload["decision"],
+            winner=payload["winner"],
+        )
+    except Exception:  # noqa: BLE001 - trace cannot change launch semantics
+        return
 
 
 def _record_implicit_aliases(
@@ -613,19 +642,51 @@ def build_actuation_tools(session, config) -> list[StructuredTool]:
                 inventory = None
 
         learning = getattr(session, "app_knowledge", None)
-        resolution = DEFAULT_LAUNCH_TARGET_RESOLVER.resolve(
-            app_name, inventory=inventory, learning=learning
+        raw_name_resolution = resolve_app_name(
+            session, config, app_name, inventory=inventory
         )
+        name_resolution = raw_name_resolution
+        resolution = None
+        if raw_name_resolution.status == "resolved" and raw_name_resolution.winner:
+            resolution = authorize_app_candidate(
+                raw_name_resolution.winner.package,
+                inventory=inventory,
+                resolver=DEFAULT_LAUNCH_TARGET_RESOLVER,
+            )
+        elif raw_name_resolution.status == "ambiguous":
+            allowed_candidates = []
+            for candidate in raw_name_resolution.candidates:
+                authorized = authorize_app_candidate(
+                    candidate.package,
+                    inventory=inventory,
+                    resolver=DEFAULT_LAUNCH_TARGET_RESOLVER,
+                )
+                if authorized.status == "resolved":
+                    allowed_candidates.append(candidate)
+            name_resolution = decide_name(
+                app_name,
+                allowed_candidates,
+                settings=ResolverSettings.from_config(config),
+            )
+            if name_resolution.status == "resolved" and name_resolution.winner:
+                resolution = authorize_app_candidate(
+                    name_resolution.winner.package,
+                    inventory=inventory,
+                    resolver=DEFAULT_LAUNCH_TARGET_RESOLVER,
+                )
+        _record_resolution_attempt(session, name_resolution)
+        name_winner = name_resolution.winner
         kb_match = (
-            getattr(learning, "last_match", None)
-            if resolution.identity is None and learning is not None
+            name_winner.source_entry
+            if name_winner is not None and name_winner.source_entry is not None
             else None
         )
-        status = resolution.status
+        status = resolution.status if resolution is not None else name_resolution.status
         if status == "resolved" and resolution.package_name:
             launched = device.launch_app(
-                app_name,
+                resolution.package_name,
                 device_id=device_id,
+                package_candidates=[resolution.package_name],
                 inventory=inventory,
                 learning=learning,
             )
@@ -660,15 +721,15 @@ def build_actuation_tools(session, config) -> list[StructuredTool]:
                 settle_ms=settle_ms,
             )
         if status == "ambiguous":
-            names = []
-            for cand in resolution.candidates[:5]:
-                names.append(getattr(cand, "canonical_id", str(cand)))
-            available = _available_app_names(session, max_n=10)
-            suffix = f"；本机可用应用：{available}" if available else ""
+            top_k = max(1, int(getattr(config, "resolver_top_k", 10)))
+            names = [
+                f"{candidate.package}"
+                f"(score={candidate.score:.3f}, {candidate.source_route})"
+                for candidate in name_resolution.candidates[:top_k]
+            ]
             return _fail(
                 session,
-                f"ambiguous app {app_name!r}: {', '.join(names)} — be more specific"
-                f"{suffix}",
+                f"ambiguous app {app_name!r}: {', '.join(names)} — be more specific",
             )
         if status == "denied":
             return _fail(session, f"denied: {app_name!r} is not launch-authorized")
@@ -677,9 +738,19 @@ def build_actuation_tools(session, config) -> list[StructuredTool]:
                 session,
                 f"error: {app_name!r} 未安装在这台设备上（{resolution.package_name}），无法启动。",
             )
-        available = _available_app_names(session, max_n=10)
-        suffix = f"；本机可用应用：{available}" if available else ""
-        _remember_unknown_launch(session, config, app_name, available)
+        top_k = max(1, int(getattr(config, "resolver_top_k", 10)))
+        ranked = _ranked_app_packages(name_resolution, max_n=top_k)
+        available = _available_app_names(session, max_n=top_k)
+        hints = []
+        if ranked:
+            hints.append(f"排序候选：{ranked}")
+        if available:
+            hints.append(f"本机可用应用：{available}")
+        suffix = "；" + "；".join(hints) if hints else ""
+        evidence_candidates = "，".join(
+            value for value in (ranked, available) if value
+        )
+        _remember_unknown_launch(session, config, app_name, evidence_candidates)
         return _fail(
             session,
             f"unknown app {app_name!r}: not in registry/inventory — cannot launch"

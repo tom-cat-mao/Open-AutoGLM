@@ -82,6 +82,21 @@
 | `PHONE_AGENT_DREAM` | `off`/`auto`/`manual` | `manual` | 记忆整理时机；`manual` 仅 `--dream` |
 | `PHONE_AGENT_IMPLICIT_ALIAS` | bool | `true` | 隐式纠正：叫法失败→候选包名成功时自动记别名 |
 
+### App 名解析
+
+| 变量 | 类型 | 默认值 | 说明 |
+|---|---|---|---|
+| `PHONE_AGENT_RESOLVER_MIN_SCORE` | float | `0.90` | top1 成为 resolved 的最低综合分；低于该值为 unknown |
+| `PHONE_AGENT_RESOLVER_MARGIN` | float | `0.08` | top1 相对 top2 的最小领先分差；不足则 ambiguous |
+| `PHONE_AGENT_RESOLVER_TOP_K` | int | `10` | 结构化结果、trace 与失败回执最多保留的排序候选数 |
+| `PHONE_AGENT_RESOLVER_LEXICAL` | bool | `true` | 启用归一化变体、字符 bigram/trigram 与 difflib 候选路 |
+| `PHONE_AGENT_RESOLVER_PINYIN` | bool | `true` | 启用全拼与首字母候选路；pypinyin 不可用时 fail-open 跳过 |
+| `PHONE_AGENT_RESOLVER_EMBED` | bool | `true` | 启用 `vec.db` App alias 向量候选路；索引/模型不可用时 fail-open 跳过 |
+| `PHONE_AGENT_RESOLVER_W_SIM` | float | `0.8` | 综合分中的相似度权重 |
+| `PHONE_AGENT_RESOLVER_W_PRIOR` | float | `0.2` | 综合分中的 App-KB 先验权重 |
+
+综合分为 `W_SIM * sim + W_PRIOR * prior`。名称候选胜出后仍须通过设备安装事实和 launch policy；解析配置不能扩大启动权限。
+
 ### 经验与回想
 
 | 变量 | 类型 | 默认值 | 说明 |

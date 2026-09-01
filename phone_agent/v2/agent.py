@@ -166,6 +166,9 @@ class ThinPhoneAgent:
             experience_writer=self._experience_writer,
             session=self.session,
         )
+        self.session.resolution_trace_recorder = getattr(
+            self._trace, "record_event", None
+        )
         self.trace_path = self._trace.trace_path
 
         def taskdoc_middleware_factory():
