@@ -81,6 +81,10 @@
 | `PHONE_AGENT_APP_LIST_MAX` | int | `40` | 注入提示词的应用名数量上限 |
 | `PHONE_AGENT_DREAM` | `off`/`auto`/`manual` | `manual` | 记忆整理时机；`manual` 仅 `--dream` |
 | `PHONE_AGENT_IMPLICIT_ALIAS` | bool | `true` | 隐式纠正：叫法失败→候选包名成功时自动记别名 |
+| `PHONE_AGENT_ALIAS_OVERWRITE` | bool | `true` | dream 是否从同 run 的“开错并秒退→随后成功”证据覆盖错误 learned 别名 |
+| `PHONE_AGENT_ALIAS_OVERWRITE_NOTES` | comma-separated str | `开错,不对,不是,错了,wrong app` | 模型明确自述开错应用的匹配词表；事件只落命中的词，不落完整 note |
+
+手工纠正可用 `main_v2.py --learn-alias "名称=包名"` 写入最高信任的全局 `user` 别名；即使包未安装也会在警告后保存。`main_v2.py --forget-alias "名称"` 只删除该名称的全局 `user` / `learned` 条目，不影响设备清单。两者都会把实际变更追加到 `memory/app_kb/events.jsonl`。
 
 ### App 名解析
 

@@ -13,12 +13,20 @@ import json
 import math
 import os
 from pathlib import Path
+import re
 import tempfile
 import threading
 import unicodedata
 from typing import Any
 
 APP_KINDS = frozenset({"device", "alias", "learned", "user"})
+ALIAS_KINDS = frozenset({"learned", "user"})
+PACKAGE_NAME_PATTERN = re.compile(
+    r"^[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0-9_]*)+$"
+)
+_PRESERVED_AUDIT_OPS = frozenset(
+    {"alias_overwritten", "alias_user_set", "alias_forgotten"}
+)
 
 
 def _utc_now() -> datetime:
@@ -162,6 +170,12 @@ def should_save(kind: str, *, durable: bool, sensitive: bool) -> bool:
     return durable is True and sensitive is False and kind in APP_KINDS
 
 
+def is_valid_package_name(value: str) -> bool:
+    """Return whether ``value`` has a conventional Android package shape."""
+
+    return PACKAGE_NAME_PATTERN.fullmatch(str(value or "").strip()) is not None
+
+
 class AppKnowledgeStore:
     """Append-only App-KB store with a materialized current view."""
 
@@ -269,6 +283,264 @@ class AppKnowledgeStore:
             if matches:
                 self._write_materialized()
 
+    def record_alias_tool_event(
+        self,
+        *,
+        run_id: str,
+        step: int,
+        tool: str,
+        term: str | None = None,
+        package: str | None = None,
+        success: bool,
+        note_marker: str | None = None,
+    ) -> None:
+        """Append the bounded evidence needed by offline alias correction.
+
+        Full tool arguments, receipts, and model notes are intentionally not
+        persisted.  ``note_marker`` is only the configured phrase that matched
+        the model's note, keeping this event narrower than a transcript.
+        """
+
+        event = {
+            "op": "tool_observed",
+            "run_id": str(run_id or "").strip(),
+            "step": max(0, int(step)),
+            "tool": str(tool or "").strip(),
+            "success": bool(success),
+            "ts": _iso_now(),
+        }
+        clean_term = str(term or "").strip()
+        clean_package = str(package or "").strip()
+        clean_marker = str(note_marker or "").strip()
+        if clean_term:
+            event["term"] = clean_term
+        if clean_package:
+            event["package"] = clean_package
+        if clean_marker:
+            event["note_marker"] = clean_marker
+        with self._lock:
+            self._append_raw_event(event)
+
+    def overwrite_learned_alias(
+        self,
+        term: str,
+        old_package: str,
+        new_package: str,
+        *,
+        label: str | None = None,
+        evidence_run_id: str,
+        signature_fingerprint: str,
+    ) -> dict[str, Any] | None:
+        """Replace one term's learned mapping with direct positive evidence.
+
+        A current user correction blocks automatic overwrite.  Otherwise all
+        learned mappings for the normalized term are removed and exactly one
+        learned mapping to ``new_package`` remains.  The single semantic event
+        is replayable before compaction and retained as audit-only afterwards.
+        """
+
+        clean_term = str(term or "").strip()
+        clean_old = str(old_package or "").strip()
+        clean_new = str(new_package or "").strip()
+        clean_run_id = str(evidence_run_id or "").strip()
+        fingerprint = str(signature_fingerprint or "").strip()
+        if not clean_term or not is_valid_package_name(clean_new):
+            raise ValueError("term and a valid new package are required")
+        if not clean_run_id or not fingerprint:
+            raise ValueError("evidence_run_id and signature_fingerprint are required")
+
+        normalized_term = _normalize_term(clean_term)
+        timestamp = _iso_now()
+        with self._lock:
+            if any(
+                event.get("op") == "alias_overwritten"
+                and str(event.get("signature_fingerprint", "")).strip()
+                == fingerprint
+                for event in self._read_events()
+            ):
+                return None
+            same_term = [
+                (key, entry)
+                for key, entry in self._entries.items()
+                if entry["scope"] == "global"
+                and _normalize_term(entry["term"]) == normalized_term
+                and entry["kind"] in ALIAS_KINDS
+            ]
+            if any(entry["kind"] == "user" for _, entry in same_term):
+                return None
+            learned = [
+                (key, entry) for key, entry in same_term if entry["kind"] == "learned"
+            ]
+            if learned and not any(
+                entry["package"] == clean_old for _, entry in learned
+            ):
+                return None
+            if (
+                len(learned) == 1
+                and learned[0][1]["package"] == clean_new
+                and not learned[0][1]["stale"]
+            ):
+                return None
+
+            old_entries = [dict(entry) for _, entry in learned]
+            for key, _entry in learned:
+                self._entries.pop(key, None)
+            first_seen = (
+                min(
+                    (entry["first_seen"] for entry in old_entries),
+                    key=_parse_iso,
+                )
+                if old_entries
+                else timestamp
+            )
+            new_entry = _coerce_entry(
+                {
+                    "term": clean_term,
+                    "label": str(label or clean_new).strip() or clean_new,
+                    "package": clean_new,
+                    "kind": "learned",
+                    "scope": "global",
+                    "confidence": 0.9,
+                    "success_count": 1,
+                    "first_seen": first_seen,
+                    "last_seen": timestamp,
+                    "last_success": timestamp,
+                    "stale": False,
+                }
+            )
+            self._entries[_entry_key(new_entry)] = new_entry
+            self._append_raw_event(
+                {
+                    "op": "alias_overwritten",
+                    "entry": new_entry,
+                    "old_package": clean_old,
+                    "old_packages": sorted(
+                        {str(entry["package"]) for entry in old_entries}
+                    ),
+                    "new_package": clean_new,
+                    "evidence_run_id": clean_run_id,
+                    "signature_fingerprint": fingerprint,
+                    "ts": timestamp,
+                }
+            )
+            self._write_materialized()
+            return dict(new_entry)
+
+    def set_user_alias(self, term: str, package: str) -> dict[str, Any]:
+        """Set the highest-trust global alias, replacing learned/user peers."""
+
+        clean_term = str(term or "").strip()
+        clean_package = str(package or "").strip()
+        if not clean_term:
+            raise ValueError("alias term must not be empty")
+        if not is_valid_package_name(clean_package):
+            raise ValueError(f"invalid Android package name: {clean_package!r}")
+        normalized_term = _normalize_term(clean_term)
+        timestamp = _iso_now()
+        with self._lock:
+            matches = [
+                (key, entry)
+                for key, entry in self._entries.items()
+                if entry["scope"] == "global"
+                and entry["kind"] in ALIAS_KINDS
+                and _normalize_term(entry["term"]) == normalized_term
+            ]
+            if (
+                len(matches) == 1
+                and matches[0][1]["kind"] == "user"
+                and matches[0][1]["package"] == clean_package
+                and not matches[0][1]["stale"]
+            ):
+                unchanged = dict(matches[0][1])
+                self._append_raw_event(
+                    {
+                        "op": "alias_user_set",
+                        "entry": unchanged,
+                        "changed": False,
+                        "replaced": [],
+                        "ts": timestamp,
+                    }
+                )
+                return {"changed": False, "entry": unchanged, "replaced": 0}
+
+            for key, _entry in matches:
+                self._entries.pop(key, None)
+            first_seen = (
+                min((entry["first_seen"] for _, entry in matches), key=_parse_iso)
+                if matches
+                else timestamp
+            )
+            entry = _coerce_entry(
+                {
+                    "term": clean_term,
+                    "label": clean_term,
+                    "package": clean_package,
+                    "kind": "user",
+                    "scope": "global",
+                    "confidence": 1.0,
+                    "success_count": 0,
+                    "first_seen": first_seen,
+                    "last_seen": timestamp,
+                    "stale": False,
+                }
+            )
+            self._entries[_entry_key(entry)] = entry
+            self._append_raw_event(
+                {
+                    "op": "alias_user_set",
+                    "entry": entry,
+                    "changed": True,
+                    "replaced": [
+                        {"kind": old["kind"], "package": old["package"]}
+                        for _, old in matches
+                    ],
+                    "ts": timestamp,
+                }
+            )
+            self._write_materialized()
+            return {"changed": True, "entry": dict(entry), "replaced": len(matches)}
+
+    def forget_alias(self, term: str) -> int:
+        """Delete global user/learned entries for ``term``; keep device rows."""
+
+        clean_term = str(term or "").strip()
+        if not clean_term:
+            raise ValueError("alias term must not be empty")
+        normalized_term = _normalize_term(clean_term)
+        with self._lock:
+            matches = [
+                (key, entry)
+                for key, entry in self._entries.items()
+                if entry["scope"] == "global"
+                and entry["kind"] in ALIAS_KINDS
+                and _normalize_term(entry["term"]) == normalized_term
+            ]
+            if not matches:
+                self._append_raw_event(
+                    {
+                        "op": "alias_forgotten",
+                        "term": clean_term,
+                        "removed": [],
+                        "ts": _iso_now(),
+                    }
+                )
+                return 0
+            for key, _entry in matches:
+                self._entries.pop(key, None)
+            self._append_raw_event(
+                {
+                    "op": "alias_forgotten",
+                    "term": clean_term,
+                    "removed": [
+                        {"kind": entry["kind"], "package": entry["package"]}
+                        for _, entry in matches
+                    ],
+                    "ts": _iso_now(),
+                }
+            )
+            self._write_materialized()
+            return len(matches)
+
     def entries(
         self,
         scope: str | None = None,
@@ -331,15 +603,59 @@ class AppKnowledgeStore:
                 try:
                     event = json.loads(line)
                     op = event["op"]
+                except (KeyError, TypeError, json.JSONDecodeError):
+                    continue
+                if event.get("audit_only"):
+                    continue
+                if op == "alias_forgotten":
+                    normalized_term = _normalize_term(event.get("term", ""))
+                    if not normalized_term:
+                        continue
+                    for key in [
+                        key
+                        for key, entry in current.items()
+                        if entry["scope"] == "global"
+                        and entry["kind"] in ALIAS_KINDS
+                        and _normalize_term(entry["term"]) == normalized_term
+                    ]:
+                        current.pop(key, None)
+                    continue
+                try:
                     entry = _coerce_entry(event["entry"])
                     key = _entry_key(entry)
-                except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+                except (KeyError, TypeError, ValueError):
                     continue
                 if op in {"upsert", "mark_stale"}:
                     current[key] = entry
                 elif op == "delete":
                     current.pop(key, None)
+                elif op in {"alias_overwritten", "alias_user_set"}:
+                    normalized_term = _normalize_term(entry["term"])
+                    kinds = {"learned"} if op == "alias_overwritten" else ALIAS_KINDS
+                    for old_key in [
+                        old_key
+                        for old_key, old in current.items()
+                        if old["scope"] == "global"
+                        and old["kind"] in kinds
+                        and _normalize_term(old["term"]) == normalized_term
+                    ]:
+                        current.pop(old_key, None)
+                    current[key] = entry
         return current
+
+    def _read_events(self) -> list[dict[str, Any]]:
+        """Return valid object events without interpreting their mutations."""
+
+        events: list[dict[str, Any]] = []
+        with self.events_path.open("r", encoding="utf-8") as stream:
+            for line in stream:
+                try:
+                    event = json.loads(line)
+                except (TypeError, json.JSONDecodeError):
+                    continue
+                if isinstance(event, dict):
+                    events.append(event)
+        return events
 
     def _append_event(
         self,
@@ -354,6 +670,11 @@ class AppKnowledgeStore:
         note = str(evidence_note or "").strip()
         if note:
             event["evidence_note"] = note
+        self._append_raw_event(event)
+
+    def _append_raw_event(self, event: Mapping[str, Any]) -> None:
+        """Append and fsync one already-shaped event."""
+
         needs_newline = False
         if self.events_path.stat().st_size:
             with self.events_path.open("rb") as stream:
@@ -362,7 +683,9 @@ class AppKnowledgeStore:
         with self.events_path.open("a", encoding="utf-8") as stream:
             if needs_newline:
                 stream.write("\n")
-            stream.write(json.dumps(event, ensure_ascii=False, sort_keys=True) + "\n")
+            stream.write(
+                json.dumps(dict(event), ensure_ascii=False, sort_keys=True) + "\n"
+            )
             stream.flush()
             os.fsync(stream.fileno())
 
@@ -383,6 +706,17 @@ class AppKnowledgeStore:
         canonical = [_coerce_entry(entry, now=timestamp) for entry in entries]
         projection = {_entry_key(entry): entry for entry in canonical}
         ordered = sorted(projection.values(), key=_sort_key)
+        audit_events: list[dict[str, Any]] = []
+        with self.events_path.open("r", encoding="utf-8") as stream:
+            for line in stream:
+                try:
+                    event = json.loads(line)
+                except (TypeError, json.JSONDecodeError):
+                    continue
+                if isinstance(event, dict) and event.get("op") in _PRESERVED_AUDIT_OPS:
+                    audit = dict(event)
+                    audit["audit_only"] = True
+                    audit_events.append(audit)
         events = "".join(
             json.dumps(
                 {"op": "upsert", "entry": entry, "ts": timestamp},
@@ -391,6 +725,10 @@ class AppKnowledgeStore:
             )
             + "\n"
             for entry in ordered
+        )
+        events += "".join(
+            json.dumps(event, ensure_ascii=False, sort_keys=True) + "\n"
+            for event in audit_events
         )
         materialized = (
             json.dumps(ordered, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
@@ -532,8 +870,11 @@ class AppKnowledge:
             f"device:{self.device_id}" if self.device_id is not None else None
         )
 
-        def rank(entry: dict[str, Any]) -> tuple[int, int, float, int, datetime, str]:
+        def rank(
+            entry: dict[str, Any],
+        ) -> tuple[int, int, int, float, int, datetime, str]:
             return (
+                int(entry["kind"] == "user"),
                 len(_normalize_term(entry["term"])) if prefer_long_term else 0,
                 int(entry["scope"] == device_scope),
                 float(entry["confidence"]),

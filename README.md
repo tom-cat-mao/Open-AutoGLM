@@ -20,7 +20,7 @@ TaskWizard 采用 thin-loop v2：模型每轮观察真实设备、决定一个�
 - **安全预警制**：风险动作先返回警告与选项，模型明确确认后才执行（confirm-to-execute）。
 - **可信完成**：TaskDoc 任务板与流程线持续记录进度；finish 两段式确认，并可交给独立上下文验收器复核。
 - **HTML 产出物**：攻略、计划、比价报告等成果可由 `write_document` / `update_document` 写成本 run 的自包含单页 HTML；路径由 run id 派生，内容限 256 KiB，模型不能指定任意文件。
-- **App-KB 自积累记忆**：同步本机应用名称；验证启动成功后沉淀非敏感别名，并累计成功反馈。同一 run 中未知中文名失败、回执列出的包名随后启动成功时，自动把该中文名写为 `learned` 别名（隐式纠正，证据闭环）。
+- **App-KB 自积累记忆**：同步本机应用名称；验证启动成功后沉淀非敏感别名，并累计成功反馈。同一 run 中未知中文名失败、回执列出的包名随后启动成功时，自动把该中文名写为 `learned` 别名（隐式纠正，证据闭环）。dream 还能从最小化工具事件识别“启动 A→1–2 步内明确自述开错并退出→成功启动 B”，删除错误 learned 映射并写入 B；用户可通过 CLI 写入最高信任的 `user` 别名或忘记 user/learned 别名。
 - **四层 App 名解析**：统一做 NFKC/大小写/空白归一化，再从 exact、lexical、pinyin、embedding 四路生成候选；按 App-KB 先验精排并用阈值 + margin 决策。歧义时只返回排序后的 top-K，装机事实与 launch policy 仍独立 fail-closed。
 - **经验数据面**：每次 run 结束以严格隐私白名单落盘 episode outcome 与工具结果分类，持久化分角色 token 账本；数据采集全程 observe-only，并审计本轮实际注入的 lesson id。
 - **经验提炼与晋升**：离线 `--distill` 从证据充足的 episode 组生成 proposed lesson；Rule-of-3 通过后仍须人工 approve。仅 `PHONE_AGENT_MEMORY_RAG=on` 时，approved lesson 才在 run 开局以“参考、非规则”的 L0 Mirror 受控注入。
@@ -42,6 +42,7 @@ cp .env.example .env  # 填写模型网关、模型名与 API Key
 `PHONE_AGENT_OBSERVE_SETTLE_MS=300` 控制观测前静置（`0` 关闭），`PHONE_AGENT_BLACK_SCREEN_DETECT=on|off` 控制保护页黑屏检测；动作参数 `settle_ms` 会 clamp 到 0–5000ms，并替代而非叠加全局值。
 `PHONE_AGENT_IMPLICIT_ALIAS=on|off` 控制 App-KB 的证据闭环隐式纠正（默认 `on`）；无失败回执候选证据时不会猜测或写入。
 App 名解析默认开启 lexical / pinyin / embedding 候选路，由 `PHONE_AGENT_RESOLVER_LEXICAL`、`PHONE_AGENT_RESOLVER_PINYIN`、`PHONE_AGENT_RESOLVER_EMBED` 控制；`PHONE_AGENT_RESOLVER_MIN_SCORE=0.90` 与 `PHONE_AGENT_RESOLVER_MARGIN=0.08` 共同决定 resolved / ambiguous / unknown，排序公式为 `RESOLVER_W_SIM*sim + RESOLVER_W_PRIOR*prior`。向量索引或拼音依赖不可用时对应路线 fail-open 跳过，授权边界不变。
+`PHONE_AGENT_ALIAS_OVERWRITE=on|off` 控制 dream 的错误别名覆盖（默认 `on`）；`PHONE_AGENT_ALIAS_OVERWRITE_NOTES` 是逗号分隔的明确自述词表，默认 `开错,不对,不是,错了,wrong app`。事件只保存命中的词，不保存完整模型 note。
 `PHONE_AGENT_DELIVERABLE=on|off` 控制 `deliverable` 能力（默认 `on`）；开启后模型可把文档成果写入 `PHONE_AGENT_DELIVERABLE_DIR/<run_id>.html`（默认 `outputs/deliverables`），只能创建或全量更新本 run 的 UTF-8 单页 HTML，大小上限 256 KiB。成功路径会进入 episode 的可选 `deliverable_path` 字段，生产 trace 只记录 HTML 字节数，不记录正文。
 
 ```bash
@@ -49,6 +50,8 @@ App 名解析默认开启 lexical / pinyin / embedding 候选路，由 `PHONE_AG
 .venv/bin/python main_v2.py "在飞猪查询 10 月 2 日上海飞桃仙的最低价机票" --max-steps 40
 .venv/bin/python -m phone_agent.web --device-id <serial> --port 8080   # Web 控制台
 .venv/bin/python main_v2.py --dream    # 手动整理本地 App-KB 与经验库
+.venv/bin/python main_v2.py --learn-alias "小红书=com.xingin.xhs"  # 写入最高信任 user 别名
+.venv/bin/python main_v2.py --forget-alias "小红书"                # 删除该名称的 user/learned 别名
 .venv/bin/python main_v2.py --rebuild-vec  # 从 episode/App-KB 全量重建语义索引
 .venv/bin/python main_v2.py --distill     # 离线蒸馏，只写 proposed lesson
 .venv/bin/python main_v2.py --review-lessons

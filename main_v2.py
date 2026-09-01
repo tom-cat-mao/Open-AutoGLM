@@ -79,6 +79,16 @@ def build_parser() -> argparse.ArgumentParser:
         metavar=("ID", "TEXT"),
         help="create a proposed next version of a lesson",
     )
+    maintenance.add_argument(
+        "--learn-alias",
+        metavar="NAME=PACKAGE",
+        help="set a highest-trust global app alias",
+    )
+    maintenance.add_argument(
+        "--forget-alias",
+        metavar="NAME",
+        help="remove global learned/user aliases for a name",
+    )
     return parser
 
 
@@ -191,6 +201,8 @@ def _maintenance_requested(args: argparse.Namespace) -> bool:
         or args.approve_lesson
         or args.revoke_lesson
         or args.supersede_lesson
+        or getattr(args, "learn_alias", None) is not None
+        or getattr(args, "forget_alias", None) is not None
     )
 
 
@@ -203,8 +215,11 @@ def _maintenance_command(args: argparse.Namespace) -> str | None:
         "approve_lesson",
         "revoke_lesson",
         "supersede_lesson",
+        "learn_alias",
+        "forget_alias",
     ):
-        if getattr(args, name, None):
+        value = getattr(args, name, None)
+        if value is not None and value is not False:
             return name
     return None
 
@@ -285,6 +300,70 @@ def _build_cli_capability_context(config: V2Config) -> CapabilityAssemblyContext
         )
         return 0
 
+    def learn_alias(args: argparse.Namespace) -> int:
+        from phone_agent.v2.appkb import AppKnowledgeStore, is_valid_package_name
+
+        raw = str(args.learn_alias or "")
+        if "=" not in raw:
+            print(
+                "error: --learn-alias expects NAME=PACKAGE",
+                file=sys.stderr,
+            )
+            return 1
+        term, package = (part.strip() for part in raw.split("=", 1))
+        if not term:
+            print("error: alias name must not be empty", file=sys.stderr)
+            return 1
+        if not is_valid_package_name(package):
+            print(f"error: invalid Android package name: {package!r}", file=sys.stderr)
+            return 1
+
+        inventory = _device_inventory(config)
+        warning = None
+        if inventory is None:
+            warning = "device inventory unavailable; package installation not verified"
+        elif package not in inventory:
+            warning = (
+                "package is not installed on the current device; alias was still saved"
+            )
+        result = AppKnowledgeStore(config.memory_dir).set_user_alias(term, package)
+        receipt = {
+            "action": "learn_alias",
+            "changed": bool(result["changed"]),
+            "term": term,
+            "package": package,
+            "kind": "user",
+            "confidence": 1.0,
+            "scope": "global",
+        }
+        if warning:
+            receipt["warning"] = warning
+        print("alias: " + json.dumps(receipt, ensure_ascii=False, sort_keys=True))
+        return 0
+
+    def forget_alias(args: argparse.Namespace) -> int:
+        from phone_agent.v2.appkb import AppKnowledgeStore
+
+        term = str(args.forget_alias or "").strip()
+        if not term:
+            print("error: alias name must not be empty", file=sys.stderr)
+            return 1
+        removed = AppKnowledgeStore(config.memory_dir).forget_alias(term)
+        print(
+            "alias: "
+            + json.dumps(
+                {
+                    "action": "forget_alias",
+                    "term": term,
+                    "removed": removed,
+                    "preserved_kind": "device",
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+        )
+        return 0
+
     context = CapabilityAssemblyContext(
         {
             "cli_handlers": {
@@ -295,6 +374,8 @@ def _build_cli_capability_context(config: V2Config) -> CapabilityAssemblyContext
                 "approve_lesson": approve_lesson,
                 "revoke_lesson": revoke_lesson,
                 "supersede_lesson": supersede_lesson,
+                "learn_alias": learn_alias,
+                "forget_alias": forget_alias,
             }
         }
     )
