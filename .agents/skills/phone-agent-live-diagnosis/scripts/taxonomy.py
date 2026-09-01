@@ -22,6 +22,7 @@ SRC_PERCEPTION = "phone_agent/v2/tools/perception.py"
 SRC_OBS = "phone_agent/v2/tools/_obs.py"
 SRC_CONTROL = "phone_agent/v2/tools/control.py"
 SRC_TASKDOC = "phone_agent/v2/tools/taskdoc.py"
+SRC_DELIVERABLE = "phone_agent/v2/tools/deliverable.py"
 
 
 @dataclass(frozen=True)
@@ -45,7 +46,25 @@ class ResultClass:
 # Ordered most-specific first. classify_result returns the first match.
 RESULT_CLASSES: tuple[ResultClass, ...] = (
     # --- success / observation ------------------------------------------
+    ResultClass(
+        "OK. 已创建文档",
+        "deliverable_created",
+        "deliverable",
+        SRC_DELIVERABLE,
+    ),
+    ResultClass(
+        "OK. 已更新文档",
+        "deliverable_updated",
+        "deliverable",
+        SRC_DELIVERABLE,
+    ),
     ResultClass("OK. ", "success", "success", SRC_ACTUATION),
+    ResultClass(
+        "[OBS] 此屏被系统级保护（登录/支付页）。",
+        "secure_screenshot_blocked",
+        "secure_screenshot",
+        SRC_OBS,
+    ),
     ResultClass("[OBS] (re-observation failed:", "obs_capture_failed", "observation", SRC_OBS),
     ResultClass("[OBS] app=", "observation", "success", SRC_OBS),
     # --- grounding / addressing -----------------------------------------
@@ -70,6 +89,13 @@ RESULT_CLASSES: tuple[ResultClass, ...] = (
     ResultClass("error: end must be [x, y]", "bad_coords", "actuation_arg", SRC_ACTUATION),
     ResultClass("error: unknown direction", "bad_direction", "actuation_arg", SRC_ACTUATION),
     # --- launch ----------------------------------------------------------
+    ResultClass(
+        "ambiguous app ",
+        "ambiguous_app",
+        "launch",
+        SRC_ACTUATION,
+        contains="score=",
+    ),
     ResultClass("ambiguous app ", "ambiguous_app", "launch", SRC_ACTUATION),
     ResultClass("denied:", "launch_denied", "launch", SRC_ACTUATION),
     ResultClass("error: 未能启动", "launch_failed", "launch", SRC_ACTUATION),
@@ -80,7 +106,33 @@ RESULT_CLASSES: tuple[ResultClass, ...] = (
         SRC_ACTUATION,
         contains="未安装",
     ),
+    ResultClass(
+        "unknown app ",
+        "unknown_app",
+        "launch",
+        SRC_ACTUATION,
+        contains="排序候选：",
+    ),
     ResultClass("unknown app ", "unknown_app", "launch", SRC_ACTUATION),
+    # --- run-bound deliverable ------------------------------------------
+    ResultClass(
+        "error: deliverable already exists; use update_document",
+        "deliverable_exists",
+        "deliverable",
+        SRC_DELIVERABLE,
+    ),
+    ResultClass(
+        "error: document was not written (",
+        "deliverable_write_failed",
+        "deliverable",
+        SRC_DELIVERABLE,
+    ),
+    ResultClass(
+        "error: document was not updated (",
+        "deliverable_update_failed",
+        "deliverable",
+        SRC_DELIVERABLE,
+    ),
     # --- taskdoc ---------------------------------------------------------
     ResultClass("未写入（输入无效）：", "taskdoc_input_invalid", "taskdoc", SRC_TASKDOC),
     ResultClass("未写入（校验失败）：", "taskdoc_validation_failed", "taskdoc", SRC_TASKDOC),

@@ -31,7 +31,7 @@ diagnosis maps to one of them:
 
 | Owner | What it is | Where it lives |
 |---|---|---|
-| **Tools** | 15 tools return a **result string**; the leading text is a loose contract for what happened (`OK. `, `未定位:`, `路线仍有未完成项：`, …). Fail-closed: an error string, never a faked action. | `phone_agent/v2/tools/{actuation,perception,control,taskdoc,_obs}.py` |
+| **Tools** | 15 base/TaskDoc tools plus two capability-mounted deliverable tools return a **result string**; the leading text is a loose contract for what happened (`OK. `, `未定位:`, `路线仍有未完成项：`, …). Fail-closed: an error string, never a faked action. | `phone_agent/v2/tools/{actuation,perception,control,taskdoc,deliverable,_obs}.py` |
 | **Finish gate** | `finish` is fail-closed: it requires non-empty evidence **and** an all-clear TaskDoc route. This is the only "is the task done?" authority. | `phone_agent/v2/tools/control.py::finish` |
 | **TaskDoc board** | Goal (`goal_base`, harness-seeded, model-immutable) + route items + facts, pinned into context every step (compression-immune). The model is the single writer via `update_task_doc`. | `phone_agent/v2/taskdoc.py`, `middleware/taskdoc.py` |
 | **Middleware** | Cross-cutting: safety HITL (dangerous action → interrupt), image pruning (keep newest image only), JSONL trace (P0 #6), model-call limit, and — opt-in — the diagnostic evidence stream. | `phone_agent/v2/middleware/*` |
