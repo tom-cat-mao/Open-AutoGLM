@@ -293,6 +293,14 @@ class V2Config:
     grounding_provider: str = "hybrid"
     accessibility_timeout: float = 3.0
     accessibility_max_marks: int = 80
+    # WP-G2a windowed marks (pure display layer): auto|on|off.
+    #   * ``auto`` (default) tries a ``uiautomator dump --windows`` first and
+    #     falls back to the legacy single-root dump when unsupported.
+    #   * ``on`` requires ``--windows`` (a device that lacks it errors visibly).
+    #   * ``off`` keeps the legacy dump + flat rendering.
+    # Addressing, tool execution, safety gate, folding and locate are unchanged;
+    # this only affects how the accessibility tree is grouped and rendered.
+    marks_windowed: str = "auto"
     locateanything_model: str | None = None
     locateanything_max_size: int = 960
     locateanything_context_max_chars: int = 200
@@ -528,6 +536,9 @@ class V2Config:
             grounding_provider=_env_str("PHONE_AGENT_GROUNDING_PROVIDER", "hybrid"),
             accessibility_timeout=_env_float("PHONE_AGENT_ACCESSIBILITY_TIMEOUT", 3.0),
             accessibility_max_marks=_env_int("PHONE_AGENT_ACCESSIBILITY_MAX_MARKS", 80),
+            marks_windowed=_env_choice(
+                "PHONE_AGENT_MARKS_WINDOWED", "auto", ("auto", "on", "off")
+            ),
             locateanything_model=_env_opt_str("PHONE_AGENT_LOCATEANYTHING_MODEL"),
             locateanything_max_size=_env_int("PHONE_AGENT_LOCATEANYTHING_MAX_SIZE", 960),
             locateanything_context_max_chars=_env_int(

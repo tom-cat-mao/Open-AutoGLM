@@ -103,13 +103,29 @@ class DeviceFactory:
         )
 
     def dump_uiautomator_xml(
-        self, device_id: str | None = None, timeout: float | None = None
+        self,
+        device_id: str | None = None,
+        timeout: float | None = None,
+        *,
+        windowed: str = "auto",
     ) -> str:
-        """Return the current UIAutomator hierarchy through the device boundary."""
+        """Return the current UIAutomator hierarchy through the device boundary.
+
+        ``windowed`` (``auto`` | ``on`` | ``off``) selects the WP-G2a dual-mode
+        dump. Forwarded to the device module only when it accepts the keyword so
+        older module surfaces keep working (legacy single-root dump).
+        """
 
         if not hasattr(self.module, "dump_uiautomator_xml"):
             raise RuntimeError("UIAutomator hierarchy is unavailable")
-        return self.module.dump_uiautomator_xml(device_id, timeout=timeout)
+        try:
+            return self.module.dump_uiautomator_xml(
+                device_id, timeout=timeout, windowed=windowed
+            )
+        except TypeError as exc:
+            if "windowed" not in str(exc):
+                raise
+            return self.module.dump_uiautomator_xml(device_id, timeout=timeout)
 
     def get_current_app(self, device_id: str | None = None) -> str:
         """Get current app name."""

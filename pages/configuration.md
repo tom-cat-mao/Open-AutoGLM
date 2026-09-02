@@ -47,6 +47,7 @@
 | `PHONE_AGENT_GROUNDING_PROVIDER` | `hybrid`/`accessibility`/`locateanything` | `hybrid` | mark 来源；hybrid = 控件树优先，视觉兜底 |
 | `PHONE_AGENT_ACCESSIBILITY_TIMEOUT` | float | `3.0` | 控件树抓取超时（秒） |
 | `PHONE_AGENT_ACCESSIBILITY_MAX_MARKS` | int | `80` | 单次观测最多输出的 mark 数 |
+| `PHONE_AGENT_MARKS_WINDOWED` | `auto`/`on`/`off` | `auto` | 窗口感知 marks（纯展示层）。`auto` 先试 `uiautomator dump --windows`，不支持则回退单根 dump；`on` 强制 `--windows`（不支持报错可见）；`off` 旧平铺渲染。仅影响分组/标注/渲染，寻址/执行/安全门/折叠/locate 不变，`op=blocked` 仅展示不拦截 |
 | `PHONE_AGENT_LOCATEANYTHING_MODEL` | path | 无 | 本地视觉定位模型路径；不配置则视觉定位不可用 |
 | `PHONE_AGENT_LOCATE_MAX_SIZE` | int | `0` | locate 输入图最长边；`0` = 原图 |
 | `PHONE_AGENT_SCOPE_PADDING_RATIO` | float | `0.05` | scope 区域裁剪的边缘扩展比例 |

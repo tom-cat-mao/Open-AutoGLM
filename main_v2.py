@@ -39,6 +39,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model", default=None, help="model id (PHONE_AGENT_MODEL)")
     parser.add_argument("--base-url", default=None, help="OpenAI-compatible base URL")
     parser.add_argument("--grounding-provider", default=None, help="grounding provider name")
+    parser.add_argument(
+        "--marks-windowed",
+        default=None,
+        choices=("auto", "on", "off"),
+        help="windowed marks mode (PHONE_AGENT_MARKS_WINDOWED, default auto)",
+    )
     parser.add_argument("--lang", default=None, help="prompt language (cn/en)")
     parser.add_argument("--trace-dir", default=None, help="trace output directory")
     maintenance = parser.add_mutually_exclusive_group()
@@ -101,6 +107,7 @@ def _overrides_from_args(args: argparse.Namespace) -> dict:
         "model_name": args.model,
         "base_url": args.base_url,
         "grounding_provider": args.grounding_provider,
+        "marks_windowed": args.marks_windowed,
         "lang": args.lang,
         "trace_dir": args.trace_dir,
     }

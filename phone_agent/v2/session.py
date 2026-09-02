@@ -798,10 +798,48 @@ class PhoneSession:
 
     @staticmethod
     def format_marks_digest(marks: list[MarkCandidate], max_items: int = 40) -> str:
-        """One line per mark: ``mark_id | role | text(<=32) | center``."""
+        """Render the marks digest (WP-G2a windowed-aware, pure display layer).
+
+        The ``[OBS] app=X screen#N`` / ``marks (K):`` header is added by the
+        caller and is untouched — this returns only the digest body. The mark id
+        badge, coordinates and ``max_items`` cut are unchanged; windowing only
+        regroups and annotates the *same* marks.
+
+        * Non-windowed marks (no ``window_id`` — locate marks, test doubles) or a
+          single **weak** (heuristic) window keep the historic flat layout
+          ``mark_id | role | text | center``, with an optional trailing
+          ``| path=…`` when a semantic container path exists.
+        * Multiple windows (or a single window carrying real ``--windows``
+          metadata) render grouped: one window header line (``Wk type pkg
+          layer=… [covered_by=…]``) followed by its marks indented, each ending
+          with ``| op=<actionability> | path=<container_path>``.
+        """
+
+        shown = list(marks[:max_items])
+        window_ids = [m.window_id for m in shown if m.window_id]
+        distinct = list(dict.fromkeys(window_ids))
+        has_strong = any(
+            m.window_layer is not None or m.window_type is not None for m in shown
+        )
+        grouped = bool(distinct) and (len(distinct) > 1 or has_strong)
+
+        if grouped:
+            body = PhoneSession._format_windowed_digest(shown)
+        else:
+            body = PhoneSession._format_flat_digest(shown)
+
+        if len(marks) > max_items:
+            body = f"{body}\n... (+{len(marks) - max_items} more)" if body else (
+                f"... (+{len(marks) - max_items} more)"
+            )
+        return body
+
+    @staticmethod
+    def _format_flat_digest(marks: list[MarkCandidate]) -> str:
+        """Historic one-line-per-mark layout (+ optional trailing container path)."""
 
         lines: list[str] = []
-        for mark in marks[:max_items]:
+        for mark in marks:
             role = (mark.role or "?")[:24]
             if is_container_like(mark):
                 role = f"[容器]{role}"
@@ -809,17 +847,119 @@ class PhoneSession:
             if len(text) > 32:
                 text = text[:32]
             center = tuple(mark.center) if mark.center else ()
-            lines.append(f"{mark.mark_id} | {role} | {text} | {center}")
-        if len(marks) > max_items:
-            lines.append(f"... (+{len(marks) - max_items} more)")
+            line = f"{mark.mark_id} | {role} | {text} | {center}"
+            path = PhoneSession._render_container_path(mark)
+            if path:
+                line += f" | path={path}"
+            lines.append(line)
         return "\n".join(lines)
+
+    @staticmethod
+    def _format_windowed_digest(marks: list[MarkCandidate]) -> str:
+        """Group marks by window (layer desc), one header + indented mark lines."""
+
+        order: list[str] = []
+        buckets: dict[str, list[MarkCandidate]] = {}
+        for mark in marks:
+            wid = mark.window_id or "W?"
+            if wid not in buckets:
+                buckets[wid] = []
+                order.append(wid)
+            buckets[wid].append(mark)
+
+        def layer_of(wid: str) -> int:
+            for mark in buckets[wid]:
+                if mark.window_layer is not None:
+                    return mark.window_layer
+            return -1
+
+        # Higher layer first; ties keep document (window-id) order.
+        doc_rank = {wid: i for i, wid in enumerate(order)}
+        order.sort(key=lambda wid: (-layer_of(wid), doc_rank[wid]))
+
+        lines: list[str] = []
+        for wid in order:
+            bucket = buckets[wid]
+            lines.append(PhoneSession._window_header(wid, bucket))
+            for mark in bucket:
+                lines.append(PhoneSession._windowed_mark_line(mark))
+        return "\n".join(lines)
+
+    @staticmethod
+    def _window_header(window_id: str, bucket: list[MarkCandidate]) -> str:
+        """One window header line derived from its marks' shared metadata."""
+
+        sample = bucket[0]
+        parts = [window_id]
+        if sample.window_type:
+            parts.append(str(sample.window_type))
+        if sample.package:
+            parts.append(str(sample.package))
+        if sample.window_layer is not None:
+            parts.append(f"layer={sample.window_layer}")
+        if sample.window_title:
+            parts.append(f"title={sample.window_title}")
+        covered_by = PhoneSession._covered_by(bucket)
+        if covered_by:
+            parts.append(f"covered_by={covered_by}")
+        return " ".join(parts)
+
+    @staticmethod
+    def _windowed_mark_line(mark: MarkCandidate) -> str:
+        """Indented ``mark_id | role | text | center | op=… | path=…`` line."""
+
+        role = (mark.role or "?")[:24]
+        if is_container_like(mark):
+            role = f"[容器]{role}"
+        text = (mark.text_summary or "").replace("\n", " ").strip()
+        if len(text) > 32:
+            text = text[:32]
+        center = tuple(mark.center) if mark.center else ()
+        line = f"  {mark.mark_id} | {role} | {text} | {center}"
+        if mark.actionability:
+            line += f" | op={mark.actionability}"
+        path = PhoneSession._render_container_path(mark)
+        if path:
+            line += f" | path={path}"
+        return line
+
+    @staticmethod
+    def _render_container_path(mark: MarkCandidate) -> str:
+        """Join the (already <=3) semantic container path outer->inner."""
+
+        path = getattr(mark, "container_path", ()) or ()
+        return ">".join(str(kind) for kind in path if kind)
+
+    @staticmethod
+    def _covered_by(bucket: list[MarkCandidate]) -> str | None:
+        """Return the window id covering this window, from mark reasons."""
+
+        for mark in bucket:
+            for reason in getattr(mark, "actionability_reasons", ()) or ():
+                text = str(reason)
+                if text.startswith("covered_by:"):
+                    return text.split(":", 1)[1]
+                if text.startswith("maybe_covered_by:"):
+                    return text.split(":", 1)[1]
+        return None
+
 
     # -- internals --------------------------------------------------------
 
     def _dump_tree(self, timeout: float | None = None) -> str:
-        return self.device_factory.dump_uiautomator_xml(
-            self.config.device_id, timeout=timeout
-        )
+        windowed = getattr(self.config, "marks_windowed", "auto")
+        try:
+            return self.device_factory.dump_uiautomator_xml(
+                self.config.device_id, timeout=timeout, windowed=windowed
+            )
+        except TypeError as exc:
+            # Duck-typed / test device factories may still expose the pre-WP-G2a
+            # two-argument surface. Fall back to the legacy single-root dump.
+            if "windowed" not in str(exc):
+                raise
+            return self.device_factory.dump_uiautomator_xml(
+                self.config.device_id, timeout=timeout
+            )
 
     def _foreground_observation(self) -> "ForegroundAppObservation | None":
         """Sample the foreground once; ``None`` when it cannot be read.
