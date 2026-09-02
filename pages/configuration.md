@@ -90,16 +90,22 @@
 
 | 变量 | 类型 | 默认值 | 说明 |
 |---|---|---|---|
-| `PHONE_AGENT_RESOLVER_MIN_SCORE` | float | `0.90` | top1 成为 resolved 的最低综合分；低于该值为 unknown |
-| `PHONE_AGENT_RESOLVER_MARGIN` | float | `0.08` | top1 相对 top2 的最小领先分差；不足则 ambiguous |
+| `PHONE_AGENT_RESOLVER_DECISION_MODE` | enum | `typed` | `typed` 使用证据类型化三态决策；`legacy` 回退旧 score 阈值决策 |
+| `PHONE_AGENT_RESOLVER_MIN_SCORE` | float | `0.90` | legacy 模式 top1 成为 resolved 的最低综合分；typed 模式只作为弱候选展示阈值 |
+| `PHONE_AGENT_RESOLVER_MARGIN` | float | `0.08` | legacy 模式 top1 相对 top2 的最小领先分差；不足则 ambiguous |
+| `PHONE_AGENT_RESOLVER_TYPED_MARGIN` | float | `0.08` | typed 模式强证据 top1 相对 top2 的最小 `rank_score` 分差；不足则 ambiguous |
 | `PHONE_AGENT_RESOLVER_TOP_K` | int | `10` | 结构化结果、trace 与失败回执最多保留的排序候选数 |
 | `PHONE_AGENT_RESOLVER_LEXICAL` | bool | `true` | 启用归一化变体、字符 bigram/trigram 与 difflib 候选路 |
 | `PHONE_AGENT_RESOLVER_PINYIN` | bool | `true` | 启用全拼与首字母候选路；pypinyin 不可用时 fail-open 跳过 |
 | `PHONE_AGENT_RESOLVER_EMBED` | bool | `true` | 启用 `vec.db` App alias 向量候选路；索引/模型不可用时 fail-open 跳过 |
+| `PHONE_AGENT_RESOLVER_PACKAGE_SEGMENT_MIN_LEN` | int | `4` | 包名分段强证据的最小段长 |
+| `PHONE_AGENT_RESOLVER_PACKAGE_SEGMENT_STOPWORDS` | csv | `com,org,net,android,example,app,mobile,free,debug,release` | 包名按 `.`/`_`/`-`/camelCase 切段后过滤的无意义段 |
+| `PHONE_AGENT_RESOLVER_AUTO_MATCH_TYPES` | csv | `exact_alias,exact_label,exact_package,exact_package_segment,registered_containment` | typed 模式允许自动 resolved 的强证据类型 |
+| `PHONE_AGENT_RESOLVER_CLARIFY_MATCH_TYPES` | csv | `fuzzy,pinyin_full,pinyin_initials,embedding` | typed 模式只用于澄清/候选展示、不会单独自动 resolved 的弱证据类型 |
 | `PHONE_AGENT_RESOLVER_W_SIM` | float | `0.8` | 综合分中的相似度权重 |
 | `PHONE_AGENT_RESOLVER_W_PRIOR` | float | `0.2` | 综合分中的 App-KB 先验权重 |
 
-综合分为 `W_SIM * sim + W_PRIOR * prior`。名称候选胜出后仍须通过设备安装事实和 launch policy；解析配置不能扩大启动权限。
+`rank_score = W_SIM * sim + W_PRIOR * prior`。在 typed 模式下它只用于排序、margin、回执和 trace，不单独赋予执行 authority。`exact_package_segment` 只接受完整分段相等，例如 `Firefox` 匹配 `org.mozilla.firefox`，但 `fox` 不匹配；`PiliPlus` 匹配 `com.example.piliplus`，但 `plus` 不匹配。名称候选胜出后仍须通过设备安装事实和 launch policy；解析配置不能扩大启动权限。
 
 ### 经验与回想
 

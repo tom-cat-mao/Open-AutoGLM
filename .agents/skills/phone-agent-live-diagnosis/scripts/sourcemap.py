@@ -84,11 +84,12 @@ V2_SOURCE_RULES: dict[str, dict[str, Any]] = {
         ],
         "suggestion": (
             "核对 names.py 的 exact/lexical/pinyin/embedding 四路候选、按 package 去重排序、"
-            "min_score + top-two margin 决策；结合 resolution_attempt trace 检查候选来源和分差。"
+            "match_type 类型化决策与 legacy 分支；结合 resolution_attempt trace 检查候选来源、"
+            "match_type、decision_basis 和分差。"
         ),
         "verify": (
-            "构造低于阈值与 top-two margin 不足的应用名，确认 unknown/ambiguous 回执保留"
-            "有序候选且 resolution_attempt 的 decision/winner/candidates 一致。"
+            "构造弱证据、强证据并列和 legacy 回退应用名，确认 unknown/ambiguous/resolved "
+            "回执与 resolution_attempt 的 decision/winner/candidates/match_type 一致。"
         ),
     },
     "deliverable": {

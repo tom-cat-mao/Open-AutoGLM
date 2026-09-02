@@ -701,11 +701,12 @@ function renderDimensions() {
           <td class="mono">${Math.round((st.launch_success_rate || 0) * 100)}%</td>
         </tr>`; }).join('')}
       </table>
-      ${(resolver.attempts || []).length ? `<table style="margin-top:12px"><tr><th># / step</th><th>mention</th><th>route</th><th>top1 / score / margin</th><th>decision</th><th>launch</th></tr>
+      ${(resolver.attempts || []).length ? `<table style="margin-top:12px"><tr><th># / step</th><th>mention</th><th>route / type</th><th>top1 / rank_score / margin</th><th>decision</th><th>basis</th><th>launch</th></tr>
         ${(resolver.attempts || []).map(a => `<tr><td class="mono">${num(a.launch_index)} / ${num(a.step)}</td>
-          <td class="wrap">${esc(a.mention)}</td><td>${badge(a.route || '-')}</td>
+          <td class="wrap">${esc(a.mention)}</td><td>${badge(a.route || '-')} ${badge(a.match_type || '-')}</td>
           <td class="mono wrap">${esc(a.top1_package || '-')} · ${num(a.top1_score)} · ${num(a.margin)}</td>
-          <td>${badge(a.decision || '-')}</td><td class="mono wrap">${a.launch_succeeded ? '✓ ' + esc(a.launched_package) : '-'}</td></tr>`).join('')}
+          <td>${badge(a.decision || '-')}</td><td class="mono wrap">${esc(a.decision_basis || '-')}<br><span class="muted">${esc(a.reason || '')}</span></td>
+          <td class="mono wrap">${a.launch_succeeded ? '✓ ' + esc(a.launched_package) : '-'}</td></tr>`).join('')}
       </table>` : '<div class="muted" style="margin-top:8px">无解析尝试。</div>'}
     </div>
     <div class="card"><h2>召回候选 vs 实际启动</h2>

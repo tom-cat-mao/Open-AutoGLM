@@ -115,6 +115,10 @@ def _record_resolution_attempt(session, resolution) -> None:
             candidates=payload["candidates"],
             decision=payload["decision"],
             winner=payload["winner"],
+            match_type=payload["match_type"],
+            authority=payload["authority"],
+            decision_basis=payload["decision_basis"],
+            reason=payload["reason"],
         )
     except Exception:  # noqa: BLE001 - trace cannot change launch semantics
         return
@@ -724,7 +728,8 @@ def build_actuation_tools(session, config) -> list[StructuredTool]:
             top_k = max(1, int(getattr(config, "resolver_top_k", 10)))
             names = [
                 f"{candidate.package}"
-                f"(score={candidate.score:.3f}, {candidate.source_route})"
+                f"(rank_score={candidate.rank_score:.3f}, "
+                f"{candidate.source_route}/{candidate.match_type})"
                 for candidate in name_resolution.candidates[:top_k]
             ]
             return _fail(

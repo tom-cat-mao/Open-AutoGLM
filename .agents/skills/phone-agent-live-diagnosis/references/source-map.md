@@ -62,7 +62,7 @@ test rather than the diagnosis.
 | `定位失败:` | `locate_provider_error` | grounding_addressing | `tools/perception.py::locate` (provider unavailable) |
 | `error: start must be [x, y]` / `error: end must be [x, y]` | `bad_coords` | actuation_arg | `tools/actuation.py::swipe` |
 | `error: unknown direction` | `bad_direction` | actuation_arg | `tools/actuation.py::scroll` |
-| `ambiguous app ` + `score=` | `ambiguous_app` | launch | `tools/actuation.py::launch_app` ← `names.py::generate_candidates/decide_name` |
+| `ambiguous app ` + `rank_score=` / `score=` | `ambiguous_app` | launch | `tools/actuation.py::launch_app` ← `names.py::generate_candidates/decide_name` |
 | `ambiguous app ` | `ambiguous_app` | launch | `tools/actuation.py::launch_app` (legacy form retained) |
 | `denied:` | `launch_denied` | launch | `tools/actuation.py::launch_app` |
 | `error: 未能启动` | `launch_failed` | launch | `tools/actuation.py::launch_app` |
@@ -98,7 +98,7 @@ Underlying exception → emitted prefix (the causal chain the report links):
 | `grounding_addressing` | grounding / P0 | `tools/actuation.py`, `tools/perception.py`, `resolver.py`, `session.py` | marks-first binding; stale = no `read_screen` before the action; ambiguous = non-unique description; no-match = neither accessibility nor LocateAnything hit (check provider + `max_marks`). |
 | `actuation_arg` | actuation / P1 | `tools/actuation.py`, `coords.py` | `swipe` needs `[x,y]` 0-1000; `scroll` accepts only up/down/left/right; conversion is tool-internal. |
 | `launch` | launch / P1 | `tools/actuation.py`, `names.py`, `config/apps.py`, `config/policy.py` | app registry + launch policy: denied = safety policy, not_installed/unknown = inventory, ambiguous = name too broad. |
-| `resolver` | resolver / P1 | `names.py`, `tools/actuation.py`, `middleware/trace.py` | exact/lexical/pinyin/embedding candidate generation; package-deduplicated ranking; threshold + top-two margin; `resolution_attempt` decision/winner/candidates. |
+| `resolver` | resolver / P1 | `names.py`, `tools/actuation.py`, `middleware/trace.py` | exact/lexical/pinyin/embedding candidate generation; package-deduplicated ranking; typed `match_type` decision (`decision_basis`/`reason`) plus legacy score fallback; `resolution_attempt` decision/winner/candidates. |
 | `deliverable` | deliverable / P1 | `tools/deliverable.py`, `capabilities.py` | run-id-derived path, 256 KiB limit, create-vs-update state, regular-file/symlink and atomic-write gates. |
 | `finish_gate` | finish / P0 | `tools/control.py`, `taskdoc.py` | fail-closed: non-empty evidence + no open route items. Blocked → complete / mark `blocked` (with reason) / fix the route via `update_task_doc`. Never widen the gate. |
 | `taskdoc` | taskdoc / P2 | `tools/taskdoc.py`, `taskdoc.py` | validation: ≤1 `in_progress`, ≤15 items, `blocked` needs a reason, ≤10 facts ≤120 chars each. |

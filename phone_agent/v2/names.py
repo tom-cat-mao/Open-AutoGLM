@@ -4,8 +4,9 @@ The resolver is deliberately split into two phases:
 
 * L0/L2 produce high-recall package candidates from exact, lexical, pinyin,
   and optional vector-index evidence.
-* L3 ranks the package-deduplicated candidates with explicit similarity and
-  prior weights, then applies a score threshold plus a top-two margin.
+* L3 types the evidence behind each candidate, ranks the package-deduplicated
+  candidates, then applies either the typed decision policy or the legacy
+  score-threshold fallback.
 
 This module identifies packages only.  Installation and launch authorization
 remain the responsibility of :mod:`phone_agent.config.app_registry`; a name
@@ -26,10 +27,28 @@ from typing import Any, Literal
 
 NameRoute = Literal["exact", "lexical", "pinyin", "embedding"]
 NameDecision = Literal["resolved", "ambiguous", "unknown"]
+NameDecisionMode = Literal["typed", "legacy"]
+NameMatchType = Literal[
+    "exact_alias",
+    "exact_label",
+    "exact_package",
+    "exact_package_segment",
+    "token_prefix",
+    "containment",
+    "registered_containment",
+    "fuzzy",
+    "pinyin_full",
+    "pinyin_initials",
+    "embedding",
+]
+NameAuthority = Literal["user", "device", "learned", "registry", "embedding"]
+SourceRole = Literal["alias", "label", "package"]
 EmbeddingSearch = Callable[[str, int], Sequence[Mapping[str, Any]]]
 
 _CJK_RE = re.compile(r"[\u3400-\u9fff]")
 _PUNCT_RE = re.compile(r"[^0-9a-z\u3400-\u9fff]+")
+_TOKEN_RE = re.compile(r"[0-9A-Za-z\u3400-\u9fff]+")
+_CAMEL_BOUNDARY_RE = re.compile(r"(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])")
 _KIND_PRIOR = {
     "device": 1.0,
     "learned": 0.9,
@@ -44,6 +63,51 @@ _ROUTE_ORDER: dict[NameRoute, int] = {
     "pinyin": 2,
     "embedding": 3,
 }
+_MATCH_TYPE_ORDER: dict[str, int] = {
+    "exact_alias": 0,
+    "exact_label": 0,
+    "exact_package": 0,
+    "exact_package_segment": 1,
+    "registered_containment": 2,
+    "token_prefix": 3,
+    "containment": 4,
+    "fuzzy": 5,
+    "pinyin_full": 6,
+    "pinyin_initials": 7,
+    "embedding": 8,
+}
+_AUTHORITY_ORDER = {
+    "user": 0,
+    "device": 1,
+    "learned": 2,
+    "registry": 3,
+    "embedding": 4,
+}
+_DEFAULT_PACKAGE_SEGMENT_STOPWORDS = (
+    "com",
+    "org",
+    "net",
+    "android",
+    "example",
+    "app",
+    "mobile",
+    "free",
+    "debug",
+    "release",
+)
+_DEFAULT_AUTO_MATCH_TYPES = (
+    "exact_alias",
+    "exact_label",
+    "exact_package",
+    "exact_package_segment",
+    "registered_containment",
+)
+_DEFAULT_CLARIFY_MATCH_TYPES = (
+    "fuzzy",
+    "pinyin_full",
+    "pinyin_initials",
+    "embedding",
+)
 
 # A deliberately small, dependency-free traditional-to-simplified bridge.
 # NFKC already owns full/half-width folding; this table covers common app-name
@@ -82,6 +146,7 @@ class NameSource:
     package: str
     term: str
     kind: str
+    role: SourceRole = "alias"
     label: str = ""
     success_count: int = 0
     last_success: str | None = None
@@ -99,11 +164,20 @@ class AppNameCandidate:
     prior: float
     score: float
     matched_term: str
+    match_type: str = "fuzzy"
+    authority: str = "registry"
+    success_count: int = 0
     provenance: tuple[str, ...] = ()
     source_ref: str | None = None
     source_entry: Mapping[str, Any] | None = field(
         default=None, repr=False, compare=False
     )
+
+    @property
+    def rank_score(self) -> float:
+        """Return the ranking-only score retained for compatibility."""
+
+        return self.score
 
     def to_dict(self) -> dict[str, Any]:
         """Return the trace/receipt-safe public projection."""
@@ -111,8 +185,13 @@ class AppNameCandidate:
         return {
             "package": self.package,
             "source_route": self.source_route,
+            "match_type": self.match_type,
+            "authority": self.authority,
             "sim": round(self.sim, 6),
             "prior": round(self.prior, 6),
+            "rank_score": round(self.rank_score, 6),
+            # Keep the legacy key for old reports and tests. It is no longer a
+            # resolver authority threshold in typed mode.
             "score": round(self.score, 6),
             "matched_term": self.matched_term,
             "provenance": list(self.provenance),
@@ -127,13 +206,20 @@ class AppNameResolution:
     mention: str
     candidates: tuple[AppNameCandidate, ...] = ()
     winner: AppNameCandidate | None = None
+    decision_basis: str = ""
+    reason: str = ""
 
     def to_trace(self) -> dict[str, Any]:
+        leading = self.winner or (self.candidates[0] if self.candidates else None)
         return {
             "mention": self.mention,
             "candidates": [item.to_dict() for item in self.candidates],
             "decision": self.status,
             "winner": self.winner.package if self.winner is not None else None,
+            "match_type": leading.match_type if leading is not None else None,
+            "authority": leading.authority if leading is not None else None,
+            "decision_basis": self.decision_basis,
+            "reason": self.reason,
         }
 
 
@@ -141,28 +227,58 @@ class AppNameResolution:
 class ResolverSettings:
     """Config projection used by the pure candidate/ranking core."""
 
+    decision_mode: NameDecisionMode = "typed"
     min_score: float = 0.90
     margin: float = 0.08
+    typed_margin: float = 0.08
     top_k: int = 10
     lexical: bool = True
     pinyin: bool = True
     embed: bool = True
     w_sim: float = 0.8
     w_prior: float = 0.2
+    package_segment_min_len: int = 4
+    package_segment_stopwords: tuple[str, ...] = _DEFAULT_PACKAGE_SEGMENT_STOPWORDS
+    auto_match_types: tuple[str, ...] = _DEFAULT_AUTO_MATCH_TYPES
+    clarify_match_types: tuple[str, ...] = _DEFAULT_CLARIFY_MATCH_TYPES
 
     @classmethod
     def from_config(cls, config: Any | None) -> "ResolverSettings":
         if config is None:
             return cls()
         return cls(
+            decision_mode=str(
+                getattr(config, "resolver_decision_mode", "typed")
+            ).lower(),
             min_score=float(getattr(config, "resolver_min_score", 0.90)),
             margin=float(getattr(config, "resolver_margin", 0.08)),
+            typed_margin=float(getattr(config, "resolver_typed_margin", 0.08)),
             top_k=int(getattr(config, "resolver_top_k", 10)),
             lexical=bool(getattr(config, "resolver_lexical", True)),
             pinyin=bool(getattr(config, "resolver_pinyin", True)),
             embed=bool(getattr(config, "resolver_embed", True)),
             w_sim=float(getattr(config, "resolver_w_sim", 0.8)),
             w_prior=float(getattr(config, "resolver_w_prior", 0.2)),
+            package_segment_min_len=int(
+                getattr(config, "resolver_package_segment_min_len", 4)
+            ),
+            package_segment_stopwords=_split_config_values(
+                getattr(
+                    config,
+                    "resolver_package_segment_stopwords",
+                    _DEFAULT_PACKAGE_SEGMENT_STOPWORDS,
+                )
+            ),
+            auto_match_types=_split_config_values(
+                getattr(config, "resolver_auto_match_types", _DEFAULT_AUTO_MATCH_TYPES)
+            ),
+            clarify_match_types=_split_config_values(
+                getattr(
+                    config,
+                    "resolver_clarify_match_types",
+                    _DEFAULT_CLARIFY_MATCH_TYPES,
+                )
+            ),
         )
 
 
@@ -180,6 +296,200 @@ def name_variants(value: str) -> tuple[str, ...]:
     normalized = normalize_name(value)
     compact = _PUNCT_RE.sub("", normalized)
     return tuple(dict.fromkeys(item for item in (normalized, compact) if item))
+
+
+def _split_config_values(value: Any) -> tuple[str, ...]:
+    """Coerce comma-separated or iterable config values into normalized tokens."""
+
+    if value is None:
+        return ()
+    if isinstance(value, str):
+        raw_items = value.split(",")
+    elif isinstance(value, Sequence) and not isinstance(value, (bytes, bytearray)):
+        raw_items = value
+    else:
+        raw_items = (value,)
+    result: list[str] = []
+    seen: set[str] = set()
+    for item in raw_items:
+        text = str(item or "").strip().lower()
+        if text and text not in seen:
+            seen.add(text)
+            result.append(text)
+    return tuple(result)
+
+
+def _authority_for_kind(kind: str, route: NameRoute) -> str:
+    """Map source kind to the resolver-facing authority vocabulary."""
+
+    if route == "embedding":
+        return "embedding"
+    source_kind = str(kind or "").strip().lower()
+    if source_kind in {"user", "device", "learned", "registry"}:
+        return source_kind
+    return "learned" if source_kind == "alias" else "registry"
+
+
+def _source_role_for_term(entry: Mapping[str, Any], term: str) -> SourceRole:
+    """Classify one flattened spelling as alias, label, or package text."""
+
+    package = str(entry.get("app_package", entry.get("package", ""))).strip()
+    if term == package:
+        return "package"
+    label = str(entry.get("label", "")).strip()
+    if label and normalize_name(term) == normalize_name(label):
+        return "label"
+    return "alias"
+
+
+def _exact_match_type(source: NameSource) -> str:
+    if source.role == "package":
+        return "exact_package"
+    if source.role == "label":
+        return "exact_label"
+    return "exact_alias"
+
+
+def _registered_containment_allowed(source: NameSource) -> bool:
+    """Return whether containment is a configured/registered textual alias."""
+
+    return source.role in {"alias", "label"} and (
+        source.kind in {"registry", "user", "device"}
+        or (source.kind == "learned" and source.success_count > 0)
+    )
+
+
+def _classify_lexical_match(
+    mention: str,
+    source: NameSource,
+    sim: float,
+    settings: ResolverSettings,
+) -> str | None:
+    """Assign a typed lexical evidence label for one source spelling."""
+
+    query_variants = name_variants(mention)
+    term_variants = name_variants(source.term)
+    if not query_variants or not term_variants:
+        return None
+    if any(query == term for query in query_variants for term in term_variants):
+        return _exact_match_type(source)
+
+    if source.role == "package" and _package_segment_match(
+        mention,
+        source.package,
+        min_len=settings.package_segment_min_len,
+        stopwords=settings.package_segment_stopwords,
+    ):
+        return "exact_package_segment"
+
+    containment = any(
+        len(term_variant) >= 2
+        and len(query_variant) >= 2
+        and (term_variant in query_variant or query_variant in term_variant)
+        for query_variant in query_variants
+        for term_variant in term_variants
+    )
+    if containment:
+        return (
+            "registered_containment"
+            if _registered_containment_allowed(source)
+            else "containment"
+        )
+
+    token_prefix = any(
+        _token_prefix_match(query_variant, term_variant)
+        for query_variant in query_variants
+        for term_variant in term_variants
+    )
+    if token_prefix:
+        return "token_prefix"
+    return "fuzzy" if sim > 0.0 else None
+
+
+def _classify_pinyin_match(mention: str, term: str) -> tuple[str, float] | None:
+    """Return the stronger pinyin evidence subtype and similarity."""
+
+    mention_forms = _pinyin_forms(mention)
+    term_forms = _pinyin_forms(term)
+    if mention_forms is None and term_forms is None:
+        return None
+    mention_full, mention_initials = mention_forms or (normalize_name(mention),) * 2
+    term_full, term_initials = term_forms or (normalize_name(term),) * 2
+    full = lexical_similarity(mention_full, term_full)
+    initials = lexical_similarity(mention_initials, term_initials)
+    if full * 0.97 >= initials * 0.92:
+        return "pinyin_full", min(0.97, full * 0.97)
+    return "pinyin_initials", min(0.97, initials * 0.92)
+
+
+def _token_prefix_match(query: str, term: str) -> bool:
+    """Detect token-prefix evidence without treating arbitrary substrings as strong."""
+
+    if len(query) < 2 or len(term) < 2:
+        return False
+    query_tokens = _TOKEN_RE.findall(query)
+    term_tokens = _TOKEN_RE.findall(term)
+    return any(
+        len(query_token) >= 2
+        and len(term_token) >= 2
+        and (
+            query_token.startswith(term_token)
+            or term_token.startswith(query_token)
+        )
+        for query_token in query_tokens
+        for term_token in term_tokens
+    )
+
+
+def _split_package_segments(package: str) -> tuple[str, ...]:
+    """Split package text on separators and camel-case humps."""
+
+    tokens: list[str] = []
+    for part in re.split(r"[._\\-]+", str(package or "")):
+        if not part:
+            continue
+        tokens.extend(item for item in _CAMEL_BOUNDARY_RE.split(part) if item)
+    return tuple(tokens)
+
+
+def _mention_segment_terms(mention: str) -> tuple[str, ...]:
+    """Return full and tokenized mention forms eligible for segment equality."""
+
+    values: list[str] = []
+    full = _PUNCT_RE.sub("", normalize_name(mention))
+    if full:
+        values.append(full)
+    for token in _TOKEN_RE.findall(str(mention or "")):
+        for part in _CAMEL_BOUNDARY_RE.split(token):
+            normalized = normalize_name(part)
+            if normalized:
+                values.append(normalized)
+    return tuple(dict.fromkeys(values))
+
+
+def _package_segment_match(
+    mention: str,
+    package: str,
+    *,
+    min_len: int,
+    stopwords: Sequence[str],
+) -> bool:
+    """True when the mention equals a non-stop package segment."""
+
+    minimum = max(1, int(min_len))
+    query_terms = tuple(
+        term for term in _mention_segment_terms(mention) if len(term) >= minimum
+    )
+    if not query_terms:
+        return False
+    stop = {normalize_name(item) for item in stopwords}
+    for segment in _split_package_segments(package):
+        normalized = normalize_name(segment)
+        if not normalized or normalized in stop:
+            continue
+        if len(normalized) >= minimum and normalized in query_terms:
+            return True
+    return False
 
 
 def _parse_last_success(value: str | None) -> datetime | None:
@@ -243,19 +553,25 @@ def collect_name_sources(
     for identity in getattr(registry, "identities", ()):
         if bool(getattr(identity, "observation_only", False)):
             continue
-        terms = [
-            getattr(identity, "canonical_id", ""),
-            getattr(identity, "display_name", ""),
-            *sorted(getattr(identity, "aliases", ())),
-            *sorted(getattr(identity, "packages", ())),
+        terms: list[tuple[str, SourceRole]] = [
+            (getattr(identity, "canonical_id", ""), "alias"),
+            (getattr(identity, "display_name", ""), "label"),
         ]
+        terms.extend(
+            (alias, "alias") for alias in sorted(getattr(identity, "aliases", ()))
+        )
+        terms.extend(
+            (package, "package")
+            for package in sorted(getattr(identity, "packages", ()))
+        )
         for package in sorted(getattr(identity, "packages", ())):
-            for term in terms:
+            for term, role in terms:
                 if normalize_name(term):
                     sources.append(
                         NameSource(
                             package=str(package),
                             term=str(term),
+                            role=role,
                             label=str(getattr(identity, "display_name", "")),
                             kind="registry",
                             ref_id=f"registry:{getattr(identity, 'canonical_id', package)}",
@@ -275,6 +591,7 @@ def collect_name_sources(
                 NameSource(
                     package=package,
                     term=term,
+                    role=_source_role_for_term(entry, term),
                     label=str(entry.get("label", "")),
                     kind=str(entry.get("kind", "alias")),
                     success_count=success_count,
@@ -288,9 +605,15 @@ def collect_name_sources(
                 )
             )
 
-    unique: dict[tuple[str, str, str, str | None], NameSource] = {}
+    unique: dict[tuple[str, str, str, SourceRole, str | None], NameSource] = {}
     for source in sources:
-        key = (source.package, normalize_name(source.term), source.kind, source.ref_id)
+        key = (
+            source.package,
+            normalize_name(source.term),
+            source.kind,
+            source.role,
+            source.ref_id,
+        )
         unique.setdefault(key, source)
     return list(unique.values())
 
@@ -381,16 +704,10 @@ def _pinyin_forms(value: str) -> tuple[str, str] | None:
 def pinyin_similarity(mention: str, term: str) -> float:
     """Compare full pinyin and initials; unavailable pypinyin returns zero."""
 
-    mention_forms = _pinyin_forms(mention)
-    term_forms = _pinyin_forms(term)
-    if mention_forms is None and term_forms is None:
+    classified = _classify_pinyin_match(mention, term)
+    if classified is None:
         return 0.0
-    mention_full, mention_initials = mention_forms or (normalize_name(mention),) * 2
-    term_full, term_initials = term_forms or (normalize_name(term),) * 2
-    full = lexical_similarity(mention_full, term_full)
-    initials = lexical_similarity(mention_initials, term_initials)
-    # Pinyin is weaker than literal evidence, especially for initials.
-    return min(0.97, max(full * 0.97, initials * 0.92))
+    return classified[1]
 
 
 def _candidate(
@@ -399,6 +716,7 @@ def _candidate(
     sim: float,
     settings: ResolverSettings,
     *,
+    match_type: str,
     provenance: str | None = None,
 ) -> AppNameCandidate:
     prior = source_prior(source)
@@ -410,7 +728,10 @@ def _candidate(
         prior=prior,
         score=score,
         matched_term=source.term,
-        provenance=(provenance or f"{route}:{source.kind}:{source.term}",),
+        match_type=match_type,
+        authority=_authority_for_kind(source.kind, route),
+        success_count=max(0, int(source.success_count or 0)),
+        provenance=(provenance or f"{route}:{match_type}:{source.kind}:{source.term}",),
         source_ref=source.ref_id,
         source_entry=(dict(source.metadata) if source.metadata else None),
     )
@@ -418,18 +739,28 @@ def _candidate(
 
 def _better(candidate: AppNameCandidate, current: AppNameCandidate) -> bool:
     return (
+        -_MATCH_TYPE_ORDER.get(candidate.match_type, 99),
         candidate.score,
         candidate.sim,
         candidate.prior,
         -_ROUTE_ORDER[candidate.source_route],
+        -_AUTHORITY_ORDER.get(candidate.authority, 99),
         candidate.matched_term,
     ) > (
+        -_MATCH_TYPE_ORDER.get(current.match_type, 99),
         current.score,
         current.sim,
         current.prior,
         -_ROUTE_ORDER[current.source_route],
+        -_AUTHORITY_ORDER.get(current.authority, 99),
         current.matched_term,
     )
+
+
+def _package_weak_display_allowed(mention: str) -> bool:
+    """Allow weak package-name hints only for multi-token user mentions."""
+
+    return len(_TOKEN_RE.findall(str(mention or ""))) >= 2
 
 
 def generate_candidates(
@@ -453,16 +784,87 @@ def generate_candidates(
         term = normalize_name(source.term)
         if not term:
             continue
-        if query == term:
-            generated.append(_candidate(source, "exact", 1.0, active))
+        query_variants = name_variants(mention)
+        term_variants = name_variants(source.term)
+        if any(
+            query_variant == term_variant
+            for query_variant in query_variants
+            for term_variant in term_variants
+        ):
+            generated.append(
+                _candidate(
+                    source,
+                    "exact",
+                    1.0,
+                    active,
+                    match_type=_exact_match_type(source),
+                )
+            )
+        elif active.decision_mode != "legacy" and source.role == "package" and _package_segment_match(
+            mention,
+            source.package,
+            min_len=active.package_segment_min_len,
+            stopwords=active.package_segment_stopwords,
+        ):
+            generated.append(
+                _candidate(
+                    source,
+                    "exact",
+                    1.0,
+                    active,
+                    match_type="exact_package_segment",
+                )
+            )
         if active.lexical:
             sim = lexical_similarity(mention, source.term)
             if sim >= 0.35:
-                generated.append(_candidate(source, "lexical", sim, active))
+                match_type = _classify_lexical_match(
+                    mention, source, sim, active
+                )
+                if match_type is None:
+                    continue
+                if active.decision_mode == "legacy" and match_type == "exact_package_segment":
+                    match_type = "containment"
+                if (
+                    active.decision_mode != "legacy"
+                    and source.role == "package"
+                    and match_type not in {
+                    "exact_package",
+                    "exact_package_segment",
+                    }
+                    and not _package_weak_display_allowed(mention)
+                ):
+                    continue
+                if match_type in {
+                    "exact_package",
+                    "exact_package_segment",
+                    "exact_alias",
+                    "exact_label",
+                }:
+                    sim = 1.0
+                generated.append(
+                    _candidate(
+                        source,
+                        "lexical",
+                        sim,
+                        active,
+                        match_type=match_type,
+                    )
+                )
         if active.pinyin:
-            sim = pinyin_similarity(mention, source.term)
-            if sim >= 0.45:
-                generated.append(_candidate(source, "pinyin", sim, active))
+            classified = _classify_pinyin_match(mention, source.term)
+            if classified is not None:
+                match_type, sim = classified
+                if sim >= 0.45:
+                    generated.append(
+                        _candidate(
+                            source,
+                            "pinyin",
+                            sim,
+                            active,
+                            match_type=match_type,
+                        )
+                    )
 
     if active.embed and embedding_search is not None:
         try:
@@ -495,6 +897,7 @@ def generate_candidates(
                     "embedding",
                     sim,
                     active,
+                    match_type="embedding",
                     provenance=f"embedding:{source.ref_id or source.term}",
                 )
             )
@@ -518,6 +921,9 @@ def generate_candidates(
             prior=item.prior,
             score=item.score,
             matched_term=item.matched_term,
+            match_type=item.match_type,
+            authority=item.authority,
+            success_count=item.success_count,
             provenance=tuple(provenance_by_package[item.package]),
             source_ref=item.source_ref,
             source_entry=item.source_entry,
@@ -529,14 +935,26 @@ def generate_candidates(
             -item.score,
             -item.sim,
             -item.prior,
+            _MATCH_TYPE_ORDER.get(item.match_type, 99),
             _ROUTE_ORDER[item.source_route],
+            _AUTHORITY_ORDER.get(item.authority, 99),
             item.package,
         )
     )
     return ranked
 
 
-def decide_name(
+def _is_auto_candidate(candidate: AppNameCandidate, settings: ResolverSettings) -> bool:
+    auto_types = set(settings.auto_match_types)
+    clarify_types = set(settings.clarify_match_types)
+    if candidate.authority == "learned":
+        return candidate.success_count > 0 and candidate.match_type not in clarify_types
+    if candidate.match_type in auto_types:
+        return True
+    return False
+
+
+def decide_name_legacy(
     mention: str,
     candidates: Sequence[AppNameCandidate],
     *,
@@ -548,13 +966,138 @@ def decide_name(
     all_ranked = tuple(candidates)
     visible = all_ranked[: max(0, active.top_k)]
     if not all_ranked or all_ranked[0].score < active.min_score:
-        return AppNameResolution("unknown", str(mention), visible)
+        return AppNameResolution(
+            "unknown",
+            str(mention),
+            visible,
+            decision_basis="legacy:min_score",
+            reason=(
+                "no candidates"
+                if not all_ranked
+                else f"top rank_score {all_ranked[0].score:.3f} < {active.min_score:.3f}"
+            ),
+        )
     margin = (
         all_ranked[0].score - all_ranked[1].score if len(all_ranked) > 1 else math.inf
     )
     if margin < active.margin:
-        return AppNameResolution("ambiguous", str(mention), visible)
-    return AppNameResolution("resolved", str(mention), visible, all_ranked[0])
+        return AppNameResolution(
+            "ambiguous",
+            str(mention),
+            visible,
+            decision_basis="legacy:margin",
+            reason=f"top2 rank_score margin {margin:.3f} < {active.margin:.3f}",
+        )
+    return AppNameResolution(
+        "resolved",
+        str(mention),
+        visible,
+        all_ranked[0],
+        decision_basis="legacy:min_score_margin",
+        reason=(
+            f"{all_ranked[0].source_route}/{all_ranked[0].match_type} "
+            f"rank_score={all_ranked[0].score:.3f}"
+        ),
+    )
+
+
+def decide_name_typed(
+    mention: str,
+    candidates: Sequence[AppNameCandidate],
+    *,
+    settings: ResolverSettings | None = None,
+) -> AppNameResolution:
+    """Apply evidence-typed three-state decision policy."""
+
+    active = settings or ResolverSettings()
+    all_ranked = tuple(candidates)
+    visible = all_ranked[: max(0, active.top_k)]
+    if not all_ranked:
+        return AppNameResolution(
+            "unknown",
+            str(mention),
+            visible,
+            decision_basis="typed:no_candidates",
+            reason="no resolver candidates survived generation",
+        )
+
+    auto_candidates = [
+        candidate for candidate in all_ranked if _is_auto_candidate(candidate, active)
+    ]
+    if not auto_candidates:
+        if all_ranked[0].score < active.min_score:
+            return AppNameResolution(
+                "unknown",
+                str(mention),
+                (),
+                decision_basis="typed:weak_below_display_threshold",
+                reason=(
+                    f"only weak evidence and top rank_score "
+                    f"{all_ranked[0].score:.3f} < {active.min_score:.3f}"
+                ),
+            )
+        return AppNameResolution(
+            "ambiguous",
+            str(mention),
+            visible,
+            decision_basis="typed:clarify_only",
+            reason=(
+                "only clarification evidence types are present: "
+                + ", ".join(
+                    dict.fromkeys(candidate.match_type for candidate in visible)
+                )
+            ),
+        )
+
+    top = all_ranked[0]
+    if not _is_auto_candidate(top, active):
+        return AppNameResolution(
+            "ambiguous",
+            str(mention),
+            visible,
+            decision_basis="typed:top_requires_clarification",
+            reason=(
+                f"top candidate uses {top.match_type}; strongest auto evidence "
+                f"is {auto_candidates[0].package}"
+            ),
+        )
+
+    margin = all_ranked[0].score - all_ranked[1].score if len(all_ranked) > 1 else math.inf
+    if margin < active.typed_margin:
+        return AppNameResolution(
+            "ambiguous",
+            str(mention),
+            visible,
+            decision_basis="typed:margin",
+            reason=f"top2 rank_score margin {margin:.3f} < {active.typed_margin:.3f}",
+        )
+
+    return AppNameResolution(
+        "resolved",
+        str(mention),
+        visible,
+        top,
+        decision_basis=f"typed:auto:{top.match_type}",
+        reason=(
+            f"{top.match_type} from {top.authority}; "
+            f"rank_score={top.score:.3f}; margin="
+            f"{'inf' if math.isinf(margin) else f'{margin:.3f}'}"
+        ),
+    )
+
+
+def decide_name(
+    mention: str,
+    candidates: Sequence[AppNameCandidate],
+    *,
+    settings: ResolverSettings | None = None,
+) -> AppNameResolution:
+    """Apply typed decision by default, or the legacy score rule on request."""
+
+    active = settings or ResolverSettings()
+    if active.decision_mode == "legacy":
+        return decide_name_legacy(mention, candidates, settings=active)
+    return decide_name_typed(mention, candidates, settings=active)
 
 
 def resolve_name(
@@ -618,6 +1161,8 @@ __all__ = [
     "ResolverSettings",
     "collect_name_sources",
     "decide_name",
+    "decide_name_legacy",
+    "decide_name_typed",
     "embedding_search_from_config",
     "generate_candidates",
     "lexical_similarity",
