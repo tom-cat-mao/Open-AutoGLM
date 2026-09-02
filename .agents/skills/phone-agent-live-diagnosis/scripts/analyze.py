@@ -24,7 +24,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from evidence import EvidenceView, result_text_of
+from evidence import EvidenceView, parse_obs_windows, result_text_of
 from sourcemap import V2_SOURCE_RULES, add_line_numbers
 from taxonomy import (
     classify_result,
@@ -458,6 +458,122 @@ def build_visual(view: EvidenceView) -> dict[str, Any]:
         "total_image_bytes": total_bytes,
         "first_image_step": first_step,
         "last_image_step": last_step,
+    }
+
+
+# ---------------------------------------------------------------------------
+# windowing (WP-S3): window-grouped marks structure + op distribution
+# ---------------------------------------------------------------------------
+_WINDOW_OP_LEVELS = ("confirmed", "likely", "blocked", "unknown", "unspecified")
+
+
+def build_windowing(view: EvidenceView) -> dict[str, Any]:
+    """Aggregate the WP-G2a windowed marks format across the run (fail-open).
+
+    Re-parses every ``tool_observation``'s ``[OBS]`` text with
+    :func:`parse_obs_windows`. When at least one observation is windowed the
+    block reports ``present=True`` plus the peak window count, aggregate op-tier
+    counts, window-type tally, and per-observation summaries. When no
+    observation is windowed (legacy flat runs) the block is inert
+    (``present=False`` with zeroed tallies) so an old run analyzes unchanged.
+
+    ``blocked_taps`` correlates the model's actual actuation with the windowed
+    marks: a ``tap`` / ``long_press`` / ``type_text`` whose ``target_mark_id``
+    was tagged ``op=blocked`` in the most recent windowed observation is a
+    finding (the model addressed a mark the window layer had marked blocked).
+    """
+
+    observations: list[dict[str, Any]] = []
+    peak_windows = 0
+    total_op_counts = {level: 0 for level in _WINDOW_OP_LEVELS}
+    type_counts: dict[str, int] = {}
+    present = False
+    # mark_id -> op, from the most recent windowed observation seen so far, so a
+    # later actuation is judged against the window structure it acted on.
+    blocked_by_mark: dict[str, str] = {}
+    blocked_taps: list[dict[str, Any]] = []
+
+    for call in view.tool_calls:
+        tool = call.get("tool")
+        obs_event = call.get("observation") or {}
+        text = result_text_of(obs_event)
+        parsed = None
+        try:
+            parsed = parse_obs_windows(text)
+        except Exception:  # noqa: BLE001 - a malformed OBS must never gate analysis
+            parsed = None
+
+        # Before recording this observation's own structure, judge whether this
+        # step's actuation targeted a mark the *prior* windowed frame blocked.
+        if tool in {"tap", "long_press", "type_text"} and blocked_by_mark:
+            invoke = call.get("invoke") or {}
+            args = invoke.get("args") if isinstance(invoke, dict) else None
+            args = args if isinstance(args, dict) else {}
+            mark_id = args.get("target_mark_id")
+            if mark_id and blocked_by_mark.get(str(mark_id)) == "blocked":
+                blocked_taps.append(
+                    {
+                        "step": call.get("step"),
+                        "tool": tool,
+                        "target_mark_id": str(mark_id),
+                    }
+                )
+
+        if not parsed or not parsed.get("present"):
+            continue
+        present = True
+        window_count = int(parsed.get("window_count", 0) or 0)
+        peak_windows = max(peak_windows, window_count)
+        op_counts = parsed.get("op_counts") or {}
+        for level in _WINDOW_OP_LEVELS:
+            total_op_counts[level] += int(op_counts.get(level, 0) or 0)
+        windows = parsed.get("windows") or []
+        for window in windows:
+            win_type = window.get("type") or "?"
+            type_counts[win_type] = type_counts.get(win_type, 0) + 1
+        observations.append(
+            {
+                "step": call.get("step"),
+                "tool": tool,
+                "schema": parsed.get("schema"),
+                "source": parsed.get("source"),
+                "window_count": window_count,
+                "op_counts": {
+                    level: int(op_counts.get(level, 0) or 0)
+                    for level in _WINDOW_OP_LEVELS
+                },
+                "windows": [
+                    {
+                        "id": window.get("id"),
+                        "type": window.get("type"),
+                        "package": window.get("package"),
+                        "layer": window.get("layer"),
+                        "covered_by": window.get("covered_by"),
+                        "flags": list(window.get("flags", []) or []),
+                        "mark_count": int(window.get("mark_count", 0) or 0),
+                        "op_counts": dict(window.get("op_counts", {}) or {}),
+                    }
+                    for window in windows
+                ],
+                "blocked_mark_ids": list(parsed.get("blocked_mark_ids", []) or []),
+            }
+        )
+        # Refresh the blocked-mark index to this frame's structure.
+        blocked_by_mark = {}
+        for window in windows:
+            for mark in window.get("marks", []) or []:
+                mid = mark.get("mark_id")
+                if mid:
+                    blocked_by_mark[str(mid)] = mark.get("op")
+
+    return {
+        "present": present,
+        "windowed_observations": len(observations),
+        "peak_window_count": peak_windows,
+        "op_counts": total_op_counts,
+        "window_types": type_counts,
+        "blocked_taps": blocked_taps,
+        "observations": observations,
     }
 
 
@@ -1169,6 +1285,30 @@ def build_replay(view: EvidenceView) -> list[dict[str, Any]]:
             obs = call.get("observation") or {}
             invoke = call.get("invoke") or {}
             image = obs.get("image") or {}
+            # WP-S3: attach a compact windowed-marks summary when the OBS text is
+            # in the grouped format; None for legacy flat observations.
+            windows = None
+            try:
+                parsed = parse_obs_windows(result_text_of(obs))
+            except Exception:  # noqa: BLE001 - never let a bad OBS gate replay
+                parsed = None
+            if parsed and parsed.get("present"):
+                windows = {
+                    "window_count": parsed.get("window_count", 0),
+                    "source": parsed.get("source"),
+                    "op_counts": parsed.get("op_counts") or {},
+                    "windows": [
+                        {
+                            "id": window.get("id"),
+                            "type": window.get("type"),
+                            "package": window.get("package"),
+                            "covered_by": window.get("covered_by"),
+                            "mark_count": window.get("mark_count", 0),
+                        }
+                        for window in (parsed.get("windows") or [])
+                    ],
+                    "blocked_mark_ids": list(parsed.get("blocked_mark_ids", []) or []),
+                }
             calls.append(
                 {
                     "tool": call.get("tool"),
@@ -1179,6 +1319,7 @@ def build_replay(view: EvidenceView) -> list[dict[str, Any]]:
                     "error": call.get("error"),
                     "class": classify_result(call.get("result_text") or ""),
                     "obs": obs.get("obs"),
+                    "windows": windows,
                     "image": {
                         "present": bool(image.get("present")),
                         "screen_seq": image.get("screen_seq"),
@@ -1211,7 +1352,9 @@ def build_replay(view: EvidenceView) -> list[dict[str, Any]]:
 # findings + recommendations
 # ---------------------------------------------------------------------------
 def build_findings(
-    view: EvidenceView, resolver: dict[str, Any] | None = None
+    view: EvidenceView,
+    resolver: dict[str, Any] | None = None,
+    windowing: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """One finding per report category that fired an error/notable class."""
 
@@ -1285,6 +1428,38 @@ def build_findings(
                 "verify": "复跑歧义叫法，确认候选排序稳定且细化名称后只启动唯一包。",
             }
         )
+
+    windowing = windowing or {}
+    blocked_taps = windowing.get("blocked_taps", []) or []
+    if blocked_taps:
+        findings.append(
+            {
+                "category": "windowed_blocked_tap",
+                "layer": "grounding",
+                "severity": "P1",
+                "title": "点击了窗口层标记为 op=blocked 的 mark",
+                "count": len(blocked_taps),
+                "examples": [
+                    f"step {tap.get('step')}: {tap.get('tool')} → {tap.get('target_mark_id')}"
+                    for tap in blocked_taps[:3]
+                ],
+                "files": add_line_numbers(
+                    [
+                        "phone_agent/v2/session.py",
+                        "phone_agent/v2/tools/actuation.py",
+                    ]
+                ),
+                "suggestion": (
+                    "窗口分组 marks 把该 mark 标记为 op=blocked（被上层窗口遮挡/不可交互），"
+                    "模型仍以 target_mark_id 对其执行动作。核对窗口层遮挡计算与 marks 摘要中"
+                    " op 档位的呈现，确认被遮挡 mark 不被优先建议。"
+                ),
+                "verify": (
+                    "构造多窗口（W1 覆盖 W2）观测，确认被 covered_by 遮挡窗口内的 mark 标 op=blocked，"
+                    "且对其寻址时给出可感知的降级提示。"
+                ),
+            }
+        )
     return findings
 
 
@@ -1349,8 +1524,20 @@ def build_summary(
         capabilities = build_capabilities(trace_events)
     except Exception:  # noqa: BLE001 - malformed optional snapshots fail open
         capabilities = build_capabilities([])
+    try:
+        windowing = build_windowing(view)
+    except Exception:  # noqa: BLE001 - windowed parsing must never gate a report
+        windowing = {
+            "present": False,
+            "windowed_observations": 0,
+            "peak_window_count": 0,
+            "op_counts": {level: 0 for level in _WINDOW_OP_LEVELS},
+            "window_types": {},
+            "blocked_taps": [],
+            "observations": [],
+        }
     verdict = classify_verdict(outcome, view)
-    findings = build_findings(view, resolver)
+    findings = build_findings(view, resolver, windowing)
     recommendations = build_recommendations(findings, view, verdict)
     steps = None
     if view.run_end:
@@ -1379,6 +1566,7 @@ def build_summary(
         "tool_health": build_tool_health(view),
         "grounding": build_grounding(view),
         "visual": build_visual(view),
+        "windowing": windowing,
         "model": build_model(view),
         "resolver": resolver,
         "memory": memory,
@@ -1437,6 +1625,7 @@ __all__ = [
     "build_tool_health",
     "build_grounding",
     "build_visual",
+    "build_windowing",
     "build_model",
     "build_resolver",
     "build_memory",
