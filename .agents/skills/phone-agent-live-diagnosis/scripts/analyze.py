@@ -33,6 +33,19 @@ from taxonomy import (
 
 _OPEN_STATUSES = ("pending", "in_progress")
 _RESOLVER_ROUTES = ("exact", "lexical", "pinyin", "embedding")
+_RESOLVER_MATCH_TYPES = (
+    "exact_alias",
+    "exact_label",
+    "exact_package",
+    "exact_package_segment",
+    "registered_containment",
+    "token_prefix",
+    "containment",
+    "fuzzy",
+    "pinyin_full",
+    "pinyin_initials",
+    "embedding",
+)
 _LAUNCHED_PACKAGE_RE = re.compile(r"\blaunched\s+.+?\s+\(([A-Za-z][A-Za-z0-9_.]+)\)")
 _RUN_ID_IN_NOTE_RE = re.compile(r"run<([^<>]+)>")
 _REPO_ROOT = Path(__file__).resolve().parents[4]
@@ -633,9 +646,11 @@ def build_resolver(trace_events: list[dict[str, Any]]) -> dict[str, Any]:
                 if isinstance(item, dict)
             ]
             top1 = candidates[0] if candidates else {}
-            first_score = _number(top1.get("score"))
+            first_score = _number(top1.get("rank_score", top1.get("score")))
             second_score = (
-                _number(candidates[1].get("score")) if len(candidates) > 1 else None
+                _number(candidates[1].get("rank_score", candidates[1].get("score")))
+                if len(candidates) > 1
+                else None
             )
             margin = (
                 round(first_score - second_score, 6)
@@ -647,6 +662,10 @@ def build_resolver(trace_events: list[dict[str, Any]]) -> dict[str, Any]:
                 "step": event.get("step", launch_step),
                 "mention": str(event.get("mention", "")),
                 "route": top1.get("source_route"),
+                "match_type": event.get("match_type") or top1.get("match_type"),
+                "authority": event.get("authority") or top1.get("authority"),
+                "decision_basis": event.get("decision_basis"),
+                "reason": event.get("reason"),
                 "top1_package": top1.get("package"),
                 "top1_score": first_score,
                 "margin": margin,
@@ -684,18 +703,33 @@ def build_resolver(trace_events: list[dict[str, Any]]) -> dict[str, Any]:
         }
         for route in _RESOLVER_ROUTES
     }
+    match_type_stats = {
+        match_type: {
+            "attempts": 0,
+            "resolved": 0,
+            "successful_launches": 0,
+            "resolution_rate": 0.0,
+            "launch_success_rate": 0.0,
+        }
+        for match_type in _RESOLVER_MATCH_TYPES
+    }
     decision_counts = {"resolved": 0, "ambiguous": 0, "unknown": 0}
     for attempt in attempts:
         decision = attempt["decision"]
         decision_counts[decision] = decision_counts.get(decision, 0) + 1
         route = attempt.get("route")
-        if route not in route_stats:
-            continue
-        stats = route_stats[route]
-        stats["attempts"] += 1
-        stats["resolved"] += int(decision == "resolved")
-        stats["successful_launches"] += int(attempt["launch_succeeded"])
-    for stats in route_stats.values():
+        if route in route_stats:
+            stats = route_stats[route]
+            stats["attempts"] += 1
+            stats["resolved"] += int(decision == "resolved")
+            stats["successful_launches"] += int(attempt["launch_succeeded"])
+        match_type = attempt.get("match_type")
+        if match_type in match_type_stats:
+            stats = match_type_stats[match_type]
+            stats["attempts"] += 1
+            stats["resolved"] += int(decision == "resolved")
+            stats["successful_launches"] += int(attempt["launch_succeeded"])
+    for stats in list(route_stats.values()) + list(match_type_stats.values()):
         count = stats["attempts"]
         if count:
             stats["resolution_rate"] = round(stats["resolved"] / count, 3)
@@ -738,6 +772,7 @@ def build_resolver(trace_events: list[dict[str, Any]]) -> dict[str, Any]:
         "total_attempts": len(attempts),
         "decision_counts": decision_counts,
         "route_stats": route_stats,
+        "match_type_stats": match_type_stats,
         "ambiguous_count": decision_counts.get("ambiguous", 0),
         "embedding_launch_hits": [
             attempt

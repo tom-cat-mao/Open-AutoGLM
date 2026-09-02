@@ -94,6 +94,13 @@ RESULT_CLASSES: tuple[ResultClass, ...] = (
         "ambiguous_app",
         "launch",
         SRC_ACTUATION,
+        contains="rank_score=",
+    ),
+    ResultClass(
+        "ambiguous app ",
+        "ambiguous_app",
+        "launch",
+        SRC_ACTUATION,
         contains="score=",
     ),
     ResultClass("ambiguous app ", "ambiguous_app", "launch", SRC_ACTUATION),
