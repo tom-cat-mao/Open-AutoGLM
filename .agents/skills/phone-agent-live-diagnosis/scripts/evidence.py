@@ -12,9 +12,18 @@ OBS parsing so the analyzer can re-derive ``current_app`` / ``screen_seq`` /
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
+
+# WP-G2a windowed marks contract. The ``marks (K):`` line tail carries the
+# ``windowed/v1 source=...`` badge only in the grouped format; each window head
+# is ``W<n> <TYPE> <package> layer=<n> <flags...>`` and each mark line is
+# ``<mark_id> | <role> | <text> | <center> [| op=<x>] [| path=<y>]``.
+_WINDOW_MARKER = "windowed/"
+_OP_LEVELS = ("confirmed", "likely", "blocked", "unknown")
+_WINDOW_HEAD_RE = re.compile(r"^(W\d+)\b(.*)$")
 
 # Event discriminants (mirror the middleware schema, §1).
 EVENTS = (
@@ -102,6 +111,179 @@ def parse_obs_block(text: str) -> dict[str, Any] | None:
         "screen_seq": screen_seq,
         "mark_count": mark_count,
     }
+
+
+def parse_obs_windows(text: str) -> dict[str, Any] | None:
+    """Parse the WP-G2a windowed marks section of an ``[OBS]`` block.
+
+    The grouped format tags the ``marks (K):`` line tail with
+    ``windowed/<schema> source=<src>`` and then emits, per window, a head line
+    ``W<n> <TYPE_*> <package> layer=<n> <flags...>`` followed by indented mark
+    lines carrying optional ``op=<confirmed|likely|blocked|unknown>`` and
+    ``path=<container path>`` fields.
+
+    Returns a dict::
+
+        {
+            "present": True,
+            "schema": "v1",
+            "source": "shell_windows",
+            "windows": [
+                {"id": "W1", "type": "TYPE_SYSTEM", "package": "...",
+                 "layer": 42, "flags": ["active", "focus"],
+                 "covered_by": None, "mark_count": 1,
+                 "op_counts": {...}, "marks": [{mark_id, op, path}, ...]},
+                ...
+            ],
+            "window_count": N,
+            "op_counts": {"confirmed": .., "likely": .., "blocked": ..,
+                          "unknown": .., "unspecified": ..},
+            "blocked_mark_ids": ["ax_3@e12", ...],
+        }
+
+    Returns ``None`` for the legacy flat format (no ``windowed/`` badge) or when
+    the text carries no ``[OBS]`` header. Never raises: malformed lines are
+    tolerated so an old/partly-written observation still analyzes (fail-open).
+    """
+
+    if not text or "[OBS]" not in text:
+        return None
+    idx = text.find("[OBS]")
+    segment = text[idx:]
+
+    m = segment.find("marks (")
+    if m == -1:
+        return None
+    header_end = segment.find("\n", m)
+    if header_end == -1:
+        # No body after the marks header -> nothing windowed to parse.
+        return None
+    header_line = segment[m:header_end]
+    if _WINDOW_MARKER not in header_line:
+        return None  # legacy flat format: not our concern (fail-open).
+
+    schema: str | None = None
+    source: str | None = None
+    win_match = re.search(r"windowed/(\S+)", header_line)
+    if win_match:
+        schema = win_match.group(1)
+    src_match = re.search(r"source=(\S+)", header_line)
+    if src_match:
+        source = src_match.group(1)
+
+    windows: list[dict[str, Any]] = []
+    current: dict[str, Any] | None = None
+    total_op_counts = {level: 0 for level in _OP_LEVELS}
+    total_op_counts["unspecified"] = 0
+    blocked_mark_ids: list[str] = []
+
+    for raw in segment[header_end + 1 :].splitlines():
+        stripped = raw.strip()
+        if not stripped:
+            continue
+        head = _WINDOW_HEAD_RE.match(stripped)
+        # A window head line starts with ``W<digits>`` and is NOT a mark line
+        # (mark lines contain the ``|`` field separator).
+        if head and "|" not in stripped:
+            current = _parse_window_head(head.group(1), head.group(2))
+            windows.append(current)
+            continue
+        if "|" not in stripped:
+            continue  # not a mark line and not a window head: skip.
+        mark = _parse_windowed_mark_line(stripped)
+        if mark is None:
+            continue
+        if current is None:
+            # A mark before any window head (defensive): synthesize a bucket.
+            current = _parse_window_head("W?", "")
+            windows.append(current)
+        current["marks"].append(mark)
+        current["mark_count"] += 1
+        op = mark.get("op")
+        bucket = op if op in _OP_LEVELS else "unspecified"
+        current["op_counts"][bucket] = current["op_counts"].get(bucket, 0) + 1
+        total_op_counts[bucket] = total_op_counts.get(bucket, 0) + 1
+        if op == "blocked" and mark.get("mark_id"):
+            blocked_mark_ids.append(mark["mark_id"])
+
+    return {
+        "present": True,
+        "schema": schema,
+        "source": source,
+        "windows": windows,
+        "window_count": len(windows),
+        "op_counts": total_op_counts,
+        "blocked_mark_ids": blocked_mark_ids,
+    }
+
+
+def _parse_window_head(win_id: str, rest: str) -> dict[str, Any]:
+    """Parse a ``W<n> <TYPE_*> <package> layer=<n> <flags...>`` head line.
+
+    ``rest`` is everything after the ``W<n>`` token. Type is the first
+    ``TYPE_*`` token, package the next bare token, ``layer=`` / ``covered_by=``
+    are key/value fields, and any remaining bare tokens are flags (active,
+    focus, ...). Missing fields degrade to ``None`` rather than raising.
+    """
+
+    tokens = rest.split()
+    win_type: str | None = None
+    package: str | None = None
+    layer: int | None = None
+    covered_by: str | None = None
+    flags: list[str] = []
+    for token in tokens:
+        if token.startswith("layer="):
+            value = token[len("layer=") :]
+            try:
+                layer = int(value)
+            except ValueError:
+                layer = None
+        elif token.startswith("covered_by="):
+            covered_by = token[len("covered_by=") :] or None
+        elif "=" in token:
+            # Unknown key=value field: keep as a flag token for visibility.
+            flags.append(token)
+        elif win_type is None and token.startswith("TYPE_"):
+            win_type = token
+        elif package is None and "." in token:
+            package = token
+        else:
+            flags.append(token)
+    return {
+        "id": win_id,
+        "type": win_type,
+        "package": package,
+        "layer": layer,
+        "covered_by": covered_by,
+        "flags": flags,
+        "mark_count": 0,
+        "op_counts": {},
+        "marks": [],
+    }
+
+
+def _parse_windowed_mark_line(line: str) -> dict[str, Any] | None:
+    """Parse one indented mark line into ``{mark_id, role, op, path}``.
+
+    Fields are ``|``-separated; the first field is the mark id, the second the
+    role. Optional ``op=`` / ``path=`` fields may appear in any field position.
+    Returns ``None`` only if there is no usable mark id.
+    """
+
+    parts = [seg.strip() for seg in line.split("|")]
+    if not parts or not parts[0]:
+        return None
+    mark_id = parts[0]
+    role = parts[1] if len(parts) > 1 else None
+    op: str | None = None
+    path: str | None = None
+    for seg in parts[1:]:
+        if seg.startswith("op="):
+            op = seg[len("op=") :] or None
+        elif seg.startswith("path="):
+            path = seg[len("path=") :] or None
+    return {"mark_id": mark_id, "role": role, "op": op, "path": path}
 
 
 def result_text_of(observation: dict[str, Any]) -> str:
@@ -235,6 +417,7 @@ __all__ = [
     "EVENTS",
     "read_evidence",
     "parse_obs_block",
+    "parse_obs_windows",
     "result_text_of",
     "EvidenceView",
 ]

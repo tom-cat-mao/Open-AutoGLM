@@ -520,6 +520,23 @@ function renderShot(image) {
   }
   return `<div class="shot-col"><div class="shot-missing">本步无截图<br>（工具未回流图像）</div></div>`;
 }
+function renderWindowsSummary(w) {
+  // WP-S3: compact window-grouped marks summary inside a step's observation.
+  if (!w || !w.windows || !w.windows.length) return '';
+  const op = w.op_counts || {};
+  const opBits = ['confirmed','likely','blocked','unknown','unspecified']
+    .filter(k => (op[k] ?? 0) > 0).map(k => `${k} ${op[k]}`).join(' · ');
+  const rows = w.windows.map(win => {
+    const cover = win.covered_by ? ` covered_by=${win.covered_by}` : '';
+    return `<tr><td class="mono">${esc(win.id || '?')}</td><td class="mono wrap">${esc(win.type || '-')}</td>`
+      + `<td class="mono wrap">${esc(win.package || '-')}${esc(cover)}</td><td class="mono">${num(win.mark_count)}</td></tr>`;
+  }).join('');
+  return `<details style="margin-top:8px"><summary>窗口分组 (${w.window_count} 窗口${w.source ? ' · ' + esc(w.source) : ''})</summary>
+    ${opBits ? `<div class="kv" style="margin-top:6px">op 分布：${esc(opBits)}</div>` : ''}
+    <table style="margin-top:6px"><tr><th>窗口</th><th>类型</th><th>package</th><th>marks</th></tr>${rows}</table>
+    ${(w.blocked_mark_ids || []).length ? `<div class="kv" style="margin-top:6px">blocked marks：<span class="mono">${esc((w.blocked_mark_ids||[]).join(', '))}</span></div>` : ''}
+  </details>`;
+}
 function renderToolCall(tc) {
   const isErr = !!tc.error || ERROR_CLASSES.has(tc.class);
   const argStr = tc.args && Object.keys(tc.args || {}).length ? json(tc.args) : '{}';
@@ -530,11 +547,13 @@ function renderToolCall(tc) {
       ${classBadge(tc.class)}
       ${tc.latency_ms != null ? badge(tc.latency_ms + 'ms') : ''}
       ${(tc.image && tc.image.screen_seq != null) ? badge('screen#' + tc.image.screen_seq, 'accent') : ''}
+      ${(tc.windows && tc.windows.window_count != null) ? badge((tc.windows.window_count) + ' 窗口', 'accent') : ''}
     </div>
     <div class="toolcall-body">
       <div class="kv">参数</div><pre>${argStr}</pre>
       <div class="kv" style="margin-top:8px">结果${truncNote}</div>
       <pre class="result">${esc(tc.result_text || (tc.error ? ('⚠ ' + tc.error) : '（空返回）'))}</pre>
+      ${renderWindowsSummary(tc.windows)}
     </div>
   </div>`;
 }
@@ -630,11 +649,35 @@ function renderProblems() {
 }
 
 // ---- dimensions: perf distribution + tool/grounding/context/model --------
+function renderWindowingCard(w) {
+  // WP-S3: window-grouped marks structure. Legacy flat runs report present=false
+  // and get an inert note (never breaks an old-run report).
+  if (!w || !w.present) {
+    return `<div class="card"><h2>窗口结构</h2><div class="muted">本 run 的 marks 为平铺格式（未启用窗口分组，或旧 run）。</div></div>`;
+  }
+  const op = w.op_counts || {};
+  const types = w.window_types || {};
+  const blockedTaps = w.blocked_taps || [];
+  const typeChips = Object.entries(types).map(([t, n]) => badge(`${t}×${n}`)).join(' ') || '<span class="muted">-</span>';
+  const opOrder = ['confirmed','likely','blocked','unknown','unspecified'];
+  const opChips = opOrder.map(k => badge(`${k} ${op[k] ?? 0}`, k === 'blocked' ? 'blocked' : (k === 'confirmed' ? 'success' : ''))).join(' ');
+  return `<div class="card"><h2>窗口结构</h2>
+    <table>
+      ${row('窗口化观测数', w.windowed_observations)}
+      ${row('峰值窗口数', w.peak_window_count)}
+    </table>
+    <div class="cause-head" style="margin-top:8px">${opChips}</div>
+    <div class="kv" style="margin-top:6px">窗口类型分布</div>
+    <div class="chip-cloud">${typeChips}</div>
+    ${blockedTaps.length ? `<div class="alert warn" style="margin-top:10px">点击了 op=blocked 的 mark ${blockedTaps.length} 次：${blockedTaps.map(t => esc(`step ${t.step} ${t.tool}→${t.target_mark_id}`)).join('；')}</div>` : ''}
+  </div>`;
+}
 function renderDimensions() {
   const c = summary.context || {};
   const th = summary.tool_health || {};
   const g = summary.grounding || {};
   const v = summary.visual || {};
+  const w = summary.windowing || {};
   const m = summary.model || {};
   const usage = m.token_usage || {};
   const resolver = summary.resolver || {};
@@ -669,6 +712,7 @@ function renderDimensions() {
       ${row('累计截图字节', v.total_image_bytes)}
       ${row('首个 / 末个截图步', `${v.first_image_step ?? '-'} / ${v.last_image_step ?? '-'}`)}
     </table></div>
+    ${renderWindowingCard(w)}
     <div class="card"><h2>Grounding</h2><table>
       ${row('by_mark_id / by_description', `${(g.mark_addressing||{}).by_mark_id ?? 0} / ${(g.mark_addressing||{}).by_description ?? 0}`)}
       ${row('解析失败 (ambiguous/stale/no_match)', `${(g.resolve_failures||{}).ambiguous ?? 0} / ${(g.resolve_failures||{}).stale ?? 0} / ${(g.resolve_failures||{}).no_match ?? 0}`)}
