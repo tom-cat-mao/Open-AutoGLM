@@ -80,6 +80,30 @@ class MarkCandidate:
     # external badged id (``ax_1@e12``). ``resolve_mark`` uses it as the freshness
     # gate — a mark whose ``epoch`` is not the session's current batch is stale.
     epoch: int = 0
+    # WP-G2a windowed-marks metadata (pure display layer — addressing, tool
+    # execution, safety, folding and locate are unchanged). All default so every
+    # existing ``MarkCandidate(...)`` call site keeps working untouched; the
+    # accessibility provider is the only producer that fills them.
+    #   * ``window_id``   observation-local window this mark belongs to.
+    #   * ``window_layer``/``window_type``/``window_title``  real window metadata
+    #     (only present when a ``--windows`` dump gives true window facts; ``None``
+    #     for heuristic/inferred windows so callers can tell strong from weak).
+    #   * ``package``     owning package derived from the window's node subtree.
+    #   * ``container_path``  nearest (<=3) semantic container kinds outer->inner
+    #     (``dialog``/``toolbar``/``list``/``grid``/``form``/``tab``); nameless
+    #     layout ancestors are dropped.
+    #   * ``actionability``  four-state evidence label (``confirmed``/``likely``/
+    #     ``blocked``/``unknown``); heuristics never emit ``blocked``. This is
+    #     display evidence only — G2a never gates execution on it.
+    #   * ``actionability_reasons``  short trace-safe justification tokens.
+    window_id: str | None = None
+    window_layer: int | None = None
+    window_type: str | None = None
+    window_title: str | None = None
+    package: str | None = None
+    container_path: tuple[str, ...] = ()
+    actionability: str | None = None
+    actionability_reasons: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
