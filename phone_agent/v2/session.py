@@ -113,6 +113,39 @@ def parse_badge(mark_id: str) -> tuple[str, int | None]:
         return mark_id, None
 
 
+# WP-G2cB (B2): accessibility marks-level failure codes that mean the dump was
+# *unstable* (not "there are genuinely no marks"). observe() retries the atomic
+# window once on these — the same tier as a mid-capture foreground change — then,
+# if still failing, commits an annotated zero-mark observation (the screenshot is
+# valid, so this is NOT the batch-invalidating observation failure that a bad
+# screenshot / persistent foreground instability is). ``dump_empty`` /
+# ``no_interactive_marks`` are legitimate empty screens and never retry.
+_UNSTABLE_MARK_CODES = frozenset(
+    {"timeout", "provider_error", "accessibility_xml_parse_error"}
+)
+
+
+@dataclass
+class MarksSample:
+    """Result of one marks extraction attempt (B2 internal signature).
+
+    The tool-layer contract is unchanged — this object never leaves the session.
+    ``failure_code``/``failure_message`` carry the provider's diagnosis so
+    ``observe()`` can retry transient failures and annotate a final zero-mark
+    observation; ``parse_summary`` is the trace-safe parser diagnostic bundle
+    (window source, candidate counts, actionability tally).
+    """
+
+    marks: list[MarkCandidate]
+    failure_code: str | None = None
+    failure_message: str | None = None
+    parse_summary: dict[str, Any] | None = None
+    # WP-G2cB (B3): trace-safe window sidecar (``MarkProviderResult.screen_structures``)
+    # so the digest header can surface ``active``/``focus`` — those live on the
+    # window record, not on ``MarkCandidate``. Display only.
+    windows: list[dict[str, Any]] | None = None
+
+
 @dataclass
 class Observation:
     """Node-local observation snapshot; never serialized to trace/checkpoint."""
@@ -132,6 +165,19 @@ class Observation:
     screen_hash: str = ""
     # Screenshot mime type (``image/png`` | ``image/jpeg``) for the data: URL.
     mime_type: str = "image/png"
+    # WP-G2cB (B2): accessibility marks-level failure diagnosis for this frame.
+    # ``None`` on a clean dump. When set, the screenshot was valid but the marks
+    # dump failed/was-empty; the tool layer annotates the OBS header
+    # (``marks (0) [accessibility:<code>]``) and surfaces ``parse_summary`` so a
+    # dump failure is never silently rendered as "this screen has no controls".
+    marks_failure_code: str | None = None
+    marks_failure_message: str | None = None
+    parse_summary: dict[str, Any] | None = None
+    # WP-G2cB (B3): trace-safe per-window sidecar (source_confidence / active /
+    # focused / layer / type) so the model-facing digest can surface window
+    # ``active``/``focus`` flags and the ``windowed/v1 source=`` badge. Display
+    # only — addressing/execution never read it.
+    windows: list[dict[str, Any]] | None = None
 
 
 class PhoneSession:
@@ -199,6 +245,14 @@ class PhoneSession:
         # lazy visual locate provider (singleton per session)
         self._locate_provider: "MarkProvider | None" = None
         self._locate_provider_built: bool = False
+        # WP-G2cB (B1): monotonic locate sequence. Every locate-minted mark id
+        # carries this counter so two locates *in the same batch* can never
+        # collide on the provider id (both providers tend to return ``la_1`` /
+        # ``loc_1``). Without it, a second same-epoch locate would overwrite the
+        # first entry in ``self.marks`` and a later tap on the first id would
+        # silently actuate the second target. Monotonic for the whole run (never
+        # reset by observe) so a stashed id is never reused after re-mint.
+        self._locate_seq: int = 0
         # Frame the last locate() ran its visual model on (U1 same-frame return):
         # the locate tool renders text + this screenshot instead of re-observing.
         self._last_locate_shot: "Screenshot | None" = None
@@ -443,20 +497,44 @@ class PhoneSession:
     def refresh_marks(self, shot: "Screenshot | None" = None) -> list[MarkCandidate]:
         """Produce accessibility marks for a screenshot; never raises.
 
-        U1 single-producer discipline: ``observe()`` passes the screenshot it
-        already captured so marks are extracted against *that* frame — no second
-        screenshot is taken. When ``shot`` is ``None`` (a bare external call) one
-        is captured for backward compatibility. Failure (bad screenshot, provider
-        error, empty dump) returns ``[]``; the caller decides how to degrade.
+        Backward-compatible thin wrapper over :meth:`refresh_marks_sample` that
+        returns only the mark list (external/legacy callers and tests). U1
+        single-producer discipline is unchanged: ``observe()`` passes the
+        screenshot it already captured so marks are extracted against *that*
+        frame — no second screenshot is taken.
+        """
+
+        return self.refresh_marks_sample(shot).marks
+
+    def refresh_marks_sample(
+        self, shot: "Screenshot | None" = None, *, screen_hash: str | None = None
+    ) -> MarksSample:
+        """Extract accessibility marks + the provider's failure diagnosis (B2).
+
+        Returns a :class:`MarksSample` carrying the marks, the provider's
+        ``failure_code``/``message`` (``timeout`` / ``accessibility_dump_empty``
+        / ``accessibility_xml_parse_error`` / ``accessibility_no_interactive_marks``
+        / ``provider_error``) and the trace-safe ``parse_summary``. This is an
+        *internal* signature — the tool layer still only ever sees the rendered
+        digest. Failure (bad screenshot, provider error, empty dump) yields an
+        empty mark list with the code set; the caller decides how to degrade.
+
+        ``screen_hash`` lets ``observe()`` pass the sha256 it already computed so
+        the frame is hashed exactly once per observation (B5).
         """
 
         if shot is None:
             try:
                 shot = self.screenshot()
-            except ScreenshotError:
-                return []
+            except ScreenshotError as exc:
+                return MarksSample(
+                    marks=[],
+                    failure_code=getattr(exc, "failure_code", None)
+                    or "screenshot_unavailable",
+                    failure_message=getattr(exc, "failure_message", None),
+                )
         try:
-            binding = self._screen_binding(shot)
+            binding = self._screen_binding(shot, screen_hash=screen_hash)
             provider = AccessibilityTreeProvider(
                 dump_tree=self._dump_tree,
                 max_marks=self.config.accessibility_max_marks,
@@ -467,11 +545,45 @@ class PhoneSession:
                 hints=None,
                 timeout=self.config.accessibility_timeout,
             )
-        except Exception:
-            return []
+        except Exception as exc:  # noqa: BLE001 - provider failures degrade to []
+            return MarksSample(
+                marks=[], failure_code="provider_error", failure_message=type(exc).__name__
+            )
+        parse_summary = self._extract_parse_summary(result)
+        windows = self._extract_windows_sidecar(result)
         if not result.success:
-            return []
-        return list(result.marks)
+            return MarksSample(
+                marks=[],
+                failure_code=getattr(result, "failure_code", None),
+                failure_message=getattr(result, "message", None),
+                parse_summary=parse_summary,
+                windows=windows,
+            )
+        return MarksSample(
+            marks=list(result.marks),
+            parse_summary=parse_summary,
+            windows=windows,
+        )
+
+    @staticmethod
+    def _extract_parse_summary(result: Any) -> dict[str, Any] | None:
+        """Pull the trace-safe ``parse_summary`` out of a provider result."""
+
+        metadata = getattr(result, "metadata", None)
+        if isinstance(metadata, dict):
+            summary = metadata.get("parse_summary")
+            if isinstance(summary, dict):
+                return dict(summary)
+        return None
+
+    @staticmethod
+    def _extract_windows_sidecar(result: Any) -> list[dict[str, Any]] | None:
+        """Pull the trace-safe per-window sidecar out of a provider result."""
+
+        structures = getattr(result, "screen_structures", None)
+        if isinstance(structures, list) and structures:
+            return [dict(item) for item in structures if isinstance(item, dict)]
+        return None
 
     def observe(self, settle_ms: int | None = None) -> Observation:
         """Atomic single-producer observation (U1).
@@ -491,6 +603,17 @@ class PhoneSession:
         On success the batch counter (``epoch``) increments and every mark is
         minted with the batch badge (``ax_1@e<epoch>``); the provider-internal id
         stays as the pre-badge prefix (provenance only).
+
+        WP-G2cB (B2): a marks dump whose failure is *transient* (``timeout`` /
+        parser error / provider error / a ``marks_windowed=on`` unsupported-dump
+        error) is treated as observation instability — the atomic window retries
+        once, the same tier as a mid-capture foreground change. If the marks dump
+        still fails but the *screenshot* is valid, the observation still commits
+        (annotated with the failure code + ``parse_summary``): a marks-only
+        failure is not the batch-invalidating observation failure that a bad
+        screenshot or persistent foreground instability is. A genuinely empty
+        screen (``accessibility_dump_empty`` / ``no_interactive_marks``) does not
+        retry.
         """
 
         if settle_ms is None:
@@ -501,13 +624,18 @@ class PhoneSession:
             effective_settle_ms, _was_clamped = clamp_action_settle_ms(settle_ms)
 
         last_error: Exception | None = None
-        for _attempt in range(2):
+        last_sample: MarksSample | None = None
+        last_shot: "Screenshot | None" = None
+        last_after: "ForegroundAppObservation | None" = None
+        last_hash: str = ""
+        for attempt in range(2):
             if effective_settle_ms > 0:
                 time.sleep(effective_settle_ms / 1000.0)
             try:
                 before = self._foreground_observation()
                 shot = self.screenshot()
-                marks = self.refresh_marks(shot)
+                screen_hash = self._hash_screenshot(shot)
+                sample = self.refresh_marks_sample(shot, screen_hash=screen_hash)
                 after = self._foreground_observation()
             except ScreenshotError as exc:
                 last_error = exc
@@ -520,33 +648,68 @@ class PhoneSession:
                     f"observation unstable: foreground {before_c!r} -> {after_c!r}"
                 )
                 continue
+            last_sample = sample
+            last_shot = shot
+            last_after = after
+            last_hash = screen_hash
+            # A transient marks-dump failure is observation instability: retry
+            # once (like a foreground change). A stable/empty screen or the
+            # second attempt commits with whatever the dump produced.
+            if (
+                sample.failure_code in _UNSTABLE_MARK_CODES
+                and attempt == 0
+            ):
+                last_error = ScreenshotError(
+                    f"marks dump unstable: {sample.failure_code}"
+                )
+                continue
             # The ``after`` sample is closest to the committed frame — use it for
             # the display label so the label matches the bracket that verified
             # stability (no extra device round-trip outside the window).
-            return self._commit_observation(shot, marks, foreground=after)
+            return self._commit_observation(
+                shot, sample, foreground=after, screen_hash=screen_hash
+            )
 
-        # Two unstable/invalid attempts: fail closed and drop the whole batch.
-        self._invalidate_batch()
-        raise last_error or ScreenshotError("observation failed")
+        # Screenshot itself never succeeded: fail closed, drop the whole batch.
+        if last_shot is None or last_sample is None:
+            self._invalidate_batch()
+            raise last_error or ScreenshotError("observation failed")
+
+        # Screenshot is valid but the marks dump kept failing across both
+        # attempts. The frame is real, so commit it annotated rather than losing
+        # the observation — a dump failure must never masquerade as "no controls".
+        return self._commit_observation(
+            last_shot, last_sample, foreground=last_after, screen_hash=last_hash
+        )
 
     def _commit_observation(
         self,
         shot: "Screenshot",
-        marks: list[MarkCandidate],
+        sample: MarksSample,
         *,
         foreground: "ForegroundAppObservation | None" = None,
+        screen_hash: str | None = None,
     ) -> Observation:
-        """Bump the batch, mint badged marks, and build the Observation."""
+        """Bump the batch, mint badged marks, and build the Observation.
+
+        ``sample`` carries the marks plus the B2 marks-level failure diagnosis;
+        ``screen_hash`` is the sha256 already computed for this frame (B5 — the
+        payload is hashed exactly once per observation, shared with the screen
+        binding).
+        """
 
         current_app = self._label_of(foreground)
         self.screen_seq += 1
         self.epoch += 1
-        minted = self._mint_marks(marks)
+        minted = self._mint_marks(sample.marks)
         self.marks = {mark.mark_id: mark for mark in minted}
+        # B4: a fresh observation supersedes the stashed locate frame — the
+        # located screenshot belonged to the prior batch, so drop it rather than
+        # letting the locate tool return a same-frame image from a dead batch.
+        self._last_locate_shot = None
+        self._last_locate_app = "unknown"
         # screen_hash: short sha256 of the screenshot payload, audit/binding only.
-        screen_hash = hashlib.sha256(
-            (shot.base64_data or "").encode("utf-8")
-        ).hexdigest()[:16]
+        digest = screen_hash if screen_hash is not None else self._hash_screenshot(shot)
         return Observation(
             screenshot_b64=shot.base64_data,
             width=int(shot.width),
@@ -555,8 +718,12 @@ class PhoneSession:
             marks=minted,
             screen_seq=self.screen_seq,
             epoch=self.epoch,
-            screen_hash=screen_hash,
+            screen_hash=digest,
             mime_type=getattr(shot, "mime_type", None) or "image/png",
+            marks_failure_code=sample.failure_code,
+            marks_failure_message=sample.failure_message,
+            parse_summary=sample.parse_summary,
+            windows=sample.windows,
         )
 
     def _invalidate_batch(self) -> None:
@@ -576,11 +743,24 @@ class PhoneSession:
         caller's responsibility to rebuild.
         """
 
-        minted: list[MarkCandidate] = []
-        for mark in marks:
-            badged_id = mint_badge(mark.mark_id, self.epoch)
-            minted.append(replace(mark, mark_id=badged_id, epoch=self.epoch))
-        return minted
+        return [self._mint_one(mark) for mark in marks]
+
+    def _mint_one(self, mark: MarkCandidate, *, locate_seq: int | None = None) -> MarkCandidate:
+        """Badge one mark into the current batch (single minting path — B5).
+
+        ``locate_seq`` disambiguates locate-minted ids within one batch (B1):
+        two locates before the next ``observe()`` both tend to carry the same
+        provider id (``la_1``/``loc_1``); the monotonic ``#<seq>`` infix keeps
+        the external ids distinct so the second never overwrites the first in
+        ``self.marks``. The ``@e<epoch>`` suffix is preserved so ``parse_badge``
+        / ``resolve_mark`` freshness extraction is unchanged.
+        """
+
+        provider_id = mark.mark_id
+        if locate_seq is not None:
+            provider_id = f"{provider_id}#{locate_seq}"
+        badged_id = mint_badge(provider_id, self.epoch)
+        return replace(mark, mark_id=badged_id, epoch=self.epoch)
 
     def resolve_mark(self, mark_id: str) -> MarkCandidate:
         """Return the current-batch mark for ``mark_id`` or raise StaleMarkError.
@@ -654,14 +834,21 @@ class PhoneSession:
     ) -> MarkCandidate:
         """Visual deep-locate ``description`` -> one confident mark (fail-closed).
 
-        The resolved mark is **minted into the current batch** (badged with the
-        session's current ``epoch``) and registered into ``self.marks`` — no epoch
-        bump, so it joins the batch produced by the last ``observe()`` rather than
-        starting a new one. The single screenshot the visual model ran on is
-        stashed (``_last_locate_shot`` / ``_last_locate_app``) so the locate tool
-        can return that **same frame** without a second capture. Zero or multiple
+        WP-G2cB (B4): locate runs its visual model on a **fresh screenshot**, so a
+        confident hit **opens a new observation batch** — ``epoch`` increments,
+        every prior-batch mark is invalidated (``self.marks`` cleared), and only
+        the located mark is minted into the new batch. This restores the U1
+        "one frame = one batch" invariant: before B4 locate stamped a new-frame
+        hit with the *previous* batch's epoch, so a stale ``ax_*`` id from the
+        earlier observation would still resolve against a screen locate had
+        already moved past. Any ``scope_*`` ids are resolved against the current
+        batch **before** the bump, so scoping still fails closed on a stale id.
+
+        The single screenshot the visual model ran on is stashed
+        (``_last_locate_shot`` / ``_last_locate_app``) so the locate tool can
+        return that **same frame** without a second capture. Zero or multiple
         confident candidates raise :class:`LocateAmbiguousError`; nothing is
-        registered and nothing executes.
+        registered, no batch is opened, and nothing executes.
         """
 
         self._last_locate_metadata = {}
@@ -761,9 +948,18 @@ class PhoneSession:
                 bbox=[int(round(value)) for value in full_bbox],
                 center=[int(round(value)) for value in full_center],
             )
-        minted = replace(
-            raw, mark_id=mint_badge(raw.mark_id, self.epoch), epoch=self.epoch
-        )
+        # B4: a confident locate opens a NEW batch (new frame => new authority).
+        # Bump the epoch and drop every prior-batch mark, then mint the located
+        # hit alone into the fresh batch. The monotonic locate seq (B1) still
+        # disambiguates repeat locates, and record the display geometry off this
+        # frame so swipe/scroll math stays correct.
+        self._last_width = int(shot.width)
+        self._last_height = int(shot.height)
+        self.screen_seq += 1
+        self.epoch += 1
+        self._locate_seq += 1
+        self.marks = {}
+        minted = self._mint_one(raw, locate_seq=self._locate_seq)
         self.marks[minted.mark_id] = minted
         # Stash the locate frame so the tool returns the same screenshot without
         # a fresh observe (single-producer: one screenshot per locate call).
@@ -797,7 +993,13 @@ class PhoneSession:
     # -- marks digest -----------------------------------------------------
 
     @staticmethod
-    def format_marks_digest(marks: list[MarkCandidate], max_items: int = 40) -> str:
+    def format_marks_digest(
+        marks: list[MarkCandidate],
+        max_items: int = 40,
+        *,
+        window_source: str | None = None,
+        windows: list[dict[str, Any]] | None = None,
+    ) -> str:
         """Render the marks digest (WP-G2a windowed-aware, pure display layer).
 
         The ``[OBS] app=X screen#N`` / ``marks (K):`` header is added by the
@@ -810,9 +1012,14 @@ class PhoneSession:
           ``mark_id | role | text | center``, with an optional trailing
           ``| path=…`` when a semantic container path exists.
         * Multiple windows (or a single window carrying real ``--windows``
-          metadata) render grouped: one window header line (``Wk type pkg
-          layer=… [covered_by=…]``) followed by its marks indented, each ending
-          with ``| op=<actionability> | path=<container_path>``.
+          metadata) render grouped: a leading ``windowed/v1 source=<src>`` badge
+          line (WP-G2cB B3 — ``source=`` only when ``window_source`` is known),
+          then one window header line (``Wk type pkg layer=… [active] [focus]
+          [covered_by=…]``) followed by its marks indented, each ending with
+          ``| op=<actionability> | path=<container_path>``. ``active``/``focus``
+          come from the ``windows`` sidecar (they live on the window record, not
+          on ``MarkCandidate``); when the sidecar is absent the flags are simply
+          omitted. This is display only — nothing here gates execution.
         """
 
         shown = list(marks[:max_items])
@@ -824,7 +1031,18 @@ class PhoneSession:
         grouped = bool(distinct) and (len(distinct) > 1 or has_strong)
 
         if grouped:
-            body = PhoneSession._format_windowed_digest(shown)
+            win_flags = PhoneSession._window_flag_lookup(windows)
+            windowed_body = PhoneSession._format_windowed_digest(shown, win_flags)
+            # B3: prepend the ``windowed/v1 source=<src>`` badge line **only** when
+            # the window source is known (the production observe path always sets
+            # it). A bare direct call (tests / callers without a parse summary)
+            # keeps the pre-B3 head-first layout so the WP-G2a render contract is
+            # unchanged; the diagnosis skill only ever parses the production output
+            # which carries the badge.
+            if window_source:
+                body = f"windowed/v1 source={window_source}\n{windowed_body}"
+            else:
+                body = windowed_body
         else:
             body = PhoneSession._format_flat_digest(shown)
 
@@ -833,6 +1051,24 @@ class PhoneSession:
                 f"... (+{len(marks) - max_items} more)"
             )
         return body
+
+    @staticmethod
+    def _window_flag_lookup(
+        windows: list[dict[str, Any]] | None,
+    ) -> dict[str, tuple[bool, bool]]:
+        """Map ``window_id -> (active, focused)`` from the trace-safe sidecar."""
+
+        lookup: dict[str, tuple[bool, bool]] = {}
+        for entry in windows or []:
+            if not isinstance(entry, dict):
+                continue
+            wid = entry.get("window_id")
+            if wid:
+                lookup[str(wid)] = (
+                    bool(entry.get("active")),
+                    bool(entry.get("focused")),
+                )
+        return lookup
 
     @staticmethod
     def _format_flat_digest(marks: list[MarkCandidate]) -> str:
@@ -855,7 +1091,10 @@ class PhoneSession:
         return "\n".join(lines)
 
     @staticmethod
-    def _format_windowed_digest(marks: list[MarkCandidate]) -> str:
+    def _format_windowed_digest(
+        marks: list[MarkCandidate],
+        win_flags: dict[str, tuple[bool, bool]] | None = None,
+    ) -> str:
         """Group marks by window (layer desc), one header + indented mark lines."""
 
         order: list[str] = []
@@ -880,13 +1119,17 @@ class PhoneSession:
         lines: list[str] = []
         for wid in order:
             bucket = buckets[wid]
-            lines.append(PhoneSession._window_header(wid, bucket))
+            lines.append(PhoneSession._window_header(wid, bucket, win_flags))
             for mark in bucket:
                 lines.append(PhoneSession._windowed_mark_line(mark))
         return "\n".join(lines)
 
     @staticmethod
-    def _window_header(window_id: str, bucket: list[MarkCandidate]) -> str:
+    def _window_header(
+        window_id: str,
+        bucket: list[MarkCandidate],
+        win_flags: dict[str, tuple[bool, bool]] | None = None,
+    ) -> str:
         """One window header line derived from its marks' shared metadata."""
 
         sample = bucket[0]
@@ -899,6 +1142,12 @@ class PhoneSession:
             parts.append(f"layer={sample.window_layer}")
         if sample.window_title:
             parts.append(f"title={sample.window_title}")
+        # B3: bare active/focus tokens from the window sidecar (only when true).
+        active, focused = (win_flags or {}).get(window_id, (False, False))
+        if active:
+            parts.append("active")
+        if focused:
+            parts.append("focus")
         covered_by = PhoneSession._covered_by(bucket)
         if covered_by:
             parts.append(f"covered_by={covered_by}")
@@ -1007,10 +1256,18 @@ class PhoneSession:
 
         return self._label_of(self._foreground_observation())
 
-    def _screen_binding(self, shot: "Screenshot") -> ScreenBinding:
-        raw_hash = hashlib.sha256(
-            (shot.base64_data or "").encode("utf-8")
+    @staticmethod
+    def _hash_screenshot(shot: "Screenshot") -> str:
+        """Short sha256 of a screenshot payload (B5: computed once per frame)."""
+
+        return hashlib.sha256(
+            (getattr(shot, "base64_data", "") or "").encode("utf-8")
         ).hexdigest()[:16]
+
+    def _screen_binding(
+        self, shot: "Screenshot", *, screen_hash: str | None = None
+    ) -> ScreenBinding:
+        raw_hash = screen_hash if screen_hash is not None else self._hash_screenshot(shot)
         return ScreenBinding(
             screen_id=f"screen_{self.screen_seq}",
             raw_screenshot_hash=raw_hash,

@@ -86,14 +86,32 @@ def _first_observation_content(
         )
     marks = getattr(observation, "marks", None) or []
     items = list(marks.values()) if isinstance(marks, dict) else list(marks)
+    parse_summary = getattr(observation, "parse_summary", None)
+    windows = getattr(observation, "windows", None)
+    window_source = None
+    total_candidates = None
+    if isinstance(parse_summary, dict):
+        window_source = parse_summary.get("window_source")
+        raw_total = parse_summary.get("total_candidates")
+        if isinstance(raw_total, int):
+            total_candidates = raw_total
     digest_fn = getattr(session, "format_marks_digest", None)
-    digest = digest_fn(items) if callable(digest_fn) else _marks_digest_lines(items)
+    if callable(digest_fn):
+        try:
+            digest = digest_fn(items, window_source=window_source, windows=windows)
+        except TypeError:
+            digest = digest_fn(items)
+    else:
+        digest = _marks_digest_lines(items)
     current_app = getattr(observation, "current_app", None) or "?"
     seq = getattr(observation, "screen_seq", 0)
+    count_field = f"{len(items)}"
+    if isinstance(total_candidates, int) and total_candidates > len(items):
+        count_field = f"{len(items)}/{total_candidates}"
     content.append(
         {
             "type": "text",
-            "text": f"[OBS] app={current_app} screen#{seq}\nmarks ({len(items)}): {digest}",
+            "text": f"[OBS] app={current_app} screen#{seq}\nmarks ({count_field}): {digest}",
         }
     )
     return content
