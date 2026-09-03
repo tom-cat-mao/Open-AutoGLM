@@ -85,15 +85,64 @@ def _obs_text(session, settle_ms: int | None = None) -> tuple[str, object]:
     if marks is None:
         marks = getattr(session, "marks", {})
 
+    parse_summary = getattr(obs, "parse_summary", None)
+    windows = getattr(obs, "windows", None)
+    window_source = None
+    total_candidates = None
+    if isinstance(parse_summary, dict):
+        window_source = parse_summary.get("window_source")
+        # B3: total-before-cut lives in the parser's ``total_candidates`` (parallel
+        # package A). Render ``marks (K/total)`` only when it is present and larger
+        # than the shown count; absent field => omit (never hardcode a total).
+        raw_total = parse_summary.get("total_candidates")
+        if isinstance(raw_total, int):
+            total_candidates = raw_total
+
     digest_fn = getattr(session, "format_marks_digest", None)
     if callable(digest_fn):
-        digest = digest_fn(marks)
+        try:
+            digest = digest_fn(
+                marks, window_source=window_source, windows=windows
+            )
+        except TypeError:
+            # Older/duck-typed digest signature without the B3 kwargs.
+            digest = digest_fn(marks)
     else:
         digest = format_marks_digest_fallback(marks)
 
     count = len(marks) if hasattr(marks, "__len__") else 0
-    text = f"[OBS] app={current_app} screen#{seq}\nmarks ({count}): {digest}"
-    return text, obs
+    count_field = f"{count}"
+    if isinstance(total_candidates, int) and total_candidates > count:
+        count_field = f"{count}/{total_candidates}"
+    # B2: a valid frame whose marks *dump* failed is annotated so the model never
+    # reads "no controls" when the dump timed out / errored. A genuinely empty
+    # screen (dump_empty / no_interactive_marks) is not annotated as a failure.
+    annotation = _marks_failure_annotation(obs)
+    header = f"[OBS] app={current_app} screen#{seq}\nmarks ({count_field}){annotation}: {digest}"
+    return header, obs
+
+
+_ANNOTATED_MARK_FAILURES = frozenset(
+    {"timeout", "provider_error", "accessibility_xml_parse_error"}
+)
+
+
+def _marks_failure_annotation(obs) -> str:
+    """Return `` [accessibility:<code>]`` when the marks dump failed (B2).
+
+    Only transient/parse failures are annotated (an empty screen is legitimate).
+    An unsupported ``marks_windowed=on`` dump surfaces here too rather than being
+    swallowed. The parse_summary is available on the observation for the trace
+    layer; the visible header just names the failure so a zero-mark frame reads
+    as "dump failed" not "screen is empty".
+    """
+
+    code = getattr(obs, "marks_failure_code", None)
+    if not code:
+        return ""
+    if code in _ANNOTATED_MARK_FAILURES or "unavailable" in str(code):
+        return f" [accessibility:{code}]"
+    return ""
 
 
 def auto_observation(session, settle_ms: int | None = None) -> list[dict]:

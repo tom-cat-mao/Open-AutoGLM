@@ -100,6 +100,16 @@ def _env_choice(key: str, default: str, choices: tuple[str, ...]) -> str:
     return value if value in choices else default
 
 
+def _env_csv(key: str, default: tuple[str, ...]) -> tuple[str, ...]:
+    """Read a comma-separated string tuple, dropping empty entries."""
+
+    raw = os.getenv(key)
+    if raw is None or not raw.strip():
+        return default
+    values = tuple(item.strip().lower() for item in raw.split(",") if item.strip())
+    return values or default
+
+
 def _env_bool_default_true(key: str, default: bool = True) -> bool:
     """Boolean flag that defaults to ``True`` and only ``0/false/no/off`` disable it.
 
@@ -184,17 +194,45 @@ class V2Config:
     )
     app_list_max: int = 40
     dream_mode: str = "manual"
-    # Four-route App-name resolver: high-recall generation followed by prior-
-    # weighted ranking and an explicit score/margin decision. These switches do
-    # not alter installation or launch-policy authorization.
+    # Four-route App-name resolver: high-recall generation followed by evidence
+    # typing and a three-state decision. Legacy score-threshold mode is retained
+    # for rollback; neither mode alters installation or launch-policy authority.
+    resolver_decision_mode: str = "typed"
     resolver_min_score: float = 0.90
     resolver_margin: float = 0.08
+    resolver_typed_margin: float = 0.08
     resolver_top_k: int = 10
     resolver_pinyin: bool = True
     resolver_embed: bool = True
     resolver_lexical: bool = True
     resolver_w_sim: float = 0.8
     resolver_w_prior: float = 0.2
+    resolver_package_segment_min_len: int = 4
+    resolver_package_segment_stopwords: tuple[str, ...] = (
+        "com",
+        "org",
+        "net",
+        "android",
+        "example",
+        "app",
+        "mobile",
+        "free",
+        "debug",
+        "release",
+    )
+    resolver_auto_match_types: tuple[str, ...] = (
+        "exact_alias",
+        "exact_label",
+        "exact_package",
+        "exact_package_segment",
+        "registered_containment",
+    )
+    resolver_clarify_match_types: tuple[str, ...] = (
+        "fuzzy",
+        "pinyin_full",
+        "pinyin_initials",
+        "embedding",
+    )
     # Observe-only run experience store. The explicit directory is independent
     # of App-KB's memory root so callers may place this privacy-minimal plane on
     # a separate volume without changing application knowledge.
@@ -232,6 +270,7 @@ class V2Config:
     # L0 budget warn ratio (S1 §3.1): retained for backward compatibility. A4
     # re-based the budget from model-call count to token cost (see token_budget /
     # token_warn_remaining below); this field is no longer read by BudgetMiddleware.
+    # DEPRECATED (WP-G2cC): dead config — kept only for env/CLI compatibility, no reader.
     budget_warn_ratio: float = 0.8
     # L0 token budget (A4 §2): total token cost budget (input+output, summed from
     # usage_metadata). BudgetMiddleware injects a one-time remaining-token mirror
@@ -255,6 +294,14 @@ class V2Config:
     grounding_provider: str = "hybrid"
     accessibility_timeout: float = 3.0
     accessibility_max_marks: int = 80
+    # WP-G2a windowed marks (pure display layer): auto|on|off.
+    #   * ``auto`` (default) tries a ``uiautomator dump --windows`` first and
+    #     falls back to the legacy single-root dump when unsupported.
+    #   * ``on`` requires ``--windows`` (a device that lacks it errors visibly).
+    #   * ``off`` keeps the legacy dump + flat rendering.
+    # Addressing, tool execution, safety gate, folding and locate are unchanged;
+    # this only affects how the accessibility tree is grouped and rendered.
+    marks_windowed: str = "auto"
     locateanything_model: str | None = None
     locateanything_max_size: int = 960
     locateanything_context_max_chars: int = 200
@@ -278,6 +325,9 @@ class V2Config:
     trace_enabled: bool = True
     # taskdoc (task board increment)
     taskdoc_enabled: bool = True
+    # DEPRECATED (WP-G2cC): dead config — the U3 output contract deleted the
+    # seen_states/nudged stagnation machinery; retained-but-deprecated no-op kept
+    # only for env/CLI compatibility, no reader.
     taskdoc_nudge_steps: int = 5
     # Run-bound, local single-page HTML output. The model never supplies a path;
     # write/update tools derive ``<deliverable_dir>/<run_id>.html``.
@@ -380,10 +430,18 @@ class V2Config:
             dream_mode=_env_choice(
                 "PHONE_AGENT_DREAM", "manual", ("off", "auto", "manual")
             ),
+            resolver_decision_mode=_env_choice(
+                "PHONE_AGENT_RESOLVER_DECISION_MODE",
+                "typed",
+                ("typed", "legacy"),
+            ),
             resolver_min_score=_env_float(
                 "PHONE_AGENT_RESOLVER_MIN_SCORE", 0.90
             ),
             resolver_margin=_env_float("PHONE_AGENT_RESOLVER_MARGIN", 0.08),
+            resolver_typed_margin=_env_float(
+                "PHONE_AGENT_RESOLVER_TYPED_MARGIN", 0.08
+            ),
             resolver_top_k=_env_int("PHONE_AGENT_RESOLVER_TOP_K", 10),
             resolver_pinyin=_env_bool_default_true(
                 "PHONE_AGENT_RESOLVER_PINYIN", True
@@ -396,6 +454,43 @@ class V2Config:
             ),
             resolver_w_sim=_env_float("PHONE_AGENT_RESOLVER_W_SIM", 0.8),
             resolver_w_prior=_env_float("PHONE_AGENT_RESOLVER_W_PRIOR", 0.2),
+            resolver_package_segment_min_len=_env_int(
+                "PHONE_AGENT_RESOLVER_PACKAGE_SEGMENT_MIN_LEN", 4
+            ),
+            resolver_package_segment_stopwords=_env_csv(
+                "PHONE_AGENT_RESOLVER_PACKAGE_SEGMENT_STOPWORDS",
+                (
+                    "com",
+                    "org",
+                    "net",
+                    "android",
+                    "example",
+                    "app",
+                    "mobile",
+                    "free",
+                    "debug",
+                    "release",
+                ),
+            ),
+            resolver_auto_match_types=_env_csv(
+                "PHONE_AGENT_RESOLVER_AUTO_MATCH_TYPES",
+                (
+                    "exact_alias",
+                    "exact_label",
+                    "exact_package",
+                    "exact_package_segment",
+                    "registered_containment",
+                ),
+            ),
+            resolver_clarify_match_types=_env_csv(
+                "PHONE_AGENT_RESOLVER_CLARIFY_MATCH_TYPES",
+                (
+                    "fuzzy",
+                    "pinyin_full",
+                    "pinyin_initials",
+                    "embedding",
+                ),
+            ),
             experience_enabled=(
                 _env_choice("PHONE_AGENT_EXPERIENCE", "on", ("on", "off")) == "on"
             ),
@@ -445,6 +540,9 @@ class V2Config:
             grounding_provider=_env_str("PHONE_AGENT_GROUNDING_PROVIDER", "hybrid"),
             accessibility_timeout=_env_float("PHONE_AGENT_ACCESSIBILITY_TIMEOUT", 3.0),
             accessibility_max_marks=_env_int("PHONE_AGENT_ACCESSIBILITY_MAX_MARKS", 80),
+            marks_windowed=_env_choice(
+                "PHONE_AGENT_MARKS_WINDOWED", "auto", ("auto", "on", "off")
+            ),
             locateanything_model=_env_opt_str("PHONE_AGENT_LOCATEANYTHING_MODEL"),
             locateanything_max_size=_env_int("PHONE_AGENT_LOCATEANYTHING_MAX_SIZE", 960),
             locateanything_context_max_chars=_env_int(
@@ -500,6 +598,11 @@ class V2Config:
             raise ValueError("PHONE_AGENT_LOCATE_MAX_SIZE must be 0 or a positive integer")
         if config.observe_settle_ms < 0:
             raise ValueError("PHONE_AGENT_OBSERVE_SETTLE_MS must be non-negative")
+        if config.accessibility_max_marks <= 0:
+            raise ValueError(
+                "PHONE_AGENT_ACCESSIBILITY_MAX_MARKS must be positive "
+                "(an illegal value would silently yield 0 marks)"
+            )
         if config.locateanything_context_max_chars < 0:
             raise ValueError(
                 "PHONE_AGENT_LOCATEANYTHING_CONTEXT_MAX_CHARS must be non-negative"
@@ -510,6 +613,10 @@ class V2Config:
             raise ValueError("PHONE_AGENT_EPISODE_KEEP must be non-negative")
         if config.episode_archive_days < 0:
             raise ValueError("PHONE_AGENT_EPISODE_ARCHIVE_DAYS must be non-negative")
+        if config.resolver_decision_mode not in {"typed", "legacy"}:
+            raise ValueError(
+                "PHONE_AGENT_RESOLVER_DECISION_MODE must be typed or legacy"
+            )
         if not 0.0 <= config.resolver_min_score <= 1.0:
             raise ValueError(
                 "PHONE_AGENT_RESOLVER_MIN_SCORE must be between 0 and 1"
@@ -518,8 +625,16 @@ class V2Config:
             raise ValueError(
                 "PHONE_AGENT_RESOLVER_MARGIN must be between 0 and 1"
             )
+        if not 0.0 <= config.resolver_typed_margin <= 1.0:
+            raise ValueError(
+                "PHONE_AGENT_RESOLVER_TYPED_MARGIN must be between 0 and 1"
+            )
         if config.resolver_top_k <= 0:
             raise ValueError("PHONE_AGENT_RESOLVER_TOP_K must be positive")
+        if config.resolver_package_segment_min_len <= 0:
+            raise ValueError(
+                "PHONE_AGENT_RESOLVER_PACKAGE_SEGMENT_MIN_LEN must be positive"
+            )
         if config.resolver_w_sim < 0.0 or config.resolver_w_prior < 0.0:
             raise ValueError(
                 "PHONE_AGENT_RESOLVER_W_SIM and PHONE_AGENT_RESOLVER_W_PRIOR "
@@ -530,6 +645,29 @@ class V2Config:
                 "PHONE_AGENT_RESOLVER_W_SIM and PHONE_AGENT_RESOLVER_W_PRIOR "
                 "must not both be zero"
             )
+        valid_match_types = {
+            "exact_alias",
+            "exact_label",
+            "exact_package",
+            "exact_package_segment",
+            "registered_containment",
+            "token_prefix",
+            "containment",
+            "fuzzy",
+            "pinyin_full",
+            "pinyin_initials",
+            "embedding",
+        }
+        for key, values in (
+            ("PHONE_AGENT_RESOLVER_AUTO_MATCH_TYPES", config.resolver_auto_match_types),
+            (
+                "PHONE_AGENT_RESOLVER_CLARIFY_MATCH_TYPES",
+                config.resolver_clarify_match_types,
+            ),
+        ):
+            unknown = set(values) - valid_match_types
+            if unknown:
+                raise ValueError(f"{key} contains unknown match types: {sorted(unknown)}")
         if config.lesson_inject_max < 0:
             raise ValueError("PHONE_AGENT_LESSON_INJECT_MAX must be non-negative")
         if config.lesson_inject_tokens < 0:

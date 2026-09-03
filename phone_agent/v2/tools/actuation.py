@@ -115,6 +115,10 @@ def _record_resolution_attempt(session, resolution) -> None:
             candidates=payload["candidates"],
             decision=payload["decision"],
             winner=payload["winner"],
+            match_type=payload["match_type"],
+            authority=payload["authority"],
+            decision_basis=payload["decision_basis"],
+            reason=payload["reason"],
         )
     except Exception:  # noqa: BLE001 - trace cannot change launch semantics
         return
@@ -327,34 +331,6 @@ def _resolve_target(
     return None, "error: one of target_mark_id or target_description is required"
 
 
-def _screen_dims(session) -> tuple[int, int]:
-    """Best-effort current screen size in pixels for coordinate math.
-
-    §6 does not put a raw relative->absolute helper on the session, so swipe and
-    scroll derive pixels from the session's known dimensions. Defaults match the
-    adb placeholder screenshot (1080x2400).
-    """
-
-    w = getattr(session, "screen_width", None)
-    h = getattr(session, "screen_height", None)
-    return int(w or 1080), int(h or 2400)
-
-
-def _relative_to_abs(session, rx: int, ry: int) -> tuple[int, int]:
-    """Convert a 0-1000 relative point to absolute pixels (v2.coords semantics).
-
-    Prefers a session-provided converter when present; otherwise applies
-    ``x = int(rx / 1000 * w)`` inline so the tools work before ``v2/coords.py``
-    is wired.
-    """
-
-    conv = getattr(session, "relative_to_abs", None)
-    if callable(conv):
-        return conv(rx, ry)
-    w, h = _screen_dims(session)
-    return int(rx / 1000 * w), int(ry / 1000 * h)
-
-
 def _mark_label(mark) -> str:
     """Human-facing element label for a receipt: ``「文本」(mark_id)`` or ``(mark_id)``.
 
@@ -511,23 +487,22 @@ def build_actuation_tools(session, config) -> list[StructuredTool]:
         搜索/提交/打开页面后建议 1500-2500ms；普通点击留空。
         """
 
-        obs_w, obs_h = _screen_dims(session)
-        w, h = obs_w, obs_h
-        cx, cy = w // 2, h // 2
-        near, far = int(h * 0.25), int(h * 0.75)
-        lx, rx = int(w * 0.25), int(w * 0.75)
+        # Endpoints as 0-1000 relative points; converted to pixels through the
+        # single conversion point (session.relative_to_abs -> v2/coords.py).
         moves = {
-            "down": (cx, far, cx, near),
-            "up": (cx, near, cx, far),
-            "left": (rx, cy, lx, cy),
-            "right": (lx, cy, rx, cy),
+            "down": (500, 750, 500, 250),
+            "up": (500, 250, 500, 750),
+            "left": (750, 500, 250, 500),
+            "right": (250, 500, 750, 500),
         }
         if direction not in moves:
             return _fail(
                 session,
                 f"error: unknown direction {direction!r}; use up|down|left|right",
             )
-        sx, sy, ex, ey = moves[direction]
+        rsx, rsy, rex, rey = moves[direction]
+        sx, sy = session.relative_to_abs(rsx, rsy)
+        ex, ey = session.relative_to_abs(rex, rey)
         device.swipe(sx, sy, ex, ey, device_id=device_id)
         return _ok_with_obs(f"scroll {direction}", session, settle_ms=settle_ms)
 
@@ -553,8 +528,8 @@ def build_actuation_tools(session, config) -> list[StructuredTool]:
             return _fail(session, "error: start must be [x, y] in 0-1000 relative coords")
         if not (isinstance(end, (list, tuple)) and len(end) == 2):
             return _fail(session, "error: end must be [x, y] in 0-1000 relative coords")
-        sx, sy = _relative_to_abs(session, int(start[0]), int(start[1]))
-        ex, ey = _relative_to_abs(session, int(end[0]), int(end[1]))
+        sx, sy = session.relative_to_abs(int(start[0]), int(start[1]))
+        ex, ey = session.relative_to_abs(int(end[0]), int(end[1]))
         device.swipe(sx, sy, ex, ey, device_id=device_id)
         return _ok_with_obs(
             f"swipe ({start[0]},{start[1]})->({end[0]},{end[1]})",
@@ -724,7 +699,8 @@ def build_actuation_tools(session, config) -> list[StructuredTool]:
             top_k = max(1, int(getattr(config, "resolver_top_k", 10)))
             names = [
                 f"{candidate.package}"
-                f"(score={candidate.score:.3f}, {candidate.source_route})"
+                f"(rank_score={candidate.rank_score:.3f}, "
+                f"{candidate.source_route}/{candidate.match_type})"
                 for candidate in name_resolution.candidates[:top_k]
             ]
             return _fail(

@@ -46,7 +46,9 @@ def _escape_report_data(payload: str) -> str:
     )
 
 
-def render_html(summary: dict[str, Any], evidence: list[dict[str, Any]] | None = None) -> str:
+def render_html(
+    summary: dict[str, Any], evidence: list[dict[str, Any]] | None = None
+) -> str:
     """Render ``summary`` (+ optional evidence stream) to an HTML string.
 
     ``summary`` carries the analyzed dimensions **and** the per-step ``replay``
@@ -244,6 +246,8 @@ HTML_TEMPLATE = r"""<!doctype html>
     .muted { color: var(--muted); }
     .bar { height: 8px; border-radius: 4px; background: var(--primary-soft); overflow: hidden; }
     .bar > span { display: block; height: 100%; background: var(--primary); }
+    .chip-cloud { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+    .dimension-stack { display: grid; gap: 14px; margin-top: 14px; }
     a { color: var(--primary); text-decoration: none; }
     a:hover { text-decoration: underline; }
     @media (max-width: 1100px) {
@@ -456,6 +460,33 @@ function renderTopThree() {
     </div>`).join('')}</div>`;
 }
 
+function renderResolverOverview() {
+  const r = summary.resolver || {};
+  const decisions = r.decision_counts || {};
+  const embeddings = r.embedding_launch_hits || [];
+  return `<div class="card"><h2>解析</h2><table>
+    ${row('launch 解析次数', r.total_attempts ?? 0)}
+    ${row('resolved / ambiguous / unknown', `${decisions.resolved ?? 0} / ${decisions.ambiguous ?? 0} / ${decisions.unknown ?? 0}`)}
+    ${row('embedding 启动命中', embeddings.length)}
+    ${row('歧义后恢复', (r.ambiguous_recoveries || []).length)}
+  </table>${(r.total_attempts ?? 0) === 0 ? '<div class="muted" style="margin-top:8px">无 resolution_attempt 事件（旧 run 或本 run 未 launch）。</div>' : ''}</div>`;
+}
+
+function renderMemoryOverview() {
+  const memory = summary.memory || {};
+  const rag = memory.memory_rag || {};
+  const episode = memory.episode || {};
+  const hit = rag.candidate_count ? (rag.hit ? '命中' : '未命中') : '无候选';
+  return `<div class="card"><h2>记忆</h2><table>
+    ${row('memory_rag 模式 / 状态', `${rag.mode ?? '-'} / ${rag.status ?? '-'}`)}
+    ${row('召回候选 / 实际启动包', `${rag.candidate_count ?? 0} / ${(rag.actual_launch_packages || []).length}`)}
+    ${row('逐 run 命中', hit)}
+    ${row('别名生命周期事件', (memory.alias_events || []).length)}
+    ${row('注入教训', (episode.injected_lessons || []).length)}
+    ${row('产出物', episode.deliverable_path || '-')}
+  </table></div>`;
+}
+
 function renderOverview() {
   const v = summary.visual || {};
   let visualAlert = '';
@@ -467,6 +498,10 @@ function renderOverview() {
     <div class="grid-2">
       ${renderTerminalBlock()}
       ${renderTaskBoardBlock()}
+    </div>
+    <div class="grid-2" style="margin-top:14px">
+      ${renderResolverOverview()}
+      ${renderMemoryOverview()}
     </div>
     <div style="margin-top:14px">${renderTopThree()}</div>`;
 }
@@ -485,6 +520,23 @@ function renderShot(image) {
   }
   return `<div class="shot-col"><div class="shot-missing">本步无截图<br>（工具未回流图像）</div></div>`;
 }
+function renderWindowsSummary(w) {
+  // WP-S3: compact window-grouped marks summary inside a step's observation.
+  if (!w || !w.windows || !w.windows.length) return '';
+  const op = w.op_counts || {};
+  const opBits = ['confirmed','likely','blocked','unknown','unspecified']
+    .filter(k => (op[k] ?? 0) > 0).map(k => `${k} ${op[k]}`).join(' · ');
+  const rows = w.windows.map(win => {
+    const cover = win.covered_by ? ` covered_by=${win.covered_by}` : '';
+    return `<tr><td class="mono">${esc(win.id || '?')}</td><td class="mono wrap">${esc(win.type || '-')}</td>`
+      + `<td class="mono wrap">${esc(win.package || '-')}${esc(cover)}</td><td class="mono">${num(win.mark_count)}</td></tr>`;
+  }).join('');
+  return `<details style="margin-top:8px"><summary>窗口分组 (${w.window_count} 窗口${w.source ? ' · ' + esc(w.source) : ''})</summary>
+    ${opBits ? `<div class="kv" style="margin-top:6px">op 分布：${esc(opBits)}</div>` : ''}
+    <table style="margin-top:6px"><tr><th>窗口</th><th>类型</th><th>package</th><th>marks</th></tr>${rows}</table>
+    ${(w.blocked_mark_ids || []).length ? `<div class="kv" style="margin-top:6px">blocked marks：<span class="mono">${esc((w.blocked_mark_ids||[]).join(', '))}</span></div>` : ''}
+  </details>`;
+}
 function renderToolCall(tc) {
   const isErr = !!tc.error || ERROR_CLASSES.has(tc.class);
   const argStr = tc.args && Object.keys(tc.args || {}).length ? json(tc.args) : '{}';
@@ -495,11 +547,13 @@ function renderToolCall(tc) {
       ${classBadge(tc.class)}
       ${tc.latency_ms != null ? badge(tc.latency_ms + 'ms') : ''}
       ${(tc.image && tc.image.screen_seq != null) ? badge('screen#' + tc.image.screen_seq, 'accent') : ''}
+      ${(tc.windows && tc.windows.window_count != null) ? badge((tc.windows.window_count) + ' 窗口', 'accent') : ''}
     </div>
     <div class="toolcall-body">
       <div class="kv">参数</div><pre>${argStr}</pre>
       <div class="kv" style="margin-top:8px">结果${truncNote}</div>
       <pre class="result">${esc(tc.result_text || (tc.error ? ('⚠ ' + tc.error) : '（空返回）'))}</pre>
+      ${renderWindowsSummary(tc.windows)}
     </div>
   </div>`;
 }
@@ -595,15 +649,48 @@ function renderProblems() {
 }
 
 // ---- dimensions: perf distribution + tool/grounding/context/model --------
+function renderWindowingCard(w) {
+  // WP-S3: window-grouped marks structure. Legacy flat runs report present=false
+  // and get an inert note (never breaks an old-run report).
+  if (!w || !w.present) {
+    return `<div class="card"><h2>窗口结构</h2><div class="muted">本 run 的 marks 为平铺格式（未启用窗口分组，或旧 run）。</div></div>`;
+  }
+  const op = w.op_counts || {};
+  const types = w.window_types || {};
+  const blockedTaps = w.blocked_taps || [];
+  const typeChips = Object.entries(types).map(([t, n]) => badge(`${t}×${n}`)).join(' ') || '<span class="muted">-</span>';
+  const opOrder = ['confirmed','likely','blocked','unknown','unspecified'];
+  const opChips = opOrder.map(k => badge(`${k} ${op[k] ?? 0}`, k === 'blocked' ? 'blocked' : (k === 'confirmed' ? 'success' : ''))).join(' ');
+  return `<div class="card"><h2>窗口结构</h2>
+    <table>
+      ${row('窗口化观测数', w.windowed_observations)}
+      ${row('峰值窗口数', w.peak_window_count)}
+    </table>
+    <div class="cause-head" style="margin-top:8px">${opChips}</div>
+    <div class="kv" style="margin-top:6px">窗口类型分布</div>
+    <div class="chip-cloud">${typeChips}</div>
+    ${blockedTaps.length ? `<div class="alert warn" style="margin-top:10px">点击了 op=blocked 的 mark ${blockedTaps.length} 次：${blockedTaps.map(t => esc(`step ${t.step} ${t.tool}→${t.target_mark_id}`)).join('；')}</div>` : ''}
+  </div>`;
+}
 function renderDimensions() {
   const c = summary.context || {};
   const th = summary.tool_health || {};
   const g = summary.grounding || {};
   const v = summary.visual || {};
+  const w = summary.windowing || {};
   const m = summary.model || {};
   const usage = m.token_usage || {};
+  const resolver = summary.resolver || {};
+  const memory = summary.memory || {};
+  const rag = memory.memory_rag || {};
+  const episode = memory.episode || {};
+  const capabilities = summary.capabilities || {};
   const byTool = th.by_tool || {};
   const maxLat = Math.max(1, ...Object.values(byTool).map(st => st.p95_latency_ms || 0));
+  const routeStats = resolver.route_stats || {};
+  const routeRows = ['exact','lexical','pinyin','embedding'];
+  const capItems = capabilities.items || [];
+  const ragVerdict = (rag.candidate_count ?? 0) === 0 ? 'no candidates' : (rag.hit ? 'run hit' : 'run miss');
   document.getElementById('dimensions').innerHTML = `<div class="grid-2">
     <div class="card"><h2>模型</h2><table>
       ${row('调用次数', m.calls)}
@@ -625,6 +712,7 @@ function renderDimensions() {
       ${row('累计截图字节', v.total_image_bytes)}
       ${row('首个 / 末个截图步', `${v.first_image_step ?? '-'} / ${v.last_image_step ?? '-'}`)}
     </table></div>
+    ${renderWindowingCard(w)}
     <div class="card"><h2>Grounding</h2><table>
       ${row('by_mark_id / by_description', `${(g.mark_addressing||{}).by_mark_id ?? 0} / ${(g.mark_addressing||{}).by_description ?? 0}`)}
       ${row('解析失败 (ambiguous/stale/no_match)', `${(g.resolve_failures||{}).ambiguous ?? 0} / ${(g.resolve_failures||{}).stale ?? 0} / ${(g.resolve_failures||{}).no_match ?? 0}`)}
@@ -644,6 +732,51 @@ function renderDimensions() {
           <td style="min-width:120px"><div class="bar"><span style="width:${Math.round(100*(st.p95_latency_ms||0)/maxLat)}%"></span></div></td>
         </tr>`).join('') : '<tr><td colspan="8" class="muted">无工具调用</td></tr>'}
       </table>
+    </div>
+  </div>
+  <div class="dimension-stack">
+    <div class="card"><h2>应用名解析路分布</h2>
+      <table><tr><th>route</th><th>attempts</th><th>resolved</th><th>launch ok</th><th>解析率</th><th>启动率</th></tr>
+        ${routeRows.map(route => { const st = routeStats[route] || {}; return `<tr>
+          <td>${badge(route, route === 'embedding' ? 'accent' : '')}</td>
+          <td class="mono">${num(st.attempts ?? 0)}</td><td class="mono">${num(st.resolved ?? 0)}</td>
+          <td class="mono">${num(st.successful_launches ?? 0)}</td>
+          <td class="mono">${Math.round((st.resolution_rate || 0) * 100)}%</td>
+          <td class="mono">${Math.round((st.launch_success_rate || 0) * 100)}%</td>
+        </tr>`; }).join('')}
+      </table>
+      ${(resolver.attempts || []).length ? `<table style="margin-top:12px"><tr><th># / step</th><th>mention</th><th>route / type</th><th>top1 / rank_score / margin</th><th>decision</th><th>basis</th><th>launch</th></tr>
+        ${(resolver.attempts || []).map(a => `<tr><td class="mono">${num(a.launch_index)} / ${num(a.step)}</td>
+          <td class="wrap">${esc(a.mention)}</td><td>${badge(a.route || '-')} ${badge(a.match_type || '-')}</td>
+          <td class="mono wrap">${esc(a.top1_package || '-')} · ${num(a.top1_score)} · ${num(a.margin)}</td>
+          <td>${badge(a.decision || '-')}</td><td class="mono wrap">${esc(a.decision_basis || '-')}<br><span class="muted">${esc(a.reason || '')}</span></td>
+          <td class="mono wrap">${a.launch_succeeded ? '✓ ' + esc(a.launched_package) : '-'}</td></tr>`).join('')}
+      </table>` : '<div class="muted" style="margin-top:8px">无解析尝试。</div>'}
+    </div>
+    <div class="card"><h2>召回候选 vs 实际启动</h2>
+      <div class="cause-head">${badge('mode ' + (rag.mode || '-'))} ${badge('候选 ' + (rag.candidate_count ?? 0))} ${badge(ragVerdict, rag.hit ? 'success' : ((rag.candidate_count||0) ? 'error' : ''))}</div>
+      <div class="mono wrap muted">实际启动：${esc((rag.actual_launch_packages || []).join(', ') || '-')} · 命中：${esc((rag.matched_packages || []).join(', ') || '-')}</div>
+      <table style="margin-top:10px"><tr><th>rank</th><th>namespace / ref</th><th>score</th><th>候选包</th><th>命中</th></tr>
+        ${(rag.candidates || []).length ? (rag.candidates || []).map(cand => `<tr>
+          <td class="mono">${num(cand.rank)}</td><td class="mono wrap">${esc(cand.namespace || '-')}<br><span class="muted">${esc(cand.ref_id || '-')}</span></td>
+          <td class="mono">${num(cand.score)}</td><td class="mono wrap">${esc((cand.packages || []).join(', ') || '-')}</td>
+          <td>${badge(cand.hit ? 'hit' : 'miss', cand.hit ? 'success' : 'pending')}</td></tr>`).join('') : '<tr><td colspan="5" class="muted">无 run_start memory_rag 候选。</td></tr>'}
+      </table>
+    </div>
+    <div class="card"><h2>别名生命周期与 run 产物</h2>
+      <table><tr><th>op</th><th>kind</th><th>term</th><th>package 变更</th><th>ts</th></tr>
+        ${(memory.alias_events || []).length ? (memory.alias_events || []).map(event => `<tr>
+          <td>${badge(event.op || '-')}</td><td class="mono">${esc(event.kind || '-')}</td><td class="wrap">${esc(event.term || '-')}</td>
+          <td class="mono wrap">${esc(event.old_package || event.package || '-')} ${event.new_package ? '→ ' + esc(event.new_package) : ''}</td>
+          <td class="mono wrap">${esc(event.ts || '-')}</td></tr>`).join('') : '<tr><td colspan="5" class="muted">本 run 无 learned / overwritten / user 写入事件。</td></tr>'}
+      </table>
+      <div class="cause-src"><strong>injected_lessons</strong> <span class="mono wrap">${esc((episode.injected_lessons || []).join(', ') || '-')}</span><br>
+        <strong>deliverable_path</strong> <span class="mono wrap">${esc(episode.deliverable_path || '-')}</span></div>
+    </div>
+    <div class="card"><h2>能力挂载快照</h2>
+      <div class="chip-cloud">${capItems.length ? capItems.map(cap => badge(`${cap.cap_id}:${cap.mode}/${cap.state}`, cap.state === 'active' ? 'success' : (cap.state === 'pending' ? 'blocked' : 'pending'))).join('') : '<span class="muted">无 capability_snapshot（旧 run 或 trace 缺失）。</span>'}</div>
+      ${capItems.some(cap => (cap.missing_deps || []).length) ? `<table style="margin-top:10px"><tr><th>cap_id</th><th>missing deps</th></tr>${capItems.filter(cap => (cap.missing_deps || []).length).map(cap => `<tr><td class="mono">${esc(cap.cap_id)}</td><td class="mono wrap">${esc(cap.missing_deps.join(', '))}</td></tr>`).join('')}</table>` : ''}
+      <div class="mono wrap muted" style="margin-top:10px">memory generation: ${esc(JSON.stringify(capabilities.memory_generation ?? null))}</div>
     </div>
   </div>`;
 }

@@ -14,7 +14,6 @@ from phone_agent.config.app_registry import (
 )
 from phone_agent.config.apps import DEFAULT_APP_REGISTRY, DEFAULT_LAUNCH_TARGET_RESOLVER
 from phone_agent.config.timing import TIMING_CONFIG
-from phone_agent.grounding.accessibility import parse_uiautomator_marks
 
 
 @dataclass(frozen=True)
@@ -514,14 +513,68 @@ def launch_app(
 
 
 def dump_uiautomator_xml(
-    device_id: str | None = None, timeout: float | None = None
+    device_id: str | None = None,
+    timeout: float | None = None,
+    *,
+    windowed: str = "auto",
 ) -> str:
-    """Return the current Android UiAutomator hierarchy XML from stdout."""
+    """Return the current Android UiAutomator hierarchy XML from stdout.
 
+    WP-G2a windowed dual-mode (``windowed`` = ``auto`` | ``on`` | ``off``):
+
+    * ``off`` — legacy ``uiautomator dump /dev/tty`` (single ``<hierarchy>`` root).
+    * ``on``  — ``uiautomator dump --windows /dev/tty``; a device that does not
+      emit a ``<displays>`` root raises a visible error (no silent fallback).
+    * ``auto`` (default) — try ``--windows`` first; if the device does not
+      support it (timeout / no XML / no ``<displays>`` root) fall back to the
+      legacy dump so the caller always gets a usable tree.
+
+    The ``<?xml … </root>`` truncation now recognizes both roots: ``--windows``
+    output is ``<displays>…</displays>`` (with nested ``<hierarchy>`` blocks per
+    window), while the legacy dump is a single ``<hierarchy>…</hierarchy>``.
+    """
+
+    mode = str(windowed or "auto").strip().lower()
+    if mode not in {"auto", "on", "off"}:
+        mode = "auto"
     adb_prefix = _get_adb_prefix(device_id)
+
+    if mode in {"auto", "on"}:
+        payload: str | None = None
+        try:
+            raw = _run_uiautomator_dump(adb_prefix, windows=True, timeout=timeout)
+            payload = _extract_uiautomator_payload(raw)
+        except (TimeoutError, ValueError):
+            payload = None
+        if payload and "<displays" in payload:
+            return payload
+        if mode == "on":
+            raise ValueError(
+                "UiAutomator --windows dump unavailable on this device"
+            )
+        # auto: --windows produced a usable non-windowed tree — reuse it rather
+        # than paying for a second dump.
+        if payload:
+            return payload
+        # auto: --windows failed outright — fall through to the legacy dump.
+
+    return _extract_uiautomator_payload(
+        _run_uiautomator_dump(adb_prefix, windows=False, timeout=timeout)
+    )
+
+
+def _run_uiautomator_dump(
+    adb_prefix: list[str], *, windows: bool, timeout: float | None
+) -> subprocess.CompletedProcess:
+    """Run one ``uiautomator dump`` invocation; raise TimeoutError on timeout."""
+
+    command = adb_prefix + ["exec-out", "uiautomator", "dump"]
+    if windows:
+        command.append("--windows")
+    command.append("/dev/tty")
     try:
-        result = subprocess.run(
-            adb_prefix + ["exec-out", "uiautomator", "dump", "/dev/tty"],
+        return subprocess.run(
+            command,
             capture_output=True,
             text=True,
             encoding="utf-8",
@@ -530,41 +583,31 @@ def dump_uiautomator_xml(
         )
     except subprocess.TimeoutExpired as exc:
         raise TimeoutError("UiAutomator dump timed out") from exc
+
+
+def _extract_uiautomator_payload(result: subprocess.CompletedProcess) -> str:
+    """Slice ``<?xml … </root>`` from stdout for the ``<displays>``/``<hierarchy>`` root."""
+
     output = result.stdout or ""
     marker = "<?xml"
     start = output.find(marker)
-    end = output.find("</hierarchy>", start)
     if result.returncode != 0 or start < 0:
         raise ValueError("No UiAutomator XML output")
-    if end < 0:
+    close_tag = _root_closing_tag(output, start)
+    end = output.rfind(close_tag)
+    if end < start:
         raise ValueError("Incomplete UiAutomator XML output")
-    return output[start : end + len("</hierarchy>")].strip()
+    return output[start : end + len(close_tag)].strip()
 
 
-def get_screen_marks(
-    device_id: str | None = None,
-    *,
-    width: int | None = None,
-    height: int | None = None,
-    timeout: float | None = None,
-    max_marks: int = 80,
-) -> list[dict]:
-    """Return Accessibility/UiAutomator marks in normalized 0-1000 coordinates."""
+def _root_closing_tag(output: str, start: int) -> str:
+    """Pick ``</displays>`` when the root is a windows dump, else ``</hierarchy>``."""
 
-    xml_text = dump_uiautomator_xml(device_id, timeout=timeout)
-    if width is None or height is None:
-        from phone_agent.adb.screenshot import get_screenshot
-
-        screenshot = get_screenshot(device_id)
-        width = int(getattr(screenshot, "width", 0) or 0)
-        height = int(getattr(screenshot, "height", 0) or 0)
-    return parse_uiautomator_marks(
-        xml_text,
-        screen_width=int(width or 0),
-        screen_height=int(height or 0),
-        source="uiautomator",
-        max_marks=max_marks,
-    )
+    displays = output.find("<displays", start)
+    hierarchy = output.find("<hierarchy", start)
+    if displays != -1 and (hierarchy == -1 or displays < hierarchy):
+        return "</displays>"
+    return "</hierarchy>"
 
 
 def _resolve_launcher_component(adb_prefix: list[str], package: str) -> str | None:

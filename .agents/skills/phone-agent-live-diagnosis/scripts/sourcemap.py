@@ -66,11 +66,45 @@ V2_SOURCE_RULES: dict[str, dict[str, Any]] = {
         "title": "应用启动被拒 / 未安装 / 歧义 / 未知",
         "files": [
             "phone_agent/v2/tools/actuation.py",
+            "phone_agent/v2/names.py",
             "phone_agent/config/apps.py",
             "phone_agent/config/policy.py",
         ],
         "suggestion": "核对 app registry / launch policy：denied 走安全策略，not_installed/unknown 走清单，ambiguous 需更精确的名字。",
         "verify": "分别用受限 app、未安装 app、歧义名运行 launch_app，确认返回码与提示准确。",
+    },
+    "resolver": {
+        "layer": "resolver",
+        "severity": "P1",
+        "title": "应用名解析未决（排序候选 / margin）",
+        "files": [
+            "phone_agent/v2/names.py",
+            "phone_agent/v2/tools/actuation.py",
+            "phone_agent/v2/middleware/trace.py",
+        ],
+        "suggestion": (
+            "核对 names.py 的 exact/lexical/pinyin/embedding 四路候选、按 package 去重排序、"
+            "match_type 类型化决策与 legacy 分支；结合 resolution_attempt trace 检查候选来源、"
+            "match_type、decision_basis 和分差。"
+        ),
+        "verify": (
+            "构造弱证据、强证据并列和 legacy 回退应用名，确认 unknown/ambiguous/resolved "
+            "回执与 resolution_attempt 的 decision/winner/candidates/match_type 一致。"
+        ),
+    },
+    "deliverable": {
+        "layer": "deliverable",
+        "severity": "P1",
+        "title": "运行绑定产出物写入 / 更新",
+        "files": [
+            "phone_agent/v2/tools/deliverable.py",
+            "phone_agent/v2/capabilities.py",
+        ],
+        "suggestion": (
+            "核对 run_id 派生的唯一 HTML 路径、256 KiB 上限以及 create/update 状态；"
+            "既有文件用 update_document，缺失文件先 write_document。"
+        ),
+        "verify": "分别覆盖首次创建、重复创建、缺失更新、超限和 symlink，确认失败不改变原文档。",
     },
     "finish_gate": {
         "layer": "finish",
@@ -114,14 +148,32 @@ V2_SOURCE_RULES: dict[str, dict[str, Any]] = {
     "observation": {
         "layer": "observation",
         "severity": "P1",
-        "title": "再观测失败（截图不可用被吞）",
+        "title": "再观测失败（非保护页截图 / 采样异常）",
         "files": [
             "phone_agent/v2/tools/_obs.py",
             "phone_agent/v2/session.py",
             "phone_agent/adb/screenshot.py",
         ],
-        "suggestion": "auto_observation 吞掉 ScreenshotError 只记 note——动作成功但再观测失败会掩盖后续 stale mark，关注连续 obs_capture_failed。",
-        "verify": "在安全页/黑屏页运行，确认 [OBS] (re-observation failed:) 出现且不伪装成新状态。",
+        "suggestion": "auto_observation 把非 secure 的 ScreenshotError 只记为 note——动作成功但再观测失败会掩盖后续 stale mark，关注连续 obs_capture_failed。",
+        "verify": "模拟非 secure 的截图/采样失败，确认 [OBS] (re-observation failed:) 出现且不伪装成新状态。",
+    },
+    "secure_screenshot": {
+        "layer": "observation",
+        "severity": "P0",
+        "title": "系统保护页 / 黑屏保护阻断截图",
+        "files": [
+            "phone_agent/v2/tools/_obs.py",
+            "phone_agent/v2/session.py",
+            "phone_agent/adb/screenshot.py",
+        ],
+        "suggestion": (
+            "secure_screenshot_blocked 是 fail-closed 的受保护页事实：不使用占位黑图，也不沿用旧 mark；"
+            "若 accessibility 无可用 mark，登录/支付流程应 take_over。"
+        ),
+        "verify": (
+            "用系统拒绝 screencap 与 RGB maxima <=4 两条路径触发保护，确认回执无 image、批次失效，"
+            "关闭 PHONE_AGENT_BLACK_SCREEN_DETECT 时仅绕过像素黑屏检测。"
+        ),
     },
     "context": {
         "layer": "context",
@@ -153,6 +205,31 @@ V2_SOURCE_RULES: dict[str, dict[str, Any]] = {
         "files": ["phone_agent/v2/model.py", "phone_agent/v2/agent.py"],
         "suggestion": "网关在 Cloudflare 后需浏览器式 UA；采样上限按模型强制。高延迟核对 prompt 前缀缓存与图像剪裁。",
         "verify": "对比连续 step 的 model_request.context_chars 是否受控，确认无缓存击穿。",
+    },
+    "recall": {
+        "layer": "memory",
+        "severity": "P2",
+        "title": "分榜召回 / 增量索引 / 召回指标",
+        "files": ["phone_agent/v2/recall.py"],
+        "suggestion": (
+            "分别核对确定性 App mention 榜与 episode 语义榜；top_k 只约束 episode。"
+            "索引漂移查 incremental_upsert/reconcile_index，指标漂移查 schema-v2 显式分母。"
+        ),
+        "verify": (
+            "覆盖 app_alias 不占 episode quota、增量写后可检索、reconcile 清理缺失项，"
+            "并核对 hit@1、conditional hit、package precision/recall 的分母。"
+        ),
+    },
+    "capabilities": {
+        "layer": "assembly",
+        "severity": "P1",
+        "title": "能力挂载与释放",
+        "files": ["phone_agent/v2/capabilities.py"],
+        "suggestion": (
+            "核对 middleware/tools/prompt/start-end hooks/CLI 五个挂载缝及 cap_id 所有权；"
+            "pending/off 不应用，mode 变化先 release 再 apply。"
+        ),
+        "verify": "逐能力切换 on/shadow/off，确认顺序稳定、重复 reconcile 幂等且 release 后零残留。",
     },
 }
 
