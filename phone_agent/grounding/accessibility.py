@@ -4,11 +4,26 @@ WP-G2a adds *windowed marks* — a pure display-layer upgrade. The parser no
 longer flattens the tree with ``root.iter("node")``; it groups nodes by window
 (a real ``<window>`` from a ``--windows`` dump, or an inferred window per
 top-level hierarchy node), records a sparse semantic container path per node,
-and labels each mark with a four-state actionability evidence tag. None of this
-touches addressing, tool execution, the safety gate, folding, or locate: the
-mark id sequence, dedup, ``max_marks`` cut, and every legacy field are produced
-in exactly the same order as before so a legacy ``<hierarchy>`` dump yields a
-byte-identical mark list; the windowed metadata is purely additive.
+and labels each mark with a four-state actionability evidence tag.
+
+WP-G2cA (parser-layer fixes, still pure display layer):
+* A1 — the ``max_marks`` cut is a per-window fair-share quota (each window gets
+  a guaranteed floor before the remainder is filled by window priority) so a
+  top-layer popup is never starved by a content window that fills the budget
+  first. ``parse_summary`` gains ``total_candidates`` (pre-truncation count) and
+  ``per_window_counts``.
+* A2 — the dedup key carries ``window_id`` so a popup and the background never
+  merge on identical bbox/role/text.
+* A3 — one DFS per window builds records *and* tallies dominant package/display
+  id (the old triple traversal is gone); actionability is computed only for the
+  marks that survive the quota.
+* A4 — the dead ``disabled``/``invisible`` ``blocked`` branch is removed
+  (those nodes are already dropped by ``_is_candidate_node``).
+
+None of this touches addressing, tool execution, the safety gate, folding, or
+locate: for a legacy ``<hierarchy>`` dump a single window keeps the historic
+document order, so the mark id sequence, dedup, ``max_marks`` cut, and every
+legacy field are byte-identical; the windowed metadata is purely additive.
 """
 
 from __future__ import annotations
@@ -17,7 +32,7 @@ import hashlib
 import re
 import time
 import xml.etree.ElementTree as ET
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from phone_agent.grounding.provider import MarkCandidate, MarkProviderHint, MarkProviderResult, ScreenBinding
@@ -141,18 +156,36 @@ def _parse_uiautomator_xml(
     summary["window_source"] = window_source
     summary["window_count"] = len(windows)
 
-    # Flatten every window's subtree in document order. Concatenating each
-    # window's pre-order DFS reproduces the exact node sequence the legacy
-    # ``root.iter("node")`` produced, so the mark ids / dedup / ``max_marks``
-    # cut are byte-identical for a legacy ``<hierarchy>`` dump — only the
-    # per-node window/container/actionability metadata is new.
+    # Single DFS per window (WP-G2cA A3): ``_collect_nodes`` now folds the
+    # dominant-package / dominant-display counting into the one pre-order walk
+    # that builds the node records, so the common single-window path costs ~1
+    # traversal instead of the old 3 (collect + dominant_package +
+    # dominant_display). Concatenating each window's pre-order DFS reproduces the
+    # exact node sequence the legacy ``root.iter("node")`` produced, so the mark
+    # ids / dedup / ``max_marks`` cut stay byte-identical for a legacy
+    # ``<hierarchy>`` dump — only the per-node window/container/actionability
+    # metadata is new.
     records: list[_NodeRecord] = []
-    for window, root_elem in windows:
-        _collect_nodes(root_elem, window, records)
+    finalized: list[tuple[WindowRecord, ET.Element]] = []
+    for base_window, root_elem in windows:
+        window_records: list[_NodeRecord] = []
+        pkg_counts: dict[str, int] = {}
+        display_counts: dict[int, int] = {}
+        _collect_nodes(root_elem, base_window, window_records, pkg_counts, display_counts)
+        window = _finalize_window(base_window, root_elem, pkg_counts, display_counts)
+        for rec in window_records:
+            rec.window = window
+        records.extend(window_records)
+        finalized.append((window, root_elem))
+    windows = finalized
     summary["raw_node_count"] = len(records)
 
-    marks: list[dict[str, Any]] = []
-    seen: set[tuple[int, int, int, int, str, str]] = set()
+    # Phase 1 — collect every dedup-passing candidate mark in document order,
+    # tagging its window. ``total_candidates`` is this pre-truncation total
+    # (parallel package B renders ``marks (80/124)`` from it — see summary keys).
+    candidates: list[tuple[_NodeRecord, dict[str, Any]]] = []
+    seen: set[tuple[int, int, int, int, str, str, str]] = set()
+    per_window_counts: dict[str, int] = {}
     for rec in records:
         attrs = rec.attrs
         role = rec.role
@@ -167,25 +200,26 @@ def _parse_uiautomator_xml(
         if x2 <= x1 or y2 <= y1:
             summary["filtered_zero_area_count"] += 1
             continue
-        if len(marks) >= max_marks:
-            continue
-        actionability, reasons = _compute_actionability(rec, windows)
         parsed = _node_to_mark_from_parts(
             attrs,
             bounds=raw_bounds,
             role=role,
             text=text,
-            index=len(marks) + 1,
+            index=0,  # placeholder; real ax_N is assigned after quota selection
             width=screen_width,
             height=screen_height,
             source=source,
             window=rec.window,
             container_path=rec.container_path,
-            actionability=actionability,
-            actionability_reasons=reasons,
+            actionability=None,  # computed lazily for kept marks only (A3)
+            actionability_reasons=(),
         )
         if parsed is None:
             continue
+        # WP-G2cA A2: the dedup key carries ``window_id`` so a popup and the
+        # background never merge just because they share bbox/role/text. A legacy
+        # single window makes ``window_id`` a constant ("W1"), so dedup stays
+        # byte-identical; a windowless caller yields "" (None-compatible).
         key = (
             int(parsed["bbox"][0]),
             int(parsed["bbox"][1]),
@@ -193,10 +227,31 @@ def _parse_uiautomator_xml(
             int(parsed["bbox"][3]),
             str(parsed.get("role") or ""),
             str(parsed.get("text_summary") or ""),
+            str(parsed.get("window_id") or ""),
         )
         if key in seen:
             continue
         seen.add(key)
+        candidates.append((rec, parsed))
+        wid = str(parsed.get("window_id") or "")
+        per_window_counts[wid] = per_window_counts.get(wid, 0) + 1
+
+    summary["total_candidates"] = len(candidates)
+    summary["per_window_counts"] = per_window_counts
+
+    # Phase 2 — fair-share window quota (A1). Below budget every candidate is
+    # kept, so a single window stays byte-identical; over budget each window is
+    # guaranteed a floor before the remainder is filled by window priority.
+    kept = _select_by_window_quota(candidates, max_marks)
+
+    # Phase 3 — number in document order (byte-identical ax_N for legacy) and
+    # compute actionability for the kept candidate marks only.
+    marks: list[dict[str, Any]] = []
+    for rec, parsed in kept:
+        parsed["mark_id"] = f"ax_{len(marks) + 1}"
+        actionability, reasons = _compute_actionability(rec, windows)
+        parsed["actionability"] = actionability
+        parsed["actionability_reasons"] = tuple(reasons)
         marks.append(parsed)
     summary["mark_count"] = len(marks)
     summary["actionability_counts"] = _actionability_counts(marks)
@@ -205,6 +260,65 @@ def _parse_uiautomator_xml(
         "parse_summary": summary,
         "windows": _window_structures(windows, marks),
     }
+
+
+# Per-window guaranteed floor for the fair-share quota (A1): each window that
+# has candidates is reserved at least ``min(_WINDOW_QUOTA_FLOOR, max_marks // n)``
+# slots before the remaining budget is filled by window priority (layer desc,
+# weak windows in document order). Keeps a top-layer popup from being starved of
+# marks by a content window that fills ``max_marks`` first.
+_WINDOW_QUOTA_FLOOR = 8
+
+
+def _select_by_window_quota(
+    candidates: list[tuple[_NodeRecord, dict[str, Any]]],
+    max_marks: int,
+) -> list[tuple[_NodeRecord, dict[str, Any]]]:
+    """Pick ≤ ``max_marks`` candidates with a per-window floor, doc order kept.
+
+    Below budget everything survives (single window ⇒ byte-identical). Over
+    budget: bucket by window, reserve ``guarantee`` slots per window, then fill
+    the remainder by window priority (higher layer first, weak windows by
+    document/root order). The kept set is returned in original document order so
+    ax_N numbering matches the legacy flat flatten for a single window.
+    """
+
+    if len(candidates) <= max_marks:
+        return list(candidates)
+
+    buckets: dict[str, list[int]] = {}
+    window_by_id: dict[str, WindowRecord] = {}
+    for pos, (rec, _parsed) in enumerate(candidates):
+        win = rec.window
+        buckets.setdefault(win.window_id, []).append(pos)
+        window_by_id.setdefault(win.window_id, win)
+
+    n = len(buckets)
+    guarantee = min(_WINDOW_QUOTA_FLOOR, max_marks // n) if n else 0
+
+    def _priority(window_id: str) -> tuple[bool, int, int]:
+        win = window_by_id[window_id]
+        # layer desc for real windows; weak (layer None) sort last by root order.
+        return (win.layer is None, -(win.layer or 0), win.root_index)
+
+    ordered = sorted(buckets, key=_priority)
+
+    selected: set[int] = set()
+    for window_id in ordered:
+        for pos in buckets[window_id][:guarantee]:
+            selected.add(pos)
+    remaining = max_marks - len(selected)
+    if remaining > 0:
+        for window_id in ordered:
+            for pos in buckets[window_id][guarantee:]:
+                if remaining <= 0:
+                    break
+                if pos not in selected:
+                    selected.add(pos)
+                    remaining -= 1
+            if remaining <= 0:
+                break
+    return [candidates[i] for i in sorted(selected)]
 
 
 
@@ -220,6 +334,13 @@ def _empty_parse_summary() -> dict[str, Any]:
         "window_source": "none",
         "window_count": 0,
         "actionability_counts": {},
+        # WP-G2cA A1: candidate accounting for the fair-share window quota.
+        # ``total_candidates`` is the dedup-passing candidate count *before* the
+        # ``max_marks`` truncation (parallel package B renders ``marks (80/124)``
+        # from ``mark_count``/``total_candidates`` — do not rename these keys).
+        # ``per_window_counts`` maps window_id -> candidate count (pre-truncation).
+        "total_candidates": 0,
+        "per_window_counts": {},
     }
 
 
@@ -561,7 +682,8 @@ def _windows_from_displays(
                 layer=_int_or_none(win.get("layer")),
                 window_type=(win.get("type") or None),
                 title=(win.get("title") or None),
-                package=_dominant_package(root_elem),
+                # package resolved in _finalize_window from the single DFS (A3).
+                package=None,
                 bounds=_parse_bounds(win.get("bounds") or ""),
                 active=win.get("active") == "true",
                 focused=win.get("focused") == "true",
@@ -600,11 +722,12 @@ def _inferred_window(
         bounds = _parse_bounds(elem.get("bounds") or "")
     return WindowRecord(
         window_id=window_id,
-        display_id=_dominant_display_id(elem),
+        # display_id / package resolved in _finalize_window from the single DFS (A3).
+        display_id=None,
         layer=None,
         window_type=None,
         title=None,
-        package=_dominant_package(elem),
+        package=None,
         bounds=bounds,
         active=elem.get("focused") == "true",
         focused=elem.get("focused") == "true",
@@ -617,6 +740,8 @@ def _collect_nodes(
     root_elem: ET.Element,
     window: WindowRecord,
     out: list[_NodeRecord],
+    pkg_counts: dict[str, int],
+    display_counts: dict[int, int],
 ) -> None:
     """Pre-order DFS over ``<node>`` descendants, carrying a container path.
 
@@ -624,12 +749,23 @@ def _collect_nodes(
     us track depth and the sparse semantic container ancestry. When ``root_elem``
     is itself a ``<node>`` (an inferred window built from a top-level hierarchy
     node) that node is included too, matching the legacy flat traversal.
+
+    WP-G2cA A3: this one walk also tallies ``pkg_counts`` / ``display_counts``
+    for the window (dominant package / display id), replacing the two extra
+    ``elem.iter("node")`` passes ``_dominant_package`` / ``_dominant_display_id``
+    used to make.
     """
 
     def emit(elem: ET.Element, path: tuple[str, ...], depth: int) -> None:
         attrs = dict(elem.attrib)
         role = _role_from_class(attrs.get("class") or "")
         text = _node_text(attrs)
+        pkg = (attrs.get("package") or "").strip()
+        if pkg:
+            pkg_counts[pkg] = pkg_counts.get(pkg, 0) + 1
+        did = _int_or_none(attrs.get("display-id"))
+        if did is not None:
+            display_counts[did] = display_counts.get(did, 0) + 1
         out.append(
             _NodeRecord(
                 attrs=attrs,
@@ -657,6 +793,42 @@ def _collect_nodes(
             emit(child, (), 0)
 
 
+def _finalize_window(
+    base: WindowRecord,
+    root_elem: ET.Element,
+    pkg_counts: dict[str, int],
+    display_counts: dict[int, int],
+) -> WindowRecord:
+    """Fill the dominant package / display id gathered during the single DFS.
+
+    ``_windows_from_displays`` / ``_inferred_window`` build a ``WindowRecord``
+    with ``package``/``display_id`` left unresolved; A3 resolves them here from
+    the tallies collected while walking the subtree, matching the old
+    ``_dominant_*`` results (including the empty-tree fallback to the root
+    element's own attribute).
+    """
+
+    package = _dominant_from_counts(pkg_counts)
+    if package is None:
+        package = (root_elem.get("package") or "").strip() or None
+    # Strong windows already carry the authoritative ``display_id`` from the
+    # ``<display id=…>`` attribute; only weak (inferred) windows derive it from
+    # the node tally (matching the old ``_dominant_display_id``).
+    if base.source_confidence == "strong":
+        display_id = base.display_id
+    else:
+        display_id = _dominant_from_counts(display_counts)
+    if base.package == package and base.display_id == display_id:
+        return base
+    return replace(base, package=package, display_id=display_id)
+
+
+def _dominant_from_counts(counts: dict[Any, int]) -> Any:
+    if not counts:
+        return None
+    return max(counts.items(), key=lambda kv: (kv[1], kv[0]))[0]
+
+
 
 def _container_kind(attrs: dict[str, str], role: str) -> str | None:
     """Classify a node into a semantic container kind, or ``None``.
@@ -681,25 +853,23 @@ def _container_kind(attrs: dict[str, str], role: str) -> str | None:
 def _compute_actionability(
     rec: _NodeRecord, windows: list[tuple[WindowRecord, ET.Element]]
 ) -> tuple[str, tuple[str, ...]]:
-    """Four-state evidence label for one node (WP-G2a §2).
+    """Four-state evidence label for one node (WP-G2a §2, WP-G2cA A4).
 
-    * ``blocked`` — only from real evidence: the node is ``enabled=false`` /
-      ``visible-to-user=false``, or a *strong* window with a higher layer covers
-      this node's center. Heuristic (weak) windows never emit ``blocked``.
-    * ``confirmed`` — a strong window's enabled node whose center is not covered
-      by any higher strong window.
+    Only ever runs on nodes that already passed ``_is_candidate_node``, so a
+    ``disabled`` / ``visible-to-user=false`` node can never reach here — the old
+    ``blocked`` branch for those was dead code and is removed (A4). The three
+    reachable outcomes:
+
+    * ``blocked`` — real evidence only: a *strong* window with a higher layer
+      covers this node's center. Heuristic (weak) windows never emit ``blocked``.
+    * ``confirmed`` — a strong window's node whose center is not covered by any
+      higher strong window.
     * ``likely`` — the default for a plain accessibility candidate.
     * ``unknown`` — a weak-window node that a higher inferred window seems to
       cover (occlusion is a hint only, never a hard block).
     """
 
-    attrs = rec.attrs
     reasons: list[str] = []
-    if attrs.get("enabled") == "false":
-        return "blocked", ("disabled",)
-    if attrs.get("visible-to-user") == "false":
-        return "blocked", ("invisible",)
-
     win = rec.window
     center = _bounds_center(rec.raw_bounds)
     strong = win.source_confidence == "strong"
@@ -822,27 +992,4 @@ def _point_in_bounds(
     x, y = point
     x1, y1, x2, y2 = bounds
     return x1 <= x <= x2 and y1 <= y <= y2
-
-
-def _dominant_package(elem: ET.Element) -> str | None:
-    counts: dict[str, int] = {}
-    for node in elem.iter("node"):
-        pkg = (node.get("package") or "").strip()
-        if pkg:
-            counts[pkg] = counts.get(pkg, 0) + 1
-    if not counts:
-        pkg = (elem.get("package") or "").strip()
-        return pkg or None
-    return max(counts.items(), key=lambda kv: (kv[1], kv[0]))[0]
-
-
-def _dominant_display_id(elem: ET.Element) -> int | None:
-    counts: dict[int, int] = {}
-    for node in elem.iter("node"):
-        did = _int_or_none(node.get("display-id"))
-        if did is not None:
-            counts[did] = counts.get(did, 0) + 1
-    if not counts:
-        return None
-    return max(counts.items(), key=lambda kv: (kv[1], kv[0]))[0]
 
