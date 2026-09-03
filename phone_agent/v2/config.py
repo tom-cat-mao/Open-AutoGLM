@@ -270,6 +270,7 @@ class V2Config:
     # L0 budget warn ratio (S1 §3.1): retained for backward compatibility. A4
     # re-based the budget from model-call count to token cost (see token_budget /
     # token_warn_remaining below); this field is no longer read by BudgetMiddleware.
+    # DEPRECATED (WP-G2cC): dead config — kept only for env/CLI compatibility, no reader.
     budget_warn_ratio: float = 0.8
     # L0 token budget (A4 §2): total token cost budget (input+output, summed from
     # usage_metadata). BudgetMiddleware injects a one-time remaining-token mirror
@@ -324,6 +325,9 @@ class V2Config:
     trace_enabled: bool = True
     # taskdoc (task board increment)
     taskdoc_enabled: bool = True
+    # DEPRECATED (WP-G2cC): dead config — the U3 output contract deleted the
+    # seen_states/nudged stagnation machinery; retained-but-deprecated no-op kept
+    # only for env/CLI compatibility, no reader.
     taskdoc_nudge_steps: int = 5
     # Run-bound, local single-page HTML output. The model never supplies a path;
     # write/update tools derive ``<deliverable_dir>/<run_id>.html``.
@@ -594,6 +598,11 @@ class V2Config:
             raise ValueError("PHONE_AGENT_LOCATE_MAX_SIZE must be 0 or a positive integer")
         if config.observe_settle_ms < 0:
             raise ValueError("PHONE_AGENT_OBSERVE_SETTLE_MS must be non-negative")
+        if config.accessibility_max_marks <= 0:
+            raise ValueError(
+                "PHONE_AGENT_ACCESSIBILITY_MAX_MARKS must be positive "
+                "(an illegal value would silently yield 0 marks)"
+            )
         if config.locateanything_context_max_chars < 0:
             raise ValueError(
                 "PHONE_AGENT_LOCATEANYTHING_CONTEXT_MAX_CHARS must be non-negative"
