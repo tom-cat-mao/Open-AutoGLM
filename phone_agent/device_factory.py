@@ -1,6 +1,5 @@
 """Device factory for Android ADB device control."""
 
-from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Iterable
 
@@ -8,25 +7,6 @@ from phone_agent.config.app_registry import (
     ForegroundAppObservation,
     InstalledAppInventory,
 )
-
-
-@dataclass(frozen=True)
-class CapturedDeviceObservation:
-    """Stable foreground facts and screenshot captured in one sampling window."""
-
-    screenshot: Any
-    foreground: ForegroundAppObservation
-    observation_epoch: int
-    attempts: int
-
-
-class ObservationCaptureError(RuntimeError):
-    """Raised when a stable composite device observation cannot be captured."""
-
-    def __init__(self, code: str, *, attempts: int) -> None:
-        super().__init__(code)
-        self.code = code
-        self.attempts = attempts
 
 
 class DeviceType(Enum):
@@ -51,7 +31,6 @@ class DeviceFactory:
         """
         self.device_type = device_type
         self._module = None
-        self._observation_epoch = 0
 
     @property
     def module(self):
@@ -81,26 +60,6 @@ class DeviceFactory:
             if "black_screen_detect" not in str(exc):
                 raise
             return self.module.get_screenshot(device_id, timeout)
-
-    def get_screen_marks(
-        self,
-        device_id: str | None = None,
-        *,
-        width: int | None = None,
-        height: int | None = None,
-        timeout: float | None = None,
-        max_marks: int = 80,
-    ) -> list[dict]:
-        """Get normalized Accessibility/UiAutomator marks from the device."""
-        if not hasattr(self.module, "get_screen_marks"):
-            return []
-        return self.module.get_screen_marks(
-            device_id,
-            width=width,
-            height=height,
-            timeout=timeout,
-            max_marks=max_marks,
-        )
 
     def dump_uiautomator_xml(
         self,
@@ -144,30 +103,6 @@ class DeviceFactory:
 
             return DEFAULT_APP_REGISTRY.foreground_observation(component)
         raise ValueError("Foreground app observation is unavailable")
-
-    def capture_observation(
-        self,
-        device_id: str | None = None,
-        *,
-        timeout: int = 10,
-        max_attempts: int = 2,
-    ) -> CapturedDeviceObservation:
-        """Capture a screenshot bracketed by matching foreground observations."""
-
-        attempts = max(1, int(max_attempts))
-        for attempt in range(1, attempts + 1):
-            before = self.get_foreground_app(device_id)
-            screenshot = self.get_screenshot(device_id, timeout)
-            after = self.get_foreground_app(device_id)
-            if before.component_name and before.component_name == after.component_name:
-                self._observation_epoch += 1
-                return CapturedDeviceObservation(
-                    screenshot=screenshot,
-                    foreground=after,
-                    observation_epoch=self._observation_epoch,
-                    attempts=attempt,
-                )
-        raise ObservationCaptureError("observation_unstable", attempts=attempts)
 
     def get_installed_app_inventory(
         self, device_id: str | None = None

@@ -17,7 +17,6 @@ from phone_agent.adb.device import (
     get_app_labels,
     get_installed_app_inventory,
     get_focused_window_or_app,
-    get_screen_marks,
     get_top_activity,
     home,
     is_keyboard_visible,
@@ -59,7 +58,6 @@ __all__ = [
     "long_press",
     "launch_app",
     "dump_uiautomator_xml",
-    "get_screen_marks",
     # Connection management
     "ADBConnection",
     "DeviceInfo",

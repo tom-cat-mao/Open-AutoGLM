@@ -14,7 +14,6 @@ from phone_agent.config.app_registry import (
 )
 from phone_agent.config.apps import DEFAULT_APP_REGISTRY, DEFAULT_LAUNCH_TARGET_RESOLVER
 from phone_agent.config.timing import TIMING_CONFIG
-from phone_agent.grounding.accessibility import parse_uiautomator_marks
 
 
 @dataclass(frozen=True)
@@ -609,33 +608,6 @@ def _root_closing_tag(output: str, start: int) -> str:
     if displays != -1 and (hierarchy == -1 or displays < hierarchy):
         return "</displays>"
     return "</hierarchy>"
-
-
-
-def get_screen_marks(
-    device_id: str | None = None,
-    *,
-    width: int | None = None,
-    height: int | None = None,
-    timeout: float | None = None,
-    max_marks: int = 80,
-) -> list[dict]:
-    """Return Accessibility/UiAutomator marks in normalized 0-1000 coordinates."""
-
-    xml_text = dump_uiautomator_xml(device_id, timeout=timeout)
-    if width is None or height is None:
-        from phone_agent.adb.screenshot import get_screenshot
-
-        screenshot = get_screenshot(device_id)
-        width = int(getattr(screenshot, "width", 0) or 0)
-        height = int(getattr(screenshot, "height", 0) or 0)
-    return parse_uiautomator_marks(
-        xml_text,
-        screen_width=int(width or 0),
-        screen_height=int(height or 0),
-        source="uiautomator",
-        max_marks=max_marks,
-    )
 
 
 def _resolve_launcher_component(adb_prefix: list[str], package: str) -> str | None:

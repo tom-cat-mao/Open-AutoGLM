@@ -67,8 +67,26 @@ def _message_has_obs_marks(message: Any) -> bool:
     return False
 
 
+def _image_block_screen_seq(block: Any) -> int | None:
+    """Return the ``screen_seq`` carried on an image block, if any.
+
+    Tools stamp the real observation sequence onto the image block
+    (``{image_url, screen_seq}``); the placeholder reuses it so the pruned
+    marker points back at the true frame instead of a crop-order counter.
+    """
+    if isinstance(block, dict):
+        seq = block.get("screen_seq")
+        if isinstance(seq, int):
+            return seq
+    return None
+
+
 def _prune_message_images(message: Any, screen_no: int) -> bool:
     """Replace image blocks in *message* with a text placeholder in place.
+
+    ``screen_no`` is the fallback crop-order counter; when the image block
+    carries a real ``screen_seq`` that value is used instead so the placeholder
+    points back at the true frame.
 
     Returns ``True`` if the message was modified.
     """
@@ -79,8 +97,10 @@ def _prune_message_images(message: Any, screen_no: int) -> bool:
     changed = False
     for block in content:
         if _is_image_block(block):
+            seq = _image_block_screen_seq(block)
+            label_no = seq if seq is not None else screen_no
             new_content.append(
-                {"type": "text", "text": f"[screen#{screen_no} 已剪除]"}
+                {"type": "text", "text": f"[screen#{label_no} 已剪除]"}
             )
             changed = True
         else:
@@ -134,7 +154,8 @@ class ContextPruningMiddleware(AgentMiddleware):
             return []
         prune_indices = image_indices[: -self.keep_images]
         modified: list[Any] = []
-        # Number pruned screens in chronological order (oldest = screen#1).
+        # Prefer the real screen_seq on each image block; the chronological
+        # counter (oldest = screen#1) is only a fallback when it is absent.
         for screen_no, idx in enumerate(prune_indices, start=1):
             if _prune_message_images(messages[idx], screen_no):
                 modified.append(messages[idx])
