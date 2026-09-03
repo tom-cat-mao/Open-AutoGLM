@@ -40,6 +40,26 @@ sequenceDiagram
 
 每次成功观测使上一批 mark 全部过期；执行动作引用过期 mark 时在 `resolve_mark` 处拒绝。这保证模型操作的永远是最新一帧。
 
+## 窗口化 marks
+
+屏幕默认按窗口分组呈现（`uiautomator dump --windows`，设备不支持自动回退单根模式）：
+
+```
+W1 TYPE_SYSTEM com.android.permissioncontroller layer=42 active focus
+  ax_1@e12 | Button | 仅本次允许 | (500,522) | op=confirmed | path=dialog
+W2 TYPE_APPLICATION com.tencent.mm layer=10 covered_by=W1
+  ax_3@e12 | ImageButton | 返回 | (58,35) | op=blocked | path=toolbar
+```
+
+- 可操作性四档：confirmed（真窗口证据+未被覆盖）/ likely（默认）/ blocked（仅真 layer 证据：被高层弹窗覆盖）/ unknown；blocked 只展示不拦截；
+- 名额按窗口配额分配，顶层弹窗有保底；
+- 寻址语义不变：执行动作仍只认当前批次的 `ax_*@eN`；
+- dump 失败（超时/解析错）触发一次重试，最终失败在观测文本显式标注，不装成“本屏无控件”。
+
+## App 名解析
+
+`launch_app("哔哩哔哩")` 的名字→包名解析分四层：归一化 → 多路候选生成（精确别名 / 词汇 / 拼音 / 嵌入向量）→ 先验排序 → 证据分型三态决策（resolved / ambiguous / unknown）。设备事实类强证据（精确别名、产品名恰为包名片段且全机唯一）才自动启动；弱证据（拼音、模糊、嵌入）只产出排序候选交由模型选择。名字匹配永不授予启动权限——装机事实与 launch policy 独立校验。
+
 ## 约束（P0）
 
 | 域 | 约束 |
@@ -64,6 +84,7 @@ sequenceDiagram
 | 流程线 | run 内 | 最近 8 步"意图→工具→结果"，从 transcript 推导 |
 | 应用清单/记忆 | 跨 run | App-KB 事实；将来注入晋升的经验 |
 | 截图 + marks | 每步 | 当前世界状态；历史图片滚动剪除 |
+| 窗口结构 | 每步 | marks 按窗口分组 + 可操作性标注（windowed dump 支持时） |
 
 成本由两道闸控制：token 预算（硬上限）与两级 auto-compact（0.75 提醒收敛、0.92 折叠历史）。两者均可配置，见[配置参考](configuration.md)。
 
