@@ -1,9 +1,9 @@
 """Offline lesson distillation and human-governed promotion.
 
-The mutation path is deliberately outside the actor hot path: it reads
-privacy-minimal episode outcomes and emits proposal/review events.  The sole
-runtime bridge is a bounded, read-only selector for approved lessons; actor
-message construction remains owned by :mod:`phone_agent.v2.agent`.
+The mutation path is deliberately outside the actor hot path: it reads full
+episode outcomes and emits proposal/review events.  The sole runtime bridge is a
+bounded, read-only selector for approved lessons; actor message construction
+remains owned by :mod:`phone_agent.v2.agent`.
 events.jsonl is authoritative; lessons.json is a rebuildable current-version
 view.
 """
@@ -35,6 +35,7 @@ LESSON_EVENT_TYPES = frozenset(
         "lesson_proposed",
         "lesson_approved",
         "lesson_revoked",
+        "lesson_demoted",
         "lesson_superseded",
     }
 )
@@ -306,6 +307,10 @@ def _replay_lesson_events(events_path: Path) -> dict[str, LessonCandidate]:
                     current[lesson_id] = replace(candidate, status="approved")
                 elif kind == "lesson_revoked" and candidate.status != "revoked":
                     current[lesson_id] = replace(candidate, status="revoked")
+                elif kind == "lesson_demoted" and candidate.status == "approved":
+                    # Back to proposed at the same version; there is no
+                    # reinstatement path, so a revoked lesson stays revoked.
+                    current[lesson_id] = replace(candidate, status="proposed")
             except (KeyError, TypeError, ValueError, json.JSONDecodeError):
                 continue
     return current
@@ -417,6 +422,36 @@ class LessonStore:
             self._lessons[lesson_id] = revoked
             self._write_view()
             return revoked
+
+    def demote(self, lesson_id: str, reason: str) -> LessonCandidate:
+        """Withdraw an approved lesson back to proposed, keeping its version.
+
+        This is the evidence-loss counterpart of :meth:`approve`: a lesson whose
+        cited episodes no longer satisfy Rule-of-3 stops being injectable and
+        needs another human approval.  Revoked lessons are never reinstated.
+        """
+
+        clean_reason = _single_line(reason)
+        if not clean_reason:
+            raise ValueError("demote reason must not be empty")
+        with self._lock:
+            candidate = self._require(lesson_id)
+            if candidate.status != "approved":
+                raise ValueError("only an approved lesson can be demoted")
+            demoted = replace(candidate, status="proposed")
+            self._append(
+                {
+                    "type": "lesson_demoted",
+                    "schema_v": 1,
+                    "ts": time.time(),
+                    "lesson_id": lesson_id,
+                    "version": candidate.version,
+                    "reason": clean_reason,
+                }
+            )
+            self._lessons[lesson_id] = demoted
+            self._write_view()
+            return demoted
 
     def supersede(self, lesson_id: str, text: str) -> LessonCandidate:
         """Create a proposed revision while retaining the stable lesson id."""
@@ -647,14 +682,13 @@ def evaluate_promotion(
 
 
 def _task_key(episode: Mapping[str, Any]) -> str:
-    """Derive a non-identifying task key without exposing goal text to the model."""
+    """Derive a stable, readable task key from the episode goal text."""
 
     goal = _single_line(episode.get("goal_text")).casefold()
     for key, terms in _TASK_TERMS:
         if any(term in goal for term in terms):
             return key
-    digest = hashlib.sha256(goal.encode("utf-8")).hexdigest()[:12]
-    return f"task_{digest}"
+    return "task:" + goal[:48]
 
 
 def _episode_rows(events_path: Path) -> list[dict[str, Any]]:
@@ -683,51 +717,46 @@ def _episode_sort_key(item: Mapping[str, Any]) -> tuple[float, str]:
     return float(item.get("ts_end", 0.0)), str(item.get("run_id", ""))
 
 
-def _eligible_groups(
-    episodes: Sequence[Mapping[str, Any]],
-) -> list[list[dict[str, Any]]]:
-    """Group by app set and retain only evidence-qualified cohorts."""
+def _ledger_text(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    return _single_line(value) or None
 
-    by_apps: dict[tuple[str, ...], dict[bool, list[dict[str, Any]]]] = {}
-    for raw in episodes:
-        apps = tuple(sorted({str(app) for app in raw.get("apps", []) if app}))
-        episode = dict(raw)
-        by_apps.setdefault(apps, {False: [], True: []})[
-            bool(episode.get("success"))
-        ].append(episode)
 
-    eligible: list[list[dict[str, Any]]] = []
-    for buckets in by_apps.values():
-        failures = buckets[False]
-        successes = buckets[True]
-        contrasting = bool(
-            failures
-            and successes
-            and min(float(item.get("ts_end", 0.0)) for item in failures)
-            < max(float(item.get("ts_end", 0.0)) for item in successes)
-        )
-        if contrasting:
-            eligible.append(sorted([*failures, *successes], key=_episode_sort_key))
-            continue
-        repeated_reasons = {
-            reason
-            for reason, count in Counter(
-                _single_line(item.get("reason")) for item in failures
-            ).items()
-            if reason and count >= 2
-        }
-        for reason in sorted(repeated_reasons):
-            eligible.append(
-                sorted(
-                    [
-                        item
-                        for item in failures
-                        if _single_line(item.get("reason")) == reason
-                    ],
-                    key=_episode_sort_key,
+def _tool_ledgers(events_path: Path) -> dict[str, list[dict[str, Any]]]:
+    """Collect per-run step ledgers from the append-only experience log."""
+
+    ledgers: dict[str, list[dict[str, Any]]] = {}
+    if not events_path.exists():
+        return ledgers
+    with events_path.open("r", encoding="utf-8") as stream:
+        for line in stream:
+            try:
+                event = json.loads(line)
+                if (
+                    not isinstance(event, dict)
+                    or event.get("type") != "experience_event"
+                ):
+                    continue
+                run_id = str(event.get("run_id") or "")
+                if not run_id:
+                    continue
+                ledgers.setdefault(run_id, []).append(
+                    {
+                        "step": max(0, int(event.get("step", 0) or 0)),
+                        "tool": _ledger_text(event.get("tool")) or "unknown",
+                        "result_class": _ledger_text(event.get("result_class"))
+                        or "error",
+                        "app_package": _ledger_text(event.get("app_package")),
+                        "intent": _ledger_text(event.get("intent")),
+                        "note": _ledger_text(event.get("note")),
+                    }
                 )
-            )
-    return eligible
+            except (TypeError, ValueError, json.JSONDecodeError):
+                continue
+    for entries in ledgers.values():
+        entries.sort(key=lambda item: item["step"])
+    return ledgers
 
 
 def _scope_values(group: Sequence[Mapping[str, Any]]) -> dict[str, set[str]]:
@@ -740,44 +769,66 @@ def _scope_values(group: Sequence[Mapping[str, Any]]) -> dict[str, set[str]]:
     return {"devices": devices, "apps": apps}
 
 
-def _prompt_rows(group: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
-    """Render model evidence with no goal text or other user-authored content."""
+def _prompt_rows(
+    batch: Sequence[Mapping[str, Any]],
+    ledgers: Mapping[str, Sequence[Mapping[str, Any]]],
+) -> list[dict[str, Any]]:
+    """Render complete episode cards: goal, outcome, and per-step ledger."""
 
-    return [
-        {
-            "run_id": str(item["run_id"]),
+    rows: list[dict[str, Any]] = []
+    for item in batch:
+        run_id = str(item.get("run_id", ""))
+        row: dict[str, Any] = {
+            "run_id": run_id,
+            "goal": str(item.get("goal_text", "") or ""),
             "apps": sorted({str(app) for app in item.get("apps", []) if app}),
             "success": bool(item.get("success")),
             "reason": _single_line(item.get("reason"))[:120],
-            "device": _single_line(item.get("device_scope"))
-            .removeprefix("device:")[:120]
+            "verifier": _single_line(item.get("verifier")) or "skipped",
+            "steps": max(0, int(item.get("steps", 0) or 0)),
+            "tokens_total": max(0, int(item.get("tokens_total", 0) or 0)),
+            "warnings": max(0, int(item.get("warnings", 0) or 0)),
+            "takeover": _single_line(item.get("takeover")) or None,
+            "device": _single_line(item.get("device_scope")).removeprefix("device:")[
+                :120
+            ]
             or None,
             "task_key": _task_key(item),
-            "ts_end": float(item.get("ts_end", 0.0)),
+            "ts_end": float(item.get("ts_end", 0.0) or 0.0),
         }
-        for item in group
-    ]
+        steps_ledger = [dict(entry) for entry in ledgers.get(run_id, ())]
+        if steps_ledger:
+            row["steps_ledger"] = steps_ledger
+        rows.append(row)
+    return rows
 
 
-def _build_distill_messages(group: Sequence[Mapping[str, Any]]) -> list[Any]:
+def _build_distill_messages(
+    batch: Sequence[Mapping[str, Any]],
+    ledgers: Mapping[str, Sequence[Mapping[str, Any]]],
+) -> list[Any]:
     from langchain_core.messages import HumanMessage, SystemMessage
 
     system = SystemMessage(
         content=(
-            "你是离线经验提炼器，只能依据给定的隐私最小化 episode 摘要提出行为规则。"
+            "你是离线经验提炼器：你会看到若干完整的任务过程（目标、逐步 intent/note 与"
+            "执行结果账本、最终结局），请从中提炼可复用的因果行为规则。"
             "只输出严格 JSON 数组，不要 Markdown、解释或代码围栏。每个元素必须且只能包含："
             + ", ".join(LESSON_FIELDS)
             + "。status 必须是 proposed，schema_v/version 必须是 1，source 必须是 distill；"
             "lesson_id 使用 les_ 加 12-64 位小写十六进制。text 只能是一句行为规则及适用条件，"
-            "禁止复述或猜测用户输入。scope 的 device/app 只能逐字选自输入，app_version 必须为 null。"
+            "应能指导未来同类任务，不得照抄单次任务的具体参数。"
+            "scope 的 device/app 只能逐字选自输入，app_version 必须为 null。"
             "evidence 只能引用输入 run_id；support_count 必须等于去重 evidence 数；"
-            "task_keys 只能选输入 task_key。无法形成有证据的规则时输出 []。"
+            "task_keys 只能选输入 task_key。没有足够证据支撑的规则时输出 []。"
         )
     )
     human = HumanMessage(
         content=(
-            "从以下 episode 摘要提炼候选：\n"
-            + json.dumps(_prompt_rows(group), ensure_ascii=False, sort_keys=True)
+            "从以下完整任务过程提炼候选：\n"
+            + json.dumps(
+                _prompt_rows(batch, ledgers), ensure_ascii=False, sort_keys=True
+            )
         )
     )
     return [system, human]
@@ -810,25 +861,6 @@ def _strict_json_loads(text: str) -> Any:
         parse_constant=reject_constant,
         object_pairs_hook=reject_duplicate_keys,
     )
-
-
-def _contains_goal_leak(
-    candidate: LessonCandidate, group: Sequence[Mapping[str, Any]]
-) -> bool:
-    output_text = _single_line(
-        " ".join(
-            [
-                candidate.text,
-                *(item["note"] for item in candidate.evidence),
-                *candidate.conflicts,
-            ]
-        )
-    ).casefold()
-    for episode in group:
-        goal = _single_line(episode.get("goal_text")).casefold()
-        if goal and goal in output_text:
-            return True
-    return False
 
 
 def _has_distill_evidence(
@@ -880,8 +912,6 @@ def _validate_model_candidates(
             raise ValueError("candidate app scope was not observed")
         if candidate.scope["app_version"] is not None:
             raise ValueError("episode schema contains no app_version evidence")
-        if _contains_goal_leak(candidate, group):
-            raise ValueError("candidate leaks episode goal_text")
         canonical_evidence = []
         for item in candidate.evidence:
             episode = episode_by_id[item["run_id"]]
@@ -923,6 +953,75 @@ class DistillResult:
         }
 
 
+_DISTILL_BATCH_MAX = 40
+_DISTILL_STATE_FILE = "distill_state.json"
+
+
+def _distill_state_path(lessons_dir: str | os.PathLike[str]) -> Path:
+    return Path(lessons_dir) / _DISTILL_STATE_FILE
+
+
+def _read_distill_watermark(lessons_dir: str | os.PathLike[str]) -> float:
+    """Return the last processed ts_end; missing or corrupt state means 0.0."""
+
+    try:
+        payload = json.loads(
+            _distill_state_path(lessons_dir).read_text(encoding="utf-8")
+        )
+        value = float(payload["last_ts_end"])
+    except (OSError, TypeError, ValueError, KeyError, json.JSONDecodeError):
+        return 0.0
+    return value if math.isfinite(value) else 0.0
+
+
+def _write_distill_watermark(lessons_dir: str | os.PathLike[str], value: float) -> None:
+    _atomic_write(_distill_state_path(lessons_dir), {"last_ts_end": float(value)})
+
+
+def _distill_batch(
+    batch: Sequence[Mapping[str, Any]],
+    *,
+    messages: Sequence[Any],
+    request_estimate: int,
+    model: Any,
+    ledger: UsageLedger,
+    store: LessonStore,
+    token_budget: int | None,
+) -> tuple[int, list[LessonCandidate]]:
+    """Run one batch through the model and persist whatever it supports."""
+
+    try:
+        response = model.invoke(messages)
+    except Exception:  # noqa: BLE001 - reject this offline batch, keep the watermark
+        ledger.record("distill", estimate_tokens=request_estimate)
+        return 1, []
+    ledger.record(
+        "distill",
+        response,
+        estimate_tokens=request_estimate + estimate_message_tokens(response),
+    )
+    if token_budget is not None and ledger.total > token_budget:
+        return 1, []
+    try:
+        candidates = _validate_model_candidates(response, batch)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return 1, []
+    if not candidates:
+        return 1, []
+    proposed: list[LessonCandidate] = []
+    for candidate in candidates:
+        evaluation = evaluate_promotion(
+            candidate,
+            batch,
+            approved_lessons=store.lessons(status="approved"),
+        )
+        prior = store.get(evaluation.candidate.lesson_id)
+        saved = store.propose(evaluation.candidate)
+        if prior is None or saved.version > prior.version:
+            proposed.append(saved)
+    return 0, proposed
+
+
 def distill_lessons(
     experience_events: str | os.PathLike[str],
     lessons_dir: str | os.PathLike[str],
@@ -931,59 +1030,62 @@ def distill_lessons(
     ledger: UsageLedger | None = None,
     token_budget: int | None = None,
 ) -> DistillResult:
-    """Distill evidence-qualified groups into proposed lessons only."""
+    """Distill one watermarked batch of episodes into proposed lessons only.
 
-    episodes = _episode_rows(Path(experience_events))
-    groups = _eligible_groups(episodes)
+    Every episode newer than the persisted ``last_ts_end`` watermark is distilled
+    ungrouped in a single model call, so the distiller sees complete task
+    processes instead of per-app cohorts.  The watermark advances once the batch
+    has been processed, including when the batch was rejected, so processed
+    episodes are never replayed.
+    """
+
+    events_path = Path(experience_events)
+    episodes = _episode_rows(events_path)
+    watermark = _read_distill_watermark(lessons_dir)
+    batch = sorted(
+        (
+            item
+            for item in episodes
+            if float(item.get("ts_end", 0.0) or 0.0) > watermark
+        ),
+        key=_episode_sort_key,
+    )[:_DISTILL_BATCH_MAX]
     active_ledger = ledger or UsageLedger()
+    if not batch:
+        return DistillResult(0, 0, (), active_ledger.total, active_ledger.by_role())
+
     store = LessonStore(lessons_dir)
-    proposed: list[LessonCandidate] = []
+    ledgers = _tool_ledgers(events_path)
     rejected = 0
-    for group in groups:
+    proposed: list[LessonCandidate] = []
+    try:
         if token_budget is not None and active_ledger.total >= token_budget:
-            rejected += 1
-            continue
-        messages = _build_distill_messages(group)
-        request_estimate = estimate_context_tokens(messages)
-        if (
-            token_budget is not None
-            and active_ledger.total + request_estimate > token_budget
-        ):
-            rejected += 1
-            continue
-        try:
-            response = model.invoke(messages)
-        except Exception:  # noqa: BLE001 - reject this offline group and continue
-            rejected += 1
-            active_ledger.record(
-                "distill", estimate_tokens=request_estimate
-            )
-            continue
-        estimate = request_estimate + estimate_message_tokens(response)
-        active_ledger.record("distill", response, estimate_tokens=estimate)
-        if token_budget is not None and active_ledger.total > token_budget:
-            rejected += 1
-            break
-        try:
-            candidates = _validate_model_candidates(response, group)
-        except (TypeError, ValueError, json.JSONDecodeError):
-            rejected += 1
-            continue
-        if not candidates:
-            rejected += 1
-            continue
-        for candidate in candidates:
-            evaluation = evaluate_promotion(
-                candidate,
-                group,
-                approved_lessons=store.lessons(status="approved"),
-            )
-            prior = store.get(evaluation.candidate.lesson_id)
-            saved = store.propose(evaluation.candidate)
-            if prior is None or saved.version > prior.version:
-                proposed.append(saved)
+            rejected = 1
+        else:
+            messages = _build_distill_messages(batch, ledgers)
+            request_estimate = estimate_context_tokens(messages)
+            if (
+                token_budget is not None
+                and active_ledger.total + request_estimate > token_budget
+            ):
+                rejected = 1
+            else:
+                rejected, proposed = _distill_batch(
+                    batch,
+                    messages=messages,
+                    request_estimate=request_estimate,
+                    model=model,
+                    ledger=active_ledger,
+                    store=store,
+                    token_budget=token_budget,
+                )
+    finally:
+        _write_distill_watermark(
+            lessons_dir,
+            max(float(item.get("ts_end", 0.0) or 0.0) for item in batch),
+        )
     return DistillResult(
-        groups_considered=len(groups),
+        groups_considered=1,
         groups_rejected=rejected,
         proposed=tuple(proposed),
         tokens_total=active_ledger.total,

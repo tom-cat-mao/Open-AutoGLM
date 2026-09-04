@@ -82,7 +82,7 @@ Usage examples:
     api_key = args.apikey
     model = args.model
 
-    print(f"Starting model inference test...")
+    print("Starting model inference test...")
     print(f"Base URL: {base_url}")
     print(f"Model: {model}")
     print(f"Messages file: {args.messages_file}")
@@ -110,17 +110,17 @@ Usage examples:
         print("=" * 80)
 
         if response.usage:
-            print(f"\nStatistics:")
+            print("\nStatistics:")
             print(f"  - Prompt tokens: {response.usage.prompt_tokens}")
             print(f"  - Completion tokens: {response.usage.completion_tokens}")
             print(f"  - Total tokens: {response.usage.total_tokens}")
 
         print(
-            f"\nPlease evaluate the above inference result to determine if the model deployment meets expectations."
+            "\nPlease evaluate the above inference result to determine if the model deployment meets expectations."
         )
 
     except Exception as e:
-        print(f"\nError occurred while calling API:")
+        print("\nError occurred while calling API:")
         print(f"Error type: {type(e).__name__}")
         print(f"Error message: {str(e)}")
         print(

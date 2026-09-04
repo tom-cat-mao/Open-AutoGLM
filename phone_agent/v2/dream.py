@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -432,6 +434,160 @@ def maintain_experience(
     }
 
 
+LESSON_EFFECTIVENESS_MIN_RUNS = 2
+
+
+def reconcile_lessons(
+    lessons_dir: str | os.PathLike[str],
+    episodes: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """Return approved lessons to proposed once their evidence stops qualifying.
+
+    ``episodes`` must be the *current* materialized episode view (see
+    :func:`phone_agent.v2.experience.load_episodes`), never the raw event log:
+    archived and folded episodes are absent from that view, so a lesson whose
+    cited runs were folded into an aggregate has lost the evidence that
+    approved it.  Re-running the same gate that blocked promotion keeps
+    approval and withdrawal symmetric.  Only ``approved`` lessons are
+    reconsidered — a revoked lesson stays revoked because there is
+    deliberately no automatic reinstatement path, and a demoted lesson must be
+    approved again by a human before it can be injected.
+    """
+
+    from phone_agent.v2.evolution import LessonStore, evaluate_promotion
+
+    store = LessonStore(lessons_dir)
+    approved = store.lessons(status="approved")
+    demoted: list[dict[str, Any]] = []
+    for lesson in approved:
+        evaluation = evaluate_promotion(lesson, episodes, approved_lessons=approved)
+        if evaluation.eligible:
+            continue
+        reasons = list(evaluation.reasons)
+        try:
+            store.demote(
+                lesson.lesson_id,
+                "evidence no longer eligible: " + ";".join(reasons),
+            )
+        except (KeyError, ValueError):  # state moved under us; fail open
+            continue
+        demoted.append({"lesson_id": lesson.lesson_id, "reasons": reasons})
+    return demoted
+
+
+def lesson_effectiveness(
+    episodes: Sequence[Mapping[str, Any]],
+    *,
+    min_runs: int = LESSON_EFFECTIVENESS_MIN_RUNS,
+) -> list[dict[str, Any]]:
+    """Compare run outcomes with and without an injected lesson.
+
+    Cohort definition: ``runs_with`` are the episodes whose ``injected_lessons``
+    contains the lesson id; ``runs_without`` are every other episode in the same
+    view, whether it injected nothing or injected different lessons.  The
+    narrower "empty injection only" baseline was rejected because archived and
+    folded episodes leave the view over time, which makes the empty cohort both
+    smaller and systematically older than the injected one.
+
+    Only lessons injected into at least ``min_runs`` episodes are reported; one
+    run says nothing about a lesson.  Nothing here revokes or demotes: the
+    output is a suggestion for human review only, and a lower success rate with
+    the lesson is a correlation over few runs, not proof of harm.
+    """
+
+    injected: dict[str, list[Mapping[str, Any]]] = {}
+    for episode in episodes:
+        for lesson_id in _injected_lesson_ids(episode):
+            injected.setdefault(lesson_id, []).append(episode)
+
+    report: list[dict[str, Any]] = []
+    for lesson_id in sorted(injected):
+        runs_with = injected[lesson_id]
+        if len(runs_with) < min_runs:
+            continue
+        runs_without = [
+            episode
+            for episode in episodes
+            if lesson_id not in _injected_lesson_ids(episode)
+        ]
+        report.append(
+            {
+                "lesson_id": lesson_id,
+                "runs_with": _cohort_stats(runs_with),
+                "runs_without": _cohort_stats(runs_without),
+            }
+        )
+    return report
+
+
+def _injected_lesson_ids(episode: Mapping[str, Any]) -> set[str]:
+    raw = episode.get("injected_lessons")
+    if not isinstance(raw, (list, tuple)):
+        return set()
+    return {str(item) for item in raw if item}
+
+
+def _as_non_negative_int(value: Any) -> int:
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _cohort_stats(episodes: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    count = len(episodes)
+    if not count:
+        return {
+            "runs": 0,
+            "success_rate": 0.0,
+            "avg_steps": 0.0,
+            "avg_tokens_total": 0.0,
+        }
+    successes = sum(bool(item.get("success")) for item in episodes)
+    steps = sum(_as_non_negative_int(item.get("steps")) for item in episodes)
+    tokens = sum(_as_non_negative_int(item.get("tokens_total")) for item in episodes)
+    return {
+        "runs": count,
+        "success_rate": round(successes / count, 4),
+        "avg_steps": round(steps / count, 4),
+        "avg_tokens_total": round(tokens / count, 4),
+    }
+
+
+def _maintain_lessons(config: Any, experience_dir: str) -> dict[str, Any]:
+    """Reconcile lesson evidence against the post-archive episode view.
+
+    Both steps read the view *after* :func:`maintain_experience` folded old
+    episodes, so a lesson whose evidence was just archived is withdrawn in the
+    same pass.  Any failure fails open: lesson maintenance never blocks the
+    rest of dream, and a skipped step is reported in the summary.
+    """
+
+    if getattr(config, "evolution_mode", "manual") == "off":
+        return {}
+    try:
+        view = load_episodes(experience_dir)
+        episodes = [
+            record
+            for record in view.values()
+            if record.get("type") == "episode_outcome"
+        ]
+        stats = lesson_effectiveness(episodes)
+        return {
+            "lessons_demoted": reconcile_lessons(
+                getattr(config, "lessons_dir", "memory/lessons"), episodes
+            ),
+            "suggested_revoke": [
+                item
+                for item in stats
+                if item["runs_with"]["success_rate"]
+                < item["runs_without"]["success_rate"]
+            ],
+        }
+    except Exception as exc:  # noqa: BLE001 - lesson maintenance is fail-open
+        return {"lessons": {"status": "skipped", "reason": type(exc).__name__}}
+
+
 def run_maintenance(
     config: Any,
     *,
@@ -464,9 +620,10 @@ def run_maintenance(
         summary = {"status": "skipped", "reason": type(exc).__name__}
 
     if getattr(config, "experience_enabled", False):
+        experience_dir = getattr(config, "experience_dir", "memory/experience")
         try:
             summary["experience"] = maintain_experience(
-                getattr(config, "experience_dir", "memory/experience"),
+                experience_dir,
                 keep=getattr(config, "episode_keep", 500),
                 archive_days=getattr(config, "episode_archive_days", 90),
             )
@@ -475,6 +632,11 @@ def run_maintenance(
                 "status": "skipped",
                 "reason": type(exc).__name__,
             }
+        else:
+            # Only reconcile once the view above is known to be current: an
+            # empty or stale view would make every approved lesson look
+            # unsupported and demote all of them.
+            summary.update(_maintain_lessons(config, experience_dir))
     if getattr(config, "vec_db", None):
         try:
             from phone_agent.v2.recall import reconcile_index
