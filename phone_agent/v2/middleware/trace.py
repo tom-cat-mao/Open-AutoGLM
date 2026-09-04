@@ -128,10 +128,11 @@ class TraceMiddleware(AgentMiddleware):
         tool: str,
         result: Any = None,
         *,
+        args: Any = None,
         error: BaseException | None = None,
         launched_before: int = 0,
     ) -> None:
-        """Persist a privacy-minimal tool receipt without touching its return."""
+        """Persist a fixed-schema tool receipt without touching its return."""
 
         writer = self._experience_writer
         if writer is None:
@@ -145,6 +146,7 @@ class TraceMiddleware(AgentMiddleware):
                 if tool == "launch_app" and len(launched) > launched_before
                 else None
             )
+            call_args = args if isinstance(args, Mapping) else {}
             writer.append_event(
                 run_id=self.run_id,
                 step=self._step,
@@ -153,6 +155,8 @@ class TraceMiddleware(AgentMiddleware):
                 result_class=classify_tool_result(result, error),
                 app_package=app_package,
                 device_scope=getattr(self, "experience_device_scope", "device:unknown"),
+                intent=call_args.get("intent"),
+                note=call_args.get("note"),
             )
         except Exception:  # noqa: BLE001 - observability must never alter actor behavior
             return
@@ -317,7 +321,9 @@ class TraceMiddleware(AgentMiddleware):
                     "error": _redact_text(error),
                 }
             )
-            self._write_experience(name, error=exc, launched_before=launched_before)
+            self._write_experience(
+                name, error=exc, args=args, launched_before=launched_before
+            )
             self._write_alias_evidence(
                 name, args, error=exc, launched_before=launched_before
             )
@@ -336,7 +342,7 @@ class TraceMiddleware(AgentMiddleware):
                 "error": None,
             }
         )
-        self._write_experience(name, result, launched_before=launched_before)
+        self._write_experience(name, result, args=args, launched_before=launched_before)
         self._write_alias_evidence(name, args, result, launched_before=launched_before)
         return result
 
@@ -367,7 +373,9 @@ class TraceMiddleware(AgentMiddleware):
                     "error": _redact_text(error),
                 }
             )
-            self._write_experience(name, error=exc, launched_before=launched_before)
+            self._write_experience(
+                name, error=exc, args=args, launched_before=launched_before
+            )
             self._write_alias_evidence(
                 name, args, error=exc, launched_before=launched_before
             )
@@ -386,7 +394,7 @@ class TraceMiddleware(AgentMiddleware):
                 "error": None,
             }
         )
-        self._write_experience(name, result, launched_before=launched_before)
+        self._write_experience(name, result, args=args, launched_before=launched_before)
         self._write_alias_evidence(name, args, result, launched_before=launched_before)
         return result
 

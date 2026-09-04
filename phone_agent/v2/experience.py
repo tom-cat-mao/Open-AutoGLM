@@ -1,9 +1,12 @@
-"""Privacy-minimal, append-only experience records for thin-loop runs.
+"""Fixed-schema, append-only experience records for thin-loop runs.
 
 The JSONL log is the source of truth.  ``episodes.json`` is only a materialized
 view keyed by ``run_id`` and can always be rebuilt by replaying that log.  This
 module intentionally uses only the Python standard library and never feeds
 experience back into the actor; it is an observe-only data plane.
+
+Records are validated, not transformed: strings are stored verbatim and every
+field outside the fixed schema is discarded.
 """
 
 from __future__ import annotations
@@ -15,8 +18,6 @@ import threading
 import time
 from pathlib import Path
 from typing import Any, Mapping
-
-from phone_agent.config.redact import redact_context_text
 
 EPISODE_OUTCOME_FIELDS = (
     "type",
@@ -51,6 +52,8 @@ EXPERIENCE_EVENT_FIELDS = (
     "result_class",
     "app_package",
     "device_scope",
+    "intent",
+    "note",
 )
 
 _TIME_BUCKETS = ("night", "morning", "afternoon", "evening")
@@ -82,36 +85,47 @@ _PACKAGE_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0-9_]*
 _CAPABILITY_ID_PATTERN = re.compile(r"^[a-z][a-z0-9_]*$")
 _CAPABILITY_STATES = frozenset({"active", "off", "shadow", "pending"})
 _LESSON_ID_PATTERN = re.compile(r"^les_[0-9a-f]{12,64}$")
+_MAX_EVENT_TEXT_CHARS = 200
 
 
 def _clean_text(value: Any) -> str:
-    """Redact every persisted string, including otherwise allowed fields."""
+    """Normalize a persisted value to a plain string, stored verbatim."""
 
-    return redact_context_text(str(value or ""))
+    return str(value or "")
+
+
+def _optional_text(value: Any) -> str | None:
+    """Collapse an optional free-text field to one line, capped at 200 chars."""
+
+    if value is None:
+        return None
+    return " ".join(str(value).split())[:_MAX_EVENT_TEXT_CHARS] or None
 
 
 def _classify_and_clean(record: Mapping[str, Any]) -> dict[str, Any]:
-    """Apply the experience privacy allowlist and return a canonical record.
+    """Validate a record against the fixed schema and return the canonical form.
 
-    Allowlist rationale, field by field:
+    Every field is schema validation only: strings are stored verbatim and any
+    field outside the schema is discarded.
 
-    * ``type``/``schema_v`` identify the public schema, not user content.
+    * ``type``/``schema_v`` identify the public record schema.
     * ``run_id`` and timestamps support joins, retention, and time analysis.
-    * ``time_of_day``/``day_of_week`` are coarse scheduling context only.
-    * ``device_scope`` is the explicitly allowed device namespace.
-    * ``goal_text`` is the sole free-text field and is regex-redacted here.
-    * ``apps``/``app_package`` contain package ids, never screen or mark text.
+    * ``time_of_day``/``day_of_week``/``device_scope`` are bounded context.
+    * ``goal_text`` is free text and is stored exactly as supplied.
+    * ``apps``/``app_package`` must look like package ids to be retained.
     * success/reason/steps/tokens/warnings/takeover/verifier are bounded outcome
-      and accounting signals; any string among them is still regex-redacted.
-    * ``capabilities`` contains only stable ids and one of four bounded states;
+      and accounting signals.
+    * ``capabilities`` retains only stable ids paired with one bounded state;
       titles, hook data, configuration values, and dependency details are absent.
     * ``injected_lessons`` contains only validated lesson ids, never lesson text.
     * optional ``deliverable_path`` identifies a successfully written local
       artifact; the HTML body itself has no schema field and is discarded.
-    * ``tool`` and ``result_class`` describe execution shape without arguments or
-      receipts.  In particular, ``type_text`` text, document HTML, mark text,
-      screenshots, tool result text, and model reasoning have no schema field
-      and are discarded.
+    * ``tool``/``result_class`` describe execution shape, and optional
+      ``intent``/``note`` carry the model's own one-line step intent and
+      discovery, collapsed and capped at 200 chars each.
+    * Tool arguments, tool result receipts, ``type_text`` text, document HTML,
+      mark text, screenshots, and model reasoning have no schema field and are
+      discarded.
     """
 
     kind = record.get("type")
@@ -225,6 +239,8 @@ def _classify_and_clean(record: Mapping[str, Any]) -> dict[str, Any]:
             "result_class": result_class,
             "app_package": clean_package,
             "device_scope": _clean_text(record.get("device_scope")),
+            "intent": _optional_text(record.get("intent")),
+            "note": _optional_text(record.get("note")),
         }
 
     raise ValueError(f"unsupported experience record type: {kind!r}")
@@ -297,7 +313,7 @@ def load_episodes(
 
 
 class ExperienceWriter:
-    """Append allowlisted events and maintain the rebuildable episode view."""
+    """Append fixed-schema events and maintain the rebuildable episode view."""
 
     def __init__(
         self, experience_dir: str | os.PathLike[str] = "memory/experience"
