@@ -22,7 +22,7 @@ TaskWizard 采用 thin-loop v2：模型每轮观察真实设备、决定一个�
 - **HTML 产出物**：攻略、计划、比价报告等成果可由 `write_document` / `update_document` 写成本 run 的自包含单页 HTML；路径由 run id 派生，内容限 256 KiB，模型不能指定任意文件。
 - **App-KB 自积累记忆**：同步本机应用名称；验证启动成功后沉淀非敏感别名，并累计成功反馈。同一 run 中未知中文名失败、回执列出的包名随后启动成功时，自动把该中文名写为 `learned` 别名（隐式纠正，证据闭环）。dream 还能从最小化工具事件识别“启动 A→1–2 步内明确自述开错并退出→成功启动 B”，删除错误 learned 映射并写入 B；用户可通过 CLI 写入最高信任的 `user` 别名或忘记 user/learned 别名。
 - **类型化 App 名解析**：统一做 NFKC/大小写/空白归一化，再从 exact、lexical、pinyin、embedding 四路生成候选；候选携带 `match_type` / `authority`，默认按证据类型与三态代价决策，`rank_score` 只参与排序和分差。歧义时只返回排序后的 top-K，装机事实与 launch policy 仍独立 fail-closed。
-- **经验数据面**：每次 run 结束以严格隐私白名单落盘 episode outcome 与工具结果分类，持久化分角色 token 账本；数据采集全程 observe-only，并审计本轮实际注入的 lesson id。
+- **经验数据面**：每次 run 结束以固定 schema 落盘 episode outcome 与工具结果分类（字符串原文照存，工具事件另含模型逐步自述的 intent/note；schema 之外的内容直接丢弃），持久化分角色 token 账本；数据采集全程 observe-only，并审计本轮实际注入的 lesson id。
 - **经验提炼与晋升**：离线 `--distill` 从证据充足的 episode 组生成 proposed lesson；Rule-of-3 通过后仍须人工 approve。仅 `PHONE_AGENT_MEMORY_RAG=on` 时，approved lesson 才在 run 开局以“参考、非规则”的 L0 Mirror 受控注入。
 - **RAG shadow 召回**：sqlite-vec + FTS5 混合检索历史 episode 与 App 别名；默认只写 trace 并按实际启动应用统计命中率，绝不注入 actor 上下文。
 - **能力装配层**：十个内建能力通过稳定 `cap_id` 和 `apply/release` 生命周期挂入中间件、工具、提示块、run hooks 或 CLI 命令；注册表按 id/档位 diff 做 reconcile，依赖缺失保持 pending，卸载后不残留能力产物。每次 run 的能力快照仍写入 trace 与 episode。
@@ -86,8 +86,9 @@ Web 控制台默认只监听 `127.0.0.1:8080`：输入任务后可实时查看�
 `PHONE_AGENT_EPISODE_KEEP` / `PHONE_AGENT_EPISODE_ARCHIVE_DAYS` 将旧全文折叠为无原文的类别成功率统计。
 
 `PHONE_AGENT_EVOLUTION=manual` 仅开放显式离线命令；候选写入
-`memory/lessons/{events.jsonl,lessons.json}`。蒸馏只看到隐私最小化的 episode 摘要，输出先经严格
-schema、证据、scope 与原文泄漏检查，再以 proposed 状态落盘；Rule-of-3 也只产生“可供人工晋升”结论。
+`memory/lessons/{events.jsonl,lessons.json}`。蒸馏以水位线批次处理新 episode（上限 40 条），看到完整任务过程卡片（目标原文 + 逐步 intent/note 账本 + 结局），输出先经严格
+schema、证据与 scope 校验，再以 proposed 状态落盘；Rule-of-3 也只产生“可供人工晋升”结论。
+dream 会对账：证据被折叠后不再够格的 approved 经验自动降回草案（lesson_demoted），并按注入组/未注入组成功率给出建议撤销清单（仅提醒）。
 离线管线不参与 actor prompt；proposed/revoked 永不注入。默认 `shadow` 继续只观测，只有显式
 `PHONE_AGENT_MEMORY_RAG=on` 才按上述边界把 approved lesson 注入一次，并在 trace 与 episode 记录 id。
 
