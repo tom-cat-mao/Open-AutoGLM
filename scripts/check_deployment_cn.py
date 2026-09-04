@@ -70,7 +70,7 @@ if __name__ == "__main__":
     api_key = args.apikey
     model = args.model
 
-    print(f"开始测试模型推理...")
+    print("开始测试模型推理...")
     print(f"Base URL: {base_url}")
     print(f"Model: {model}")
     print(f"Messages file: {args.messages_file}")
@@ -98,15 +98,15 @@ if __name__ == "__main__":
         print("=" * 80)
 
         if response.usage:
-            print(f"\n统计信息:")
+            print("\n统计信息:")
             print(f"  - Prompt tokens: {response.usage.prompt_tokens}")
             print(f"  - Completion tokens: {response.usage.completion_tokens}")
             print(f"  - Total tokens: {response.usage.total_tokens}")
 
-        print(f"\n请根据上述推理结果判断模型部署是否符合预期。")
+        print("\n请根据上述推理结果判断模型部署是否符合预期。")
 
     except Exception as e:
-        print(f"\n调用 API 时发生错误:")
+        print("\n调用 API 时发生错误:")
         print(f"错误类型: {type(e).__name__}")
         print(f"错误信息: {str(e)}")
         print(
