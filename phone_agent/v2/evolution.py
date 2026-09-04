@@ -35,6 +35,7 @@ LESSON_EVENT_TYPES = frozenset(
         "lesson_proposed",
         "lesson_approved",
         "lesson_revoked",
+        "lesson_demoted",
         "lesson_superseded",
     }
 )
@@ -306,6 +307,10 @@ def _replay_lesson_events(events_path: Path) -> dict[str, LessonCandidate]:
                     current[lesson_id] = replace(candidate, status="approved")
                 elif kind == "lesson_revoked" and candidate.status != "revoked":
                     current[lesson_id] = replace(candidate, status="revoked")
+                elif kind == "lesson_demoted" and candidate.status == "approved":
+                    # Back to proposed at the same version; there is no
+                    # reinstatement path, so a revoked lesson stays revoked.
+                    current[lesson_id] = replace(candidate, status="proposed")
             except (KeyError, TypeError, ValueError, json.JSONDecodeError):
                 continue
     return current
@@ -417,6 +422,36 @@ class LessonStore:
             self._lessons[lesson_id] = revoked
             self._write_view()
             return revoked
+
+    def demote(self, lesson_id: str, reason: str) -> LessonCandidate:
+        """Withdraw an approved lesson back to proposed, keeping its version.
+
+        This is the evidence-loss counterpart of :meth:`approve`: a lesson whose
+        cited episodes no longer satisfy Rule-of-3 stops being injectable and
+        needs another human approval.  Revoked lessons are never reinstated.
+        """
+
+        clean_reason = _single_line(reason)
+        if not clean_reason:
+            raise ValueError("demote reason must not be empty")
+        with self._lock:
+            candidate = self._require(lesson_id)
+            if candidate.status != "approved":
+                raise ValueError("only an approved lesson can be demoted")
+            demoted = replace(candidate, status="proposed")
+            self._append(
+                {
+                    "type": "lesson_demoted",
+                    "schema_v": 1,
+                    "ts": time.time(),
+                    "lesson_id": lesson_id,
+                    "version": candidate.version,
+                    "reason": clean_reason,
+                }
+            )
+            self._lessons[lesson_id] = demoted
+            self._write_view()
+            return demoted
 
     def supersede(self, lesson_id: str, text: str) -> LessonCandidate:
         """Create a proposed revision while retaining the stable lesson id."""
