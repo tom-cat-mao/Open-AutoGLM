@@ -146,6 +146,23 @@ def _run_dream(
 
 def _print_dream_summary(summary: dict[str, Any]) -> None:
     print(f"dream: {json.dumps(summary, ensure_ascii=False, sort_keys=True)}")
+    for entry in summary.get("lessons_demoted") or ():
+        print(
+            "lessons_demoted: "
+            f"{entry.get('lesson_id')} ({'; '.join(entry.get('reasons') or ())})"
+        )
+    for entry in summary.get("suggested_revoke") or ():
+        with_lesson = entry.get("runs_with") or {}
+        without_lesson = entry.get("runs_without") or {}
+        print(
+            "suggested_revoke: "
+            f"{entry.get('lesson_id')} success_rate "
+            f"{with_lesson.get('success_rate', 0.0):.2f} "
+            f"({with_lesson.get('runs', 0)} injected runs) < "
+            f"{without_lesson.get('success_rate', 0.0):.2f} "
+            f"({without_lesson.get('runs', 0)} runs without it) "
+            "-- human decision, nothing was revoked"
+        )
 
 
 def _lesson_store(config: V2Config) -> Any:
@@ -172,6 +189,7 @@ def _review_lessons(config: V2Config) -> dict[str, int]:
 
     store = _lesson_store(config)
     episodes = read_episode_outcomes(config.experience_dir)
+    suggestions = _lesson_effectiveness_by_id(config)
     reviewed = approved = revoked = 0
     for candidate in store.lessons(status="proposed"):
         evaluation = evaluate_promotion(
@@ -180,6 +198,12 @@ def _review_lessons(config: V2Config) -> dict[str, int]:
             approved_lessons=store.lessons(status="approved"),
         )
         print(json.dumps(evaluation.candidate.to_dict(), ensure_ascii=False, indent=2))
+        suggestion = suggestions.get(candidate.lesson_id)
+        if suggestion is not None:
+            print(
+                "effectiveness: "
+                + json.dumps(suggestion, ensure_ascii=False, sort_keys=True)
+            )
         verdict = input("[a]pprove / [r]evoke / [s]kip: ").strip().lower()
         reviewed += 1
         if verdict in {"a", "approve"}:
@@ -197,6 +221,28 @@ def _review_lessons(config: V2Config) -> dict[str, int]:
             else:
                 revoked += 1
     return {"reviewed": reviewed, "approved": approved, "revoked": revoked}
+
+
+def _lesson_effectiveness_by_id(config: V2Config) -> dict[str, Any]:
+    """Index the injection-effectiveness report by lesson id; fail open."""
+
+    if not getattr(config, "experience_enabled", False):
+        return {}
+    try:
+        from phone_agent.v2.dream import lesson_effectiveness
+        from phone_agent.v2.experience import load_episodes
+
+        view = load_episodes(config.experience_dir)
+        episodes = [
+            record
+            for record in view.values()
+            if record.get("type") == "episode_outcome"
+        ]
+        return {
+            item["lesson_id"]: item for item in lesson_effectiveness(episodes)
+        }
+    except Exception:  # noqa: BLE001 - review stays usable without statistics
+        return {}
 
 
 def _maintenance_requested(args: argparse.Namespace) -> bool:
